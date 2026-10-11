@@ -526,3 +526,34 @@ func Locale() string {
 	}
 	return "ja"
 }
+
+// WriteAtomic replaces the prefs file with body so that a concurrent Read sees either the old
+// or the new complete JSON. os.WriteFile truncates first, and a launch-time gate (AgentMemory
+// read by a session spawn) that lands in that window sees an empty file, answers "off", and
+// pins the wrong environment on a long-lived host. The temp file is created beside the target
+// (same filesystem, so the rename is atomic); a symlinked prefs file is written through to its
+// target rather than replaced.
+func WriteAtomic(body []byte) error {
+	path := Path()
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".ui-prefs-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(body); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}

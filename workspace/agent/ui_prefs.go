@@ -294,7 +294,7 @@ func handlePutUIPrefs(w http.ResponseWriter, r *http.Request) {
 	fleetSpawnBefore := uiprefs.FleetSpawn()
 	sessionSearchBefore := uiprefs.SessionSearch()
 	agentMemoryBefore := uiprefs.AgentMemory()
-	if err := os.WriteFile(uiprefs.Path(), body, 0o600); err != nil {
+	if err := uiprefs.WriteAtomic(body); err != nil {
 		httpx.WriteErr(w, http.StatusInternalServerError, "write_failed", err.Error())
 		return
 	}
