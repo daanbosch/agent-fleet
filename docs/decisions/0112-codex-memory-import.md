@@ -126,3 +126,64 @@ what codex *instructs* its model to write, not output that was seen):
 - The work that remains, building the import, is tracked in the follow-up issue linked from the
   pull request, and waits for a workspace in which codex has run its consolidation with a login
   the member chose to use.
+
+## Addendum (2026-10-11) — the shape of real codex memories (#1683, #1950)
+
+The sections above stay as written. This note records a first look at consolidated output. It
+changes the Status line in no way: the record stays **proposed**, and no import code exists.
+
+**What was measured.** Codex CLI 0.162.1, on one account that already had `features.memories`
+enabled with `memories.min_rollout_idle_hours=12` and `memories.max_rollouts_per_startup=4`.
+Codex itself had consolidated the store earlier (the files predate the check). Only structure was
+recorded; no content was copied, and none is quoted here. These are measurements from a single
+account and one codex version.
+
+- **Tree.** The store is itself a git repo (`.git/`). It holds `MEMORY.md`, `memory_summary.md`,
+  `raw_memories.md`, `extensions/ad_hoc/instructions.md`,
+  `rollout_summaries/<timestamp>-<id>-<slug>.md` (one file per rollout) and
+  `skills/<name>/SKILL.md`.
+- **`MEMORY.md`**: four H1 "Task Group" blocks. Each has Task 1, `rollout_summary_files`,
+  keywords, User, Reusable and Failures headings, and carries the `scope` and `applies_to`
+  fields. There are no horizontal rules between blocks. No block title contained path-like or
+  first-person text.
+- **`memory_summary.md`**: six headings, no separators and no fields.
+- **`raw_memories.md`**: Thread blocks, each with a Task 1 heading, separated by horizontal rules,
+  with a `description` field.
+- **Rollout summaries**: one H1 and one Task 1 H2 each; no separators and no fields.
+- **`skills/*/SKILL.md`**: a `description` field, seven headings, and one heading that contains a
+  path.
+
+**Assumptions, checked against that output.**
+
+- **Corrected: the `memory_summary.md` marker.** The Measurement section above says its first line
+  is exactly `v1`. In the real file the first line is **not** a version marker. Nothing may detect
+  or require `v1`.
+- **Confirmed:** `MEMORY.md` is a sequence of H1 Task Group blocks with `scope` and `applies_to`
+  fields, and each block has Task, `rollout_summary_files`, keywords, and the User / Reusable /
+  Failures sections. `memory_summary.md`, `rollout_summaries/` and `skills/` are separate
+  artefacts, as assumed.
+- **New:** block titles are the only handle; no per-block stable ID was seen. Block titles had no
+  path-like or first-person text. `raw_memories.md` uses horizontal rules and a `description`
+  field, which `MEMORY.md` does not.
+- **Still open, not measured:**
+  - Title and order stability across consolidations. The docs describe no command to force a
+    consolidation, and this check could not trigger a new one (it follows the idle threshold). Open question 1 stands in full.
+  - Whether `applies_to` carries project paths that need sanitising (open questions 2 and 7).
+  - Block size, ad-hoc notes, the value of `raw_memories.md` and `external_agent_memory_import`
+    (open questions 3 to 6) were not examined.
+
+**What this changes in "Proposed rules".** Rules 1 to 5 stand as proposed; none is overturned. Two
+assumptions in the Measurement section did not hold: the `v1` first line, and the `description:`
+line of rollout summaries (this measurement saw no fields in them; it does not say whether
+`thread_id`, `rollout_path` or raw-evidence snippets are present). The proposed rules depend on
+neither (rule 1 imports `MEMORY.md` only and does not import rollout summaries), so no rule text
+needs to change. The content-based tombstone
+requirement stays: with no stable ID per block, a forgotten block must still be recognised by
+content, not by title or by `source_hash`. The precondition test of open question 1 (a title-only
+change, and an import into another scope, must not bring a forgotten block back) stays a
+precondition.
+
+**What remains** for the implementation is tracked in #1950: a second consolidation to observe
+title and ordering stability, a check of whether `applies_to` carries project paths, and fixtures
+that carry content (only the structure has been measured; no content was copied), followed by the
+import itself.
