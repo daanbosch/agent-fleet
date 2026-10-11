@@ -329,3 +329,38 @@ revision も `updated` も変えず、エージェントの保存はピンを引
 決定 5 の「関連度順は #1558 のまま」は成り立たなくなった。#1558 は会話検索（#1656、#1664）として完了したが、AF の `memory_search` の関連度順は含まれず、その作業は #1981 に移った。
 未実装：codex の取り込み（#1950、[0112](0112-codex-memory-import.ja.md)）と、切り替えを入れたときの自動取り込み・
 切ったときの自動書き戻し（#1972）。他の未決事項は別の Issue（#1982〜#1988）で追う。上の決定は変えない。
+
+## 注（2026-10-11）：muse には独自のネイティブメモリがある（未決事項 6、#1986）
+
+調べたもの：ADR [0095](0095-muse-agent-kind.ja.md) のクランプ表、`internal/agents/muse/program.go`、
+`muse --help` / `muse exec --help`、インストール済み muse 1.4.4 バイナリの文字列、使い捨ての
+`HOME` / `XDG_*` での `muse exec --provider echo` 1 回（ログインなし。利用者自身の muse 設定と
+認証情報は読んでいない）。
+
+分かったこと：
+- **ネイティブメモリはある。** バイナリにツール `read_memory` / `add_memory` / `edit_memory`、3 つの
+  スコープ（既定の `personal_project`、`personal`、`<repo>/.agents/memory` である `project`）、スコープごとの
+  `MEMORY.md` 索引（claude と同じ `- [Title](file.md) - hook` 形式）とノートの frontmatter（`name`、
+  `description`、`type` は `user` / `feedback` / `project` / `reference`）、実行開始時に注入されるスナップショット、
+  「長く効く好みは `add_memory` で保存せよ」というシステムプロンプトの段落がある。AF のスイッチが
+  オンのとき muse は 2 つのメモリを持ち、AF が走査・版管理・帰属をしない自前の側へ書くよう指示される。
+- **AF が既に入れているクランプは切替ではないが、切替は別にある。** `MUSE_EXPERIMENTAL_MEMORY_REMINDER=0`
+  （ADR 0095）が止めるのは助言的な memory-reminder オブザーバだけで、`--disable-reminders` も同じ系統。
+  バイナリの文字列にある別変数 `MUSE_EXPERIMENTAL_MEMORY=0` がメモリ本体を外す。echo provider での A/B
+  （両腕とも reminder 変数 0 と `--disable-reminders`、`env -i` の隔離 `HOME` / `XDG_*`）で、既定の腕の
+  durable `session.jsonl` には `model_request_configured` に 3 つのメモリツール、`memory_snapshot`
+  コンテキスト、「Use persistent memory」の段落がある。`MUSE_EXPERIMENTAL_MEMORY=0` の腕にはこの 3 つ
+  がない（他のツールは残る）。ログインは不要。AF の `childEnv` は reminder 変数しか設定しないので、
+  AF の下では今ネイティブメモリはオンのまま。設定の `memory.destinations.*`（スコープの保存先）と
+  ポリシーで止まる `memory sync` はメモリを切らない。
+- muse 同梱の `migrate` スキルは claude と codex のメモリノートを読んで `add_memory` で記録するので、
+  AF を通さずにそちらから取り込んでいる利用者もありうる。
+
+実測：上の A/B（echo provider、ログインなし）。空の `HOME` での起動ではメモリ用ディレクトリができない
+（その 1 回の話で、最初の書込みまで作られない証明ではない）。`--help` にメモリのオプションはない。
+文字列からの推定（出力の観測ではない）：スコープ、`memory.destinations.*` キー、2 つの変数の関係。
+未計測：各スコープの保存先、`add_memory` による書込みと取り込み（実モデル呼び出しなのでログインが要る）、
+AF が muse を起動する `muse serve` 上でのスイッチの効き。
+
+後続：#1990（`MUSE_EXPERIMENTAL_MEMORY=0` を AF のスイッチの下で設定し、`muse serve` 上で確認する。claude の #1734 と同様）、#1991
+（取り込み・書き戻し）。上の決定は変えない。

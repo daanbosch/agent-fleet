@@ -375,3 +375,41 @@ Decision 5's "relevance ranking stays with #1558" no longer holds: #1558 closed 
 search (#1656, #1664) without relevance ranking for AF `memory_search`, and that work is now #1981. Not built: the codex import (#1950, after [0112](0112-codex-memory-import.md))
 and automatic import on switch-on / write-back on switch-off (#1972). The other open questions are
 tracked separately (#1982–#1988). The decisions above are unchanged.
+
+## Note (2026-10-11): muse has a native memory (open question 6, #1986)
+
+Looked at: ADR [0095](0095-muse-agent-kind.md)'s clamp table, `internal/agents/muse/program.go`,
+`muse --help` / `muse exec --help`, the strings of the installed muse 1.4.4 binary, and one
+`muse exec --provider echo` run in a throwaway `HOME` / `XDG_*` (no login; the user's own muse
+config and credentials were not read).
+
+Found:
+- **A native memory exists.** The binary carries the tools `read_memory`, `add_memory` and
+  `edit_memory`, three scopes (`personal_project`, the default; `personal`; `project`, which is
+  `<repo>/.agents/memory`), a `MEMORY.md` index per scope in the same `- [Title](file.md) - hook`
+  shape and note frontmatter (`name`, `description`, `type` of `user` / `feedback` / `project` /
+  `reference`) as claude's, a snapshot of it injected at run start, and a system-prompt paragraph
+  telling the model to save lasting preferences with `add_memory`. So with the AF switch on muse
+  holds two memories and is told to write to its own, which AF never scans, versions or attributes.
+- **AF's existing clamp is not the switch, but a switch exists.** `MUSE_EXPERIMENTAL_MEMORY_REMINDER=0`
+  (ADR 0095) stops only the advisory memory-reminder observer, and `--disable-reminders` is the same
+  family. `MUSE_EXPERIMENTAL_MEMORY=0` (a separate variable in the binary's strings) removes the
+  memory itself: in an A/B on the echo provider, both arms with the reminder variable at 0 and
+  `--disable-reminders`, in an isolated `HOME` / `XDG_*` under `env -i`, the default arm's durable
+  `session.jsonl` has the three memory tools in `model_request_configured`, the `memory_snapshot`
+  context and the "Use persistent memory" paragraph; the `MUSE_EXPERIMENTAL_MEMORY=0` arm has none of
+  the three (other tools stay). No login is needed. AF's `childEnv` sets only the reminder variable,
+  so the native memory is currently on under AF. Settings has `memory.destinations.*` (where a scope
+  is stored) and a policy-gated `memory sync`; neither turns the memory off.
+- muse's bundled `migrate` skill already reads claude's and codex's memory notes and records them with
+  `add_memory`, so a user may be seeding it from those without AF involved.
+
+Measured: the A/B above (echo provider, no login); the startup of an empty `HOME` creates no memory
+directory (that run only; it does not show that none is ever created before the first write);
+`--help` lists no memory option. Inferred from binary strings (not observed output): the scopes,
+the `memory.destinations.*` key and the relation of the two variables. Not measured: where each
+scope's store lives on disk, `add_memory` / write behaviour and import (a real model call, so a
+login), and the switch under `muse serve`, which is how AF launches muse.
+
+Follow-ups: #1990 (set `MUSE_EXPERIMENTAL_MEMORY=0` behind the AF switch, as #1734 did for claude, and verify it over `muse serve`),
+#1991 (import / write-back). Nothing above is changed.
