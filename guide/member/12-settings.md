@@ -259,7 +259,9 @@ Version control over the memory an agent accumulates by itself (claude's auto-me
     of the index is ordered by kind (feedback and user memories first), then by how often agents read it (a
     read or a search hit that was returned counts), then by recency. Pins share the index's size limit: if
     the pinned ones alone do not fit, the last of them drop to the names-only list and the agent is told so,
-    so pin only what every session needs. A pin is recorded as a change by you ("pin changed") and can be
+    so pin only what every session needs. `memory_search` ranks its hits too: more of the query's words first,
+    then a match in the name before the description before the body, then pins, reads and recency; if no
+    memory holds every word it returns the ones that hold some and says so. A pin is recorded as a change by you ("pin changed") and can be
     reverted; an agent's later update of a pinned memory keeps the pin, and the af memory tools offer agents no way to pin or unpin. (Like every Agent route, the pin route is not a security boundary against a shell in the same workspace; the change is always recorded as made by you from the Console.)
   - **Browse memories**: below the pins, the memories of one scope (all projects, or one project) with their
     author, last update, how often agents read them and whether they are pinned. Search matches the name,
@@ -294,6 +296,13 @@ Version control over the memory an agent accumulates by itself (claude's auto-me
     switch off again returns later Claude sessions to their own memory, but what was saved in Agent Fleet
     memory does not appear there on its own (one way; **Write back to Claude Code**, below, carries it over when you ask). And only Claude sessions *started* after the change are
     affected; a running session keeps what it started with.
+  - **Muse Code's own memory**: while the switch is on, Agent Fleet starts Muse Code with its native memory
+    switched off (`MUSE_EXPERIMENTAL_MEMORY=0`): Muse has no `read_memory` / `add_memory` / `edit_memory`
+    tools, no memory snapshot in its context and no "use persistent memory" paragraph in its prompt, so it uses
+    the af tools like every other kind. The setting wins over the same variable in your own environment while
+    the switch is on; with the switch off Agent Fleet sets nothing and Muse keeps its default. This covers
+    Muse sessions and the assistant chat. Only Muse hosts *started* after the change are affected; a running
+    session keeps what it started with. What Muse saved natively is not imported.
   - **From a terminal**: `af-memory import-sources`, `af-memory import --project <slug> --dry-run` (preview) and
     `af-memory import --project <slug>` (import); `af-memory changes` lists the latest changes. The import is
     gated by the same switch and the same secret scan as the Console.

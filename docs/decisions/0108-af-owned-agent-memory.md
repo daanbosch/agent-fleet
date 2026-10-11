@@ -2,7 +2,11 @@
 
 English | [日本語](0108-af-owned-agent-memory.ja.md)
 
-- Status: **proposed** (2026-10-03). Built so far (P1 without the claude seed): the store, the
+- Status: **proposed** (2026-10-03); built as of 2026-10-11, see the note at the end: P1, P2 (#1733),
+  P3 / decision 6 step 2 (#1734, #1916), usage ranking and pins (#1703), size and name limits (#1921) and
+  the write-back to claude's native memory (#1914). Still open: codex import (#1950) and automatic
+  import on switch (#1972). The original status text follows, as of 2026-10-03.
+  Built so far (P1 without the claude seed): the store, the
   five MCP tools, revisions, authorship, the one-commit history under `af/` and the secret scan
   (`memoryx/agent_memory.go`); the Console change list with revert and forget
   (`memoryx/agent_memory_changes.go`, Settings → Agent memory); the one-time claude import
@@ -106,7 +110,7 @@ that is safe when what one session writes is read by every kind.
    is built per session, may inject them directly. cursor gets the guidance in the tools'
    descriptions.
    `memory_index` is partial by design (#1702; usage-based ranking and pinned memories are
-   follow-ups in #1703, relevance ranking stays with #1558). The Agent bounds it, so every client
+   follow-ups in #1703, relevance ranking stays with #1558 [now #1981, see the Note of 2026-10-11]). The Agent bounds it, so every client
    gets the same answer:
    - The described part is limited to a byte budget of rendered lines (default 24 KiB; the
      optional `budget` argument is clamped to 4–64 KiB), in rank order: `feedback` and `user`
@@ -265,7 +269,7 @@ that is safe when what one session writes is read by every kind.
 ## Open questions (decide after measuring)
 
 1. ~~What `autoMemoryDirectory` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY` do~~ — answered in decision 6
-   step 2 (#1734); still open: a live check that a new claude session loads no `MEMORY.md`.
+   step 2 (#1734). The live check (a new claude session loads no `MEMORY.md`) was answered 2026-10-08, see #1734 and #1916.
 2. The size of the `memory_index` answer and how its entries are ranked (recency, `kinds`), and the
    cost of the coexistence period measured on a real project.
 3. Purging a secret from history: rewriting the 0022 history for one memory, and what that does to
@@ -283,7 +287,7 @@ that is safe when what one session writes is read by every kind.
 - **P1** — the store, the MCP tools with revisions, authorship and history, the secret scan, the
   Console change list with forget and rollback, the one-time claude seed.
 - **P2** — the distributed guidance block, and lcpp's per-session injection.
-- **P3** — decision 6 step 2, decided after measuring (#1734; the live check is open); tie-in with #1559 (automated review) and #1558
+- **P3** — decision 6 step 2, decided after measuring (#1734, #1916; the live check was answered 2026-10-08); tie-in with #1559 (automated review) and #1558
   (search).
 
 ## Note (2026-10-08): the guidance block (P2, #1733)
@@ -358,6 +362,86 @@ needs model calls, so no consolidated output (`MEMORY.md`) was obtained. The sha
 formats codex's own prompts ask its model to write (not observed output), the proposed
 split by `# Task Group:` block, scope, naming rules and the open questions are in
 [0112](0112-codex-memory-import.md). Nothing above is changed.
+
+## Note (2026-10-11): status refresh (#1987)
+
+What is built, checked against the closed issues: P2, the guidance block (#1733); P3 / decision 6
+step 2, claude's auto-memory switched off while AF memory is on (#1734, shipped in PR #1916); usage
+ranking and pins for `memory_index` (#1703); the size and name limits that make import lossless
+(#1921); the write-back to claude's native memory (#1914). The live check of open question 1 passed
+on a live workspace on 2026-10-08 (last comment on #1734): a new claude session loads no `MEMORY.md`.
+
+Decision 5's "relevance ranking stays with #1558" no longer holds: #1558 closed as conversation
+search (#1656, #1664) without relevance ranking for AF `memory_search`, and that work is now #1981. Not built: the codex import (#1950, after [0112](0112-codex-memory-import.md))
+and automatic import on switch-on / write-back on switch-off (#1972). The other open questions are
+tracked separately (#1982–#1988). The decisions above are unchanged.
+
+## Note (2026-10-11): muse has a native memory (open question 6, #1986)
+
+Looked at: ADR [0095](0095-muse-agent-kind.md)'s clamp table, `internal/agents/muse/program.go`,
+`muse --help` / `muse exec --help`, the strings of the installed muse 1.4.4 binary, and one
+`muse exec --provider echo` run in a throwaway `HOME` / `XDG_*` (no login; the user's own muse
+config and credentials were not read).
+
+Found:
+- **A native memory exists.** The binary carries the tools `read_memory`, `add_memory` and
+  `edit_memory`, three scopes (`personal_project`, the default; `personal`; `project`, which is
+  `<repo>/.agents/memory`), a `MEMORY.md` index per scope in the same `- [Title](file.md) - hook`
+  shape and note frontmatter (`name`, `description`, `type` of `user` / `feedback` / `project` /
+  `reference`) as claude's, a snapshot of it injected at run start, and a system-prompt paragraph
+  telling the model to save lasting preferences with `add_memory`. So with the AF switch on muse
+  holds two memories and is told to write to its own, which AF never scans, versions or attributes.
+- **AF's existing clamp is not the switch, but a switch exists.** `MUSE_EXPERIMENTAL_MEMORY_REMINDER=0`
+  (ADR 0095) stops only the advisory memory-reminder observer, and `--disable-reminders` is the same
+  family. `MUSE_EXPERIMENTAL_MEMORY=0` (a separate variable in the binary's strings) removes the
+  memory itself: in an A/B on the echo provider, both arms with the reminder variable at 0 and
+  `--disable-reminders`, in an isolated `HOME` / `XDG_*` under `env -i`, the default arm's durable
+  `session.jsonl` has the three memory tools in `model_request_configured`, the `memory_snapshot`
+  context and the "Use persistent memory" paragraph; the `MUSE_EXPERIMENTAL_MEMORY=0` arm has none of
+  the three (other tools stay). No login is needed. AF's `childEnv` sets only the reminder variable,
+  so the native memory is currently on under AF. Settings has `memory.destinations.*` (where a scope
+  is stored) and a policy-gated `memory sync`; neither turns the memory off.
+- muse's bundled `migrate` skill already reads claude's and codex's memory notes and records them with
+  `add_memory`, so a user may be seeding it from those without AF involved.
+
+Measured: the A/B above (echo provider, no login); the startup of an empty `HOME` creates no memory
+directory (that run only; it does not show that none is ever created before the first write);
+`--help` lists no memory option. Inferred from binary strings (not observed output): the scopes,
+the `memory.destinations.*` key and the relation of the two variables. Not measured: where each
+scope's store lives on disk, `add_memory` / write behaviour and import (a real model call, so a
+login), and the switch under `muse serve`, which is how AF launches muse.
+
+Follow-ups: #1990 (set `MUSE_EXPERIMENTAL_MEMORY=0` behind the AF switch, as #1734 did for claude, and verify it over `muse serve`),
+#1991 (import / write-back). Nothing above is changed.
+
+## Note (2026-10-11): `memory_search` ranks its hits (#1981)
+
+Decision 5 left search relevance to #1558, but #1558 closed with the conversation search of
+[0110](0110-past-session-search.md) only, so `memory_search` stayed a newest-first filter. It now orders
+hits by matched words (more first), then by the best field of each word (name over description over
+body), then pinned, read count and recency. When no memory holds every word of a multi-word query, it
+answers with the ones holding some of them and marks the answer (`fallback: "any"`, plus each hit's
+`matchedTerms`; the tool text says so). Matching stays case-insensitive substring, so Japanese
+without spaces still works; 0110's tokenizer is bound to its FTS5 index and was not reused, and there
+is no new index. On 500 synthetic memories (40 body lines each) a search takes about 30 ms warm (a
+test logs it). The REST route only gains optional fields. Embeddings are not planned.
+
+## Note (2026-10-11): muse's native memory is switched off with the switch (#1990)
+
+While the Agent memory switch is on, every muse launch (`muse serve` for sessions, the model-list
+host, and the `muse exec` of assistant chat; all take their environment from `childEnv`) now carries
+`MUSE_EXPERIMENTAL_MEMORY=0`, through a `muse.NativeMemoryOff` hook wired to the switch beside
+`claude.AutoMemoryOff`. An inherited value is dropped first, so the member's own environment cannot
+re-enable it; with the switch off nothing is set. The `MUSE_EXPERIMENTAL_MEMORY_REMINDER=0` clamp
+stays. Running hosts keep what they launched with.
+
+Measured over `muse serve --provider echo` in a throwaway HOME/XDG, one turn per arm, reading
+`model_request_configured` in the durable log: without the variable the tool list holds `read_memory`,
+`add_memory`, `edit_memory`, the `memory_snapshot` context and the "Use persistent memory" paragraph;
+with `=0` the tools, the snapshot and the paragraph are all gone (the only remaining mention is a
+generic "do not call read_memory…" sentence in the work-stop instructions, present in both arms). The
+variable was set by hand in that probe, not by AF's `childEnv`, whose output the unit tests pin. Not
+done: the phase-based switch (#1972) and import of muse memory (#1991).
 
 ## Note (2026-10-11): the member can browse, search and restore memories in the Console (#1985)
 

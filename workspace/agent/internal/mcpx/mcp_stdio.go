@@ -1045,7 +1045,7 @@ func mcpStdioMemoryTools() []map[string]any {
 		},
 		{
 			"name":        "memory_search",
-			"description": "Agent Fleet memory: find memories whose name, description or body contain every word of query. Call it before re-deriving something a previous session may have learned. " + mcpMemoryEvidence,
+			"description": "Agent Fleet memory: find memories whose name, description or body contain every word of query, best match first (a name hit outranks a description hit, which outranks a body hit; pinned and often-used memories win ties). If no memory contains every word, it answers with the ones containing some of the words and says so, so a long query degrades instead of returning nothing. Call it before re-deriving something a previous session may have learned. " + mcpMemoryEvidence,
 			"inputSchema": map[string]any{
 				"type": "object", "additionalProperties": false,
 				"properties": map[string]any{

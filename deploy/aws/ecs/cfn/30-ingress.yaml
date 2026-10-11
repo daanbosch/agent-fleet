@@ -28,6 +28,11 @@ Parameters:
     Default: ""
     AllowedPattern: "^(arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/[A-Za-z0-9-]+)?$"
     Description: Empty = the local key custodian. A KMS key ARN = the kms one (PARAMETERS.md).
+  WorkspaceDekRandom:
+    Type: String
+    Default: "off"
+    AllowedValues: [ "off", "on" ]
+    Description: on = AF_WORKSPACE_DEK=random; needs CustodianKmsKeyArn.
   ImageTag:
     Type: String
     Default: dev
@@ -397,6 +402,14 @@ Parameters:
       topic and no alarm, and the only trace is the CP log. !! That is exactly how the
       2026-09-01 outage stayed silent - /healthz kept answering 200. Set it.
 
+Rules:
+  # The CP refuses the flag without kms (dek.go); refuse here, not by crash-looping.
+  WorkspaceDekNeedsKmsCustodian:
+    RuleCondition: !Equals [ !Ref WorkspaceDekRandom, "on" ]
+    Assertions:
+      - Assert: !Not [ !Equals [ !Ref CustodianKmsKeyArn, "" ] ]
+        AssertDescription: WorkspaceDekRandom=on needs CustodianKmsKeyArn (AF_KEY_CUSTODIAN=kms).
+
 Conditions:
   # Each IdP's client secret is pulled from SSM, and a Secrets entry pointing at a
   # parameter that doesn't exist stops the task from starting - so wire each one in
@@ -435,6 +448,7 @@ Conditions:
   # update, which is the one thing a captured parameter must survive. TaskDef below.
   CpArm: !Equals [ !Ref CpArch, arm64 ]
   UseKmsCustodian: !Not [ !Equals [ !Ref CustodianKmsKeyArn, "" ] ]
+  UseWorkspaceDek: !And [ !Condition UseKmsCustodian, !Equals [ !Ref WorkspaceDekRandom, "on" ] ]
   HasCpAlarms: !Not [ !Equals [ !Ref CpAlarmEmail, "" ] ]
   HasWaf: !Not [ !Equals [ !Ref WafRateLimitPer5Min, 0 ] ]
   HasWafReputation: !And [ !Condition HasWaf, !Equals [ !Ref WafIpReputation, "on" ] ]
@@ -727,15 +741,8 @@ Resources:
               awslogs-stream-prefix: home-ops
 
   # The CP's grant for the task above, in this stack because only this stack can name the
-  # family. RunTask is fenced to that family (any revision: a stack update deregisters the
-  # old one, and the CP runs the family by name) in this deployment's cluster. The task's
-  # roles need no new PassRole: it names only the execution role, which PassTaskRoles in
-  # 20-platform already lets the CP pass to ecs-tasks. ListTasks (is a home task still
-  # running) and DescribeTasks (its exit code) are EcsDrive's, unscoped there already.
-  # The task's cost tags (af-membership, af-role, af-tenant, as on the workspace service)
-  # are authorized as ecs:TagResource on the new task: only as part of a RunTask
-  # (ecs:CreateAction), so no task that exists can be retagged, only in this cluster, and
-  # only the keys EcsTagServiceOnCreate (20-platform) allows on a workspace service.
+  # family: RunTask fenced to that family and this cluster, and the cost tags authorized as
+  # ecs:TagResource on the new task only (PARAMETERS.md, "Home task grant").
   # deploy/local/cfn-cp-ec2-scope-test.py holds the allowed calls and the denied ones.
   # Managed (inline total is capped, #1576); names are account-wide, hence the region.
   CpHomeOpsManagedPolicy:
@@ -836,6 +843,7 @@ Resources:
             - { Name: AF_DB_NAME, Value: agentfleet }
             - { Name: AF_KEY_CUSTODIAN, Value: !If [ UseKmsCustodian, kms, local ] }
             - !If [ UseKmsCustodian, { Name: AF_KMS_KEY_ID, Value: !Ref CustodianKmsKeyArn }, !Ref "AWS::NoValue" ]
+            - !If [ UseWorkspaceDek, { Name: AF_WORKSPACE_DEK, Value: random }, !Ref "AWS::NoValue" ]
             - { Name: AF_DB_USER, Value: afadmin }
             # ...and where to go and read the password AGAIN when the injected one stops
             # working, because RDS rotates it every 7 days and `secrets` below is

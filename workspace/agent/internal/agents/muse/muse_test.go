@@ -151,6 +151,46 @@ func TestChildEnvCarriesTheEnvironmentClamps(t *testing.T) {
 	}
 }
 
+// While the Agent memory switch is on, every launch carries MUSE_EXPERIMENTAL_MEMORY=0 (native
+// memory off) and an inherited value cannot re-enable it; with the hook off or unset the variable
+// is neither added nor removed, and the REMINDER clamp stays either way.
+func TestChildEnvSwitchesNativeMemoryOffWithAFMemory(t *testing.T) {
+	t.Cleanup(func() { NativeMemoryOff = nil })
+	has := func(env []string, prefix string) []string {
+		var got []string
+		for _, e := range env {
+			if strings.HasPrefix(e, prefix) {
+				got = append(got, e)
+			}
+		}
+		return got
+	}
+	base := []string{"PATH=/usr/bin", "MUSE_EXPERIMENTAL_MEMORY=1"}
+
+	NativeMemoryOff = func() bool { return true }
+	env := childEnv(base)
+	if got := has(env, "MUSE_EXPERIMENTAL_MEMORY="); len(got) != 1 || got[0] != "MUSE_EXPERIMENTAL_MEMORY=0" {
+		t.Errorf("switch on: native memory entries = %v, want exactly MUSE_EXPERIMENTAL_MEMORY=0", got)
+	}
+	if !hasEnv(env, "MUSE_EXPERIMENTAL_MEMORY_REMINDER=0") {
+		t.Error("switch on: the REMINDER clamp was lost")
+	}
+
+	for name, hook := range map[string]func() bool{"off": func() bool { return false }, "nil": nil} {
+		NativeMemoryOff = hook
+		env := childEnv(base)
+		if got := has(env, "MUSE_EXPERIMENTAL_MEMORY="); len(got) != 1 || got[0] != "MUSE_EXPERIMENTAL_MEMORY=1" {
+			t.Errorf("hook %s: native memory entries = %v, want the inherited value untouched", name, got)
+		}
+		if got := has(childEnv(nil), "MUSE_EXPERIMENTAL_MEMORY="); len(got) != 0 {
+			t.Errorf("hook %s: variable set although muse's default should stand: %v", name, got)
+		}
+		if !hasEnv(env, "MUSE_EXPERIMENTAL_MEMORY_REMINDER=0") {
+			t.Errorf("hook %s: the REMINDER clamp was lost", name)
+		}
+	}
+}
+
 // An API key always OVERRIDES a stored account login, which silently moves a member from a
 // flat-rate subscription onto metered billing. AF must never put one in the child.
 func TestChildEnvNeverCarriesAnAPIKey(t *testing.T) {

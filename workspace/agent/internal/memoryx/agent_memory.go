@@ -31,7 +31,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -660,70 +659,9 @@ func agentMemListIndex(c agentMemCaller, budget int) (agentMemIndex, error) {
 type agentMemHit struct {
 	agentMemEntry
 	Snippets []string `json:"snippets"`
-}
-
-// agentMemSearch matches every whitespace-separated term, case-insensitively, against name,
-// description and body. Plain substring matching is enough at the size measured for one
-// project (469 files, ADR 0108); ranking is #1558's.
-func agentMemSearch(c agentMemCaller, query string, limit int) ([]agentMemHit, error) {
-	terms := strings.Fields(strings.ToLower(query))
-	if len(terms) == 0 {
-		return nil, memoryErrf(http.StatusBadRequest, errCodeMemoryBadRequest, "query is required")
-	}
-	if limit <= 0 {
-		limit = agentMemSearchDefault
-	}
-	limit = min(limit, agentMemSearchMax)
-	agentMemMu.RLock()
-	defer agentMemMu.RUnlock()
-	hits := []agentMemHit{}
-	for _, scope := range agentMemScopes(c) {
-		es, _, err := agentMemLoadScope(scope, c)
-		if err != nil {
-			return nil, err
-		}
-		for _, e := range es {
-			if !agentMemAppliesTo(e, c.Kind) {
-				continue
-			}
-			hay := strings.ToLower(e.Name + "\n" + e.Description + "\n" + e.Body)
-			all := true
-			for _, t := range terms {
-				if !strings.Contains(hay, t) {
-					all = false
-					break
-				}
-			}
-			if !all {
-				continue
-			}
-			h := agentMemHit{agentMemEntry: e, Snippets: []string{}}
-			for _, line := range strings.Split(e.Body, "\n") {
-				low := strings.ToLower(line)
-				for _, t := range terms {
-					if strings.Contains(low, t) {
-						h.Snippets = append(h.Snippets, agentMemTruncate(strings.TrimSpace(line), agentMemSnippetChars))
-						break
-					}
-				}
-				if len(h.Snippets) >= agentMemSnippetLines {
-					break
-				}
-			}
-			h.Body = ""
-			hits = append(hits, h)
-		}
-	}
-	sort.SliceStable(hits, func(i, j int) bool { return hits[i].Updated > hits[j].Updated })
-	if len(hits) > limit {
-		hits = hits[:limit]
-	}
-	// Counted after the limit, under the read lock: a hit the caller never saw was not used, and
-	// a forget or re-create cannot slip between the search and the count.
-	for _, h := range hits {
-		agentMemRecordUses(c, h.agentMemEntry)
-	}
-	return hits, nil
+	// MatchedTerms names the query words this hit contains. It is set only on an any-term
+	// fallback answer, where hits differ in how much of the query they matched.
+	MatchedTerms []string `json:"matchedTerms,omitempty"`
 }
 
 // agentMemTruncate cuts at a rune boundary so a snippet of Japanese text stays valid UTF-8.
