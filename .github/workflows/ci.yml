@@ -321,7 +321,8 @@ jobs:
       - name: CP role KMS custodian grant (template vs Go)
         run: python3 ./deploy/local/cfn-cp-kms-scope-test.py
       # AF_WORKSPACE_DEK=random is refused by the CP without the kms custodian; the template
-      # must refuse the same combination at change-set time rather than crash-loop the CP.
+      # must fail the same combination when the stack operation runs (execute-time guard), and
+      # the env var must stay unset without a key, so the CP never crash-loops on it.
       - name: CP AF_WORKSPACE_DEK parameter / Rule (offline template evaluation)
         run: python3 ./deploy/local/cfn-workspace-dek-test.py
       # IAM caps a role's inline policies at 10,240 characters in total and each managed one

@@ -286,7 +286,8 @@ required; KMS errors fail closed. The trade-offs are in
 ```
 
 Sets `AF_WORKSPACE_DEK=random` on the CP task (#1646); with no `CustodianKmsKeyArn`
-CloudFormation refuses the update instead of letting the CP crash-loop. Check before turning it
+the template's Rule fails the stack operation when it runs and rolls it back (a change set can
+still be created; the failure appears in the stack events), and the flag alone sets no env var. Check before turning it
 on: kept homes keep the derived key until their first start with the flag; turning it off only
 stops keys for new homes (existing ones keep theirs, no reconnecting), while going back to a CP that
 does not know the home's key, or losing `home_dek`, can need credentials reconnected; unmigrated homes and old snapshots are

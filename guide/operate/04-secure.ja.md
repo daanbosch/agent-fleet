@@ -154,7 +154,7 @@ Workspace の中では CLI エージェントが**任意コードを実行**し�
 `AF_WORKSPACE_DEK=random` にすると、Control Plane はメンバーのホームごとに資格情報ストア（`secrets.enc`）用の
 ランダムな鍵を作り、KMS で封じます。受け付けるのは `AF_KEY_CUSTODIAN=kms` のときだけで、それ以外の組み合わせや
 別の値では Control Plane は起動時に止まります。`ecs` / `ecs-ec2` では `30-ingress` のパラメータ
-`WorkspaceDekRandom=on` で有効にします。`CustodianKmsKeyArn` が必須で、無いと CloudFormation が更新を拒否します
+`WorkspaceDekRandom=on` で有効にします。`CustodianKmsKeyArn` が必須で、無いと更新は CloudFormation の実行時にロールバックされます（変更セット自体は作成できます）
 （[有効にする前に](#ecs-で有効にする前に)）。
 
 #### ECS で有効にする前に

@@ -633,8 +633,28 @@ AWS KMS".
 home gets a random credential-store key sealed by KMS (ADR 0005 addenda, #1646). The CP refuses
 that flag unless the custodian is kms ("AF_WORKSPACE_DEK=random needs AF_KEY_CUSTODIAN=kms",
 `control-plane/dek.go`), so the template carries a Rule: `on` without `CustodianKmsKeyArn` fails
-the change set instead of crash-looping the service. The env var is also gated by the same
-condition on its own. `deploy/local/cfn-workspace-dek-test.py` holds both.
+the stack operation when it runs and rolls it back with the assertion message. It does **not**
+refuse at change-set creation: `create-stack` and `execute-change-set` are accepted (exit 0),
+and `aws cloudformation deploy --no-execute-changeset` succeeds too; the failure shows up as stack
+events. A plain `deploy` (which executes the change set and waits) is expected to exit non-zero
+when the stack rolls back, but that was not measured; check the stack status, not only the
+accepting call's exit code. The env var is also gated by the same condition on its own, so
+the flag without a key is inert at the template level: no `AF_WORKSPACE_DEK` is set and the CP
+could not crash-loop on it even without the Rule. Clearing `CustodianKmsKeyArn` is the normal
+switch back to the local custodian. `deploy/local/cfn-workspace-dek-test.py` holds both.
+
+Measured 2026-10-11 on throwaway stacks in a sandbox account (deleted afterwards):
+
+- `create-stack` with `on` and an empty ARN returned exit 0; the stack went `CREATE_IN_PROGRESS`
+  -> `ROLLBACK_IN_PROGRESS` -> `ROLLBACK_COMPLETE`, reason "Parameter validation failed:
+  assertion error: WorkspaceDekRandom=on needs CustodianKmsKeyArn (AF_KEY_CUSTODIAN=kms)."
+- `aws cloudformation deploy --no-execute-changeset` with `on` and an empty ARN exited 0
+  ("Changeset created successfully"), and the change set carried `on` and `""`. Executing it
+  exited 0, then the stack ran `UPDATE_IN_PROGRESS` -> `UPDATE_ROLLBACK_IN_PROGRESS` (same
+  assertion text) -> `UPDATE_ROLLBACK_COMPLETE`, parameters back to their old values.
+- A direct `update-stack` on a stack whose resources do not depend on the parameters answered
+  "No updates are to be performed" and never evaluated the Rule. On `30-ingress` the task
+  definition does change, so it behaves like the change-set case.
 
 Before turning it on: kept homes keep the derived key until their first start with the flag;
 turning it off only stops keys for new homes (homes that have one keep using it, no
