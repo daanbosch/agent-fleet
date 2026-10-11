@@ -2,7 +2,11 @@
 
 English | [日本語](0108-af-owned-agent-memory.ja.md)
 
-- Status: **proposed** (2026-10-03). Built so far (P1 without the claude seed): the store, the
+- Status: **proposed** (2026-10-03); built as of 2026-10-11, see the note at the end: P1, P2 (#1733),
+  P3 / decision 6 step 2 (#1734, #1916), usage ranking and pins (#1703), size and name limits (#1921) and
+  the write-back to claude's native memory (#1914). Still open: codex import (#1950) and automatic
+  import on switch (#1972). The original status text follows, as of 2026-10-03.
+  Built so far (P1 without the claude seed): the store, the
   five MCP tools, revisions, authorship, the one-commit history under `af/` and the secret scan
   (`memoryx/agent_memory.go`); the Console change list with revert and forget
   (`memoryx/agent_memory_changes.go`, Settings → Agent memory); the one-time claude import
@@ -106,7 +110,7 @@ that is safe when what one session writes is read by every kind.
    is built per session, may inject them directly. cursor gets the guidance in the tools'
    descriptions.
    `memory_index` is partial by design (#1702; usage-based ranking and pinned memories are
-   follow-ups in #1703, relevance ranking stays with #1558). The Agent bounds it, so every client
+   follow-ups in #1703, relevance ranking stays with #1558 [now #1981, see the Note of 2026-10-11]). The Agent bounds it, so every client
    gets the same answer:
    - The described part is limited to a byte budget of rendered lines (default 24 KiB; the
      optional `budget` argument is clamped to 4–64 KiB), in rank order: `feedback` and `user`
@@ -265,7 +269,7 @@ that is safe when what one session writes is read by every kind.
 ## Open questions (decide after measuring)
 
 1. ~~What `autoMemoryDirectory` and `CLAUDE_CODE_DISABLE_AUTO_MEMORY` do~~ — answered in decision 6
-   step 2 (#1734); still open: a live check that a new claude session loads no `MEMORY.md`.
+   step 2 (#1734). The live check (a new claude session loads no `MEMORY.md`) was answered 2026-10-08, see #1734 and #1916.
 2. The size of the `memory_index` answer and how its entries are ranked (recency, `kinds`), and the
    cost of the coexistence period measured on a real project.
 3. Purging a secret from history: rewriting the 0022 history for one memory, and what that does to
@@ -283,7 +287,7 @@ that is safe when what one session writes is read by every kind.
 - **P1** — the store, the MCP tools with revisions, authorship and history, the secret scan, the
   Console change list with forget and rollback, the one-time claude seed.
 - **P2** — the distributed guidance block, and lcpp's per-session injection.
-- **P3** — decision 6 step 2, decided after measuring (#1734; the live check is open); tie-in with #1559 (automated review) and #1558
+- **P3** — decision 6 step 2, decided after measuring (#1734, #1916; the live check was answered 2026-10-08); tie-in with #1559 (automated review) and #1558
   (search).
 
 ## Note (2026-10-08): the guidance block (P2, #1733)
@@ -358,6 +362,19 @@ needs model calls, so no consolidated output (`MEMORY.md`) was obtained. The sha
 formats codex's own prompts ask its model to write (not observed output), the proposed
 split by `# Task Group:` block, scope, naming rules and the open questions are in
 [0112](0112-codex-memory-import.md). Nothing above is changed.
+
+## Note (2026-10-11): status refresh (#1987)
+
+What is built, checked against the closed issues: P2, the guidance block (#1733); P3 / decision 6
+step 2, claude's auto-memory switched off while AF memory is on (#1734, shipped in PR #1916); usage
+ranking and pins for `memory_index` (#1703); the size and name limits that make import lossless
+(#1921); the write-back to claude's native memory (#1914). The live check of open question 1 passed
+on a live workspace on 2026-10-08 (last comment on #1734): a new claude session loads no `MEMORY.md`.
+
+Decision 5's "relevance ranking stays with #1558" no longer holds: #1558 closed as conversation
+search (#1656, #1664) without relevance ranking for AF `memory_search`, and that work is now #1981. Not built: the codex import (#1950, after [0112](0112-codex-memory-import.md))
+and automatic import on switch-on / write-back on switch-off (#1972). The other open questions are
+tracked separately (#1982–#1988). The decisions above are unchanged.
 
 ## Note (2026-10-11): muse has a native memory (open question 6, #1986)
 
