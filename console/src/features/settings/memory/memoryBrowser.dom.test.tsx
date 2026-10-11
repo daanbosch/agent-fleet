@@ -19,6 +19,7 @@ import { ToastProvider } from "../../../ui/ToastProvider.tsx";
 
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
+let readKinds: string[] = [];
 
 const project = { id: "app-0123456789ab", root: "/r/app", vcs: "git", display: "app" };
 const entries = [
@@ -86,11 +87,12 @@ async function setValue(el: HTMLInputElement | HTMLSelectElement | HTMLTextAreaE
 }
 
 beforeEach(async () => {
+  readKinds = [];
   api.mockImplementation(async (url: string) => {
     if (url.startsWith("api/agents/memory/entries/list")) return { entries, withheld: 2 };
     if (url.startsWith("api/agents/memory/entries/changes")) return { changes };
     if (url.startsWith("api/agents/memory/entries/member-read"))
-      return { ...entries[0], body: "always run the tests" };
+      return { ...entries[0], kinds: readKinds, body: "always run the tests" };
     return {};
   });
   apiJSON.mockResolvedValue({ name: "x" });
@@ -188,6 +190,7 @@ describe("MemoryBrowserPanel", () => {
       name: "rules",
       description: "house rules",
       type: "feedback",
+      kinds: [],
       body: "new text",
       revision: 3,
     });
@@ -207,6 +210,30 @@ describe("MemoryBrowserPanel", () => {
       "api/agents/memory/entries/member-save?project=app-0123456789ab",
       "POST",
       expect.objectContaining({ scope: "project", project: project.id, name: "fresh", revision: 0 }),
+    );
+  });
+
+  it("saves an edit to the scope it was opened in, even if the selector moved", async () => {
+    await click(text("View") ?? text("表示"));
+    await click(text("Edit") ?? text("編集"));
+    await setValue(select(), "project:" + project.id);
+    await click(document.body.querySelector<HTMLButtonElement>('button[type="submit"]'));
+    expect(apiJSON).toHaveBeenCalledWith(
+      "api/agents/memory/entries/member-save",
+      "POST",
+      expect.objectContaining({ scope: "user", project: "", name: "rules", revision: 3 }),
+    );
+  });
+
+  it("keeps the kinds of the memory when its body is edited", async () => {
+    readKinds = ["claude"];
+    await click(text("View") ?? text("表示"));
+    await click(text("Edit") ?? text("編集"));
+    await click(document.body.querySelector<HTMLButtonElement>('button[type="submit"]'));
+    expect(apiJSON).toHaveBeenCalledWith(
+      "api/agents/memory/entries/member-save",
+      "POST",
+      expect.objectContaining({ kinds: ["claude"] }),
     );
   });
 });

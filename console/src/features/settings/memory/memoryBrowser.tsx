@@ -26,6 +26,11 @@ const scopeKey = (m: { scope: string; project?: { id: string } }) =>
 interface Draft {
   /** null: a new memory. */
   base: MemoryBody | null;
+  /** Where the form was opened, fixed: the scope selector may move while the form is open, and a
+   *  save must never land in another scope with this revision and text. */
+  scope: "user" | "project";
+  project: string;
+  kinds: string[];
   name: string;
   description: string;
   type: string;
@@ -164,6 +169,10 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
     setFormErr("");
     setDraft({
       base,
+      scope: base ? base.scope : project ? "project" : "user",
+      project: base ? (base.project?.id ?? "") : project,
+      // Kept as read: a save replaces the kinds, and an edit of the body must not widen who sees it.
+      kinds: base?.kinds ?? [],
       name: base?.name ?? "",
       description: base?.description ?? "",
       type: base?.type || "feedback",
@@ -177,12 +186,13 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
     setFindings([]);
     setFormErr("");
     try {
-      const res = await apiJSON("api/agents/memory/entries/member-save" + projectQuery(project), "POST", {
-        scope: project ? "project" : "user",
-        project,
+      const res = await apiJSON("api/agents/memory/entries/member-save" + projectQuery(draft.project), "POST", {
+        scope: draft.scope,
+        project: draft.project,
         name: draft.name.trim(),
         description: draft.description,
         type: draft.type,
+        kinds: draft.kinds,
         body: draft.body,
         revision: draft.base?.revision ?? 0,
       });
