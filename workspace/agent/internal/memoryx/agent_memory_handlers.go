@@ -113,6 +113,9 @@ func HandleAgentMemoryIndex(w http.ResponseWriter, r *http.Request) {
 type agentMemSearchWire struct {
 	Project *agentMemProject `json:"project"`
 	Hits    []agentMemHit    `json:"hits"`
+	// Fallback is "any" when no memory held every query word and the hits are the ones that
+	// held some of them (each lists its matchedTerms). Absent for an every-word answer.
+	Fallback string `json:"fallback,omitempty"`
 }
 
 // HandleAgentMemorySearch finds memories by text.
@@ -123,12 +126,12 @@ func HandleAgentMemorySearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	hits, err := agentMemSearch(c, q.Get("q"), limit)
+	hits, fallback, err := agentMemSearchRanked(c, q.Get("q"), limit)
 	if err != nil {
 		agentMemWriteErr(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, agentMemSearchWire{Project: c.Project, Hits: hits})
+	httpx.WriteJSON(w, http.StatusOK, agentMemSearchWire{Project: c.Project, Hits: hits, Fallback: fallback})
 }
 
 // HandleAgentMemoryRead returns one memory with its body.

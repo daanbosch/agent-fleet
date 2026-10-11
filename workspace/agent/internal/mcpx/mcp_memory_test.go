@@ -172,6 +172,10 @@ func TestMemoryToolsRoundTrip(t *testing.T) {
 	if r.IsError || !strings.Contains(r.Text, "go-test-cap") || !strings.Contains(r.Text, "-p 2") {
 		t.Fatalf("search = %+v", r)
 	}
+	r = callMemoryTool(t, "memory_search", map[string]any{"query": "busy nosuchword"})
+	if r.IsError || !strings.Contains(r.Text, "No memory contains every word") || !strings.Contains(r.Text, "go-test-cap") || !strings.Contains(r.Text, "[matched: busy]") {
+		t.Fatalf("fallback search = %+v", r)
+	}
 	r = callMemoryTool(t, "memory_read", map[string]any{"name": "go-test-cap"})
 	if r.IsError || !strings.Contains(r.Text, "revision: 1") || !strings.Contains(r.Text, "author: claude (session owner01)") {
 		t.Fatalf("read = %+v", r)

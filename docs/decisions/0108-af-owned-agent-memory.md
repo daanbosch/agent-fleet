@@ -413,3 +413,15 @@ login), and the switch under `muse serve`, which is how AF launches muse.
 
 Follow-ups: #1990 (set `MUSE_EXPERIMENTAL_MEMORY=0` behind the AF switch, as #1734 did for claude, and verify it over `muse serve`),
 #1991 (import / write-back). Nothing above is changed.
+
+## Note (2026-10-11): `memory_search` ranks its hits (#1981)
+
+Decision 5 left search relevance to #1558, but #1558 closed with the conversation search of
+[0110](0110-past-session-search.md) only, so `memory_search` stayed a newest-first filter. It now orders
+hits by matched words (more first), then by the best field of each word (name over description over
+body), then pinned, read count and recency. When no memory holds every word of a multi-word query, it
+answers with the ones holding some of them and marks the answer (`fallback: "any"`, plus each hit's
+`matchedTerms`; the tool text says so). Matching stays case-insensitive substring, so Japanese
+without spaces still works; 0110's tokenizer is bound to its FTS5 index and was not reused, and there
+is no new index. On 500 synthetic memories (40 body lines each) a search takes about 30 ms warm (a
+test logs it). The REST route only gains optional fields. Embeddings are not planned.
