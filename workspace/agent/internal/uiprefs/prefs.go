@@ -2,6 +2,7 @@ package uiprefs
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -534,9 +535,9 @@ func Locale() string {
 // (same filesystem, so the rename is atomic); a symlinked prefs file is written through to its
 // target rather than replaced.
 func WriteAtomic(body []byte) error {
-	path := Path()
-	if real, err := filepath.EvalSymlinks(path); err == nil {
-		path = real
+	path, err := resolveLink(Path())
+	if err != nil {
+		return err
 	}
 	f, err := os.CreateTemp(filepath.Dir(path), ".ui-prefs-*.tmp")
 	if err != nil {
@@ -556,4 +557,25 @@ func WriteAtomic(body []byte) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// resolveLink follows a chain of symlinks on the final path component and returns the file to
+// write, which may not exist yet (a dangling link is the first save after a restore). Relative
+// targets are taken from the link's directory. A loop fails rather than replacing the link.
+func resolveLink(path string) (string, error) {
+	for i := 0; i < 40; i++ {
+		fi, err := os.Lstat(path)
+		if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			return path, nil
+		}
+		dest, err := os.Readlink(path)
+		if err != nil {
+			return "", err
+		}
+		if !filepath.IsAbs(dest) {
+			dest = filepath.Join(filepath.Dir(path), dest)
+		}
+		path = dest
+	}
+	return "", fmt.Errorf("ui-prefs: too many symlinks at %s", Path())
 }
