@@ -634,8 +634,11 @@ home gets a random credential-store key sealed by KMS (ADR 0005 addenda, #1646).
 that flag unless the custodian is kms ("AF_WORKSPACE_DEK=random needs AF_KEY_CUSTODIAN=kms",
 `control-plane/dek.go`), so the template carries a Rule: `on` without `CustodianKmsKeyArn` fails
 the stack operation when it runs and rolls it back with the assertion message. It does **not**
-refuse at change-set creation or at the `create-stack` / `deploy` API call: those succeed and the
-failure shows up as stack events. The env var is also gated by the same condition on its own, so
+refuse at change-set creation: `create-stack` and `execute-change-set` are accepted (exit 0),
+and `aws cloudformation deploy --no-execute-changeset` succeeds too; the failure shows up as stack
+events. A plain `deploy` (which executes the change set and waits) is expected to exit non-zero
+when the stack rolls back, but that was not measured; check the stack status, not only the
+accepting call's exit code. The env var is also gated by the same condition on its own, so
 the flag without a key is inert at the template level: no `AF_WORKSPACE_DEK` is set and the CP
 could not crash-loop on it even without the Rule. Clearing `CustodianKmsKeyArn` is the normal
 switch back to the local custodian. `deploy/local/cfn-workspace-dek-test.py` holds both.
