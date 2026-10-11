@@ -359,18 +359,18 @@ formats codex's own prompts ask its model to write (not observed output), the pr
 split by `# Task Group:` block, scope, naming rules and the open questions are in
 [0112](0112-codex-memory-import.md). Nothing above is changed.
 
-## Note (2026-10-11): the member can browse, search, edit and restore memories in the Console (#1985)
+## Note (2026-10-11): the member can browse, search and restore memories in the Console (#1985)
 
-Decision 8's after-the-fact view had the change list and the pin list, but no way to read a memory,
-see what was forgotten, or write one by hand. Settings > Agent memory now has a browser per scope. It
-reuses `entries/list` (now with revision and author) and the changes list (a memory's newest change,
-when the memory no longer exists, is the forgotten row, and its revert is the restore). Three
-member routes are new: `entries/member-read` (a body, not counted as a use), `entries/member-save` and
-`entries/member-forget`. They name the scope and project id directly because the Console has no session,
-are not gated by the `agentMemory` switch (like the changes and revert routes), and call the tools'
-own `agentMemSave` / `agentMemForget`, so the revision check, the secret scan and the limits are the same;
-the author is recorded as `member` / `console`, as for a revert. The Console cannot start a project (it
-has no working copy to take the root from), so a save needs an existing project id. The CP audits the two
-writes as `memory.entry.save` / `memory.entry.forget` with an id-shaped project hint only. Search in the
-browser filters the list on the Console side and does not read bodies; ranked body search stays with the
-tools' search (#1981).
+Decision 8's after-the-fact view had the change list and the pin list, but no way to read a memory or
+see what was forgotten. Settings > Agent memory now has a browser per scope. It reuses `entries/list`
+(now with revision and author) and the changes list: a memory's newest change, when the memory no
+longer exists, is the forgotten row, and its revert is the restore; forget from the list is a revert
+with `forget` on the memory's newest change. One route is new, `entries/member-read`: a body for the
+Console, not counted as a use, not gated by the `agentMemory` switch (like the changes list), and it
+writes nothing. Search filters the list on the Console side and does not read bodies; ranked body
+search stays with the tools' search (#1981).
+
+The member-only routes (pin, revert/forget) cannot tell the Console from a session holding
+`AGENT_TOKEN`: the author they record is the route, not a verified person. That is acceptable for
+them because they cannot write new free text. A member create/edit route could, and would bypass
+decision 4's switch, so it is not built; it waits for a member mark the Agent can verify (#1997).

@@ -263,15 +263,14 @@ Version control over the memory an agent accumulates by itself (claude's auto-me
     reverted; an agent's later update of a pinned memory keeps the pin, and the af memory tools offer agents no way to pin or unpin. (Like every Agent route, the pin route is not a security boundary against a shell in the same workspace; the change is always recorded as made by you from the Console.)
   - **Browse memories**: below the pins, the memories of one scope (all projects, or one project) with their
     author, last update, how often agents read them and whether they are pinned. Search matches the name,
-    description, type and author (not the body). **View** shows a memory's text; **Edit** and **New memory**
-    write one by hand. A memory you save is recorded as written by you (Console), is checked against the
-    revision you read (if an agent changed it meanwhile, the save is refused and you reload), and goes
-    through the same secret scan as an agent's save: text that looks like a secret is refused with the masked
-    findings and nothing is written. **Forget** removes it from every agent's view from the list, and
-    **Forgotten memories** lists those you can **Restore** (the text comes back as it was before; if it now
-    looks like a secret, restore it from the recent changes, where you can confirm). A memory whose text looks
-    like a secret is never listed, only counted. Saving and forgetting work with the sessions' switch off, and
-    a project appears once it holds a memory (start the first one from a session in that project).
+    description, type and author (not the body). **View** shows a memory's text. **Forget** removes it from
+    every agent's view, and **Forgotten memories** lists those you can **Restore** (the text comes back as it
+    was before; if it now looks like a secret, restore it from the recent changes, where you can confirm).
+    Both are the same revert and forget as the recent changes, recorded as made by you and undoable. Forget is
+    offered for memories whose newest change is in the recent changes loaded (the latest 300). A memory whose
+    text looks like a secret is never listed, only counted. Writing or editing a memory by hand is not
+    available yet (#1997): the Agent cannot tell a Console request from a session holding the workspace's
+    agent token, so pin, revert and forget are recorded as made by you but are not proof of it.
   - **Import from Claude Code**: below the list, brings the memory Claude Code kept for a project into Agent
     Fleet memory, once. Pick a project and you see what would happen before anything is written: **new**,
     **newer in Claude** (will overwrite the Agent Fleet copy, even one you edited since; both times are shown),

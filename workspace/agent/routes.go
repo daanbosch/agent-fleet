@@ -481,11 +481,9 @@ func buildMux() *http.ServeMux {
 	// reaches the pin route.
 	mux.HandleFunc("GET /agents/memory/entries/list", memoryx.HandleAgentMemoryList)
 	mux.HandleFunc("POST /agents/memory/entries/pin", memoryx.HandleAgentMemoryPin)
-	// The member's read of one body, and save / forget by hand (#1985). They name the scope and
-	// project directly and are not gated by the agentMemory switch.
+	// The member's read of one body (#1985): names the scope and project directly, not gated by
+	// the agentMemory switch, writes nothing.
 	mux.HandleFunc("GET /agents/memory/entries/member-read", memoryx.HandleAgentMemoryMemberRead)
-	mux.HandleFunc("POST /agents/memory/entries/member-save", memoryx.HandleAgentMemoryMemberSave)
-	mux.HandleFunc("POST /agents/memory/entries/member-forget", memoryx.HandleAgentMemoryMemberForget)
 	// One-time import of claude's own auto-memory (ADR 0108 decision 6 step 1). Not
 	// /agents/memory/import: that is the bundle import of the 0022 history.
 	mux.HandleFunc("GET /agents/memory/claude-import", memoryx.HandleAgentMemoryClaudeSources)

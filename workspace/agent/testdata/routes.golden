@@ -16,9 +16,7 @@ GET /agents/memory/entries/diff
 POST /agents/memory/entries/forget
 GET /agents/memory/entries/list
 POST /agents/memory/entries/pin
-POST /agents/memory/entries/member-forget
 GET /agents/memory/entries/member-read
-POST /agents/memory/entries/member-save
 GET /agents/memory/entries/read
 POST /agents/memory/entries/revert
 GET /agents/memory/entries/search

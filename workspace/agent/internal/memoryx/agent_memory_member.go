@@ -1,16 +1,15 @@
 package memoryx
 
-// The member's own routes into AF-owned agent memory (#1985): read one body, save, forget. The
-// tools' routes need a calling session and the agentMemory switch; the Console has neither, so
-// these name the scope and the project id directly, are not gated by the switch (the member can
-// always tend what sessions wrote), and record the author as the Console, like a revert. The
-// write path is the tools' own (agentMemSave, agentMemForget): the same revision check, the same
-// secret scan.
+// The member's read of one memory body (#1985). The tools' read needs a calling session and the
+// agentMemory switch; the Console has neither, so this names the scope and the project id
+// directly and is not gated by the switch, like the changes list. It writes nothing and counts no
+// use. There is deliberately no member save or forget route here: the Agent cannot tell the
+// Console from a session holding AGENT_TOKEN, so a route that writes free text as "member" would
+// let a session bypass the switch (#1997).
 
 import (
 	"net/http"
 	"os"
-	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
 )
@@ -68,19 +67,6 @@ func agentMemMemberRead(scope, project, name string) (agentMemEntry, error) {
 	return es[0], nil
 }
 
-// agentMemMemberSaveReq is agentMemSaveReq plus the project id the Console has no session to
-// resolve.
-type agentMemMemberSaveReq struct {
-	agentMemSaveReq
-	Project string `json:"project"`
-}
-
-// agentMemMemberForgetReq is agentMemForgetReq plus the project id.
-type agentMemMemberForgetReq struct {
-	agentMemForgetReq
-	Project string `json:"project"`
-}
-
 // HandleAgentMemoryMemberRead returns one memory with its body to the Console.
 func HandleAgentMemoryMemberRead(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -90,44 +76,4 @@ func HandleAgentMemoryMemberRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, e)
-}
-
-// HandleAgentMemoryMemberSave creates or updates a memory as the member.
-func HandleAgentMemoryMemberSave(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, agentMemSaveMaxRequest)
-	var req agentMemMemberSaveReq
-	if !httpx.DecodeJSON(w, r, &req) {
-		return
-	}
-	c, err := agentMemMemberCaller(req.Scope, req.Project)
-	if err != nil {
-		agentMemWriteErr(w, err)
-		return
-	}
-	res, err := agentMemSave(c, req.agentMemSaveReq, time.Now())
-	if err != nil {
-		agentMemWriteErr(w, err)
-		return
-	}
-	httpx.WriteJSON(w, http.StatusOK, res)
-}
-
-// HandleAgentMemoryMemberForget removes a memory as the member; history keeps it and the
-// changes list can bring it back.
-func HandleAgentMemoryMemberForget(w http.ResponseWriter, r *http.Request) {
-	var req agentMemMemberForgetReq
-	if !httpx.DecodeJSON(w, r, &req) {
-		return
-	}
-	c, err := agentMemMemberCaller(req.Scope, req.Project)
-	if err != nil {
-		agentMemWriteErr(w, err)
-		return
-	}
-	res, err := agentMemForget(c, req.agentMemForgetReq, time.Now())
-	if err != nil {
-		agentMemWriteErr(w, err)
-		return
-	}
-	httpx.WriteJSON(w, http.StatusOK, res)
 }

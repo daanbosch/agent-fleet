@@ -90,12 +90,6 @@ func auditActionTarget(r *http.Request) (action, target string, ok bool) {
 			// #1703: the member pins or unpins a memory. The Console repeats the project id in the query;
 			// only an id-shaped value is recorded, never the free-text memory name.
 			return "memory.entry.pin", auditProjectHint(q.Get("project")), true
-		case p == "/api/agents/memory/entries/member-save":
-			// #1985: the member writes a memory by hand. Same id-shaped project hint as the pin;
-			// the memory name is free text and never copied into the ledger.
-			return "memory.entry.save", auditProjectHint(q.Get("project")), true
-		case p == "/api/agents/memory/entries/member-forget":
-			return "memory.entry.forget", auditProjectHint(q.Get("project")), true
 		case p == "/api/agents/memory/claude-import":
 			// ADR 0108 decision 6: the one-time import of claude's memory writes the store. The
 			// Console repeats the project id in the query; only an id-shaped value is recorded.

@@ -1,7 +1,8 @@
 // MemoryBrowserPanel — the member's browser of AF-owned agent memory (#1985): the memories of one
 // scope with their author, use count and pin, a search, the body of one, forget, and the
-// forgotten ones with a way back. Writing by hand goes through the same revision check and secret
-// scan as the agents' memory_save; the author is recorded as the Console, like a revert.
+// forgotten ones with a way back. It adds no write route: forget and restore are the changes
+// list's own revert route, on the newest change of the memory. Writing a memory by hand waits for
+// a member mark the Agent can verify (#1997).
 //
 // A memory whose text fails the secret scan is never listed (the Agent sends a count), so no
 // name or body of one reaches this DOM. Search matches what the list carries (name, description,
@@ -14,28 +15,12 @@ import { useToast } from "../../../ui/ToastProvider.tsx";
 import { useConfirm } from "../../../ui/ConfirmProvider.tsx";
 import { useT } from "../../../lib/i18n/index.ts";
 import { fmtDateTime, DATETIME_FULL } from "../../../lib/intl.ts";
-import type { MemoryBody, MemoryChange, MemoryListed, SecretFinding } from "./memoryTypes.ts";
+import type { MemoryBody, MemoryChange, MemoryListed } from "./memoryTypes.ts";
 
-const TYPES = ["user", "feedback", "project", "reference"] as const;
-const projectQuery = (project?: string) => (project ? "?project=" + encodeURIComponent(project) : "");
 
 // "user" or "project:<id>": one browsable scope.
 const scopeKey = (m: { scope: string; project?: { id: string } }) =>
   m.scope === "user" ? "user" : "project:" + (m.project?.id ?? "");
-
-interface Draft {
-  /** null: a new memory. */
-  base: MemoryBody | null;
-  /** Where the form was opened, fixed: the scope selector may move while the form is open, and a
-   *  save must never land in another scope with this revision and text. */
-  scope: "user" | "project";
-  project: string;
-  kinds: string[];
-  name: string;
-  description: string;
-  type: string;
-  body: string;
-}
 
 export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onChanged: () => void }) {
   const tr = useT();
@@ -49,9 +34,7 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState<MemoryBody | null>(null);
   const [openErr, setOpenErr] = useState("");
-  const [draft, setDraft] = useState<Draft | null>(null);
-  const [findings, setFindings] = useState<SecretFinding[]>([]);
-  const [formErr, setFormErr] = useState("");
+  const [live, setLive] = useState<MemoryChange[]>([]);
   const [busy, setBusy] = useState(false);
   const [mine, setMine] = useState(0);
 
@@ -69,6 +52,8 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
     // revert brings the memory back.
     const changes: MemoryChange[] = ch?.error ? [] : (ch?.changes ?? []);
     setForgotten(changes.filter((c) => c.latest && !c.live && c.revertible));
+    // A live memory is forgotten from its newest change; one older than the window has none here.
+    setLive(changes.filter((c) => c.latest && c.live));
     return true;
   }, []);
   useRetryLoad(load, [reload, mine]);
@@ -86,7 +71,6 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
     if (!scopes.some(([k]) => k === scope)) setScope("user");
   }, [scopes, scope]);
 
-  const project = scope.startsWith("project:") ? scope.slice("project:".length) : "";
   const q = query.trim().toLowerCase();
   const shown = (rows ?? []).filter(
     (m) =>
@@ -98,7 +82,6 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
     m.authorKind === "member" ? tr("mem.af_by_member") : `${m.authorKind} · ${m.authorSession}`;
 
   const view = async (m: MemoryListed) => {
-    setDraft(null);
     setOpenErr("");
     setOpen(null);
     try {
@@ -112,7 +95,12 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
     }
   };
 
+  const newest = (m: MemoryListed) =>
+    live.find((c) => c.name === m.name && scopeKey(c) === scopeKey(m) && c.scope === m.scope);
+
   const forget = async (m: MemoryListed) => {
+    const c = newest(m);
+    if (!c) return;
     const ok = await askConfirm({
       title: tr("mem.af_forget_title"),
       body: <p>{tr("mem.af_forget_body", { name: m.name, where: m.scope === "user" ? tr("mem.af_scope_user") : (m.project?.display ?? "") })}</p>,
@@ -122,12 +110,11 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
     if (!ok) return;
     setBusy(true);
     try {
-      // The project id also goes in the query: the CP audit ledger reads the URL only.
-      const res = await apiJSON("api/agents/memory/entries/member-forget" + projectQuery(m.project?.id), "POST", {
-        scope: m.scope,
-        project: m.project?.id ?? "",
-        name: m.name,
-        revision: m.revision,
+      // The same revert route as the changes list; the commit also goes in the query for the audit.
+      const res = await apiJSON("api/agents/memory/entries/revert?commit=" + encodeURIComponent(c.commit), "POST", {
+        commit: c.commit,
+        forget: true,
+        ack: false,
       });
       if (res?.error) toast(errDetail(res.error));
       else {
@@ -164,57 +151,6 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
     }
   };
 
-  const edit = (base: MemoryBody | null) => {
-    setFindings([]);
-    setFormErr("");
-    setDraft({
-      base,
-      scope: base ? base.scope : project ? "project" : "user",
-      project: base ? (base.project?.id ?? "") : project,
-      // Kept as read: a save replaces the kinds, and an edit of the body must not widen who sees it.
-      kinds: base?.kinds ?? [],
-      name: base?.name ?? "",
-      description: base?.description ?? "",
-      type: base?.type || "feedback",
-      body: base?.body ?? "",
-    });
-  };
-
-  const save = async () => {
-    if (!draft) return;
-    setBusy(true);
-    setFindings([]);
-    setFormErr("");
-    try {
-      const res = await apiJSON("api/agents/memory/entries/member-save" + projectQuery(draft.project), "POST", {
-        scope: draft.scope,
-        project: draft.project,
-        name: draft.name.trim(),
-        description: draft.description,
-        type: draft.type,
-        kinds: draft.kinds,
-        body: draft.body,
-        revision: draft.base?.revision ?? 0,
-      });
-      if (res?.error?.code === "memory_secret_detected") {
-        setFindings(res.findings ?? []);
-        setFormErr(tr("mem.br_secret"));
-      } else if (res?.error) {
-        setFormErr(errDetail(res.error));
-      } else {
-        toast(tr("mem.br_saved", { name: draft.name.trim() }), { kind: "success" });
-        setDraft(null);
-        setOpen(null);
-        onChanged();
-        setMine((n) => n + 1);
-      }
-    } catch {
-      setFormErr(tr("mem.af_failed"));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <div className="mem-browser">
       <h4>{tr("mem.br_title")}</h4>
@@ -236,9 +172,6 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
-        <button type="button" disabled={busy} onClick={() => edit(null)}>
-          {tr("mem.br_new")}
-        </button>
       </div>
       <ul className="mem-pin-list mem-br-list">
         {rows === null ? (
@@ -264,7 +197,7 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
               <button type="button" disabled={busy} onClick={() => void view(m)}>
                 {tr("mem.br_view")}
               </button>
-              <button type="button" disabled={busy} onClick={() => void forget(m)}>
+              <button type="button" disabled={busy || !newest(m)} onClick={() => void forget(m)}>
                 {tr("mem.af_forget")}
               </button>
             </li>
@@ -272,73 +205,17 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
         )}
       </ul>
       {openErr && <p className="mem-warn">{openErr}</p>}
-      {open && !draft && (
+      {open && (
         <div className="mem-br-detail">
           <div className="mem-diff-head">
             <strong className="mem-af-name">{open.name}</strong>
             <span className="muted">{open.description}</span>
-            <button type="button" disabled={busy} onClick={() => edit(open)}>
-              {tr("mem.br_edit")}
-            </button>
             <button type="button" onClick={() => setOpen(null)}>
               {tr("mem.br_close")}
             </button>
           </div>
           <pre className="mem-br-body">{open.body}</pre>
         </div>
-      )}
-      {draft && (
-        <form
-          className="mem-br-form"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void save();
-          }}
-        >
-          <strong>{draft.base ? tr("mem.br_edit_title", { name: draft.base.name }) : tr("mem.br_new_title")}</strong>
-          {!draft.base && (
-            <label>
-              {tr("mem.br_f_name")}
-              <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
-            </label>
-          )}
-          <label>
-            {tr("mem.br_f_description")}
-            <input value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
-          </label>
-          <label>
-            {tr("mem.br_f_type")}
-            <select value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value })}>
-              {TYPES.map((t) => (
-                <option key={t} value={t}>
-                  {t}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            {tr("mem.br_f_body")}
-            <textarea rows={8} value={draft.body} onChange={(e) => setDraft({ ...draft, body: e.target.value })} />
-          </label>
-          {formErr && <p className="mem-warn">{formErr}</p>}
-          {findings.length > 0 && (
-            <ul className="mem-findings">
-              {findings.map((f, i) => (
-                <li key={i}>
-                  <code>{f.rule}</code> {tr("mem.af_secret_line", { line: f.line })} <code>{f.hint}</code>
-                </li>
-              ))}
-            </ul>
-          )}
-          <div className="mem-br-actions">
-            <button type="submit" disabled={busy}>
-              {tr("mem.br_save")}
-            </button>
-            <button type="button" disabled={busy} onClick={() => setDraft(null)}>
-              {tr("mem.br_cancel")}
-            </button>
-          </div>
-        </form>
       )}
       {gone.length > 0 && (
         <>

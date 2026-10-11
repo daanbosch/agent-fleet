@@ -1,6 +1,5 @@
 // The memory browser (#1985): rows with author / uses / pin, search, body view, forget and
-// restore through the member routes (project id in the query for the audit), the save form and
-// its secret refusal. Withheld memories are a count, never a name.
+// restore through the existing revert route (commit in the query for the audit). Withheld memories are a count, never a name.
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -19,7 +18,6 @@ import { ToastProvider } from "../../../ui/ToastProvider.tsx";
 
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
-let readKinds: string[] = [];
 
 const project = { id: "app-0123456789ab", root: "/r/app", vcs: "git", display: "app" };
 const entries = [
@@ -50,6 +48,31 @@ const entries = [
   },
 ];
 const changes = [
+  {
+    commit: "livecommit1",
+    at: "2026-10-02T00:00:00Z",
+    op: "create",
+    scope: "project",
+    project,
+    name: "build-cmd",
+    authorKind: "member",
+    authorSession: "console",
+    latest: true,
+    live: true,
+    revertible: true,
+  },
+  {
+    commit: "livecommit0",
+    at: "2026-10-01T00:00:00Z",
+    op: "create",
+    scope: "user",
+    name: "rules",
+    authorKind: "claude",
+    authorSession: "claude-main",
+    latest: true,
+    live: true,
+    revertible: true,
+  },
   {
     commit: "abcdef1234",
     at: "2026-10-03T00:00:00Z",
@@ -87,12 +110,11 @@ async function setValue(el: HTMLInputElement | HTMLSelectElement | HTMLTextAreaE
 }
 
 beforeEach(async () => {
-  readKinds = [];
   api.mockImplementation(async (url: string) => {
     if (url.startsWith("api/agents/memory/entries/list")) return { entries, withheld: 2 };
     if (url.startsWith("api/agents/memory/entries/changes")) return { changes };
     if (url.startsWith("api/agents/memory/entries/member-read"))
-      return { ...entries[0], kinds: readKinds, body: "always run the tests" };
+      return { ...entries[0], body: "always run the tests" };
     return {};
   });
   apiJSON.mockResolvedValue({ name: "x" });
@@ -150,16 +172,36 @@ describe("MemoryBrowserPanel", () => {
     expect(document.body.querySelector(".mem-br-body")!.textContent).toBe("always run the tests");
   });
 
-  it("forgets from the list with the revision it read and the project id in the query", async () => {
+  it("forgets from the list through the revert route on the memory's newest change", async () => {
     await setValue(select(), "project:" + project.id);
     expect(document.body.querySelectorAll(".mem-br-row")[0].textContent).toContain("build-cmd");
     await click(document.body.querySelectorAll(".mem-br-row")[0].querySelectorAll("button")[1]);
     await click(confirmButton());
-    expect(apiJSON).toHaveBeenCalledWith(
-      "api/agents/memory/entries/member-forget?project=app-0123456789ab",
-      "POST",
-      { scope: "project", project: project.id, name: "build-cmd", revision: 1 },
+    expect(apiJSON).toHaveBeenCalledWith("api/agents/memory/entries/revert?commit=livecommit1", "POST", {
+      commit: "livecommit1",
+      forget: true,
+      ack: false,
+    });
+  });
+
+  it("offers no forget when the memory's newest change is outside the loaded window", async () => {
+    expect(document.body.querySelectorAll(".mem-br-row")[0].querySelectorAll("button")[1].disabled).toBe(false);
+    api.mockImplementation(async (url: string) =>
+      url.startsWith("api/agents/memory/entries/list") ? { entries } : { changes: [] },
     );
+    await act(async () => root!.unmount());
+    root = createRoot(host!);
+    await act(async () => {
+      root!.render(
+        <ToastProvider>
+          <ConfirmProvider>
+            <MemoryBrowserPanel reload={0} onChanged={() => {}} />
+          </ConfirmProvider>
+        </ToastProvider>,
+      );
+    });
+    await flush();
+    expect(document.body.querySelectorAll(".mem-br-row")[0].querySelectorAll("button")[1].disabled).toBe(true);
   });
 
   it("restores a forgotten memory through the revert route", async () => {
@@ -172,68 +214,5 @@ describe("MemoryBrowserPanel", () => {
       forget: false,
       ack: false,
     });
-  });
-
-  it("saves an edit at the revision it read, and shows secret findings without saving", async () => {
-    await click(text("View") ?? text("表示"));
-    await click(text("Edit") ?? text("編集"));
-    const body = document.body.querySelector<HTMLTextAreaElement>("textarea")!;
-    await setValue(body, "new text");
-    apiJSON.mockResolvedValueOnce({
-      error: { code: "memory_secret_detected", message: "x" },
-      findings: [{ path: "body", line: 1, rule: "aws-key", hint: "AKIA…" }],
-    });
-    await click(document.body.querySelector<HTMLButtonElement>('button[type="submit"]'));
-    expect(apiJSON).toHaveBeenCalledWith("api/agents/memory/entries/member-save", "POST", {
-      scope: "user",
-      project: "",
-      name: "rules",
-      description: "house rules",
-      type: "feedback",
-      kinds: [],
-      body: "new text",
-      revision: 3,
-    });
-    expect(document.body.querySelector(".mem-findings")!.textContent).toContain("aws-key");
-    expect(document.body.querySelector("form")).toBeTruthy();
-  });
-
-  it("creates a memory in the selected project at revision 0", async () => {
-    await setValue(select(), "project:" + project.id);
-    await click(text("New memory") ?? text("新しいメモリ"));
-    const inputs = document.body.querySelectorAll<HTMLInputElement>("form input");
-    await setValue(inputs[0], "fresh");
-    await setValue(inputs[1], "a fact");
-    await setValue(document.body.querySelector<HTMLTextAreaElement>("textarea")!, "body");
-    await click(document.body.querySelector<HTMLButtonElement>('button[type="submit"]'));
-    expect(apiJSON).toHaveBeenCalledWith(
-      "api/agents/memory/entries/member-save?project=app-0123456789ab",
-      "POST",
-      expect.objectContaining({ scope: "project", project: project.id, name: "fresh", revision: 0 }),
-    );
-  });
-
-  it("saves an edit to the scope it was opened in, even if the selector moved", async () => {
-    await click(text("View") ?? text("表示"));
-    await click(text("Edit") ?? text("編集"));
-    await setValue(select(), "project:" + project.id);
-    await click(document.body.querySelector<HTMLButtonElement>('button[type="submit"]'));
-    expect(apiJSON).toHaveBeenCalledWith(
-      "api/agents/memory/entries/member-save",
-      "POST",
-      expect.objectContaining({ scope: "user", project: "", name: "rules", revision: 3 }),
-    );
-  });
-
-  it("keeps the kinds of the memory when its body is edited", async () => {
-    readKinds = ["claude"];
-    await click(text("View") ?? text("表示"));
-    await click(text("Edit") ?? text("編集"));
-    await click(document.body.querySelector<HTMLButtonElement>('button[type="submit"]'));
-    expect(apiJSON).toHaveBeenCalledWith(
-      "api/agents/memory/entries/member-save",
-      "POST",
-      expect.objectContaining({ kinds: ["claude"] }),
-    );
   });
 });
