@@ -7,8 +7,9 @@
 
 The per-home credential-store key (#1646) is switched on with AF_WORKSPACE_DEK=random, which
 the CP refuses at boot unless the custodian is kms (control-plane/dek.go). On ECS a task that
-refuses to boot is restarted forever, so 30-ingress must refuse the combination itself:
-WorkspaceDekRandom=on without CustodianKmsKeyArn is a Rules failure at change-set time.
+refuses to boot is restarted forever, so 30-ingress guards the combination itself:
+WorkspaceDekRandom=on without CustodianKmsKeyArn is a Rules failure at stack-operation run
+time (measured: a change set is still created; execution rolls the stack back).
 This evaluates the template's Rules, Conditions and the task's Environment for every
 combination of the two parameters and fails when
 
@@ -132,7 +133,7 @@ def check(tpl):
             if ev.rules_ok() != want_ok:
                 fails.append("Rules verdict for WorkspaceDekRandom=%s key=%s: want accepted=%s"
                              % (dek, "set" if key else "empty", want_ok))
-            # Evaluated for the refused combination too: the Condition must hold on its own
+            # Evaluated for the failing combination too: the Condition must hold on its own
             # should the Rule ever be dropped.
             env = ev.cp_env_names()
             got = env.get("AF_WORKSPACE_DEK")

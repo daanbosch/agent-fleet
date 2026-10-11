@@ -177,7 +177,7 @@ With `AF_WORKSPACE_DEK=random` the Control Plane gives each member's home a rand
 its credential store (`secrets.enc`), sealed by KMS. It is accepted only with
 `AF_KEY_CUSTODIAN=kms`; any other combination, or another value, stops the Control Plane at
 boot. On `ecs` / `ecs-ec2` it is the `30-ingress` parameter `WorkspaceDekRandom=on`, which needs
-`CustodianKmsKeyArn` (CloudFormation refuses the update without it); [before you turn it on](#before-you-turn-it-on-on-ecs).
+`CustodianKmsKeyArn` (without it the update is rolled back when CloudFormation runs it; a change set can still be created); [before you turn it on](#before-you-turn-it-on-on-ecs).
 
 #### Before you turn it on on ECS
 

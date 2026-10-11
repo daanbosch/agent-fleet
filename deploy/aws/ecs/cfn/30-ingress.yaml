@@ -403,7 +403,7 @@ Parameters:
       2026-09-01 outage stayed silent - /healthz kept answering 200. Set it.
 
 Rules:
-  # The CP refuses the flag without kms (dek.go); refuse here, not by crash-looping.
+  # The CP refuses the flag without kms (dek.go). Execute-time guard: see PARAMETERS.md.
   WorkspaceDekNeedsKmsCustodian:
     RuleCondition: !Equals [ !Ref WorkspaceDekRandom, "on" ]
     Assertions:
