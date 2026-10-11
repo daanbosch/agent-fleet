@@ -375,3 +375,18 @@ AF が muse を起動する `muse serve` 上でのスイッチの効き。
 部分文字列のままなので、空白なしの日本語も引ける。0110 のトークナイザは FTS5 の索引に結び付いているため
 再利用せず、新しい索引も作らない。合成した 500 件（本文 40 行）で、ウォーム時の検索は約 30 ms
 （テストがログに出す）。REST ルートは任意のフィールドが増えるだけ。埋め込み検索は予定しない。
+
+## 注（2026-10-11）：Agent memory のスイッチで muse のネイティブメモリを切る（#1990）
+
+Agent memory のスイッチがオンの間、muse の起動はすべて（セッションの `muse serve`、モデル一覧用ホスト、
+アシスタントチャットの `muse exec`。いずれも `childEnv` から環境を得る）`MUSE_EXPERIMENTAL_MEMORY=0` を
+持つようになった。`claude.AutoMemoryOff` と並べてスイッチに配線した `muse.NativeMemoryOff` フック経由。
+継承された値は先に取り除くので、メンバー自身の環境では再び有効にできない。スイッチがオフなら何も設定しない。
+`MUSE_EXPERIMENTAL_MEMORY_REMINDER=0` の抑止はそのまま。起動中のホストは起動時のままである。
+
+`muse serve --provider echo` を使い捨ての HOME/XDG で、アームごとに 1 ターン回し、永続ログの
+`model_request_configured` を読んで測った。変数なしではツール一覧に `read_memory`・`add_memory`・
+`edit_memory`、`memory_snapshot` コンテキスト、「Use persistent memory」段落がある。`=0` ではツール、
+スナップショット、段落のすべてが消える（残る言及は work-stop の指示にある一般的な「read_memory などを呼ぶな」
+という一文で、両アームにある）。この測定では変数を手で設定しており、AF の `childEnv` の出力はユニットテストで
+固定している。未実施：フェーズ制の切り替え（#1972）と muse メモリの取り込み（#1991）。

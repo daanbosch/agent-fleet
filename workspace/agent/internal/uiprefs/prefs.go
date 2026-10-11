@@ -2,6 +2,7 @@ package uiprefs
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -525,4 +526,63 @@ func Locale() string {
 		return "en"
 	}
 	return "ja"
+}
+
+// WriteAtomic replaces the prefs file with body so that a concurrent Read sees either the old
+// or the new complete JSON. os.WriteFile truncates first, and a launch-time gate (AgentMemory
+// read by a session spawn) that lands in that window sees an empty file, answers "off", and
+// pins the wrong environment on a long-lived host. The temp file is created beside the target
+// (same filesystem, so the rename is atomic); a symlinked prefs file is written through to its
+// target rather than replaced.
+func WriteAtomic(body []byte) error {
+	path, err := resolveLink(Path())
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".ui-prefs-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(body); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// resolveLink follows a chain of symlinks on the final path component and returns the file to
+// write (its parent directories resolved to physical paths), which may not exist yet (a dangling link is the first save after a restore). Relative
+// targets are taken from the link's directory. A loop fails rather than replacing the link.
+func resolveLink(path string) (string, error) {
+	for i := 0; i < 40; i++ {
+		// Physical parent first: a relative target with ".." is resolved by the kernel from the
+		// link's real directory, which a lexical Join over a symlinked parent gets wrong.
+		dir, err := filepath.EvalSymlinks(filepath.Dir(path))
+		if err != nil {
+			return "", err
+		}
+		path = filepath.Join(dir, filepath.Base(path))
+		fi, err := os.Lstat(path)
+		if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			return path, nil
+		}
+		dest, err := os.Readlink(path)
+		if err != nil {
+			return "", err
+		}
+		if !filepath.IsAbs(dest) {
+			dest = filepath.Join(filepath.Dir(path), dest)
+		}
+		path = dest
+	}
+	return "", fmt.Errorf("ui-prefs: too many symlinks at %s", Path())
 }

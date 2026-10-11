@@ -425,3 +425,20 @@ answers with the ones holding some of them and marks the answer (`fallback: "any
 without spaces still works; 0110's tokenizer is bound to its FTS5 index and was not reused, and there
 is no new index. On 500 synthetic memories (40 body lines each) a search takes about 30 ms warm (a
 test logs it). The REST route only gains optional fields. Embeddings are not planned.
+
+## Note (2026-10-11): muse's native memory is switched off with the switch (#1990)
+
+While the Agent memory switch is on, every muse launch (`muse serve` for sessions, the model-list
+host, and the `muse exec` of assistant chat; all take their environment from `childEnv`) now carries
+`MUSE_EXPERIMENTAL_MEMORY=0`, through a `muse.NativeMemoryOff` hook wired to the switch beside
+`claude.AutoMemoryOff`. An inherited value is dropped first, so the member's own environment cannot
+re-enable it; with the switch off nothing is set. The `MUSE_EXPERIMENTAL_MEMORY_REMINDER=0` clamp
+stays. Running hosts keep what they launched with.
+
+Measured over `muse serve --provider echo` in a throwaway HOME/XDG, one turn per arm, reading
+`model_request_configured` in the durable log: without the variable the tool list holds `read_memory`,
+`add_memory`, `edit_memory`, the `memory_snapshot` context and the "Use persistent memory" paragraph;
+with `=0` the tools, the snapshot and the paragraph are all gone (the only remaining mention is a
+generic "do not call read_memory…" sentence in the work-stop instructions, present in both arms). The
+variable was set by hand in that probe, not by AF's `childEnv`, whose output the unit tests pin. Not
+done: the phase-based switch (#1972) and import of muse memory (#1991).

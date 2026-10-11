@@ -193,6 +193,8 @@ func init() {
 	// claude's own auto-memory is off for launches while the Agent memory switch is on (ADR 0108
 	// decision 6 step 2); read at launch, so a running session keeps what it started with.
 	claude.AutoMemoryOff = uiprefs.AgentMemory
+	// Likewise muse's native memory (#1990): MUSE_EXPERIMENTAL_MEMORY=0 on launches while the switch is on.
+	muse.NativeMemoryOff = uiprefs.AgentMemory
 }
 
 // lcppMemoryPrompt is harness.MemoryPrompt: while the Agent memory switch is on, the fixed
