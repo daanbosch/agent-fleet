@@ -29,6 +29,7 @@ func TestMemoryRoutesProxiedByCP(t *testing.T) {
 		{"POST", "/api/agents/memory/entries/revert", "POST /api/agents/memory/entries/revert"},
 		{"GET", "/api/agents/memory/entries/list", "GET /api/agents/memory/entries/list"},
 		{"POST", "/api/agents/memory/entries/pin", "POST /api/agents/memory/entries/pin"},
+		{"GET", "/api/agents/memory/entries/member-read", "GET /api/agents/memory/entries/member-read"},
 		{"GET", "/api/agents/memory/claude-import", "GET /api/agents/memory/claude-import"},
 		{"GET", "/api/agents/memory/claude-import/preview", "GET /api/agents/memory/claude-import/preview"},
 		{"POST", "/api/agents/memory/claude-import", "POST /api/agents/memory/claude-import"},

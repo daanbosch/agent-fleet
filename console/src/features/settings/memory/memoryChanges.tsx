@@ -19,6 +19,7 @@ import { fmtDateTime, DATETIME_FULL } from "../../../lib/intl.ts";
 import { ClaudeImportPanel } from "./memoryClaudeImport.tsx";
 import { ClaudeExportPanel } from "./memoryClaudeExport.tsx";
 import { MemoryPinsPanel } from "./memoryPins.tsx";
+import { MemoryBrowserPanel } from "./memoryBrowser.tsx";
 import type { ChangeDiff, MemoryChange, SecretFinding } from "./memoryTypes.ts";
 
 // An unknown op from a newer Agent is printed raw rather than breaking the row.
@@ -171,6 +172,7 @@ export function AgentMemorySection({ reload, onChanged }: { reload: number; onCh
       {loadErr && <p className="mem-warn">{loadErr}</p>}
       {withheld > 0 && <p className="mem-warn">{tr("mem.af_withheld", { n: withheld })}</p>}
       <MemoryPinsPanel reload={reload + mine} onChanged={() => setMine((n) => n + 1)} />
+      <MemoryBrowserPanel reload={reload + mine} onChanged={() => setMine((n) => n + 1)} />
       <div className="mem-body">
         <ul className="mem-list">
           {changes === null ? (

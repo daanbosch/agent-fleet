@@ -442,3 +442,19 @@ with `=0` the tools, the snapshot and the paragraph are all gone (the only remai
 generic "do not call read_memory…" sentence in the work-stop instructions, present in both arms). The
 variable was set by hand in that probe, not by AF's `childEnv`, whose output the unit tests pin. Not
 done: the phase-based switch (#1972) and import of muse memory (#1991).
+
+## Note (2026-10-11): the member can browse, search and restore memories in the Console (#1985)
+
+Decision 8's after-the-fact view had the change list and the pin list, but no way to read a memory or
+see what was forgotten. Settings > Agent memory now has a browser per scope. It reuses `entries/list`
+(now with revision and author) and the changes list: a memory's newest change, when the memory no
+longer exists, is the forgotten row, and its revert is the restore; forget from the list is a revert
+with `forget` on the memory's newest change. One route is new, `entries/member-read`: a body for the
+Console, not counted as a use, not gated by the `agentMemory` switch (like the changes list), and it
+writes nothing. Search filters the list on the Console side and does not read bodies; ranked body
+search stays with the tools' search (#1981).
+
+The member-only routes (pin, revert/forget) cannot tell the Console from a session holding
+`AGENT_TOKEN`: the author they record is the route, not a verified person. That is acceptable for
+them because they cannot write new free text. A member create/edit route could, and would bypass
+decision 4's switch, so it is not built; it waits for a member mark the Agent can verify (#1997).
