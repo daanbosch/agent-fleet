@@ -166,15 +166,18 @@ account and one codex version.
   path-like or first-person text. `raw_memories.md` uses horizontal rules and a `description`
   field, which `MEMORY.md` does not.
 - **Still open, not measured:**
-  - Title and order stability across consolidations. A new consolidation could not be forced: it
-    follows the idle threshold and no command exists. Open question 1 stands in full.
+  - Title and order stability across consolidations. The docs describe no command to force a
+    consolidation, and this check could not trigger a new one (it follows the idle threshold). Open question 1 stands in full.
   - Whether `applies_to` carries project paths that need sanitising (open questions 2 and 7).
   - Block size, ad-hoc notes, the value of `raw_memories.md` and `external_agent_memory_import`
     (open questions 3 to 6) were not examined.
 
-**What this changes in "Proposed rules".** Rules 1 to 5 stand as proposed; none is overturned. The
-one wrong assumption is the `v1` first line, which the proposed rules do not depend on (rule 1
-imports `MEMORY.md` only), so no rule text needs to change. The content-based tombstone
+**What this changes in "Proposed rules".** Rules 1 to 5 stand as proposed; none is overturned. Two
+assumptions in the Measurement section did not hold: the `v1` first line, and the `description:`
+line of rollout summaries (this measurement saw no fields in them; it does not say whether
+`thread_id`, `rollout_path` or raw-evidence snippets are present). The proposed rules depend on
+neither (rule 1 imports `MEMORY.md` only and does not import rollout summaries), so no rule text
+needs to change. The content-based tombstone
 requirement stays: with no stable ID per block, a forgotten block must still be recognised by
 content, not by title or by `source_hash`. The precondition test of open question 1 (a title-only
 change, and an import into another scope, must not bring a forgotten block back) stays a
