@@ -4,6 +4,8 @@ English | [日本語](0111-member-collaboration.ja.md)
 
 - Status: **accepted** (2026-10-10). Nothing is built. Proposed 2026-10-07 after three rounds of design
   review by a second model. The open questions are settled in the addendum at the end.
+  Status update (2026-10-11): the P0 inbox acceptance conditions that P1-A must pass are in
+  [docs/log/130](../log/130-member-inbox-acceptance.md).
 - Tracking: #1840
 - Follow-ups: #1960, #1961, #1962
 - Related: [0057](0057-member-handoff.md) (handover between members: execution never crosses) /
