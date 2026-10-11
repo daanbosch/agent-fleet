@@ -278,6 +278,21 @@ required; KMS errors fail closed. The trade-offs are in
 [`cfn/PARAMETERS.md`](cfn/PARAMETERS.md#custodiankmskeyarn) and the operator's view in
 `guide/operate/04-secure.md`.
 
+#### A key of its own for each home (optional, kms only)
+
+```bash
+# 30-ingress, together with CustodianKmsKeyArn above
+--parameter-overrides CustodianKmsKeyArn=arn:aws:kms:<region>:<account>:key/<key-id> WorkspaceDekRandom=on ...
+```
+
+Sets `AF_WORKSPACE_DEK=random` on the CP task (#1646); with no `CustodianKmsKeyArn`
+CloudFormation refuses the update instead of letting the CP crash-loop. Check before turning it
+on: kept homes keep the derived key until their first start with the flag; turning it off or
+downgrading after migration needs credentials reconnected; unmigrated homes and old snapshots are
+not shredded (#1956). The per-workspace SSM parameter `secret-key-next` sits under `/af-ws/*`,
+which the CP role (`SsmWorkspaceParams`) and the workspace execution role already cover. Details:
+[`cfn/PARAMETERS.md`](cfn/PARAMETERS.md#workspacedekrandom) and `guide/operate/04-secure.md`.
+
 ### Alarms — the Control Plane cannot reach its database (set this one)
 
 ```bash

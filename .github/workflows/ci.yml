@@ -320,6 +320,10 @@ jobs:
       # only, and a widened grant decrypts with keys the CP has no business with.
       - name: CP role KMS custodian grant (template vs Go)
         run: python3 ./deploy/local/cfn-cp-kms-scope-test.py
+      # AF_WORKSPACE_DEK=random is refused by the CP without the kms custodian; the template
+      # must refuse the same combination at change-set time rather than crash-loop the CP.
+      - name: CP AF_WORKSPACE_DEK parameter / Rule (offline template evaluation)
+        run: python3 ./deploy/local/cfn-workspace-dek-test.py
       # IAM caps a role's inline policies at 10,240 characters in total and each managed one
       # at 6,144, and four stacks attach to the CP task role, so no one template shows the
       # total. Passing it is a ServiceLimitExceeded and a rolled-back stack on a real

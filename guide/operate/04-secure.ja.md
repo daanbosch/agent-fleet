@@ -153,7 +153,21 @@ Workspace の中では CLI エージェントが**任意コードを実行**し�
 
 `AF_WORKSPACE_DEK=random` にすると、Control Plane はメンバーのホームごとに資格情報ストア（`secrets.enc`）用の
 ランダムな鍵を作り、KMS で封じます。受け付けるのは `AF_KEY_CUSTODIAN=kms` のときだけで、それ以外の組み合わせや
-別の値では Control Plane は起動時に止まります。`ecs` / `ecs-ec2` のスタックにはまだパラメータがありません。
+別の値では Control Plane は起動時に止まります。`ecs` / `ecs-ec2` では `30-ingress` のパラメータ
+`WorkspaceDekRandom=on` で有効にします。`CustodianKmsKeyArn` が必須で、無いと CloudFormation が更新を拒否します
+（[有効にする前に](#ecs-で有効にする前に)）。
+
+#### ECS で有効にする前に
+
+`30-ingress` を `WorkspaceDekRandom=on` と `CustodianKmsKeyArn` を付けてデプロイします。変わるのは Control Plane の
+タスク定義（`AF_WORKSPACE_DEK=random` が加わる）だけで、サービスはローリング更新されます。先に確認してください。
+
+- 残してあるホームは、このフラグでの最初の起動までは導出した鍵のままです。ワークスペースごとの SSM パラメータ
+  `secret-key-next` はその起動から作られ、ホームの確定または Destroy で消えます。既存の `/af-ws/*` への権限で足ります。
+- パラメータを戻す、または Control Plane をダウングレードしても、移したホームは元に戻りません。メンバーに資格情報を
+  接続し直してもらう必要があります（下の「無効にしても元には戻らない」）。
+- まだ起動していないホームや古いスナップショット・バックアップは、KMS 鍵を無効化しても **crypto-shred されません**
+  （残りは #1956）。
 
 - **鍵はワークスペースではなくホームのもの。** 残したホームの上でワークスペースを削除して作り直しても鍵は
   そのままです。今は何もこの鍵を消しません。Destroy も同じで、ホームが丸ごと消えたことをすべてのランタイムが

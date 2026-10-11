@@ -176,7 +176,23 @@ apart from the credential-store keys, which it can still derive.
 With `AF_WORKSPACE_DEK=random` the Control Plane gives each member's home a random key for
 its credential store (`secrets.enc`), sealed by KMS. It is accepted only with
 `AF_KEY_CUSTODIAN=kms`; any other combination, or another value, stops the Control Plane at
-boot. The `ecs` / `ecs-ec2` stacks do not expose it as a parameter yet.
+boot. On `ecs` / `ecs-ec2` it is the `30-ingress` parameter `WorkspaceDekRandom=on`, which needs
+`CustodianKmsKeyArn` (CloudFormation refuses the update without it); [before you turn it on](#before-you-turn-it-on-on-ecs).
+
+#### Before you turn it on on ECS
+
+Deploy `30-ingress` with `WorkspaceDekRandom=on`
+together with `CustodianKmsKeyArn`; only the Control Plane task definition changes (it gets
+`AF_WORKSPACE_DEK=random`) and the service rolls. Check first:
+
+- Kept homes stay on the derived key until their first start with the flag; the
+  `secret-key-next` SSM parameter appears per workspace from that start and is deleted when the
+  home is confirmed or destroyed. The existing `/af-ws/*` grants already cover it.
+- Turning the parameter off, or downgrading the Control Plane, after homes have moved does not
+  undo it, and members have to reconnect their credentials (see "Turning it off does not
+  undo it" below).
+- Homes that have not started since, and old snapshots or backups, are **not** shredded
+  by disabling the KMS key (#1956 tracks the rest).
 
 - **The key belongs to the home, not the workspace.** Deleting and re-creating a workspace over
   a kept home keeps the key. Nothing removes it yet, Destroy included: not every runtime can
