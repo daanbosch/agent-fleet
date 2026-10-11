@@ -560,10 +560,17 @@ func WriteAtomic(body []byte) error {
 }
 
 // resolveLink follows a chain of symlinks on the final path component and returns the file to
-// write, which may not exist yet (a dangling link is the first save after a restore). Relative
+// write (its parent directories resolved to physical paths), which may not exist yet (a dangling link is the first save after a restore). Relative
 // targets are taken from the link's directory. A loop fails rather than replacing the link.
 func resolveLink(path string) (string, error) {
 	for i := 0; i < 40; i++ {
+		// Physical parent first: a relative target with ".." is resolved by the kernel from the
+		// link's real directory, which a lexical Join over a symlinked parent gets wrong.
+		dir, err := filepath.EvalSymlinks(filepath.Dir(path))
+		if err != nil {
+			return "", err
+		}
+		path = filepath.Join(dir, filepath.Base(path))
 		fi, err := os.Lstat(path)
 		if err != nil || fi.Mode()&os.ModeSymlink == 0 {
 			return path, nil

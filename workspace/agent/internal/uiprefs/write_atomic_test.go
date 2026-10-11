@@ -106,3 +106,32 @@ func TestWriteAtomicKeepsSymlinks(t *testing.T) {
 		})
 	}
 }
+
+// ~/.config may itself be a symlink onto durable storage, and the prefs file a relative link
+// with ".." inside it: the target is relative to the link's PHYSICAL directory.
+func TestWriteAtomicResolvesRelativeLinkThroughSymlinkedParent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, d := range []string{"durable/config/agent-fleet", "durable/store", "store"} {
+		if err := os.MkdirAll(filepath.Join(home, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(home, "durable", "config"), filepath.Join(home, ".config")); err != nil {
+		t.Fatal(err)
+	}
+	// physical: home/durable/config/agent-fleet/ui-prefs.json -> ../../store/prefs.json
+	// = home/durable/store/prefs.json (a lexical join would land on home/store/prefs.json).
+	if err := os.Symlink("../../store/prefs.json", filepath.Join(home, "durable/config/agent-fleet/ui-prefs.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteAtomic([]byte(`{"agentMemory":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if !AgentMemory() {
+		t.Error("the save did not reach the file the link points at")
+	}
+	if _, err := os.Stat(filepath.Join(home, "store", "prefs.json")); err == nil {
+		t.Error("wrote to the lexically joined path")
+	}
+}
