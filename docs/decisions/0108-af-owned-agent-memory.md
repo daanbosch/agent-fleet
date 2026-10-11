@@ -413,6 +413,7 @@ login), and the switch under `muse serve`, which is how AF launches muse.
 
 Follow-ups: #1990 (set `MUSE_EXPERIMENTAL_MEMORY=0` behind the AF switch, as #1734 did for claude, and verify it over `muse serve`),
 #1991 (import / write-back). Nothing above is changed.
+
 ## Note (2026-10-11): `memory_search` ranks its hits (#1981)
 
 Decision 5 left search relevance to #1558, but #1558 closed with the conversation search of
