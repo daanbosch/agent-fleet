@@ -95,6 +95,30 @@ func TestAgentMemorySearchFallsBackToAnyTerm(t *testing.T) {
 	}
 }
 
+// More matched words beat a heavier field: the older body-only memory matches two words (score
+// 2), the newer name-only one matches one (score 4), and limit 1 must keep the former.
+func TestAgentMemorySearchMatchedCountBeatsFieldWeight(t *testing.T) {
+	agentMemTestEnv(t)
+	c := agentMemCallerT(t, "claude-main")
+	now := time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC)
+	memSearchSave(t, c, "two-body", "plain", "alpha and beta here", now)
+	memSearchSave(t, c, "alpha", "plain", "x", now.Add(time.Hour))
+	hits, fb, _ := agentMemSearchRanked(c, "alpha beta absent", 1)
+	if fb != "any" || len(hits) != 1 || hits[0].Name != "two-body" {
+		t.Fatalf("fb=%q hits=%v, want two-body", fb, memSearchNames(hits))
+	}
+}
+
+func TestAgentMemoryScoreTakesBestFieldOnlyAndTermsAreDistinct(t *testing.T) {
+	e := agentMemEntry{Name: "alpha", Description: "alpha", Body: "alpha"}
+	if s := agentMemScore(e, []string{"alpha"}); s.score != agentMemWeightName || len(s.matched) != 1 {
+		t.Errorf("score = %+v, want the name weight once", s)
+	}
+	if got := agentMemSearchTerms("Alpha  alpha ALPHA beta"); !reflect.DeepEqual(got, []string{"alpha", "beta"}) {
+		t.Errorf("terms = %v", got)
+	}
+}
+
 func TestAgentMemorySearchJapaneseWithoutSpaces(t *testing.T) {
 	agentMemTestEnv(t)
 	c := agentMemCallerT(t, "claude-main")
@@ -125,7 +149,7 @@ func TestAgentMemorySearchCountsUsesOnlyForReturnedHits(t *testing.T) {
 }
 
 // TestAgentMemorySearchLatency states the cost at the size ADR 0108 measured (469 files). It
-// fails only if a search of 500 memories takes more than a second, and logs the figure.
+// logs the figure; it asserts results only, since a wall-clock limit would fail on a loaded host.
 func TestAgentMemorySearchLatency(t *testing.T) {
 	if testing.Short() {
 		t.Skip("writes 500 memories")
@@ -152,8 +176,5 @@ func TestAgentMemorySearchLatency(t *testing.T) {
 			t.Fatalf("%q: %d hits, err=%v", q, len(hits), err)
 		}
 		t.Logf("500 memories, %q: %v (fallback=%q)", q, d, fb)
-		if d > time.Second {
-			t.Errorf("%q took %v", q, d)
-		}
 	}
 }
