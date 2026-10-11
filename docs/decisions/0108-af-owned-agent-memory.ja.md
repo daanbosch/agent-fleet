@@ -314,3 +314,34 @@ revision も `updated` も変えず、エージェントの保存はピンを引
 統合後の出力（`MEMORY.md`）は得られていない。codex 自身のプロンプトが書くよう求める形からの推定
 （観測した出力ではない）、`# Task Group:` ブロックでの分割案、スコープ、
 命名規則、未決事項は [0112](0112-codex-memory-import.ja.md) にある。上の決定は変えない。
+
+## 注（2026-10-11）：muse には独自のネイティブメモリがある（未決事項 6、#1986）
+
+調べたもの：ADR [0095](0095-muse-agent-kind.ja.md) のクランプ表、`internal/agents/muse/program.go`、
+`muse --help` / `muse exec --help`、インストール済み muse 1.4.4 バイナリの文字列、使い捨ての
+`HOME` / `XDG_*` での `muse exec --provider echo` 1 回（ログインなし。利用者自身の muse 設定と
+認証情報は読んでいない）。
+
+分かったこと：
+- **ネイティブメモリはある。** バイナリにツール `read_memory` / `add_memory` / `edit_memory`、3 つの
+  スコープ（既定の `personal_project`、`personal`、`<repo>/.agents/memory` である `project`）、スコープごとの
+  `MEMORY.md` 索引（claude と同じ `- [Title](file.md) - hook` 形式）とノートの frontmatter（`name`、
+  `description`、`type` は `user` / `feedback` / `project` / `reference`）、実行開始時に注入されるスナップショット、
+  「長く効く好みは `add_memory` で保存せよ」というシステムプロンプトの段落がある。AF のスイッチが
+  オンのとき muse は 2 つのメモリを持ち、AF が走査・版管理・帰属をしない自前の側へ書くよう指示される。
+- **AF が既に入れているクランプはその切替ではない。** `MUSE_EXPERIMENTAL_MEMORY_REMINDER=0`（ADR 0095）
+  が止めるのは助言的な memory-reminder オブザーバだけで、`--disable-reminders` も同じ系統。設定には
+  `memory.destinations.*`（スコープの保存先：`local`、`notes`、project 以外の git）とポリシーで止まる
+  `memory sync` があるが、メモリ自体を切るものではない。ツール・スナップショット・プロンプト段落を
+  切るスイッチは見つからなかった。
+- muse 同梱の `migrate` スキルは claude と codex のメモリノートを読んで `add_memory` で記録するので、
+  AF を通さずにそちらから取り込んでいる利用者もありうる。
+
+実測：echo 実行が記録したツール一覧に 3 つのツールがある。使い捨てホームには起動時にメモリ用のものは
+何もできない（ノートを書くまでストアはない）。`--help` にメモリのオプションはない。文字列からの推定
+（出力の観測ではない）：スコープ、プロンプト段落、スナップショット、リマインダ・オブザーバとの関係、
+`memory.destinations.*` が唯一のメモリ設定キーであること。未計測（いずれもログインが要るため）：各スコープ
+の保存先、設定キーやツール除外でツールを外せるか、最初のモデル入力の中身。
+
+後続：#1990（切るスイッチを見つけ AF のスイッチの下で適用する。claude の #1734 と同様）、#1991
+（取り込み・書き戻し）。上の決定は変えない。

@@ -358,3 +358,36 @@ needs model calls, so no consolidated output (`MEMORY.md`) was obtained. The sha
 formats codex's own prompts ask its model to write (not observed output), the proposed
 split by `# Task Group:` block, scope, naming rules and the open questions are in
 [0112](0112-codex-memory-import.md). Nothing above is changed.
+
+## Note (2026-10-11): muse has a native memory (open question 6, #1986)
+
+Looked at: ADR [0095](0095-muse-agent-kind.md)'s clamp table, `internal/agents/muse/program.go`,
+`muse --help` / `muse exec --help`, the strings of the installed muse 1.4.4 binary, and one
+`muse exec --provider echo` run in a throwaway `HOME` / `XDG_*` (no login; the user's own muse
+config and credentials were not read).
+
+Found:
+- **A native memory exists.** The binary carries the tools `read_memory`, `add_memory` and
+  `edit_memory`, three scopes (`personal_project`, the default; `personal`; `project`, which is
+  `<repo>/.agents/memory`), a `MEMORY.md` index per scope in the same `- [Title](file.md) - hook`
+  shape and note frontmatter (`name`, `description`, `type` of `user` / `feedback` / `project` /
+  `reference`) as claude's, a snapshot of it injected at run start, and a system-prompt paragraph
+  telling the model to save lasting preferences with `add_memory`. So with the AF switch on muse
+  holds two memories and is told to write to its own, which AF never scans, versions or attributes.
+- **AF's existing clamp is not a switch for it.** `MUSE_EXPERIMENTAL_MEMORY_REMINDER=0` (ADR 0095)
+  stops only the advisory memory-reminder observer. `--disable-reminders` is the same family. Settings
+  has `memory.destinations.*` (where a scope is stored: `local`, `notes`, git for non-project
+  scopes) and a policy-gated `memory sync`; none of them turns the memory off. No switch for the
+  tools, the snapshot or the prompt paragraph was found.
+- muse's bundled `migrate` skill already reads claude's and codex's memory notes and records them with
+  `add_memory`, so a user may be seeding it from those without AF involved.
+
+Measured: the three tools are in the toolset the echo run recorded; nothing is created under the
+throwaway home for memory at startup (no store exists until a note is written); `--help` lists no
+memory option. Inferred from strings (not observed output): the scopes, the prompt paragraph, the
+snapshot, the reminder-observer relation, and `memory.destinations.*` as the only memory settings
+key. Not measured, because every such run needs a login: where each scope's store lives on disk,
+whether any settings key or tool exclusion removes the tools, and what the first model input holds.
+
+Follow-ups: #1990 (find the off-switch and apply it behind the AF switch, as #1734 did for claude),
+#1991 (import / write-back). Nothing above is changed.
