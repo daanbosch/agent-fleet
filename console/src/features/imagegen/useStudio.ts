@@ -272,6 +272,9 @@ export function useStudio(id: string, opts: { running: boolean }): StudioState {
   // The debounce, re-armed after a save that got no answer — so a failed save is not left
   // sitting dirty (which also holds the poll off) until the member happens to type again.
   function scheduleRetry() {
+    // A save answered after the page's environment is gone (a test file's jsdom torn down) has no
+    // timer to arm; in a live window this never fires.
+    if (typeof window === "undefined") return;
     const wait = RETRY_MS[Math.min(retryRef.current, RETRY_MS.length - 1)];
     retryRef.current++;
     window.clearTimeout(timerRef.current);
