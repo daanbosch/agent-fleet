@@ -329,19 +329,23 @@ revision も `updated` も変えず、エージェントの保存はピンを引
   `description`、`type` は `user` / `feedback` / `project` / `reference`）、実行開始時に注入されるスナップショット、
   「長く効く好みは `add_memory` で保存せよ」というシステムプロンプトの段落がある。AF のスイッチが
   オンのとき muse は 2 つのメモリを持ち、AF が走査・版管理・帰属をしない自前の側へ書くよう指示される。
-- **AF が既に入れているクランプはその切替ではない。** `MUSE_EXPERIMENTAL_MEMORY_REMINDER=0`（ADR 0095）
-  が止めるのは助言的な memory-reminder オブザーバだけで、`--disable-reminders` も同じ系統。設定には
-  `memory.destinations.*`（スコープの保存先：`local`、`notes`、project 以外の git）とポリシーで止まる
-  `memory sync` があるが、メモリ自体を切るものではない。ツール・スナップショット・プロンプト段落を
-  切るスイッチは見つからなかった。
+- **AF が既に入れているクランプは切替ではないが、切替は別にある。** `MUSE_EXPERIMENTAL_MEMORY_REMINDER=0`
+  （ADR 0095）が止めるのは助言的な memory-reminder オブザーバだけで、`--disable-reminders` も同じ系統。
+  バイナリの文字列にある別変数 `MUSE_EXPERIMENTAL_MEMORY=0` がメモリ本体を外す。echo provider での A/B
+  （両腕とも reminder 変数 0 と `--disable-reminders`、`env -i` の隔離 `HOME` / `XDG_*`）で、既定の腕の
+  durable `session.jsonl` には `model_request_configured` に 3 つのメモリツール、`memory_snapshot`
+  コンテキスト、「Use persistent memory」の段落がある。`MUSE_EXPERIMENTAL_MEMORY=0` の腕にはこの 3 つ
+  がない（他のツールは残る）。ログインは不要。AF の `childEnv` は reminder 変数しか設定しないので、
+  AF の下では今ネイティブメモリはオンのまま。設定の `memory.destinations.*`（スコープの保存先）と
+  ポリシーで止まる `memory sync` はメモリを切らない。
 - muse 同梱の `migrate` スキルは claude と codex のメモリノートを読んで `add_memory` で記録するので、
   AF を通さずにそちらから取り込んでいる利用者もありうる。
 
-実測：echo 実行が記録したツール一覧に 3 つのツールがある。使い捨てホームには起動時にメモリ用のものは
-何もできない（ノートを書くまでストアはない）。`--help` にメモリのオプションはない。文字列からの推定
-（出力の観測ではない）：スコープ、プロンプト段落、スナップショット、リマインダ・オブザーバとの関係、
-`memory.destinations.*` が唯一のメモリ設定キーであること。未計測（いずれもログインが要るため）：各スコープ
-の保存先、設定キーやツール除外でツールを外せるか、最初のモデル入力の中身。
+実測：上の A/B（echo provider、ログインなし）。空の `HOME` での起動ではメモリ用ディレクトリができない
+（その 1 回の話で、最初の書込みまで作られない証明ではない）。`--help` にメモリのオプションはない。
+文字列からの推定（出力の観測ではない）：スコープ、`memory.destinations.*` キー、2 つの変数の関係。
+未計測：各スコープの保存先、`add_memory` による書込みと取り込み（実モデル呼び出しなのでログインが要る）、
+AF が muse を起動する `muse serve` 上でのスイッチの効き。
 
-後続：#1990（切るスイッチを見つけ AF のスイッチの下で適用する。claude の #1734 と同様）、#1991
+後続：#1990（`MUSE_EXPERIMENTAL_MEMORY=0` を AF のスイッチの下で設定し、`muse serve` 上で確認する。claude の #1734 と同様）、#1991
 （取り込み・書き戻し）。上の決定は変えない。
