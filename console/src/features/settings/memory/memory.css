@@ -336,3 +336,65 @@
   color: var(--warn, var(--err));
   border-color: var(--warn, var(--err));
 }
+
+/* The memory browser (#1985). */
+.mem-browser {
+  margin: 12px 0;
+}
+
+.mem-br-bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.mem-br-bar input[type="search"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.mem-br-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.mem-br-row .mem-snap-what {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mem-br-detail,
+.mem-br-form {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mem-br-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.mem-br-body {
+  margin: 0;
+  padding: 8px;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.mem-br-actions {
+  display: flex;
+  gap: 8px;
+}

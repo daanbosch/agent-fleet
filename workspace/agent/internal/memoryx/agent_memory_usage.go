@@ -123,6 +123,10 @@ type agentMemListed struct {
 	Updated     string           `json:"updated"`
 	Pinned      bool             `json:"pinned"`
 	Uses        int              `json:"uses"`
+	// Revision is what a member forget passes back; the author is who last wrote the memory.
+	Revision      int    `json:"revision"`
+	AuthorKind    string `json:"authorKind"`
+	AuthorSession string `json:"authorSession"`
 }
 
 // agentMemListAllOut is every memory of every scope, for the Console. Withheld counts files
@@ -163,6 +167,7 @@ func agentMemListAll() (agentMemListAllOut, error) {
 			out.Entries = append(out.Entries, agentMemListed{
 				Name: e.Name, Scope: e.Scope, Project: r.project, Description: e.Description,
 				Type: e.Type, Kinds: e.Kinds, Updated: e.Updated, Pinned: e.Pinned, Uses: e.Uses,
+				Revision: e.Revision, AuthorKind: e.AuthorKind, AuthorSession: e.AuthorSession,
 			})
 		}
 	}

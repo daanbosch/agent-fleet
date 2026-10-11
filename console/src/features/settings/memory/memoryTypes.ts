@@ -208,4 +208,15 @@ export interface MemoryListed {
   updated: string;
   pinned: boolean;
   uses: number;
+  /** What a member forget passes back, so a memory changed since is not removed unseen. */
+  revision: number;
+  authorKind: string;
+  authorSession: string;
+}
+
+/** One memory with its body (member-read). */
+export interface MemoryBody extends MemoryListed {
+  body: string;
+  kinds?: string[];
+  created?: string;
 }
