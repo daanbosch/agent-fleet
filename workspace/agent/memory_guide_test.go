@@ -4,6 +4,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -322,5 +323,29 @@ func TestClaudeAutoMemoryOffFollowsTheAgentMemorySwitch(t *testing.T) {
 	setAgentMemory(t, false)
 	if claude.AutoMemoryOff() {
 		t.Error("switch off: claude's auto-memory should be left alone")
+	}
+}
+
+// #1990: muse's native memory follows the Agent memory switch the same way (wired in package main
+// because muse cannot import ui-prefs). Unwired, the switch would leave muse on two memories.
+func TestMuseNativeMemoryOffFollowsTheAgentMemorySwitch(t *testing.T) {
+	instrEnv(t)
+	if muse.NativeMemoryOff == nil {
+		t.Fatal("muse.NativeMemoryOff is not wired")
+	}
+	setAgentMemory(t, true)
+	if !muse.NativeMemoryOff() {
+		t.Error("switch on: muse's native memory should be off")
+	}
+	// The exported surface assistant chat uses must carry it too.
+	if !slices.Contains(muse.ChildEnv(nil), "MUSE_EXPERIMENTAL_MEMORY=0") {
+		t.Error("switch on: muse.ChildEnv lacks MUSE_EXPERIMENTAL_MEMORY=0")
+	}
+	setAgentMemory(t, false)
+	if muse.NativeMemoryOff() {
+		t.Error("switch off: muse's native memory should be left alone")
+	}
+	if slices.ContainsFunc(muse.ChildEnv(nil), func(e string) bool { return strings.HasPrefix(e, "MUSE_EXPERIMENTAL_MEMORY=") }) {
+		t.Error("switch off: muse.ChildEnv sets MUSE_EXPERIMENTAL_MEMORY")
 	}
 }

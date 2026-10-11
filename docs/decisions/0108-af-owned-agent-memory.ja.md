@@ -314,3 +314,18 @@ revision も `updated` も変えず、エージェントの保存はピンを引
 統合後の出力（`MEMORY.md`）は得られていない。codex 自身のプロンプトが書くよう求める形からの推定
 （観測した出力ではない）、`# Task Group:` ブロックでの分割案、スコープ、
 命名規則、未決事項は [0112](0112-codex-memory-import.ja.md) にある。上の決定は変えない。
+
+## 注（2026-10-11）：Agent memory のスイッチで muse のネイティブメモリを切る（#1990）
+
+Agent memory のスイッチがオンの間、muse の起動はすべて（セッションの `muse serve`、モデル一覧用ホスト、
+アシスタントチャットの `muse exec`。いずれも `childEnv` から環境を得る）`MUSE_EXPERIMENTAL_MEMORY=0` を
+持つようになった。`claude.AutoMemoryOff` と並べてスイッチに配線した `muse.NativeMemoryOff` フック経由。
+継承された値は先に取り除くので、メンバー自身の環境では再び有効にできない。スイッチがオフなら何も設定しない。
+`MUSE_EXPERIMENTAL_MEMORY_REMINDER=0` の抑止はそのまま。起動中のホストは起動時のままである。
+
+`muse serve --provider echo` を使い捨ての HOME/XDG で、アームごとに 1 ターン回し、永続ログの
+`model_request_configured` を読んで測った。変数なしではツール一覧に `read_memory`・`add_memory`・
+`edit_memory`、`memory_snapshot` コンテキスト、「Use persistent memory」段落がある。`=0` ではツール、
+スナップショット、段落のすべてが消える（残る言及は work-stop の指示にある一般的な「read_memory などを呼ぶな」
+という一文で、両アームにある）。この測定では変数を手で設定しており、AF の `childEnv` の出力はユニットテストで
+固定している。未実施：フェーズ制の切り替え（#1972）と muse メモリの取り込み（#1991）。

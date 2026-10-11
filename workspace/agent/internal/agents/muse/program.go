@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 )
@@ -113,7 +114,38 @@ func childEnv(base []string) []string {
 	for _, name := range observerVars {
 		env = append(env, name+"=0")
 	}
+	// Muse's own memory (read_memory / add_memory / edit_memory, the memory_snapshot context
+	// and the "Use persistent memory" prompt paragraph) is switched off while the Agent memory
+	// switch is on, so knowledge does not land in a store AF never scans or attributes. Any
+	// inherited value is dropped first so the member's own environment cannot re-enable it;
+	// with the switch off nothing is set and muse keeps its default. Read at launch: a running
+	// host keeps what it started with.
+	if NativeMemoryOff != nil && NativeMemoryOff() {
+		env = withoutVar(env, nativeMemoryVar)
+		env = append(env, nativeMemoryVar+"=0")
+	}
 	return env
+}
+
+// nativeMemoryVar is muse's native-memory switch. Distinct from MUSE_EXPERIMENTAL_MEMORY_REMINDER
+// (the advisory observer in observerVars), which stops only the reminder.
+const nativeMemoryVar = "MUSE_EXPERIMENTAL_MEMORY"
+
+// NativeMemoryOff reports whether a launch should switch muse's native memory off. Package main
+// wires it to the Agent memory switch (importing ui-prefs here would be an import cycle). Unset
+// means "leave muse's memory alone". childEnv is the single place every muse spawn (serve, the
+// model-list host, assistant-chat exec) takes its environment from, so this covers them all.
+var NativeMemoryOff func() bool
+
+// withoutVar returns env without any NAME=... entry.
+func withoutVar(env []string, name string) []string {
+	out := env[:0:0]
+	for _, e := range env {
+		if !strings.HasPrefix(e, name+"=") {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // ChildEnv returns base with the muse-specific clamp environment variables applied. It is
