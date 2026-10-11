@@ -34,6 +34,7 @@ type mcpMemoryEntry struct {
 	Updated       string   `json:"updated"`
 	Body          string   `json:"body"`
 	Snippets      []string `json:"snippets"`
+	MatchedTerms  []string `json:"matchedTerms"`
 }
 
 type mcpMemoryProject struct {
@@ -256,7 +257,8 @@ func mcpMemoryTags(e mcpMemoryEntry) string {
 
 func mcpMemoryFormatSearch(raw string) string {
 	var v struct {
-		Hits []mcpMemoryEntry `json:"hits"`
+		Hits     []mcpMemoryEntry `json:"hits"`
+		Fallback string           `json:"fallback"`
 	}
 	if json.Unmarshal([]byte(raw), &v) != nil {
 		return raw
@@ -265,8 +267,15 @@ func mcpMemoryFormatSearch(raw string) string {
 		return "No memory matches."
 	}
 	var b strings.Builder
+	if v.Fallback != "" {
+		b.WriteString("No memory contains every word of the query; these contain some of them (matched words in brackets), best first:\n")
+	}
 	for _, e := range v.Hits {
-		fmt.Fprintf(&b, "- [%s] %s — %s%s\n", e.Scope, e.Name, e.Description, mcpMemoryTags(e))
+		fmt.Fprintf(&b, "- [%s] %s — %s%s", e.Scope, e.Name, e.Description, mcpMemoryTags(e))
+		if len(e.MatchedTerms) > 0 {
+			fmt.Fprintf(&b, " [matched: %s]", strings.Join(e.MatchedTerms, ", "))
+		}
+		b.WriteString("\n")
 		for _, s := range e.Snippets {
 			fmt.Fprintf(&b, "    %s\n", s)
 		}
