@@ -627,6 +627,36 @@ after that. Do not clear this parameter again while KMS-sealed values exist; the
 custodian refuses them. The operator's side is `guide/operate/04-secure.md`, "Keys at rest on
 AWS KMS".
 
+### `WorkspaceDekRandom`
+
+`off` (the default) or `on`. `on` sets `AF_WORKSPACE_DEK=random` on the CP task: each member's
+home gets a random credential-store key sealed by KMS (ADR 0005 addenda, #1646). The CP refuses
+that flag unless the custodian is kms ("AF_WORKSPACE_DEK=random needs AF_KEY_CUSTODIAN=kms",
+`control-plane/dek.go`), so the template carries a Rule: `on` without `CustodianKmsKeyArn` fails
+the change set instead of crash-looping the service. The env var is also gated by the same
+condition on its own. `deploy/local/cfn-workspace-dek-test.py` holds both.
+
+Before turning it on: kept homes keep the derived key until their first start with the flag;
+turning it off only stops keys for new homes (homes that have one keep using it, no
+reconnecting), while going back to a CP that does not know the home's key, or losing `home_dek`,
+can need credentials reconnected (see 04-secure); unmigrated homes and old snapshots are not shredded (#1956). The
+per-workspace SSM parameter `secret-key-next` (deleted best-effort by the next start after confirm, or by Destroy) is under `/af-ws/*`: the CP role's
+`SsmWorkspaceParams` (20-platform: Put/Get/Delete) and the workspace execution role's `ssm-read`
+(GetParameters) already cover it, so no IAM statement was added. Operator view:
+`guide/operate/04-secure.md`, "A key of its own for each home".
+
+### Home task grant
+
+The CP's grant for the home task: it lives in this stack because only this stack can name the
+family. RunTask is fenced to that family (any revision: a stack update deregisters the old one,
+and the CP runs the family by name) in this deployment's cluster. The task's roles need no new
+PassRole: it names only the execution role, which PassTaskRoles in 20-platform already lets the
+CP pass to ecs-tasks. ListTasks and DescribeTasks are EcsDrive's, unscoped there already. The
+task's cost tags (af-membership, af-role, af-tenant) are authorized as ecs:TagResource on the new
+task: only as part of a RunTask (ecs:CreateAction), so no task that exists can be retagged, only
+in this cluster, and only the keys EcsTagServiceOnCreate (20-platform) allows on a workspace
+service. `deploy/local/cfn-cp-ec2-scope-test.py` holds the allowed calls and the denied ones.
+
 ## Alarms
 
 ### `CpAlarmEmail`
