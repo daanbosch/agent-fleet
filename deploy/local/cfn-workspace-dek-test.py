@@ -112,8 +112,11 @@ class Ev:
             if "!If" in e:
                 c, yes, no = e["!If"]
                 e = yes if self.cond({"!Condition": c}) else no
-            if isinstance(e, dict) and "Name" in e:
-                out[e["Name"]] = e["Value"]
+            if e == {"!Ref": "AWS::NoValue"}:
+                continue
+            if not (isinstance(e, dict) and "Name" in e):
+                raise SystemExit("cfn-workspace-dek-test: unexpected Environment entry %r" % (e,))
+            out[e["Name"]] = e["Value"]
         return out
 
 
@@ -171,6 +174,17 @@ def main():
             "UseWorkspaceDek", {"!Equals": [{"!Ref": "WorkspaceDekRandom"}, "on"]}),
         "default on": lambda t: t["Parameters"]["WorkspaceDekRandom"].__setitem__("Default", "on"),
     }
+    bad = copy.deepcopy(tpl)
+    for c in bad["Resources"]["TaskDef"]["Properties"]["ContainerDefinitions"]:
+        if c.get("Name") == "cp":
+            for e in c["Environment"]:
+                if "!If" in e and e["!If"][0] == "UseWorkspaceDek":
+                    e["!If"][2] = {"invalid": "kept"}
+    try:
+        Ev(bad, {}).cp_env_names()
+        fails.append("positive control 'malformed false branch' was not caught")
+    except SystemExit:
+        pass
     for name, m in controls.items():
         if not broken(m):
             fails.append("positive control %r was not caught" % name)

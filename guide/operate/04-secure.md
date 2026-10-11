@@ -186,11 +186,14 @@ together with `CustodianKmsKeyArn`; only the Control Plane task definition chang
 `AF_WORKSPACE_DEK=random`) and the service rolls. Check first:
 
 - Kept homes stay on the derived key until their first start with the flag; the
-  `secret-key-next` SSM parameter appears per workspace from that start and is deleted when the
-  home is confirmed or destroyed. The existing `/af-ws/*` grants already cover it.
-- Turning the parameter off, or downgrading the Control Plane, after homes have moved does not
-  undo it, and members have to reconnect their credentials (see "Turning it off does not
-  undo it" below).
+  `secret-key-next` SSM parameter appears per workspace from that start. After the home is
+  confirmed, the next start tries to delete it (a failure is logged and the start goes on), and
+  Destroy deletes it; a running task keeps its environment until restarted. The existing
+  `/af-ws/*` grants already cover it.
+- Turning the parameter off only stops minting keys for new homes: homes that already have a
+  key keep using it and need no reconnecting. Going back to a Control Plane that does not
+  know the home's key, or losing the `home_dek` table, is a different case and can need
+  credentials reconnected (see "Turning it off does not undo it" below).
 - Homes that have not started since, and old snapshots or backups, are **not** shredded
   by disabling the KMS key (#1956 tracks the rest).
 

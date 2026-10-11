@@ -637,9 +637,10 @@ the change set instead of crash-looping the service. The env var is also gated b
 condition on its own. `deploy/local/cfn-workspace-dek-test.py` holds both.
 
 Before turning it on: kept homes keep the derived key until their first start with the flag;
-turning it off, or downgrading the CP, after homes have moved does not undo it and needs
-credentials reconnected; unmigrated homes and old snapshots are not shredded (#1956). The
-per-workspace SSM parameter `secret-key-next` is under `/af-ws/*`: the CP role's
+turning it off only stops keys for new homes (homes that have one keep using it, no
+reconnecting), while going back to a CP that does not know the home's key, or losing `home_dek`,
+can need credentials reconnected (see 04-secure); unmigrated homes and old snapshots are not shredded (#1956). The
+per-workspace SSM parameter `secret-key-next` (deleted best-effort by the next start after confirm, or by Destroy) is under `/af-ws/*`: the CP role's
 `SsmWorkspaceParams` (20-platform: Put/Get/Delete) and the workspace execution role's `ssm-read`
 (GetParameters) already cover it, so no IAM statement was added. Operator view:
 `guide/operate/04-secure.md`, "A key of its own for each home".
