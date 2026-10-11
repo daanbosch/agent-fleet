@@ -81,3 +81,34 @@ func TestAgentMemoryListCarriesAuthorAndRevision(t *testing.T) {
 		t.Errorf("entry = %+v", e)
 	}
 }
+
+// A forget pinned to the revision the member saw is refused once an agent has updated the memory,
+// even though the newest change (read after the update) is a valid revert target; the reloaded
+// revision goes through. Without the check the newer text is deleted unseen.
+func TestAgentMemoryRevertExpectRevision(t *testing.T) {
+	_, _, _ = agentMemTestEnv(t)
+	c := agentMemCallerT(t, "claude-main")
+	now := time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC)
+	agentMemSaveN(t, c, "same", "project", now)
+	listed, err := agentMemListAll() // the row the member looked at: revision 1
+	if err != nil || len(listed.Entries) != 1 || listed.Entries[0].Revision != 1 {
+		t.Fatalf("list: %+v %v", listed, err)
+	}
+	if _, err := agentMemSave(c, agentMemSaveReq{Name: "same", Description: "new", Type: "project", Body: "newer", Revision: 1}, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	ch, err := agentMemListChanges(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = agentMemRevert(agentMemRevertReq{Commit: ch.Changes[0].Commit, Forget: true, ExpectRevision: listed.Entries[0].Revision}, now)
+	if agentMemCode(err) != errCodeMemoryConflict {
+		t.Fatalf("forget of a row older than the memory: %v", err)
+	}
+	if _, err := agentMemRead(c, "project", "same"); err != nil {
+		t.Fatalf("memory was removed: %v", err)
+	}
+	if _, err := agentMemRevert(agentMemRevertReq{Commit: ch.Changes[0].Commit, Forget: true, ExpectRevision: 2}, now); err != nil {
+		t.Fatalf("forget at the reloaded revision: %v", err)
+	}
+}

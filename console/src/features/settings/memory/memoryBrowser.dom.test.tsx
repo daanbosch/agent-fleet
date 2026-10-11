@@ -181,6 +181,7 @@ describe("MemoryBrowserPanel", () => {
       commit: "livecommit1",
       forget: true,
       ack: false,
+      expectRevision: 1,
     });
   });
 

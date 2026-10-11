@@ -411,6 +411,10 @@ type agentMemRevertReq struct {
 	Commit string `json:"commit"`
 	Forget bool   `json:"forget"`
 	Ack    bool   `json:"ack"`
+	// ExpectRevision, when set, pins the request to the revision the caller saw: the memory must
+	// still be at it, or the request is refused. The list and the change list are read apart, so
+	// "the newest change" alone does not prove it is the row the member looked at. 0 = unchecked.
+	ExpectRevision int `json:"expectRevision,omitempty"`
 }
 
 func agentMemRevOf(b []byte, ok bool) int {
@@ -464,6 +468,10 @@ func agentMemRevert(req agentMemRevertReq, now time.Time) (agentMemWriteResult, 
 	if liveOK != afterOK || !bytes.Equal(live, after) {
 		return agentMemWriteResult{}, memoryErrf(http.StatusConflict, errCodeMemoryConflict,
 			"the memory has changed since this change; only its newest change can be reverted")
+	}
+	if req.ExpectRevision > 0 && (!liveOK || agentMemRevOf(live, liveOK) != req.ExpectRevision) {
+		return agentMemWriteResult{}, memoryErrf(http.StatusConflict, errCodeMemoryConflict,
+			"the memory is no longer at revision %d; reload the list and try again", req.ExpectRevision)
 	}
 	tomb, err := agentMemTombRevision(scopeDir, name)
 	if err != nil {

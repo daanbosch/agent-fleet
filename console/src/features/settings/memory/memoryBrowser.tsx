@@ -115,6 +115,8 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
         commit: c.commit,
         forget: true,
         ack: false,
+        // The list and the changes are read apart: pin the forget to the revision this row showed.
+        expectRevision: m.revision,
       });
       if (res?.error) toast(errDetail(res.error));
       else {
