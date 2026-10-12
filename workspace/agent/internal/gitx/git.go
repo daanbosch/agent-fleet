@@ -901,6 +901,36 @@ func EnsureBranchRef(dir, base string) {
 	_ = CmdContext(ctx, dir, "fetch", "--prune").Run()
 }
 
+// NewWorktreeStartPoint resolves the base a new-branch worktree forks from into a start
+// point `git worktree add -b` accepts, fetching once (EnsureBranchRef) only when base
+// resolves to nothing — the handover recipient's case, whose clone has never fetched the
+// sender's branch. A base that already resolves costs no network round trip.
+//
+// A base that exists only as origin/<base> is returned as the full remote-tracking ref.
+// Passing the bare name does not work: worktree add then either fails with "invalid
+// reference" or, when origin/<base> is known, DWIMs to a checkout of a new local <base>
+// and drops -b (measured, git 2.47). An empty base (the parent's HEAD) is returned as is.
+func NewWorktreeStartPoint(dir, base string) (string, error) {
+	base = strings.TrimSpace(base)
+	if base == "" || strings.HasPrefix(base, "-") {
+		return base, nil // EnsureWorktree refuses the '-' case with its own message
+	}
+	resolves := func(ref string) bool { return OK(dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}") }
+	// A local branch, tag, commit or full ref keeps the start point the bare name has
+	// always had; only a name that resolves to nothing falls back to origin.
+	if branchExists(dir, base) || resolves(base) {
+		return base, nil
+	}
+	tracking := "refs/remotes/origin/" + base
+	if !resolves(tracking) {
+		EnsureBranchRef(dir, base)
+	}
+	if resolves(tracking) {
+		return tracking, nil
+	}
+	return "", fmt.Errorf("base %q exists neither in this working copy nor on origin", base)
+}
+
 // FastForwardWorktree brings a just-created existing-branch worktree up to its
 // upstream tip (git pull --ff-only). "Start work on branch X" means X as it is NOW,
 // not as of this copy's last fetch — without this the session silently begins on a
@@ -1203,7 +1233,10 @@ func EnsureWorktree(parentDir, base, newBranch, folderSeg string) (string, error
 	// git worktree add [-b <newBranch>] <dir> [<base>]
 	args := []string{"worktree", "add"}
 	if newBranch != "" {
-		args = append(args, "-b", newBranch, dir)
+		// --no-track: a start point that is a remote-tracking ref (NewWorktreeStartPoint)
+		// would otherwise become the new branch's upstream, and `git push` would then aim
+		// at the base instead of creating the new branch.
+		args = append(args, "--no-track", "-b", newBranch, dir)
 		if base != "" {
 			args = append(args, base)
 		}
