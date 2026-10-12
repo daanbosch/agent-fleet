@@ -31,6 +31,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/gitx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/imagegen"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/limitsnap"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/mcpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
@@ -297,9 +298,15 @@ func HandleListSessions(w http.ResponseWriter, r *http.Request) {
 	// deliberately does not count as activity, so without this idle-stop kills a running
 	// clone / checkout; the image queue dies with the container the same way.
 	// The reaper reads this list on every sweep, so it costs no extra request.
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"sessions": sessions, "repoJobs": repoJobsRunning(), "imageJobs": imageJobsActive(),
-	})
+	}
+	// The limit snapshot (ADR 0111 decision 6) rides the same response for the reaper, which
+	// asks for it. Other callers (the Console's list, through the CP) do not, and pay nothing.
+	if r.URL.Query().Get("limits") == "1" {
+		body["limits"] = limitsnap.Cached(time.Now())
+	}
+	httpx.WriteJSON(w, http.StatusOK, body)
 }
 
 // HandleSessionCatalog is the sharing inventory. Unlike the ordinary list it

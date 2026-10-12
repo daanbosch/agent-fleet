@@ -86,6 +86,10 @@ var (
 	usageMu     sync.Mutex
 	usageCached *usageResult
 	usageAt     time.Time
+	// usageToken is the gh token the cached value was fetched with. The limit snapshot reports
+	// the cache only while the same token is current, so a gh login to another account never
+	// serves the previous account's pools as this one's (ADR 0111 decision 6).
+	usageToken string
 )
 
 // quotaOrder gives the pools a stable, meaningful display order (map iteration is
@@ -102,7 +106,8 @@ func HandleUsage(w http.ResponseWriter, r *http.Request) {
 	usageMu.Lock()
 	defer usageMu.Unlock()
 	if usageCached == nil || time.Since(usageAt) > usageCacheTTL || r.URL.Query().Get("refresh") != "" {
-		res, err := fetchUsage(r.Context())
+		tok := Token()
+		res, err := fetchUsage(r.Context(), tok)
 		if err != nil {
 			out := map[string]any{"ok": false, "authed": true, "error": err.Error()}
 			// stale-if-error: keep an already-shown gauge rather than blanking it on a
@@ -117,7 +122,7 @@ func HandleUsage(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteJSON(w, http.StatusOK, out)
 			return
 		}
-		usageCached, usageAt = res, time.Now()
+		usageCached, usageAt, usageToken = res, time.Now(), tok
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"ok":         true,
@@ -148,14 +153,14 @@ type internalUser struct {
 	} `json:"quota_snapshots"`
 }
 
-func fetchUsage(ctx context.Context) (*usageResult, error) {
+func fetchUsage(ctx context.Context, token string) (*usageResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, usageURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "token "+Token())
+	req.Header.Set("Authorization", "token "+token)
 	req.Header.Set("Editor-Version", "CopilotCLI/agent-fleet")
 	req.Header.Set("Accept", "application/json")
 	resp, err := http.DefaultClient.Do(req)
