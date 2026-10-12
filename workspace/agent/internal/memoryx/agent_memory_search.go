@@ -85,6 +85,7 @@ func agentMemSearchRanked(c agentMemCaller, query string, limit int) (hits []age
 	for _, scope := range agentMemScopes(c) {
 		srcs = append(srcs, agentMemSearchSrc{c: c, scope: scope})
 	}
+	agentMemWarmScan(c)
 	agentMemMu.RLock()
 	defer agentMemMu.RUnlock()
 	found, fallback, err := agentMemRankLocked(srcs, c.Kind, terms, limit)
@@ -107,6 +108,13 @@ func agentMemSearchRanked(c agentMemCaller, query string, limit int) (hits []age
 type agentMemSearchSrc struct {
 	c     agentMemCaller
 	scope string
+}
+
+// agentMemWarmSrcs is agentMemWarmScan for an arbitrary set of scope directories.
+func agentMemWarmSrcs(srcs []agentMemSearchSrc) {
+	for _, src := range srcs {
+		_, _, _ = agentMemLoadScope(src.scope, src.c)
+	}
 }
 
 // agentMemRankLocked scores and orders the memories of srcs (the caller holds agentMemMu). It

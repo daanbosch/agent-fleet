@@ -247,3 +247,32 @@ func TestAgentMemoryMemberLatestWithholdsSecretFile(t *testing.T) {
 		t.Fatalf("latest of a leaky memory: %d %s", code, b)
 	}
 }
+
+// A forgotten memory whose earlier text carries a secret behind a JSON escape (raw bytes clean,
+// decoded value not) is withheld like a live one: the history can hold text the save path's scan
+// never saw (an adopted lineage, a hand edit). Without the decoded check this answers 200 with
+// the name. An unparseable earlier text is refused too.
+func TestAgentMemoryMemberLatestWithholdsForgottenSecretBehindEscape(t *testing.T) {
+	trailers := func(op, name string) string {
+		return "agent-memory: " + op + "\n\nAF-Trigger: agent-memory\nAF-Op: " + op + "\nAF-Memory: af/user/" + name + ".md\nAF-Author-Kind: claude\nAF-Author-Session: s\n"
+	}
+	for name, text := range map[string]string{
+		"esc":    "---\nname: esc\ndescription: \"key \\u0041" + agentMemFakeAWS()[1:] + "\"\nrevision: 1\n---\nb\n",
+		"broken": "not a memory file at all\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, _ = agentMemTestEnv(t)
+			agentMemCommitRaw(t, map[string]string{"af/user/" + name + ".md": text}, trailers("create", name))
+			if _, err := memoryGitRun("rm", "--quiet", "--", "af/user/"+name+".md"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := memoryGitRun("commit", "--quiet", "--no-verify", "-m", trailers("forget", name)); err != nil {
+				t.Fatal(err)
+			}
+			code, b := memberDo(t, http.MethodGet, "/agents/memory/entries/member-latest?scope=user&name="+name, nil)
+			if code != http.StatusUnprocessableEntity || strings.Contains(string(b), name) {
+				t.Fatalf("latest of a forgotten memory with a hidden secret: %d %s", code, b)
+			}
+		})
+	}
+}

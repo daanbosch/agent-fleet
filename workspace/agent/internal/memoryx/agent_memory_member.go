@@ -105,8 +105,6 @@ func agentMemMemberSearch(scope, project, query string, limit int) (agentMemMemb
 	if len(terms) == 0 {
 		return out, memoryErrf(http.StatusBadRequest, errCodeMemoryBadRequest, "query is required")
 	}
-	agentMemMu.RLock()
-	defer agentMemMu.RUnlock()
 	var srcs []agentMemSearchSrc
 	add := func(scope, project string) error {
 		c, err := agentMemMemberCaller(scope, project)
@@ -134,6 +132,12 @@ func agentMemMemberSearch(scope, project, query string, limit int) (agentMemMemb
 			}
 		}
 	}
+	// The cold scan of every searched scope runs before the read lock, as the tools' search does,
+	// so a writer queued behind this read is not held up by it; the ranking below re-reads under
+	// the lock and still goes through the scan.
+	agentMemWarmSrcs(srcs)
+	agentMemMu.RLock()
+	defer agentMemMu.RUnlock()
 	found, fallback, err := agentMemRankLocked(srcs, agentMemUnknown, terms, limit)
 	if err != nil {
 		return out, err
@@ -221,9 +225,22 @@ func agentMemMemberLatest(scope, project, name string) (agentMemChangeView, erro
 		return agentMemChangeView{}, withheld
 	}
 	if !exists {
+		// Judged as a reader would judge the file (agentMemClean: raw bytes and decoded values),
+		// and closed on anything that cannot be read or parsed: the earlier text may have entered
+		// the history by import or a hand edit, which the save path's scan never saw.
 		before, beforeOK, _, _, serr := agentMemSides(commit, rel2)
-		if serr == nil && beforeOK && len(agentMemScanText("memory", string(before))) > 0 {
+		if serr != nil {
 			return agentMemChangeView{}, withheld
+		}
+		if beforeOK {
+			e, pok := agentMemParse(before)
+			if !pok {
+				return agentMemChangeView{}, withheld
+			}
+			e.Name, e.Scope = name, scope
+			if !agentMemClean(before, e) {
+				return agentMemChangeView{}, withheld
+			}
 		}
 	}
 	if pid != "" {
