@@ -510,3 +510,15 @@ personal scopes, which is inferred), so a fixed path would be a guess; those two
 needs one logged-in muse run that calls `add_memory` (a member's quota). Write-back to muse is out of scope:
 with the switch on muse's native memory is off (#1990), so nothing writes there. Follow-up: #2005 (personal
 scopes), the codex import stays with #1950 and the phase-based switch with #1972.
+
+## Note (2026-10-12): member writes carry a mark the Agent verifies; the member can write memories (#1997)
+
+The limit stated in the #1985 note is lifted by [0113](0113-member-origin-mark.md). The CP signs the member's
+relayed `entries/pin`, `entries/revert` and the new `entries/member-save` with an Ed25519 key only it holds,
+bound to the method, path, query, body, workspace, member, a 60 s expiry and a nonce; the Agent verifies with
+the public keys it was started with and refuses these three routes without a valid mark, including a request
+carrying only `AGENT_TOKEN` and `X-AF-Relay: cp`. The author `member` / `console` is therefore recorded only
+behind a verified mark. `entries/member-save` (create or edit, the tools' own revision check, secret scan and
+limits, not gated by the switch, no new project) is back in Settings > Agent memory, and the CP audits it as
+`memory.entry.save`. What the mark does not change: a session with a shell can still write the store's files
+directly (decision 8's reasoning stands); the mark governs the Agent's routes, not the files.
