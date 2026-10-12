@@ -33,7 +33,7 @@ import { coarsePointer } from "../../lib/device.ts";
 import { findScroller, VIEWER_KINDS } from "../../lib/keyScroll.ts";
 import { useT } from "../../lib/i18n/index.ts";
 import { hintSuffix } from "../keys/keyHint.ts";
-import { IconButton } from "../../ui/Button.tsx";
+import { Button, IconButton } from "../../ui/Button.tsx";
 import { Icon } from "../../ui/Icon.tsx";
 import { cx } from "../../ui/cx.ts";
 import { isManagedSession } from "../../types/session.ts";
@@ -60,7 +60,8 @@ import { paneTitle } from "./paneTitle.ts";
 import { acceptsPaneDrag, setTabDragShield, tabOwnsDrop } from "./paneDnd.ts";
 import { stateInfo } from "../../lib/sessionview.ts";
 import { kindClass, kindIcon, kindLabel } from "../../lib/sessionkind.ts";
-import { OnboardingCard } from "../terminal/OnboardingCard.tsx";
+import { HomeView } from "../home/HomeView.tsx";
+import { openHome } from "../home/open.ts";
 
 // The family fold is optional on PaneContent (a layout written before it existed has no
 // such field), and one shared empty array keeps "nothing folded" from being a new prop
@@ -122,13 +123,22 @@ function EmptyPane({ cell, style, active, tabbed, canSplitRight, canSplitDown, c
     >
       {tabbed && <div className="pane-tabs" role="tablist" aria-label={tr("display.pane_layout_tabs")} />}
       {canDrag && <button type="button" className={cx("pane-grip", ordinal ? "pane-ord " + ordClass(ordinal) : "")} draggable onDragStart={(e) => { e.dataTransfer.setData(DND, cell.id); e.dataTransfer.effectAllowed = "move"; }}>{ordinal}</button>}
-      {/* This is what a brand-new user sees first: the initial layout is an emptyCell
-          (views: []), so no pane exists and TerminalView never mounts. Putting the first-run
-          guide only in the terminal pane's empty state hid it from exactly the audience it was
-          for. The card decides for itself whether to render (configured / later / CP
-          unreachable) and returns null, so all this needs to do is give it a place. */}
-      <div className="pane-empty">{tr("pane.no_session")}</div>
-      {active && <OnboardingCard />}
+      {/* The sole empty cell is both a brand-new member's first screen (the initial layout is
+          an emptyCell, views: [], so no pane exists) and what "close all" leaves. Home there
+          gives both a next step. canClose is false exactly for that cell (PaneHost). Other
+          empty cells of a split stay placeholders, so Home never appears twice. */}
+      {!canClose ? (
+        <HomeView embedded />
+      ) : (
+        <div className="pane-empty">
+          <span>{tr("pane.no_session")}</span>
+          {active && (
+            <Button variant="ghost" icon="home" onClick={() => openHome()}>
+              {tr("pane.open_home")}
+            </Button>
+          )}
+        </div>
+      )}
       {canClose && <div className="pane-controls"><IconButton icon="close" label={tr("ui.close_pane_hint")} onClick={() => onClose(cell.id, true)} /></div>}
     </div>
   );
@@ -851,6 +861,7 @@ function PopulatedPane({
           headerActions={tabHeaderActions}
         />
       )}
+      {pane.content.kind === "home" && <HomeView headerActions={tabHeaderActions} />}
       {pane.content.kind === "fleetgraph" && (
         <FleetGraphView
           paneId={pane.id}

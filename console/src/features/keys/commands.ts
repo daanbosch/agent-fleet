@@ -21,6 +21,7 @@ import type { Dir } from "../../layout/nav.ts";
 import { useLeftRail } from "../../core/store/leftRail.ts";
 import { useWorkspaceStore } from "../../core/store/workspace.ts";
 import { useSessionsStore } from "../sessions/store.ts";
+import { openHome } from "../home/open.ts";
 import { openSessionsOverview } from "../overview/open.ts";
 import { openImagegen } from "../imagegen/open.ts";
 import { openGeneratedGallery } from "../gallery/open.ts";
@@ -386,6 +387,7 @@ export const ALL_COMMANDS: Command[] = [
   { id: "open.usageCodex", title: "keys.cmd.openUsageCodex", seq: "g x", run: () => useUiOpen.getState().toggle("usage-codex") },
   { id: "open.usageAgy", title: "keys.cmd.openUsageAgy", seq: "g a", run: () => useUiOpen.getState().toggle("usage-agy") },
   { id: "open.resources", title: "keys.cmd.openResources", seq: "g r", run: () => useUiOpen.getState().toggle("resources") },
+  { id: "open.home", title: "keys.cmd.openHome", seq: "g h", run: () => openHome() },
   { id: "open.sessions", title: "keys.cmd.openSessions", seq: "g s", run: () => openSessionsOverview() },
   // The image-generation studio (ADR 0081 decision 6). It can be bound here — unlike the
   // gallery, which needs a folder — because it takes no argument at all, like the overview.

@@ -64,6 +64,7 @@ import { useSettingsUI } from "../features/settings/store.ts";
 import { SettingsDialog } from "../features/settings/SettingsDialog.tsx";
 import { AdminDialog } from "../features/settings/AdminDialog.tsx";
 import { TenantDialog } from "../features/settings/TenantDialog.tsx";
+import { useUIStateStore } from "../core/store/uiState.ts";
 import { GuideModal } from "../features/terminal/OnboardingCard.tsx";
 import { StartHost } from "../features/repos/StartHost.tsx";
 import { startNotificationPolling, useNotificationStore, wireNotificationReadOnVisibleSessions } from "../features/notifications/store.ts";
@@ -408,6 +409,8 @@ export function App() {
     restartPush();
     useNotificationStore.getState().reset();
     void useNotificationStore.getState().refresh();
+    // The member's UI state is per membership (ADR 0114), so a tenant switch reads it again.
+    void useUIStateStore.getState().load();
     // Pop-out first boot: seed the layout from the handed-off descriptor
     // instead of restoring the saved split. Handed over exactly once —
     // reloads and tenant switches fall back to the normal load(). The descriptor

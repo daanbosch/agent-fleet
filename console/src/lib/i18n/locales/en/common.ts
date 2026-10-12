@@ -230,6 +230,13 @@ export const common: Record<keyof typeof jaCommon, string> = {
   "pane.kind.gallery": "Image gallery",
   "pane.kind.imagegen": "Image generation",
   "pane.kind.fleetgraph": "Fleet graph",
+  "pane.kind.home": "Home",
+  "pane.open_home": "Open Home",
+  "home.waiting": "Waiting for you",
+  "home.waiting_hint": "Sessions waiting for an answer, a permission or a plan approval",
+  "home.continue": "Continue",
+  "home.start": "Start something",
+  "home.empty": "No sessions yet. Pick a repository from Start, or ask a question in a chat.",
 
   // === P2 common (added) ===
   "common.approx": "~{v}",

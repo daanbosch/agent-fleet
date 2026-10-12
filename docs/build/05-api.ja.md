@@ -29,7 +29,7 @@ membership 検証（§5.4）。「中継」は CP が呼び出しをそのまま
 
 | グループ | 代表パス | 処理 | 詳細 |
 |---|---|---|---|
-| identity / tenant | `GET /api/whoami`・`GET /api/tenants`・`GET /api/version`・`GET/DELETE /api/me/login-methods` | CP | [03](03-control-plane.ja.md) |
+| identity / tenant | `GET /api/whoami`・`GET /api/tenants`・`GET /api/version`・`GET/DELETE /api/me/login-methods`・`GET/PATCH /api/me/ui-state`（[ADR 0114](../decisions/0114-member-ui-state-in-the-cp.ja.md)） | CP | [03](03-control-plane.ja.md) |
 | events | `GET /api/events`（SSE。下記）| CP | [ADR 0084](../decisions/0084-engine-indicator-and-tenant-gate.ja.md) |
 | workspace | `GET /api/workspace`・`POST /api/workspace/{start,stop,recreate,clean-home,attention}`・`GET /api/workspace/{stats,machine}` | CP（Runtime）。`stats` は CP がホストの cgroup を読めない所では Agent に聞く。`machine` は Agent の実測と設定上の宣言を並べて返す | [03](03-control-plane.ja.md) |
 | sessions | `GET/POST /api/sessions`・`DELETE /api/sessions/{name}`（ごみ箱へ。`?stop=1` で先に止める。`POST …/stop` はこの旧名）・ライフサイクル `POST …/{halt,recreate,archive,restore,fork,start,lock}`・意味論操作 `POST …/{turn,respond,settings,driver,plan-respond,carried-answer}`・端末操作 `POST …/{input,paste-image}`・`GET …/{status,output,messages,settings,skills,plan-file}`・`POST …/{keep-awake,stop-after-turn,spend-cap}`・`GET …/spend`（予算、#1054）・タイトル／ブランチ／マーク／翻訳／引き継ぎ提案・`GET /api/sessions/archived` | 生成・fork・start・carried-answer は CP のハンドラ（セッション上限と自動起動）を通ってから中継。他は中継 | [04](04-agent.ja.md) / [ADR 0101](../decisions/0101-session-delete-via-trash.ja.md) |

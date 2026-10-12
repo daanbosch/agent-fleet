@@ -498,6 +498,7 @@ export const settings = {
   "keys.cmd.openUsageAgy": "Antigravity 使用量を開く",
   "keys.cmd.openResources": "リソース使用量を開く",
   "keys.cmd.openSessions": "セッション一覧を開く",
+  "keys.cmd.openHome": "ホームを開く",
   "keys.cmd.openImagegen": "画像生成を開く",
   "keys.cmd.openGenerated": "生成した画像を開く",
   "keys.cmd.openFleetGraph": "フリート俯瞰図を開く",

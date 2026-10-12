@@ -163,6 +163,11 @@ func registerAuthRoutes(mux *http.ServeMux, cfg config) {
 	// Unlinking one (docs/log/61 §61.16.4). provider/subject are query parameters, not
 	// path segments — a tenant provider id carries colons; see detachLoginMethod.
 	mux.HandleFunc("DELETE /api/me/login-methods", acct.withIdentity(acct.detachLoginMethod))
+	// The member's Console-only UI state (ADR 0114). Membership-scoped and answered from the CP
+	// database, so the Console reads it before the workspace runs.
+	uiState := newMemberUIStateAPI(cfg.mgr)
+	mux.HandleFunc("GET /api/me/ui-state", uiState.withMembership(uiState.get))
+	mux.HandleFunc("PATCH /api/me/ui-state", uiState.withMembership(uiState.patch))
 	// Identity — who the AuthGateway resolved this request to (and the raw
 	// gateway headers, for verifying the oauth2-proxy -> Caddy -> CP chain).
 	mux.HandleFunc("GET /api/whoami", newWorkspaceAPI(cfg.mgr, cfg.autostart).whoami)

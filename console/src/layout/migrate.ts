@@ -154,6 +154,8 @@ function contentFromFlat(p: any): PaneContent {
       const collapsed = collapsedNames(p.collapsed);
       return { kind: "sessions", showStopped: p.showStopped === true, ...(collapsed.length ? { collapsed } : {}) };
     }
+    case "home":
+      return { kind: "home" };
     case "fleetgraph": {
       const collapsed = collapsedNames(p.collapsed);
       return { kind: "fleetgraph", showArchived: p.showArchived !== false, ...(collapsed.length ? { collapsed } : {}) };

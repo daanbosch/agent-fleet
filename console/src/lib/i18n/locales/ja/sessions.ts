@@ -130,6 +130,8 @@ export const sessions = {
   "wsbar.close_all_title": "全ペインを閉じる",
   "wsbar.overview": "セッション一覧",
   "wsbar.overview_title": "稼働中のセッションをカードで一望する",
+  "wsbar.home": "ホーム",
+  "wsbar.home_title": "返事待ちのセッションと続きの作業を開く",
   "wsbar.imagegen": "画像生成",
   "wsbar.imagegen_title": "エージェントを介さずに ComfyUI で絵を作る",
   // オーバーフロー／プレビュー／リソース

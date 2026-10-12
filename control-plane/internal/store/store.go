@@ -979,6 +979,7 @@ type Store interface {
 	TenantGitOAuthStore
 	EngineAccessStore
 	TenantBranchRulesStore
+	MemberUIStateStore
 	HomeOperationStore
 	CPLeaseStore
 	LimitBoardStore

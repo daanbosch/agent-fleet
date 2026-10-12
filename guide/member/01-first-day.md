@@ -1,6 +1,6 @@
 ---
 audience: "someone opening the Console for the first time"
-updated: "2026-08"
+updated: "2026-10"
 ---
 
 # 01. First day — from login to your first session
@@ -19,9 +19,10 @@ is a group such as a department, and your workspaces are separated per tenant. I
 there is only one, so you can just proceed. If you belong to several, pick the tenant you
 want to work in (see the [README](README.md) for the names of the screen areas).
 
-## The welcome card — 2 steps + picking a goal
+## Home and the welcome card — 2 steps + picking a goal
 
-The first time, a card titled **"Welcome to Agent Fleet"** appears in the main area
+After you sign in, the main area shows **Home**: what is waiting for you and where you left
+off. The first time, a card titled **"Welcome to Agent Fleet"** sits at the top of Home
 ("Two steps first, then just pick your goal"). It is a checklist, and completed items
 are checked off automatically. Only the top two items are required for everyone.
 
@@ -36,11 +37,20 @@ Next comes a two-way choice: **"Where do you want to start?"** (you can use both
   1. **Connect a git provider** (optional): sign in to GitHub / Bitbucket. It is required if you'll clone or push private repositories ([03 Repositories and git](03-code.md)).
   2. **Clone a repository and start a session**: from **"Start"** on the workspace action bar you can clone and launch in one go ([02 Sessions](02-sessions.md)).
 
-The card disappears once you create your first session or start your first chat.
+The card leaves Home once you create your first session or start your first chat. From then
+on Home shows three sections:
+
+- **Waiting for you**: sessions waiting for your answer, a permission or a plan approval.
+- **Continue**: the sessions you can pick up again, most recent first.
+- **Start something**: "Get started" (clone and launch) and "Start chatting".
+
+Home is what an empty screen shows, so closing every pane ("Close all") brings you back to it.
+To open it from anywhere, use **Home** on the workspace action bar, or the leader key `g h`.
 
 ### It's fine to close the card
 
-Pressing **"Later"** at the bottom right dismisses the card. You can reopen the same
+Pressing **"Later"** at the bottom right dismisses the card. This is remembered for your
+account, so the card does not come back when you sign in from another device. You can reopen the same
 checklist at any time from **"Getting-started guide"** in the account menu at the top right.
 The regular guide for looking up operations opens from **"User guide"** in the same menu.
 

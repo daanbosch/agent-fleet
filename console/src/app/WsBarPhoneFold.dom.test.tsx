@@ -65,7 +65,7 @@ describe("WsBar phone fold", () => {
     expect(host!.querySelector(".wsbar")!.getAttribute("data-fold-phone")).toBe("2");
     await act(async () => host!.querySelector<HTMLButtonElement>(".ws-more-btn")!.click());
     const labels = [...host!.querySelectorAll(".ws-more-actions button")].map((b) => b.getAttribute("aria-label"));
-    expect(labels).toEqual([t("wsbar.split_down"), t("wsbar.close_all"), t("wsbar.overview")]);
+    expect(labels).toEqual([t("wsbar.split_down"), t("wsbar.close_all"), t("wsbar.home"), t("wsbar.overview")]);
   });
 
   it("hands focus back to the ⋯ trigger when a folded action closes the popover", async () => {

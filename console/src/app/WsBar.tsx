@@ -12,6 +12,7 @@ import { useTenantStore } from "../core/store/tenant.ts";
 import { useWorkspaceStore, wsBusy, wsPowerStops, wsStartBusy } from "../core/store/workspace.ts";
 import { useLayoutStore } from "../layout/store.ts";
 import { openSessionsOverview } from "../features/overview/open.ts";
+import { openHome } from "../features/home/open.ts";
 import { openImagegen } from "../features/imagegen/open.ts";
 import { useImagegenAvailable } from "../features/imagegen/available.ts";
 import { isBlankPane, MAX_TAB_COLS } from "../layout/ops.ts";
@@ -1751,6 +1752,18 @@ export function WsBar() {
       <span className="lbl">{tr("wsbar.close_all")}</span>
     </Button>
   );
+  const homeBtn = (
+    <Button
+      variant="ghost"
+      className="ws-split ws-home"
+      title={tr("wsbar.home_title") + hintSuffix("open.home")}
+      aria-label={tr("wsbar.home")}
+      onClick={() => openHome()}
+    >
+      <Icon name="home" />
+      <span className="lbl">{tr("wsbar.home")}</span>
+    </Button>
+  );
   const overviewBtn = (
     <Button
       variant="ghost"
@@ -1914,7 +1927,9 @@ export function WsBar() {
       {closeAllBtn}
       {/* The sessions overview (ADR 0078). It sits with the pane buttons because it IS a
           pane; the rail's layout map has the same button, but that map hides itself while
-          there is a single pane — which is exactly when someone reaches for the overview. */}
+          there is a single pane — which is exactly when someone reaches for the overview.
+          Home (#2028) goes first: it is the way back to "what is next" from anywhere. */}
+      {homeBtn}
       {overviewBtn}
       {/* The image-generation studio (ADR 0081), beside the overview for the same reason:
           it is a pane, and the layout map's copy of this button hides itself while there is
@@ -1954,6 +1969,7 @@ export function WsBar() {
                 >
                   {phoneFold > 1 && splitDownBtn}
                   {phoneFold > 1 && closeAllBtn}
+                  {homeBtn}
                   {overviewBtn}
                   {imagegenBtn}
                 </div>

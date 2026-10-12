@@ -1,6 +1,6 @@
 ---
 audience: "someone using Agent Fleet without touching the terminal"
-updated: "2026-08"
+updated: "2026-10"
 ---
 
 # Easy Guide (for people who don't use the terminal)
@@ -64,8 +64,8 @@ when you pick an item, so you can operate it with one finger.
 
 ## 3. One-time setup
 
-The first time you open it, a guidance card appears saying "**Welcome to Agent Fleet /
-Two steps first, then just pick your goal**". It's a to-do list where items get checked off in
+After you sign in, the main area shows **Home**. The first time, a guidance card appears at
+the top of it saying "**Welcome to Agent Fleet / Two steps first, then just pick your goal**". It's a to-do list where items get checked off in
 order. There are only two things to do.
 
 1. **Start workspace**: brings up your own private work area. Just press the "Start" button

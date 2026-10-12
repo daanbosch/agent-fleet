@@ -225,7 +225,7 @@ export function useWsBarFold(
 // edge swipe that opens the left pane with it (wsbar.css). The right-hand chips already live in
 // ⋯, so what is left to fold is the pane buttons, least-used first, into the same popover:
 //
-//   1  overview and image generation
+//   1  Home, overview and image generation
 //   2  also split down and close all
 //
 // Step 2 is the end: what remains (power, state at its min-width, the pills, Start, ⋯) fits

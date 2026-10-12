@@ -30,7 +30,6 @@ import { PaneSessionChip } from "../panes/PaneSessionChip.tsx";
 import { TermKeys } from "./TermKeys.tsx";
 import { TermRtt } from "./TermRtt.tsx";
 import { MirrorToggle } from "../mirror/MirrorToggle.tsx";
-import { OnboardingCard } from "./OnboardingCard.tsx";
 import { ContextBar } from "../mirror/ContextBar.tsx";
 import type { Session } from "../../types/session.ts";
 
@@ -246,9 +245,6 @@ export function TerminalView({
         {!session && (
           <div className="term-empty">
             <img className="term-empty-img" src={idleSrc} alt="Agent Fleet" />
-            {/* First-run checklist, only on the active empty pane. Renders null once
-                set up / dismissed, leaving just the brand placeholder. */}
-            {active && <OnboardingCard />}
           </div>
         )}
         {stopped && (
