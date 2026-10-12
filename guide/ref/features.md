@@ -1,7 +1,7 @@
 ---
 audience: "everyone; the index the other tables hang off"
 source_of_truth: "this table for \"does it exist and who can use it\"; the linked page for how"
-updated: "2026-09"
+updated: "2026-10"
 ---
 
 # Features — the catalogue
@@ -27,6 +27,7 @@ If a feature ships and does not appear here, it is not done
 | Live terminal attached to a session | member | main area | [05 Terminal](../member/05-terminal.md) |
 | Terminal round-trip time (keystroke lag) | member | terminal pane header | [05 Terminal](../member/05-terminal.md) |
 | Resume a stopped session | member | left pane → the session | [02 Sessions](../member/02-sessions.md) |
+| Home — what waits for you, where you left off, and the first-run setup | member | the empty main area, action bar → Home, or leader `g h` | [01 First day](../member/01-first-day.md) |
 | Sessions overview — every running session as a card | member | action bar → Sessions, or leader `g s` | [02 Sessions](../member/02-sessions.md) |
 | Fleet graph — one lane per session, time left to right | member | sessions overview → Graph, or leader `g f` | [02 Sessions](../member/02-sessions.md#seeing-how-sessions-relate-over-time-the-fleet-graph) |
 | Stop every session under a working copy | member | repository / worktree right-click → Stop the sessions below | [02 Sessions](../member/02-sessions.md#stopping-and-tidying-up-sessions) |

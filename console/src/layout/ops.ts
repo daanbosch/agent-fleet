@@ -137,6 +137,8 @@ export function sameTarget(view: View, target: OpenTarget): boolean {
     // workspace, so a second open focuses the pane that already has it rather than
     // laying a duplicate beside it.
     case "fleetgraph": return c.kind === "fleetgraph";
+    // One Home per workspace, like the overview: a second open focuses it.
+    case "home": return c.kind === "home";
     // One "add a model" pane per engine and catalogue: opening it again focuses the one that is
     // already there rather than starting a second wizard against the same list.
     case "engineAdd": return c.kind === "engineAdd" && c.engineKey === t.engineKey && c.lora === t.lora;
