@@ -228,17 +228,25 @@ func agentMemMemberLatest(scope, project, name string) (agentMemChangeView, erro
 		// Judged as a reader would judge the file (agentMemClean: raw bytes and decoded values),
 		// and closed on anything that cannot be read or parsed: the earlier text may have entered
 		// the history by import or a hand edit, which the save path's scan never saw.
-		before, beforeOK, _, _, serr := agentMemSides(commit, rel2)
+		before, beforeOK, after, afterOK, serr := agentMemSides(commit, rel2)
 		if serr != nil {
 			return agentMemChangeView{}, withheld
 		}
-		if beforeOK {
-			e, pok := agentMemParse(before)
+		// Both sides: with the live file gone, the newest change may still have left text behind
+		// (a create or update whose file was removed by hand).
+		for _, side := range []struct {
+			data []byte
+			ok   bool
+		}{{before, beforeOK}, {after, afterOK}} {
+			if !side.ok {
+				continue
+			}
+			e, pok := agentMemParse(side.data)
 			if !pok {
 				return agentMemChangeView{}, withheld
 			}
 			e.Name, e.Scope = name, scope
-			if !agentMemClean(before, e) {
+			if !agentMemClean(side.data, e) {
 				return agentMemChangeView{}, withheld
 			}
 		}

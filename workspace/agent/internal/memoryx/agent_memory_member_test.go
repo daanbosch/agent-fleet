@@ -276,3 +276,16 @@ func TestAgentMemoryMemberLatestWithholdsForgottenSecretBehindEscape(t *testing.
 		})
 	}
 }
+
+// With the live file absent, the newest change may itself hold the secret (an adopted or
+// hand-edited history: a create whose file was then removed by hand). Checking only the earlier
+// side answers 200 with the name.
+func TestAgentMemoryMemberLatestWithholdsSecretInNewestChangeWithLiveAbsent(t *testing.T) {
+	_, _, _ = agentMemTestEnv(t)
+	agentMemCommitRaw(t, map[string]string{"af/user/ghost.md": "---\nname: ghost\ndescription: d\nrevision: 1\n---\n" + agentMemFakeAWS() + "\n"},
+		"agent-memory: create\n\nAF-Trigger: agent-memory\nAF-Op: create\nAF-Memory: af/user/ghost.md\nAF-Author-Kind: claude\nAF-Author-Session: s\n")
+	code, b := memberDo(t, http.MethodGet, "/agents/memory/entries/member-latest?scope=user&name=ghost", nil)
+	if code != http.StatusUnprocessableEntity || strings.Contains(string(b), "ghost") {
+		t.Fatalf("latest with a secret in the newest change and no live file: %d %s", code, b)
+	}
+}
