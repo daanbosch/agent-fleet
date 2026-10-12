@@ -999,7 +999,11 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 					fmt.Sprintf("a remote branch %q already exists; rename it or work on the existing branch", nb))
 				return
 			}
-			dir, err = gitx.EnsureWorktree(parent, req.Branch, nb, folderSeg)
+			var start string
+			start, err = gitx.NewWorktreeStartPoint(parent, req.Branch) // base pushed since our last fetch => fetch once
+			if err == nil {
+				dir, err = gitx.EnsureWorktree(parent, start, nb, folderSeg)
+			}
 			if err == nil {
 				// Start at origin's tip, the same intent as fastForwardWorktree on the
 				// existing-branch path. An empty base means the parent's HEAD is the start
