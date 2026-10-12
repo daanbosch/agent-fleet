@@ -394,6 +394,30 @@ type limitBoardMember struct {
 	limitView
 }
 
+// limitBoardPage is GET /api/limit-board. Next is the user key to pass as after= for the
+// following page, "" on the last one.
+type limitBoardPage struct {
+	Enabled bool               `json:"enabled"`
+	Members []limitBoardMember `json:"members"`
+	Next    string             `json:"next"`
+}
+
+// limitBoardMe is GET/PUT /api/limit-board/me: the caller's own setting and values.
+type limitBoardMe struct {
+	Enabled   bool                   `json:"enabled"`
+	Audience  string                 `json:"audience"`
+	Level     string                 `json:"level"`
+	Members   []limitAudienceMember  `json:"members"`
+	Own       limitView              `json:"own"`
+	Publishes []limitPublishedTenant `json:"publishes"`
+}
+
+// limitBoardSwitch is the tenant switch, GET/PUT /api/admin/tenants/{slug}/limit-board.
+type limitBoardSwitch struct {
+	Tenant  string `json:"tenant"`
+	Enabled bool   `json:"enabled"`
+}
+
 // board (GET /api/limit-board?after=&limit=) is the roster: the tenant's active members other
 // than the caller, a page at a time, each reduced to what the caller may see. It is its own
 // listing rather than the 20-row recipient search (decision 6).
@@ -405,7 +429,7 @@ func (a limitBoardAPI) board(w http.ResponseWriter, r *http.Request, _ store.Ide
 		return
 	}
 	if !on {
-		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "members": []limitBoardMember{}, "next": ""})
+		writeJSON(w, http.StatusOK, limitBoardPage{Members: []limitBoardMember{}})
 		return
 	}
 	limit := limitRosterDefault
@@ -471,7 +495,7 @@ func (a limitBoardAPI) board(w http.ResponseWriter, r *http.Request, _ store.Ide
 		out = append(out, limitBoardMember{UserKey: m.UserKey, Email: m.Email,
 			limitView: boardEntry(p, found, mv.MembershipID, byMember[m.MembershipID], ss, now)})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "members": out, "next": next})
+	writeJSON(w, http.StatusOK, limitBoardPage{Enabled: true, Members: out, Next: next})
 }
 
 type limitAudienceMember struct {
@@ -534,14 +558,8 @@ func (a limitBoardAPI) me(w http.ResponseWriter, r *http.Request, ident store.Id
 		writeAPIErr(w, aerr)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"enabled":   on,
-		"audience":  pub.Audience,
-		"level":     pub.Level,
-		"members":   audience,
-		"own":       projectLimits("exact", obs, ss, a.now()),
-		"publishes": tenants,
-	})
+	writeJSON(w, http.StatusOK, limitBoardMe{Enabled: on, Audience: pub.Audience, Level: pub.Level, Members: audience,
+		Own: projectLimits("exact", obs, ss, a.now()), Publishes: tenants})
 }
 
 // publishedTenants lists the caller's active memberships whose publication is not hidden.
@@ -643,7 +661,7 @@ func (a limitBoardAPI) tenantSwitch(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, internalErr(err))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tenant": t.Slug, "enabled": on})
+	writeJSON(w, http.StatusOK, limitBoardSwitch{Tenant: t.Slug, Enabled: on})
 }
 
 // setTenantSwitch (PUT /api/admin/tenants/{slug}/limit-board {enabled}). Turning it off stops
@@ -669,5 +687,5 @@ func (a limitBoardAPI) setTenantSwitch(w http.ResponseWriter, r *http.Request) {
 		ID: store.NewID(), TenantID: t.ID, ActorKind: "admin", ActorID: ident.ID,
 		Action: "limit_board.set", Target: t.Slug, Detail: strconv.FormatBool(*in.Enabled), At: store.NowTS(),
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"tenant": t.Slug, "enabled": *in.Enabled})
+	writeJSON(w, http.StatusOK, limitBoardSwitch{Tenant: t.Slug, Enabled: *in.Enabled})
 }
