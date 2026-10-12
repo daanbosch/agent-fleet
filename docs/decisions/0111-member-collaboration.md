@@ -22,6 +22,10 @@ English | [日本語](0111-member-collaboration.ja.md)
   `memo_origin_alone`); the session's provenance badge is a record the CP writes when a create it
   made succeeds, and the session list shows that record only, never what the workspace reports; the share an owner's attachment creates is
   a read-only `session`-scope rule for every recipient, and an existing rule is left as it is.
+  Status update (2026-10-13): the docs/log/130 checklist runs on the multi-member L2 harness
+  (`e2e/inbox_test.go`, `e2e/inbox_workspace_test.go`, PR #2042); the evidence per ID, and the
+  rows left manual with the reason (real IdP, two Agent or CP versions, deployment target), are
+  in that PR.
 - Tracking: #1840
 - Follow-ups: #1960, #1961, #1962
 - Related: [0057](0057-member-handoff.md) (handover between members: execution never crosses) /
