@@ -10,9 +10,11 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/limitepoch"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 )
 
@@ -35,9 +37,16 @@ import (
 // usageWindow is a copy of the struct of the same name in internal/agents/claude (usage.go);
 // it is small enough that the duplication is preferred to sharing. Percent used (0–100) plus
 // the ISO reset instant.
+//
+// Stale and Derived mark a window adjustWindow rolled past its reset: its 0% is an
+// assumption, not a reading (the same rule claude's chip follows). raw keeps the reading as
+// it was recorded, which is what the limit snapshot reports.
 type usageWindow struct {
 	Pct      float64 `json:"pct"`
 	ResetsAt string  `json:"resetsAt"`
+	Stale    bool    `json:"stale,omitempty"`
+	Derived  bool    `json:"derived,omitempty"`
+	raw      recordedWindow
 }
 
 type recordedWindow struct {
@@ -76,6 +85,9 @@ func HandleUsage(w http.ResponseWriter, r *http.Request) {
 	if u.AgeSec >= 0 {
 		out["ageSec"] = u.AgeSec
 	}
+	if u.OK {
+		limitepoch.Annotate(out, "codex", accountIdentity(), u.ObservedAt)
+	}
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
@@ -85,6 +97,10 @@ type usage struct {
 	SevenDay *usageWindow
 	PlanType string
 	AgeSec   int
+	// ObservedAt is when the source really produced this reading: the rollout event's own
+	// timestamp, the app-server push's arrival, the account view's last SUCCESSFUL fetch.
+	// Zero when unknown.
+	ObservedAt time.Time
 	// LimitReached is the account view's own verdict that the plan is out of quota RIGHT NOW.
 	// Only that source can assert it — a rollout reading carries percentages and nothing else —
 	// so false here means "not asserted", never "known to be fine". PlanExhausted is the one
@@ -109,7 +125,9 @@ const resetCreditsURL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-c
 //
 // Unofficial, like the reset-credits call next to it — so it is one source among three and a
 // failure falls back to the local readings rather than emptying the chip.
-const accountUsageURL = "https://chatgpt.com/backend-api/wham/usage"
+//
+// A var only so a test can point it at a local server.
+var accountUsageURL = "https://chatgpt.com/backend-api/wham/usage"
 
 type codexAuth struct {
 	AuthMode string `json:"auth_mode"`
@@ -157,11 +175,18 @@ const resetCreditsTTL = 5 * time.Minute
 // accountUsageCache throttles the quota call for the same reason resetCreditsCache does: the
 // chip polls every few seconds and this is an unofficial endpoint reached with the user's own
 // token.
+//
+// fetched is the last ATTEMPT and only drives the throttle. observed is the last success and
+// is the reading's age: stamping the age from an attempt made a failed refresh serve an
+// hour-old reading as seconds old (ADR 0111 decision 6). account is the login the value was
+// fetched under, so a re-login never serves the previous account's quota as this one's.
 type accountUsageCacheT struct {
 	sync.Mutex
-	val     usage
-	ok      bool
-	fetched time.Time
+	val      usage
+	ok       bool
+	fetched  time.Time
+	observed time.Time
+	account  string
 }
 
 var accountUsageCache accountUsageCacheT
@@ -176,15 +201,45 @@ func accountUsage(ctx context.Context) (usage, bool) {
 	c := &accountUsageCache
 	c.Lock() // also single-flights concurrent polls
 	defer c.Unlock()
+	if c.ok && c.account != auth.Tokens.AccountID {
+		c.val, c.ok, c.observed, c.fetched = usage{}, false, time.Time{}, time.Time{}
+		accountPublished.Store(nil)
+	}
 	if !c.fetched.IsZero() && time.Since(c.fetched) < accountUsageTTL {
 		return c.aged(), c.ok
 	}
 	val, got := getAccountUsage(ctx, http.DefaultClient, accountUsageURL, auth.Tokens.AccessToken, auth.Tokens.AccountID)
+	now := time.Now()
 	if got {
-		c.val, c.ok = val, true
+		c.val, c.ok, c.observed, c.account = val, true, now, auth.Tokens.AccountID
+		accountPublished.Store(&accountPub{val: val, observed: now, account: auth.Tokens.AccountID})
 	}
-	c.fetched = time.Now()
+	c.fetched = now
 	return c.aged(), c.ok
+}
+
+// accountPublished is the last successful account reading, published for the limit snapshot.
+// The snapshot must not take accountUsageCache's lock: accountUsage holds it across the HTTP
+// fetch (up to 8 s), and the reaper's serial sweep waits on GET /sessions.
+var accountPublished atomic.Pointer[accountPub]
+
+type accountPub struct {
+	val      usage
+	observed time.Time
+	account  string
+}
+
+// peekAccountUsage is the last successful account reading without any fetch or lock wait.
+// ok is false when nothing was ever fetched or the login has changed since.
+func peekAccountUsage(account string) (usage, bool) {
+	p := accountPublished.Load()
+	if p == nil || p.account != account {
+		return usage{}, false
+	}
+	u := p.val
+	u.AgeSec = int(time.Since(p.observed).Seconds())
+	u.ObservedAt = p.observed
+	return u, true
 }
 
 // aged stamps how old the cached reading is, so readUsage can compare it against a local one
@@ -192,7 +247,8 @@ func accountUsage(ctx context.Context) (usage, bool) {
 func (c *accountUsageCacheT) aged() usage {
 	u := c.val
 	if c.ok {
-		u.AgeSec = int(time.Since(c.fetched).Seconds())
+		u.AgeSec = int(time.Since(c.observed).Seconds())
+		u.ObservedAt = c.observed
 	}
 	return u
 }
@@ -466,6 +522,7 @@ func observedUsage() (usage, bool) {
 		return usage{}, false
 	}
 	u.AgeSec = int(time.Since(at).Seconds())
+	u.ObservedAt = at
 	return u, true
 }
 
@@ -573,6 +630,9 @@ func usageFromRolloutBytes(b []byte) (usage, bool) {
 		}
 		if u, ok := parseRateLimits(ev.Payload); ok {
 			u.AgeSec = ageSecFrom(ev.Timestamp)
+			if t, err := time.Parse(time.RFC3339, ev.Timestamp); err == nil {
+				u.ObservedAt = t
+			}
 			return u, true
 		}
 	}
@@ -682,18 +742,26 @@ func isApproxWindow(minutes, expected int) bool {
 // since reset (resetEpoch is at/before now), the recorded % no longer applies — usage
 // is back to 0 — so we zero it and roll the reset forward by whole windows to the next
 // sensible boundary. A window still in the future passes through unchanged.
+//
+// The rolled window is flagged Stale and Derived: 0% holds only if nothing was spent since the
+// reading, which nothing here knows. Unflagged, the chip showed a confident 0% and the
+// Console's reset notification fired "the limit has cleared" off a reading that predates the
+// reset (ADR 0111 decision 6: a derived value never clears "reset not yet observed").
 func adjustWindow(pct float64, windowMin int, resetEpoch int64, now time.Time) *usageWindow {
+	w := &usageWindow{raw: recordedWindow{UsedPercent: pct, WindowMinutes: windowMin, ResetsAt: resetEpoch}}
 	reset := time.Unix(resetEpoch, 0).UTC()
 	if !reset.After(now) {
 		pct = 0
+		w.Stale, w.Derived = true, true
 		if windowMin > 0 {
 			step := time.Duration(windowMin) * time.Minute
-			for !reset.After(now) {
-				reset = reset.Add(step)
-			}
+			// Advance directly (not a loop) so a very old reading cannot spin.
+			n := now.Sub(reset)/step + 1
+			reset = reset.Add(step * n)
 		}
 	}
-	return &usageWindow{Pct: pct, ResetsAt: reset.Format(time.RFC3339)}
+	w.Pct, w.ResetsAt = pct, reset.Format(time.RFC3339)
+	return w
 }
 
 // ageSecFrom returns whole seconds since an RFC3339 instant, or -1 if unparseable.

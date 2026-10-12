@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/limitepoch"
 )
 
 // Claude subscription usage (the 5-hour + weekly bars claude shows in its /usage view)
@@ -58,6 +59,7 @@ func HandleUsage(w http.ResponseWriter, r *http.Request) {
 			if !at.IsZero() {
 				out["ageSec"] = int(time.Since(at).Seconds())
 			}
+			limitepoch.Annotate(out, "claude", accountID(), cap.observedAt())
 		}
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)

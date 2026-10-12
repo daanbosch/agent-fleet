@@ -1,0 +1,53 @@
+/* The limit board (features/limits). Built on the settings tab classes; only the board's own
+   rows are defined here. */
+.limit-board .lb-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 6px 0;
+}
+.limit-board .lb-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.limit-board .lb-pick,
+.limit-board .lb-roster,
+.limit-board .lb-kinds {
+  list-style: none;
+  margin: 4px 0;
+  padding: 0;
+}
+.limit-board .lb-pick {
+  max-height: 180px;
+  overflow: auto;
+}
+.limit-board .lb-roster > li {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.limit-board .lb-who {
+  font-weight: 600;
+}
+.limit-board .lb-kinds > li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: baseline;
+}
+.limit-board .lb-kind {
+  min-width: 6em;
+  font-weight: 500;
+}
+.limit-board .lb-stale,
+.limit-board .lb-reset_not_observed {
+  color: var(--muted);
+}
+.limit-board .lb-coverage {
+  border-collapse: collapse;
+}
+.limit-board .lb-coverage th,
+.limit-board .lb-coverage td {
+  padding: 2px 10px 2px 0;
+  text-align: left;
+}

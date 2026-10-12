@@ -113,7 +113,7 @@ func TestReadUsagePrefersTheFreshestReading(t *testing.T) {
 
 // The cache is what keeps a chip that polls every few seconds off an unofficial endpoint.
 func TestAccountUsageCacheStampsAge(t *testing.T) {
-	c := &accountUsageCacheT{val: usage{OK: true}, ok: true, fetched: time.Now().Add(-42 * time.Second)}
+	c := &accountUsageCacheT{val: usage{OK: true}, ok: true, fetched: time.Now(), observed: time.Now().Add(-42 * time.Second)}
 	if got := c.aged().AgeSec; got < 41 || got > 44 {
 		t.Fatalf("ageSec = %d, want ~42", got)
 	}
