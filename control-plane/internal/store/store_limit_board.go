@@ -300,3 +300,98 @@ func (s *SQL) GetLimitEpoch(ctx context.Context, membershipID, kind string) (str
 	}
 	return epoch, since, err == nil, err
 }
+
+// ApplyUsageObservation runs the usage-reset notification's read-decide-write for one post in
+// one transaction. Doing it as separate reads and writes let a post that read an old
+// generation write after a newer post had committed, rolling the state back to the previous
+// login (two tabs or devices posting at once is the normal case, not an edge).
+//
+// The fence is per (membership, source), not per window: a new login seen on one window must
+// already refuse the old login's post for the other. The source's generation row is locked
+// first, so concurrent posts serialise on it; the board's stored login (when the board is on and
+// the reaper has a newer one) raises the floor too. accepted=false means the post belongs to an
+// older login, or cannot be placed (no generation while one is known), and nothing was written.
+// A post without any generation, while none is known either, keeps the behaviour the reset
+// notification had before generations existed.
+//
+// decide sees each window's state as of this transaction and returns the new state and, when
+// the window reset, the notification to insert. A newer generation clears every window of the
+// source first, so it starts with no armed state to inherit.
+func (s *SQL) ApplyUsageObservation(ctx context.Context, membershipID, source, epoch, epochSince string, windowKeys []string,
+	decide func(windowKey string, prev UsageNotificationState, found bool) (UsageNotificationState, *Notification)) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO notification_usage_epoch(membership_id, source) VALUES(?,?)
+		ON CONFLICT(membership_id, source) DO NOTHING`, membershipID, source); err != nil {
+		return false, err
+	}
+	// A write to the row is the lock (a row lock on Postgres, the write lock on SQLite) that
+	// serialises every post for this source from here to the commit.
+	if _, err := tx.ExecContext(ctx, `UPDATE notification_usage_epoch SET epoch=epoch WHERE membership_id=? AND source=?`,
+		membershipID, source); err != nil {
+		return false, err
+	}
+	switched := false
+	if epochSince != "" {
+		res, err := tx.ExecContext(ctx, `UPDATE notification_usage_epoch SET epoch=?, epoch_since=?
+			WHERE membership_id=? AND source=? AND epoch_since < ?`, epoch, epochSince, membershipID, source, epochSince)
+		if err != nil {
+			return false, err
+		}
+		n, _ := res.RowsAffected()
+		switched = n > 0
+	}
+	var curEpoch, curSince string
+	if err := tx.QueryRowContext(ctx, `SELECT epoch, epoch_since FROM notification_usage_epoch WHERE membership_id=? AND source=?`,
+		membershipID, source).Scan(&curEpoch, &curSince); err != nil {
+		return false, err
+	}
+	var boardEpoch, boardSince string
+	if err := tx.QueryRowContext(ctx, `SELECT epoch, epoch_since FROM limit_epoch WHERE membership_id=? AND kind=?`,
+		membershipID, source).Scan(&boardEpoch, &boardSince); err != nil && err != sql.ErrNoRows {
+		return false, err
+	}
+	floorEpoch, floorSince := curEpoch, curSince
+	if boardSince > floorSince {
+		floorEpoch, floorSince = boardEpoch, boardSince
+	}
+	if floorSince != "" && (epochSince != floorSince || epoch != floorEpoch) {
+		return false, nil
+	}
+	if switched {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM notification_usage_state WHERE membership_id=? AND source=?`,
+			membershipID, source); err != nil {
+			return false, err
+		}
+	}
+	for _, key := range windowKeys {
+		var prev UsageNotificationState
+		found := true
+		err := tx.QueryRowContext(ctx, `SELECT membership_id, source, window_key, resets_at, armed FROM notification_usage_state
+			WHERE membership_id=? AND source=? AND window_key=?`, membershipID, source, key).
+			Scan(&prev.MembershipID, &prev.Source, &prev.WindowKey, &prev.ResetsAt, &prev.Armed)
+		if err == sql.ErrNoRows {
+			prev, found = UsageNotificationState{}, false
+		} else if err != nil {
+			return false, err
+		}
+		next, fire := decide(key, prev, found)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO notification_usage_state(membership_id, source, window_key, resets_at, armed) VALUES(?,?,?,?,?)
+			ON CONFLICT(membership_id, source, window_key) DO UPDATE SET resets_at=excluded.resets_at, armed=excluded.armed`,
+			membershipID, source, key, next.ResetsAt, next.Armed); err != nil {
+			return false, err
+		}
+		if fire != nil {
+			n := *fire
+			if _, err := tx.ExecContext(ctx, `INSERT INTO notification(event_id, membership_id, kind, target_type, target_id, target_kind, display_name, payload, created_at, seen_at)
+				VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_id) DO NOTHING`, n.EventID, n.MembershipID,
+				n.Kind, n.TargetType, n.TargetID, n.TargetKind, n.DisplayName, n.Payload, n.CreatedAt, n.SeenAt); err != nil {
+				return false, err
+			}
+		}
+	}
+	return true, tx.Commit()
+}

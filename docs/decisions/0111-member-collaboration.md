@@ -506,8 +506,10 @@ left open.
   second or when the clock goes back. The CP accepts observations only from the current
   generation and replaces it only with a strictly later one, so a post from before a re-login,
   including one from an earlier login to the same account, is refused. The usage-reset
-  notification's armed state is fenced by the same generation on its own row, so it keeps
-  working with the board switched off and a new login does not inherit the old armed state.
+  notification's armed state is fenced by the same generation on its own row per source, with
+  the check, the state change and the notification insert in one transaction, so it keeps working
+  with the board switched off, concurrent posts cannot roll it back, and a new login on any
+  window clears the old armed state of every window.
 - **Observed time.** claude's statusLine capture moves `observedAt` only when the captured
   values change, because claude re-renders from what it already holds; codex's account cache
   keeps the last success apart from the last attempt; a window rolled past its reset is flagged

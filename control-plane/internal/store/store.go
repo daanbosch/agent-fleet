@@ -786,9 +786,6 @@ type Notification struct {
 type UsageNotificationState struct {
 	MembershipID, Source, WindowKey, ResetsAt string
 	Armed                                     int
-	// Epoch / EpochSince: the login generation the state was last set under (ADR 0111
-	// decision 6). Empty when it was set by a post that carried none.
-	Epoch, EpochSince string
 }
 
 // Workspace is one container per Membership (= identity × tenant).
@@ -1739,6 +1736,10 @@ type NotificationStore interface {
 	SweepNotifications(ctx context.Context, retainBefore string) error
 	GetUsageNotificationState(ctx context.Context, membershipID, source, windowKey string) (UsageNotificationState, bool, error)
 	PutUsageNotificationState(ctx context.Context, state UsageNotificationState) error
+	// ApplyUsageObservation is the reset notification's whole read-decide-write for one post,
+	// in one transaction fenced by the source's login generation (store_limit_board.go).
+	ApplyUsageObservation(ctx context.Context, membershipID, source, epoch, epochSince string, windowKeys []string,
+		decide func(windowKey string, prev UsageNotificationState, found bool) (UsageNotificationState, *Notification)) (accepted bool, err error)
 }
 
 // ScheduleStore is the scheduled-execution definition store (docs/log/38 + ADR0021).

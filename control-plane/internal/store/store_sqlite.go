@@ -1307,6 +1307,7 @@ func membershipCascade(membershipID string) []struct {
 		{`DELETE FROM work_item_session WHERE membership_id=?`, id},
 		{`DELETE FROM notification WHERE membership_id=?`, id},
 		{`DELETE FROM notification_usage_state WHERE membership_id=?`, id},
+		{`DELETE FROM notification_usage_epoch WHERE membership_id=?`, id},
 		// The limit board (ADR 0111 decision 6). An audience names other memberships, so a
 		// member leaving must also leave every audience they were named in.
 		{`DELETE FROM limit_publication_member WHERE membership_id=? OR viewer_membership_id=?`, both},
@@ -3162,8 +3163,8 @@ func (s *SQL) SweepNotifications(ctx context.Context, retainBefore string) error
 
 func (s *SQL) GetUsageNotificationState(ctx context.Context, membershipID, source, windowKey string) (UsageNotificationState, bool, error) {
 	var st UsageNotificationState
-	err := s.db.QueryRowContext(ctx, `SELECT membership_id, source, window_key, resets_at, armed, epoch, epoch_since FROM notification_usage_state WHERE membership_id=? AND source=? AND window_key=?`, membershipID, source, windowKey).
-		Scan(&st.MembershipID, &st.Source, &st.WindowKey, &st.ResetsAt, &st.Armed, &st.Epoch, &st.EpochSince)
+	err := s.db.QueryRowContext(ctx, `SELECT membership_id, source, window_key, resets_at, armed FROM notification_usage_state WHERE membership_id=? AND source=? AND window_key=?`, membershipID, source, windowKey).
+		Scan(&st.MembershipID, &st.Source, &st.WindowKey, &st.ResetsAt, &st.Armed)
 	if err == sql.ErrNoRows {
 		return UsageNotificationState{}, false, nil
 	}
@@ -3171,10 +3172,9 @@ func (s *SQL) GetUsageNotificationState(ctx context.Context, membershipID, sourc
 }
 
 func (s *SQL) PutUsageNotificationState(ctx context.Context, st UsageNotificationState) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO notification_usage_state(membership_id, source, window_key, resets_at, armed, epoch, epoch_since) VALUES(?,?,?,?,?,?,?)
-		ON CONFLICT(membership_id, source, window_key) DO UPDATE SET resets_at=excluded.resets_at, armed=excluded.armed,
-			epoch=excluded.epoch, epoch_since=excluded.epoch_since`,
-		st.MembershipID, st.Source, st.WindowKey, st.ResetsAt, st.Armed, st.Epoch, st.EpochSince)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO notification_usage_state(membership_id, source, window_key, resets_at, armed) VALUES(?,?,?,?,?)
+		ON CONFLICT(membership_id, source, window_key) DO UPDATE SET resets_at=excluded.resets_at, armed=excluded.armed`,
+		st.MembershipID, st.Source, st.WindowKey, st.ResetsAt, st.Armed)
 	return err
 }
 

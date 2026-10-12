@@ -55,12 +55,17 @@ CREATE TABLE limit_publication_member (
     PRIMARY KEY (membership_id, viewer_membership_id)
 );
 CREATE INDEX idx_limit_publication_member_viewer ON limit_publication_member(viewer_membership_id);
--- The usage-reset notification's armed state is fenced by the same login generation, apart
--- from the board: a post from before a re-login must neither arm, disarm nor fire it, and a
--- new login does not inherit the previous account's armed state. Empty in a row written before
--- this, and in one from a Console too old to send them.
-ALTER TABLE notification_usage_state ADD COLUMN epoch TEXT NOT NULL DEFAULT '';
-ALTER TABLE notification_usage_state ADD COLUMN epoch_since TEXT NOT NULL DEFAULT '';
+-- The usage-reset notification's own login generation per (membership, source), apart from
+-- the board's so it keeps working with the board switched off. A post from an older login must
+-- neither arm, disarm nor fire it, and a new login clears every window's armed state of that
+-- source. Empty values: nothing generation-stamped has been posted yet.
+CREATE TABLE notification_usage_epoch (
+    membership_id TEXT NOT NULL REFERENCES membership(id) ON DELETE CASCADE,
+    source        TEXT NOT NULL,
+    epoch         TEXT NOT NULL DEFAULT '',
+    epoch_since   TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (membership_id, source)
+);
 -- The tenant switch (ADR 0111 addendum item 4). No row means on.
 CREATE TABLE limit_board_tenant (
     tenant_id  TEXT PRIMARY KEY REFERENCES tenant(id),

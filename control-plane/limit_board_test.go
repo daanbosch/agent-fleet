@@ -618,47 +618,169 @@ func TestUsageObservationLatePostFromBeforeAReloginIsRefused(t *testing.T) {
 	}
 }
 
-// Round 2: the reset notification is fenced on its own state too (it works with the board
-// off). An older login's post does nothing, and a newer login does not inherit the old armed
-// state, so its first reading is not taken for a reset.
-func TestUsageResetNotificationIsFencedByLogin(t *testing.T) {
-	st := openLimitStore(t)
+// notifyDialects runs f on SQLite and, when AF_TEST_DATABASE_URL is set, Postgres: the reset
+// notification's fence is a transaction plus conditional writes, which is dialect territory.
+func notifyDialects(t *testing.T, f func(t *testing.T, st *store.SQL)) {
+	t.Run("sqlite", func(t *testing.T) { f(t, openLimitStore(t)) })
+	t.Run("postgres", func(t *testing.T) {
+		url, ok := pgtest.Schema(t)
+		if !ok {
+			t.Skip("set AF_TEST_DATABASE_URL to run the Postgres half")
+		}
+		st, err := store.OpenPostgres(url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { st.Close() })
+		if err := st.Migrate(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		f(t, st)
+	})
+}
+
+// notifyHarness posts to the real observeUsage, with the tenant's board switched off (the
+// notification must be fenced without it).
+type notifyHarness struct {
+	t  *testing.T
+	st *store.SQL
+	mv store.MembershipView
+	a  notificationAPI
+}
+
+func newNotifyHarness(t *testing.T, st *store.SQL, ns store.NotificationStore) *notifyHarness {
 	f := newLimitFixture(t, st, "alice")
-	mv := f.members["alice"]
 	if err := st.SetLimitBoardEnabled(context.Background(), f.tenant.ID, false, "t"); err != nil {
 		t.Fatal(err)
 	}
-	a := notificationAPI{store: st, limits: st, now: func() time.Time { return limitNow }}
-	post := func(epoch, gen string, pct int, resets string) {
-		t.Helper()
-		body := fmt.Sprintf(`{"source":"claude","limitEpoch":%q,"limitEpochSince":%q,"windows":[{"windowKey":"5h","percent":%d,"resetsAt":%q,"observedAt":"2026-10-12T11:59:00Z"}]}`, epoch, gen, pct, resets)
-		w := httptest.NewRecorder()
-		a.observeUsage(w, httptest.NewRequest("POST", "/", bytes.NewBufferString(body)), store.Identity{}, mv)
-		if w.Code != 204 {
-			t.Fatalf("%d %s", w.Code, w.Body)
+	if ns == nil {
+		ns = st
+	}
+	return &notifyHarness{t: t, st: st, mv: f.members["alice"],
+		a: notificationAPI{store: ns, limits: st, now: func() time.Time { return limitNow }}}
+}
+
+func (h *notifyHarness) post(ctx context.Context, epoch, gen, window string, pct int, resets string) {
+	h.t.Helper()
+	body := fmt.Sprintf(`{"source":"claude","limitEpoch":%q,"limitEpochSince":%q,"windows":[{"windowKey":%q,"percent":%d,"resetsAt":%q,"observedAt":"2026-10-12T11:59:00Z"}]}`,
+		epoch, gen, window, pct, resets)
+	w := httptest.NewRecorder()
+	h.a.observeUsage(w, httptest.NewRequest("POST", "/", bytes.NewBufferString(body)).WithContext(ctx), store.Identity{}, h.mv)
+	if w.Code != 204 {
+		h.t.Errorf("%d %s", w.Code, w.Body)
+	}
+}
+
+func (h *notifyHarness) state(window string) store.UsageNotificationState {
+	ns, _, _ := h.st.GetUsageNotificationState(context.Background(), h.mv.MembershipID, "claude", window)
+	return ns
+}
+
+func (h *notifyHarness) fired() int {
+	n, _ := h.st.ListNotifications(context.Background(), h.mv.MembershipID, "", 50)
+	return len(n)
+}
+
+const (
+	genA = "2026-10-12T08:00:00Z"
+	genB = "2026-10-12T11:58:00.000000001Z"
+)
+
+// Round 2: an older login's post does nothing, and a newer login does not inherit the old armed
+// state, so its first reading is not taken for a reset.
+func TestUsageResetNotificationIsFencedByLogin(t *testing.T) {
+	notifyDialects(t, func(t *testing.T, st *store.SQL) {
+		h := newNotifyHarness(t, st, nil)
+		ctx := context.Background()
+		h.post(ctx, "a", genA, "5h", 95, "2026-10-12T12:30:00Z")
+		if h.state("5h").Armed != 1 {
+			t.Fatalf("armed = %+v", h.state("5h"))
 		}
+		h.post(ctx, "b", genB, "5h", 5, "2026-10-12T16:00:00Z")
+		if h.state("5h").Armed != 0 || h.fired() != 0 {
+			t.Fatalf("b inherited a's armed state or fired a reset: %+v fired=%d", h.state("5h"), h.fired())
+		}
+		h.post(ctx, "a", genA, "5h", 99, "2026-10-12T12:30:00Z")
+		if h.state("5h").Armed != 0 {
+			t.Fatalf("an older login's post moved the state: %+v", h.state("5h"))
+		}
+	})
+}
+
+// Round 3 (b): the generation is per source, not per window. B observed only on the 7-day
+// window must already clear A's armed 5-hour window and refuse A's late 5-hour post.
+func TestUsageResetNotificationNewLoginOnAnotherWindowFencesAll(t *testing.T) {
+	notifyDialects(t, func(t *testing.T, st *store.SQL) {
+		h := newNotifyHarness(t, st, nil)
+		ctx := context.Background()
+		h.post(ctx, "a", genA, "5h", 90, "2026-10-12T12:30:00Z")
+		h.post(ctx, "b", genB, "7d", 3, "2026-10-15T00:00:00Z")
+		if h.state("5h").Armed != 0 {
+			t.Fatalf("a's armed 5-hour window survived b's login: %+v", h.state("5h"))
+		}
+		h.post(ctx, "a", genA, "5h", 99, "2026-10-12T12:30:00Z")
+		if h.state("5h").Armed != 0 {
+			t.Fatalf("a's late 5-hour post armed it under b: %+v", h.state("5h"))
+		}
+		// b's own later 5-hour reading with a later reset fires nothing: b never armed it.
+		h.post(ctx, "b", genB, "5h", 2, "2026-10-12T17:00:00Z")
+		if h.fired() != 0 {
+			t.Fatalf("a reset fired from the previous login's armed state: %d", h.fired())
+		}
+	})
+}
+
+// gateStore pauses one request's notification work at its first store call: after the read in
+// a read-then-write handler, before the transaction in a transactional one. That is exactly the
+// window a concurrent post used to slip through.
+type gateStore struct {
+	*store.SQL
+	reached, release chan struct{}
+}
+
+type gateKey struct{}
+
+func (g *gateStore) pause(ctx context.Context) {
+	if ctx.Value(gateKey{}) != nil {
+		close(g.reached)
+		<-g.release
 	}
-	state := func() store.UsageNotificationState {
-		ns, _, _ := st.GetUsageNotificationState(context.Background(), mv.MembershipID, "claude", "5h")
-		return ns
-	}
-	post("a", "2026-10-12T08:00:00Z", 95, "2026-10-12T12:30:00Z")
-	if state().Armed != 1 {
-		t.Fatalf("armed = %+v", state())
-	}
-	// Signed in to b: a low reading with a later reset is b's first, not a's reset.
-	post("b", "2026-10-12T11:58:00.000000001Z", 5, "2026-10-12T16:00:00Z")
-	if ns := state(); ns.Armed != 0 || ns.Epoch != "b" {
-		t.Fatalf("b inherited a's state: %+v", ns)
-	}
-	if n, _ := st.ListNotifications(context.Background(), mv.MembershipID, "", 50); len(n) != 0 {
-		t.Fatalf("a re-login fired a reset notification: %+v", n)
-	}
-	// A late post of a's (older generation) arms nothing.
-	post("a", "2026-10-12T08:00:00Z", 99, "2026-10-12T12:30:00Z")
-	if ns := state(); ns.Armed != 0 || ns.Epoch != "b" {
-		t.Fatalf("an older login's post moved the state: %+v", ns)
-	}
+}
+
+func (g *gateStore) GetUsageNotificationState(ctx context.Context, m, s, k string) (store.UsageNotificationState, bool, error) {
+	st, found, err := g.SQL.GetUsageNotificationState(ctx, m, s, k)
+	g.pause(ctx)
+	return st, found, err
+}
+
+func (g *gateStore) ApplyUsageObservation(ctx context.Context, m, s, e, gen string, keys []string,
+	decide func(string, store.UsageNotificationState, bool) (store.UsageNotificationState, *store.Notification)) (bool, error) {
+	g.pause(ctx)
+	return g.SQL.ApplyUsageObservation(ctx, m, s, e, gen, keys, decide)
+}
+
+// Round 3 (a): A's post is held after it has read the state; B's post completes; A resumes.
+// A's decision must be taken against B's committed generation, not the one it read, or it rolls
+// the state back to A and armed=1.
+func TestUsageResetNotificationConcurrentOlderPostCannotRollBack(t *testing.T) {
+	notifyDialects(t, func(t *testing.T, st *store.SQL) {
+		g := &gateStore{SQL: st, reached: make(chan struct{}), release: make(chan struct{})}
+		h := newNotifyHarness(t, st, g)
+		ctx := context.Background()
+		h.post(ctx, "a", genA, "5h", 10, "2026-10-12T12:30:00Z")
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			h.post(context.WithValue(ctx, gateKey{}, true), "a", genA, "5h", 95, "2026-10-12T12:30:00Z")
+		}()
+		<-g.reached
+		h.post(ctx, "b", genB, "5h", 4, "2026-10-12T16:00:00Z")
+		close(g.release)
+		<-done
+		if ns := h.state("5h"); ns.Armed != 0 || ns.ResetsAt != "2026-10-12T16:00:00Z" {
+			t.Fatalf("the held older post rolled b's state back: %+v", ns)
+		}
+	})
 }
 
 // Round 2: two logins recognised in the same second are still ordered (the generation keeps
