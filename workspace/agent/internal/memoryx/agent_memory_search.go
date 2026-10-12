@@ -84,6 +84,7 @@ func agentMemSearchRanked(c agentMemCaller, query string, limit int) (hits []age
 		limit = agentMemSearchDefault
 	}
 	limit = min(limit, agentMemSearchMax)
+	agentMemWarmScan(c)
 	agentMemMu.RLock()
 	defer agentMemMu.RUnlock()
 	var all, partial []agentMemScored
