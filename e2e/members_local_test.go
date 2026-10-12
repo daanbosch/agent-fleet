@@ -97,12 +97,15 @@ func TestCPEnvironIsolated(t *testing.T) {
 	}
 }
 
-// TestCheckStopped is requireStopped's negative control: only "stopped" passes.
+// TestCheckStopped is requireStopped's negative control: only the states without a
+// running container pass.
 func TestCheckStopped(t *testing.T) {
-	if err := checkStopped("stopped"); err != nil {
-		t.Fatalf("stopped rejected: %v", err)
+	for _, s := range []string{"none", "stopped"} {
+		if err := checkStopped(s); err != nil {
+			t.Fatalf("%s rejected: %v", s, err)
+		}
 	}
-	for _, s := range []string{"starting", "running", "", "none", "<nil>"} {
+	for _, s := range []string{"starting", "running", "", "<nil>", "unknown"} {
 		if checkStopped(s) == nil {
 			t.Fatalf("state %q accepted as stopped", s)
 		}

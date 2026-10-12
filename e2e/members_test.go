@@ -228,8 +228,8 @@ func (m *member) stopWorkspace() {
 	}
 }
 
-// requireStopped fails unless the workspace reads exactly "stopped" — used after reads
-// that must not wake it, on a workspace that has been started and stopped before.
+// requireStopped fails unless the workspace has no running container — used after reads
+// that must not wake it.
 func (m *member) requireStopped(why string) {
 	m.t.Helper()
 	if err := checkStopped(m.workspaceState()); err != nil {
@@ -237,12 +237,14 @@ func (m *member) requireStopped(why string) {
 	}
 }
 
-// checkStopped accepts "stopped" alone. Rejecting only "running" is not enough: a read that
-// woke the workspace reads "starting" while the container is up and the Agent is not ready
-// yet (runtime_docker.go State), and that is exactly the regression being looked for.
+// checkStopped accepts the two states with no container serving: "none" (the docker
+// runtime removes the container on stop, so a stopped workspace reads none) and "stopped"
+// (a container that exists but is not running). Rejecting only "running" is not enough:
+// a read that woke the workspace reads "starting" while the Agent is not ready yet
+// (runtime_docker.go State), which is exactly the regression being looked for.
 func checkStopped(state string) error {
-	if state != "stopped" {
-		return fmt.Errorf("workspace state is %q, want stopped", state)
+	if state != "none" && state != "stopped" {
+		return fmt.Errorf("workspace state is %q, want none or stopped", state)
 	}
 	return nil
 }
