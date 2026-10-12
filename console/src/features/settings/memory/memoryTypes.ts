@@ -242,3 +242,8 @@ export interface MemoryBody extends MemoryListed {
   kinds?: string[];
   created?: string;
 }
+
+/** One hit of the Console's body search (member-search): no body, the lines that matched. */
+export interface MemorySearchHit extends MemoryListed {
+  snippets?: string[];
+}
