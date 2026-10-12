@@ -510,3 +510,17 @@ personal scopes, which is inferred), so a fixed path would be a guess; those two
 needs one logged-in muse run that calls `add_memory` (a member's quota). Write-back to muse is out of scope:
 with the switch on muse's native memory is off (#1990), so nothing writes there. Follow-up: #2005 (personal
 scopes), the codex import stays with #1950 and the phase-based switch with #1972.
+
+## Note (2026-10-12): the browser lists every forgotten memory (#2003)
+
+The forgotten list of the browser was built from the 300 most recent changes, so a memory forgotten
+earlier could not be restored from it. `entries/member-forgotten` lists them from the store's
+tombstones (`<scope dir>/.forgotten/<name>`) for the user scope and every project, or the one named by
+`scope` and `project`. A row is the same view the changes list gives its newest row (who forgot it and
+when, the commit to revert, `revertible`), resolved with the scan of `entries/member-latest`: raw and
+decoded text, both sides of the newest change. A name or text that fails it is counted in `withheld`,
+never listed. The tombstone directory is untrusted like the rest of the store: a symlink on the way, a
+non-regular or oversized entry, or a name that is not a memory name is not a tombstone, and a tombstone
+with no published change, or a memory that is live again, is not listed. One answer holds at most 300 rows
+(`truncated`; narrow the scope). The route is read-only, counts no use and is not gated by the switch;
+restore still goes through the revert route with its newest-change and `expectRevision` checks.

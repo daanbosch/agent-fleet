@@ -114,7 +114,16 @@ async function setValue(el: HTMLInputElement | HTMLSelectElement | HTMLTextAreaE
 beforeEach(async () => {
   api.mockImplementation(async (url: string) => {
     if (url.startsWith("api/agents/memory/entries/list")) return { entries, withheld: 2 };
-    if (url.startsWith("api/agents/memory/entries/changes")) return { changes };
+    if (url.startsWith("api/agents/memory/entries/member-forgotten")) {
+      const u = new URL("http://x/" + url);
+      const sc = u.searchParams.get("scope");
+      const pid = u.searchParams.get("project");
+      return {
+        forgotten: changes.filter(
+          (c) => c.latest && !c.live && c.revertible && (!sc || (c.scope === sc && (sc === "user" || c.project?.id === pid))),
+        ),
+      };
+    }
     if (url.startsWith("api/agents/memory/entries/member-latest")) {
       const u = new URL("http://x/" + url);
       const c = changes.find((ch) => ch.name === u.searchParams.get("name") && ch.latest);
@@ -310,7 +319,6 @@ describe("MemoryBrowserPanel", () => {
   it("forgets a memory whose newest change is outside the loaded changes, resolving it on demand", async () => {
     api.mockImplementation(async (url: string) => {
       if (url.startsWith("api/agents/memory/entries/list")) return { entries };
-      if (url.startsWith("api/agents/memory/entries/changes")) return { changes: [] };
       if (url.startsWith("api/agents/memory/entries/member-latest"))
         return { ...changes[1], commit: "oldcommit9" };
       return {};
@@ -343,7 +351,6 @@ describe("MemoryBrowserPanel", () => {
   it("does not forget when no change can be resolved", async () => {
     api.mockImplementation(async (url: string) => {
       if (url.startsWith("api/agents/memory/entries/list")) return { entries };
-      if (url.startsWith("api/agents/memory/entries/changes")) return { changes: [] };
       if (url.startsWith("api/agents/memory/entries/member-latest"))
         return { error: { code: "memory_not_found", message: "no published change" } };
       return {};
@@ -375,5 +382,43 @@ describe("MemoryBrowserPanel", () => {
       forget: false,
       ack: false,
     });
+  });
+
+  it("asks for the forgotten memories of the scope on screen, not the recent changes", async () => {
+    expect(api).toHaveBeenCalledWith("api/agents/memory/entries/member-forgotten");
+    expect(api).not.toHaveBeenCalledWith(expect.stringContaining("entries/changes"));
+    await setValue(select(), "user");
+    expect(api).toHaveBeenCalledWith("api/agents/memory/entries/member-forgotten?scope=user");
+    expect(document.body.textContent).not.toContain("old-note");
+    await setValue(select(), "project:" + project.id);
+    expect(api).toHaveBeenCalledWith(
+      `api/agents/memory/entries/member-forgotten?scope=project&project=${encodeURIComponent(project.id)}`,
+    );
+    expect(document.body.textContent).toContain("old-note");
+  });
+
+  it("counts withheld forgotten memories and says when the list is cut", async () => {
+    api.mockImplementation(async (url: string) => {
+      if (url.startsWith("api/agents/memory/entries/list")) return { entries };
+      if (url.startsWith("api/agents/memory/entries/member-forgotten"))
+        return { forgotten: [changes[2]], withheld: 3, truncated: true };
+      return {};
+    });
+    await act(async () => root!.unmount());
+    root = createRoot(host!);
+    await act(async () => {
+      root!.render(
+        <ToastProvider>
+          <ConfirmProvider>
+            <MemoryBrowserPanel reload={0} onChanged={() => {}} />
+          </ConfirmProvider>
+        </ToastProvider>,
+      );
+    });
+    await flush();
+    const warns = Array.from(document.body.querySelectorAll(".mem-warn")).map((e) => e.textContent ?? "");
+    expect(warns.some((w) => w.includes("3"))).toBe(true);
+    expect(warns.some((w) => w.includes("1"))).toBe(true);
+    expect(document.body.textContent).toContain("old-note");
   });
 });
