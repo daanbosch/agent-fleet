@@ -33,6 +33,7 @@ const target = "/agents/memory/entries/pin?project=app-0123456789ab"
 func newReq(body string) *http.Request {
 	r := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
 	r.Header.Set("Authorization", "Bearer agent-token")
+	r.Header.Set("Content-Type", "application/json")
 	return r
 }
 
@@ -200,11 +201,44 @@ func TestCPWireVectorVerifies(t *testing.T) {
 	t.Setenv(memberorigin.EnvMembership, "mb-vector")
 	memberorigin.Reload()
 	t.Cleanup(memberorigin.Reload)
+	memberorigin.StartedBeforeForTest(1699999999)
+	t.Cleanup(func() { memberorigin.StartedBeforeForTest(0) })
 
 	r := httptest.NewRequest(http.MethodPost, "/agents/memory/entries/pin?project=p-0123456789ab", strings.NewReader(`{"name":"n"}`))
 	r.Header.Set(memberorigin.Header, cpWireVector)
 	_, err := memberorigin.VerifyAt(r, []byte(`{"name":"n"}`), time.Unix(1700000010, 0))
 	if err != nil {
 		t.Fatalf("CP vector: %v", err)
+	}
+}
+
+// The nonce cache is this process's alone. After a restart a mark issued before it is refused by
+// its iat, so a captured mark cannot undo a later change once the Agent has restarted.
+func TestReplayAcrossRestartIsRefused(t *testing.T) {
+	s := memberorigintest.Install(t)
+	body := []byte(`{}`)
+	r := newReq(string(body))
+	s.Sign(r, body)
+	mark := r.Header.Get(memberorigin.Header)
+	if w := serve(r); w.Code != http.StatusOK {
+		t.Fatalf("first: %d %s", w.Code, w.Body)
+	}
+	memberorigin.RestartForTest(time.Now().Unix() + 1)
+	t.Cleanup(func() { memberorigin.StartedBeforeForTest(0) })
+	again := newReq(string(body))
+	again.Header.Set(memberorigin.Header, mark)
+	if w := serve(again); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "before this Agent started") {
+		t.Fatalf("replay after restart: %d %s", w.Code, w.Body)
+	}
+}
+
+// A valid mark on a body that is not JSON is refused: the CP never signs one.
+func TestNonJSONBodyIsRefused(t *testing.T) {
+	s := memberorigintest.Install(t)
+	r := newReq(`{}`)
+	r.Header.Set("Content-Type", "text/plain")
+	s.Sign(r, []byte(`{}`))
+	if w := serve(r); w.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("text/plain: %d %s", w.Code, w.Body)
 	}
 }

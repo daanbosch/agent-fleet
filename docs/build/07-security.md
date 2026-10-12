@@ -426,14 +426,22 @@ Where a route must accept only the member's own Console request, the CP marks it
   not sign.
 - **Signed fields**: method, Agent-side path, raw query, body SHA-256, workspace, membership, CP identity,
   `iat`, `exp` (60 s) and a nonce. The Agent refuses any mismatch, an expired or over-long mark, and a nonce
-  it has seen (kept until `exp`, at most 4,096; full means refuse, never accept unrecorded).
-- **The CP drops any `X-AF-Member-Origin` the browser sent** on every relay, signs only the listed routes,
-  and only for the caller's own workspace.
+  it has seen (kept until `exp`, at most 4,096; full means refuse, never accept unrecorded). The cache is
+  per process, so the Agent also refuses a mark issued before it started: no replay across a restart.
+- **The CP drops any `X-AF-Member-Origin` the browser sent** on every relay (REST, SSE and the preview
+  relay), signs only the listed routes, and only for the caller's own workspace. REST and SSE also drop every
+  cookie and the gateway identity headers, so the member's login cookie never reaches the workspace.
+- **No signing for another page.** Before signing, the CP requires `application/json`, `Sec-Fetch-Site:
+  same-origin` when sent, and an `Origin` of the Console's own host when sent, so a same-site preview app
+  cannot have the browser make a signed member write. An app in the path-form preview runs on the
+  Console's origin and is not covered (decisions/0062 decision 7).
 - **Fails closed**: a workspace started without the keys (an older start, or `AF_MEMBER_ORIGIN_KEY_VERSION=0`)
   answers 503 on these routes; no mark, or only `AGENT_TOKEN` / `X-AF-Relay`, is 403.
 - **Rotation**: a workspace starts with the current and the next key, so raising
-  `AF_MEMBER_ORIGIN_KEY_VERSION` by one keeps running workspaces working.
-- **Limits**: the mark governs the Agent's routes, not the store's files, which a session can still write
+  `AF_MEMBER_ORIGIN_KEY_VERSION` by one keeps workspaces started under the previous version working; a
+  second raise before they restart does not.
+- **Limits**: only these three routes are signed; the claude and muse imports still record the member as
+  author unsigned (#2014). The mark governs the Agent's routes, not the store's files, which a session can still write
   directly; it is as strong as the CP's member authentication (nothing under `AUTH=dev`); a compromised CP
   is out of scope.
 

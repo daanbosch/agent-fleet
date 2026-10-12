@@ -109,6 +109,7 @@ func smokeDo(t *testing.T, h http.Handler, method, path, token, body string) *ht
 func signedDo(t *testing.T, s *memberorigintest.Signer, h http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	r := httptest.NewRequest(method, path, strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
 	s.Sign(r, []byte(body))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)

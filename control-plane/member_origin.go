@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"os"
 	"strconv"
@@ -126,6 +127,9 @@ func (m *manager) memberOriginMark(r *http.Request, res *resolved, now time.Time
 	if res.ws.MembershipID == "" || res.ws.MembershipID != res.mv.MembershipID {
 		return nil, "", &apiError{http.StatusForbidden, "forbidden", "only the workspace's own member can change its memory"}
 	}
+	if aerr := memberOriginRequestCheck(r); aerr != nil {
+		return nil, "", aerr
+	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, memberOriginMaxBody+1))
 	if err != nil {
 		return nil, "", &apiError{http.StatusBadRequest, "bad_request", "could not read the request body"}
@@ -163,4 +167,35 @@ func (m *manager) relayBody(r *http.Request, res *resolved) (io.Reader, string, 
 		return nil, "", aerr
 	}
 	return bytes.NewReader(body), mark, nil
+}
+
+// stripAgentRelayCredentials removes from a relayed request what the browser sent that the Agent
+// has no use for and a workspace must not see: the Console's and a front gateway's login cookies
+// and identity headers (preview's stripConsoleCredentials), every other cookie (no Agent route
+// reads one), and any member-origin mark. A session that obtained the member's login cookie could
+// otherwise have the CP sign whatever it sends. The caller sets the Agent bearer afterwards.
+func stripAgentRelayCredentials(out, in *http.Request, identityHeader string) {
+	stripConsoleCredentials(out, in, identityHeader)
+	out.Header.Del("Cookie")
+}
+
+// memberOriginRequestCheck refuses, before anything is signed, a request a page other than the
+// Console could have made with the member's cookie. A preview app on its own host is same-site, so
+// SameSite=Lax still sends the cookie; a text/plain no-cors POST from it needs no preflight. So:
+// the body must be JSON (a cross-origin page cannot send that without a preflight, and the CP
+// answers none), Sec-Fetch-Site, when the browser sends it, must be same-origin, and Origin, when
+// sent, must be the Console's own host. A caller with neither header is not a browser; it needs the
+// member's login cookie, which the relays keep out of the workspace.
+func memberOriginRequestCheck(r *http.Request) *apiError {
+	mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mt != "application/json" {
+		return &apiError{http.StatusUnsupportedMediaType, "unsupported_media_type", "member writes take application/json"}
+	}
+	if s := r.Header.Get("Sec-Fetch-Site"); s != "" && s != "same-origin" {
+		return &apiError{http.StatusForbidden, "forbidden", "member writes are accepted from the Console's own origin only"}
+	}
+	if r.Header.Get("Origin") != "" && !checkWSOrigin(r) {
+		return &apiError{http.StatusForbidden, "forbidden", "member writes are accepted from the Console's own origin only"}
+	}
+	return nil
 }

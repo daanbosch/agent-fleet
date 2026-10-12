@@ -44,35 +44,53 @@ Agent is therefore a key the session holds as well.
    membership id, the CP identity id, `iat`, `exp` (60 s after `iat`) and a 128-bit nonce. The Agent rejects
    any mismatch with the request it received, a lifetime over 2 minutes, an `iat` more than 30 s ahead of its
    clock, an expired mark, and a nonce it has seen.
-5. **Replay cache.** The Agent keeps each nonce until its `exp`, at most 4,096. When full and nothing has
-   expired it refuses (503) rather than accept a mark it cannot remember: a full cache must never become a
-   replay window.
-6. **Which routes.** The CP signs exactly `POST /api/agents/memory/entries/{pin,revert,member-save}`
-   (`memberOriginRoutes`) and only when the workspace is the caller's own membership's. On every relayed
-   request (REST and SSE) it first deletes any `X-AF-Member-Origin` the browser sent. The Agent wraps the same
-   three routes in `memberorigin.Require`, and their handlers refuse again when no verified claims are in the
-   request context, so a route registered without the middleware stays shut.
+5. **Replay cache, and a fence for restarts.** The Agent keeps each nonce until its `exp`, at most 4,096.
+   When full and nothing has expired it refuses (503) rather than accept a mark it cannot remember: a full
+   cache must never become a replay window. The cache lives in the process, so a restart empties it; the
+   Agent therefore also refuses a mark whose `iat` is before its own start (whole seconds). A mark captured
+   before a restart cannot be replayed after it, as long as the CP's clock is not ahead of the Agent's by
+   more than the restart took (a container restart takes seconds; the skew accepted is 30 s).
+6. **Which routes, and what never reaches the Agent.** The CP signs exactly
+   `POST /api/agents/memory/entries/{pin,revert,member-save}` (`memberOriginRoutes`) and only when the
+   workspace is the caller's own membership's. Every relay to the Agent — REST, SSE and the preview relay
+   (HTTP, SSE and WebSocket, path and host form) — drops any `X-AF-Member-Origin` the browser sent. REST and
+   SSE also drop every cookie (no Agent route reads one; the Console's `af_session` among them) and the
+   gateway identity and access-token headers, as the preview relay already did: the member's login cookie
+   in the workspace would let a session have the CP sign anything. Before it signs, the CP also refuses
+   what another page could make the browser send with the member's cookie: a preview app on its own host
+   is same-site, so `SameSite=Lax` still sends the cookie, and a `text/plain` no-cors POST needs no
+   preflight. The body must be `application/json` (415 otherwise; a cross-origin page cannot send that
+   without a preflight the CP never answers), `Sec-Fetch-Site`, when present, must be `same-origin`, and
+   `Origin`, when present, must be the Console's own host or `PUBLIC_BASE_URL`'s (the WebSocket origin
+   rule). A caller sending neither header is not a browser and needs the login cookie itself. The Agent
+   also refuses a non-JSON body behind a valid mark. The Agent wraps the same three routes in
+   `memberorigin.Require`, and their handlers refuse again when no verified claims are in the request
+   context, so a route registered without the middleware stays shut.
 7. **Unsigned pin and revert are refused.** No compatibility window: the Console reaches these routes only
    through the CP, which signs them, so nothing legitimate sends them unsigned. An Agent older than the CP
    ignores the header (pin and revert behave as before, and `member-save` is a 404); a CP older than the Agent
    sends no mark and the Agent refuses — the feature is off, not open.
-8. **Author only when verified.** `member` / `console` is written as the author only by these three routes,
-   so only behind a valid mark. `member-save` runs the tools' own save (revision check, secret scan, limits),
-   is not gated by the switch (like pin and revert), cannot start a project, and leaves the project's
-   `project.json` as the sessions wrote it. The CP audits it as `memory.entry.save` with an id-shaped project
-   hint only.
-9. **Rotation.** `AF_MEMBER_ORIGIN_KEY_VERSION` (CP env, default 1) selects the signing key. Because a
-   workspace starts with the current and the next public key, raising it by one keeps every running workspace
-   verifying; the old private key is never used again, and workspaces started afterwards no longer accept it.
-   Raising it by more than one, or rotating `AF_MASTER_KEY`, leaves running workspaces refusing member writes
-   until they restart. `0` turns signing off (nothing injected, every member write refused).
+8. **Author only when verified — on these three routes.** pin, revert and `member-save` write the author
+   `member` / `console` only behind a valid mark. That is not yet true of every route that records
+   `member`: the claude and muse imports (`agent_memory_claude_import.go`, `agent_memory_muse_import.go`)
+   also commit as `member` and are still unsigned, so an import's author is the route it came by, not a
+   verified person, until #2014 brings them under the mark. `member-save` runs the tools' own save
+   (revision check, secret scan, limits), is not gated by the switch (like pin and revert), cannot start a
+   project, and leaves the project's `project.json` as the sessions wrote it. The CP audits it as
+   `memory.entry.save` with an id-shaped project hint only.
+9. **Rotation.** `AF_MEMBER_ORIGIN_KEY_VERSION` (CP env, default 1) selects the signing key. A workspace
+   holds the public keys of the version current at its last start and of the one after it. Raising the
+   version by one therefore keeps every workspace started under the previous version verifying; a second
+   raise before it restarts does not (one started with v1/v2 cannot verify v3), nor does raising it by more
+   than one or rotating `AF_MASTER_KEY`: such a workspace refuses member writes until it restarts. The old
+   private key is never used again. `0` turns signing off (nothing injected, every member write refused).
 
 ## Threat model
 
 - **In scope**: a session, or anything running in it, that holds `AGENT_TOKEN`, can set any header, can read
   the Agent's environment and files, and can capture a mark it sees in transit inside the workspace. It cannot
   produce a mark (no private key), reuse one for another route, query, body, workspace or member (all
-  signed), or replay one (nonce, expiry).
+  signed), or replay one (nonce, expiry, and the start-time fence across a restart).
 - **What the mark does not do.** It decides what the Agent's own routes accept; it does not make the store
   tamper-proof. A session with a shell can write the store's files and history directly, as the uid that owns
   them, and can replace binaries in `~/.local/bin` that the next start runs. That was already true of every
@@ -81,7 +99,11 @@ Agent is therefore a key the session holds as well.
   no private key there to read anyway.
 - **As strong as the CP's authentication.** The CP signs for whoever it resolves as the member. Under
   `AUTH=dev` it trusts every caller, so the mark adds nothing there; under `oauth` it needs the member's
-  session cookie, which is not in the workspace.
+  session cookie, which the relays keep out of the workspace (decision 6).
+- **The path-form preview is the Console's origin.** An app served under `/preview/{port}/` runs on the
+  Console's own origin, so neither `Origin` nor `Sec-Fetch-Site` sets it apart, and it can call every
+  Console API as the member, not only these routes. That is the reason [0062](0062-preview-subdomain.md)
+  decision 7 moved previews to their own hosts; the host form is covered above, the path form is not.
 - **Out of scope**: a compromised CP (it holds the master), and a stolen master key.
 
 ## Failure modes
@@ -93,6 +115,7 @@ Agent is therefore a key the session holds as well.
 | Mark for another request, workspace, member, key; expired; replayed | 403 `member_origin_invalid` |
 | Body over the CP's 2 MiB buffer | 413 at the CP; nothing reaches the Agent |
 | Request for another member's workspace | 403 at the CP; nothing is signed |
+| Body not `application/json`; `Sec-Fetch-Site` not `same-origin`; `Origin` not the Console's | 415 / 403 at the CP; nothing is signed |
 
 ## Rejected
 

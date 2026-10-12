@@ -20,6 +20,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"os"
 	"strings"
@@ -85,6 +86,10 @@ var (
 	mu     sync.Mutex
 	cfg    *config
 	nonces = map[string]int64{} // nonce -> exp (unix)
+	// startedAt fences replay across a restart: the nonce cache lives in this process only, so a
+	// mark issued before the process started is refused whatever the cache says. The comparison
+	// is in whole seconds; a capture, a restart and a replay inside one second is not a case.
+	startedAt = time.Now().Unix()
 )
 
 // Reload re-reads the env. The Agent reads it once on first use; tests change it.
@@ -194,6 +199,8 @@ func VerifyAt(r *http.Request, body []byte, t time.Time) (Claims, error) {
 		return Claims{}, invalid("issued in the future")
 	case !t.Before(time.Unix(cl.Expires, 0)):
 		return Claims{}, invalid("expired")
+	case cl.IssuedAt < startedAt:
+		return Claims{}, invalid("issued before this Agent started")
 	}
 	if _, seen := nonces[cl.Nonce]; seen {
 		return Claims{}, invalid("replayed")
@@ -244,6 +251,12 @@ func Require(maxBody int64, next http.Handler) http.Handler {
 			} else {
 				httpx.WriteErr(w, http.StatusForbidden, CodeInvalid, err.Error())
 			}
+			return
+		}
+		// The CP signs JSON only; a text/plain body is what a cross-origin page sends without a
+		// preflight, so it is refused here as well.
+		if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+			httpx.WriteErr(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "member writes take application/json")
 			return
 		}
 		r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, cl))

@@ -460,7 +460,8 @@ AF での保存で同名のものがあっても上書きしない。
 `entries/pin`・`entries/revert`・新しい `entries/member-save` に、CP だけが持つ Ed25519 鍵で署名する。署名は
 メソッド・パス・クエリ・本文・Workspace・メンバー・60 秒の期限・ノンスに結び付く。Agent は起動時に受け取った
 公開鍵で検証し、有効な印のないこの 3 ルートを拒否する（`AGENT_TOKEN` と `X-AF-Relay: cp` だけの要求を含む）。
-したがって作者 `member` / `console` は検証済みの印の後ろでしか記録されない。`entries/member-save`（作成・編集。
+したがってこの 3 ルートでは、作者 `member` / `console` は検証済みの印の後ろでしか記録されない。claude と
+muse の取り込みは #2014 まで、署名なしで `member` を記録する。`entries/member-save`（作成・編集。
 ツールと同じ版の確認・秘密情報のスキャン・上限、スイッチの対象外、新しいプロジェクトは作らない）を設定 >
 Agent memory に戻し、CP は `memory.entry.save` として監査する。印が変えないこと：シェルを持つセッションは今も
 ストアのファイルを直接書ける（決定 8 の理由はそのまま）。印が決めるのは Agent のルートで、ファイルではない。

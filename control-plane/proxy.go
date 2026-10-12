@@ -238,14 +238,13 @@ func (a agentProxyAPI) rest(w http.ResponseWriter, r *http.Request, res *resolve
 		return
 	}
 	req.Header = r.Header.Clone()
+	stripAgentRelayCredentials(req, r, a.mgr.emailHeader)
 	if rt.Token() != "" {
 		req.Header.Set("Authorization", "Bearer "+rt.Token()) // CP↔Agent auth
 	}
 	// A hint for the Agent's own log (ADR 0102 decision 4): an agent calling the Agent
 	// directly can set it too, so the Agent never decides anything on it.
 	req.Header.Set("X-AF-Relay", "cp")
-	// The member-origin mark is the CP's alone (ADR 0113): whatever the browser sent is dropped.
-	req.Header.Del(memberOriginHeader)
 	if mark != "" {
 		req.Header.Set(memberOriginHeader, mark)
 	}
@@ -359,11 +358,11 @@ func (a agentProxyAPI) stream(w http.ResponseWriter, r *http.Request, res *resol
 		return
 	}
 	req.Header = r.Header.Clone()
+	stripAgentRelayCredentials(req, r, a.mgr.emailHeader) // as rest; no stream route is signed
 	if rt.Token() != "" {
 		req.Header.Set("Authorization", "Bearer "+rt.Token())
 	}
 	req.Header.Set("X-AF-Relay", "cp") // the same log hint rest sets
-	req.Header.Del(memberOriginHeader) // no stream route is a member write (ADR 0113)
 	resp, err := agentRelayClient.Do(req)
 	if err != nil {
 		log.Printf("agent stream proxy: %s %s: %v (ctx err=%v)", r.Method, r.URL.Path, err, r.Context().Err())
