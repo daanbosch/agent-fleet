@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -20,10 +21,12 @@ import (
 // agentMemForgottenMax bounds the rows of one answer (a variable so a test can use a small one).
 var agentMemForgottenMax = 300
 
+// agentMemTombJudgeMax bounds how many memories one request judges (a few git calls each).
+// Candidates are ordered newest first, and those without a published change are dropped before the
+// budget is spent, so only the oldest published ones can fall outside it.
+var agentMemTombJudgeMax = 2000
+
 const (
-	// agentMemTombScanMax bounds how many tombstones one request judges, since each judged
-	// memory costs a few git calls. Past it the answer says truncated.
-	agentMemTombScanMax = 2000
 	// agentMemTombMaxSize: a tombstone holds a revision number. Anything bigger is not one.
 	agentMemTombMaxSize = 64
 )
@@ -32,7 +35,8 @@ const (
 // changes list gives its newest row, so Revertible says whether the commit can be restored.
 // Withheld counts names left out because the name failed the scan or the newest change of the
 // memory did; they are never listed. Truncated says memories that could be listed were left out
-// (more than one answer holds, or more tombstones than one request judges): narrow the scope.
+// (more than one answer holds, or more published tombstones than one request judges, the oldest
+// being left unjudged: withheld is then partial): narrow the scope.
 // Projects names every project that has a listable forgotten memory, cut or not, so the Console can
 // keep offering a scope whose rows did not fit.
 type agentMemForgottenWire struct {
@@ -148,10 +152,6 @@ func agentMemMemberForgotten(scope, project string) (agentMemForgottenWire, erro
 		names, bad := agentMemTombNames(s.rel)
 		out.Withheld += bad
 		for _, name := range names {
-			if len(cands) >= agentMemTombScanMax {
-				out.Truncated = true
-				break
-			}
 			cands = append(cands, agentMemTombCand{scope: s.scope, project: s.project, name: name, rel: s.rel + "/" + name + ".md"})
 			want[agentMemRepoPrefix+"/"+s.rel+"/"+name+".md"] = true
 		}
@@ -176,7 +176,22 @@ func agentMemMemberForgotten(scope, project string) (agentMemForgottenWire, erro
 	sort.SliceStable(found, func(i, j int) bool { return found[i].at.After(found[j].at) })
 
 	projects := map[string]bool{}
-	for _, c := range found {
+	addProject := func(id string) {
+		if id != "" && !projects[id] {
+			projects[id] = true
+			out.Projects = append(out.Projects, agentMemProjectInfo(id))
+		}
+	}
+	for i, c := range found {
+		if i >= agentMemTombJudgeMax {
+			// Out of judging budget, oldest first. The project is still offered (unless the
+			// memory is plainly live), and the answer says it is not complete.
+			out.Truncated = true
+			if _, err := os.Lstat(filepath.Join(agentMemDir(), filepath.FromSlash(c.rel))); err != nil {
+				addProject(c.project)
+			}
+			continue
+		}
 		agentMemMu.RLock()
 		v, err := agentMemMemberChangeAt(c.scope, c.name, c.rel, c.commit)
 		agentMemMu.RUnlock()
@@ -192,10 +207,7 @@ func agentMemMemberForgotten(scope, project string) (agentMemForgottenWire, erro
 		if v.Live {
 			continue
 		}
-		if c.project != "" && !projects[c.project] {
-			projects[c.project] = true
-			out.Projects = append(out.Projects, agentMemProjectInfo(c.project))
-		}
+		addProject(c.project)
 		if len(out.Forgotten) >= agentMemForgottenMax {
 			out.Truncated = true
 			continue

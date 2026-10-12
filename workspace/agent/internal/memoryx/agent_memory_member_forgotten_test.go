@@ -292,3 +292,52 @@ func TestAgentMemoryMemberForgottenNamesProjectsBeyondTheCut(t *testing.T) {
 		t.Fatalf("project scope: %s", body)
 	}
 }
+
+// Tombstones without a published change cost nothing against the judging budget and cannot hide a
+// later scope: with more of them than the budget, the project that sorts after them is still
+// listed and named.
+func TestAgentMemoryMemberForgottenUnpublishedTombstonesSpendNoBudget(t *testing.T) {
+	_, _, _ = agentMemTestEnv(t)
+	c := agentMemCallerT(t, "claude-main")
+	old := agentMemTombJudgeMax
+	agentMemTombJudgeMax = 5
+	t.Cleanup(func() { agentMemTombJudgeMax = old })
+	proj := "projects/" + c.Project.ID
+	if _, err := agentMemCheckDir(proj, true); err != nil {
+		t.Fatal(err)
+	}
+	forgeForgotten(t, proj, "only-gone", "2026-03-01T00:00:00Z", false)
+	tomb, _ := agentMemCheckDir("user/"+agentMemTombDir, true)
+	for i := 0; i < 20; i++ {
+		if err := os.WriteFile(filepath.Join(tomb, "junk"+string(rune('a'+i))), []byte("1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, w, body := forgottenGet(t, "")
+	if code != http.StatusOK || namesOf(w) != "only-gone" || w.Truncated || len(w.Projects) != 1 {
+		t.Fatalf("unpublished tombstones: %d %s", code, body)
+	}
+}
+
+// Past the judging budget the oldest published tombstones are left unjudged and the answer says
+// so: the newest are judged first, so an old "a" never displaces a newer "z", and the project of
+// an unjudged memory is still offered.
+func TestAgentMemoryMemberForgottenBudgetSpendsOnTheNewestFirst(t *testing.T) {
+	_, _, _ = agentMemTestEnv(t)
+	c := agentMemCallerT(t, "claude-main")
+	old := agentMemTombJudgeMax
+	agentMemTombJudgeMax = 2
+	t.Cleanup(func() { agentMemTombJudgeMax = old })
+	proj := "projects/" + c.Project.ID
+	if _, err := agentMemCheckDir(proj, true); err != nil {
+		t.Fatal(err)
+	}
+	forgeForgotten(t, "user", "a", "2026-01-01T00:00:00Z", false)
+	forgeForgotten(t, "user", "b", "2026-02-01T00:00:00Z", false)
+	forgeForgotten(t, "user", "z", "2026-03-01T00:00:00Z", false)
+	forgeForgotten(t, proj, "oldest", "2025-12-01T00:00:00Z", false)
+	code, w, body := forgottenGet(t, "")
+	if code != http.StatusOK || namesOf(w) != "z,b" || !w.Truncated || len(w.Projects) != 1 || w.Projects[0].ID != c.Project.ID {
+		t.Fatalf("budget: %d %s", code, body)
+	}
+}

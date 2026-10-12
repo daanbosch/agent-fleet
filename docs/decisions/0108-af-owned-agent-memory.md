@@ -528,6 +528,8 @@ restore still goes through the revert route with its newest-change and `expectRe
 The newest rows are chosen after every tombstone has been judged (by the newest change's time, found
 in one history pass), so the cut never drops a newer memory for an older one, and `truncated` is set
 only when a listable row was left out. `projects` names every project with a listable forgotten
-memory, cut or not, so the Console keeps offering a scope whose rows did not fit. One request judges
-at most 2000 tombstones (`truncated` past that) and takes the read lock per memory, not across the
-request.
+memory, cut or not, so the Console keeps offering a scope whose rows did not fit. Every tombstone is looked up in that one
+history pass and those without a published change are dropped; the scan of the rest is budgeted at 2000
+memories per request, newest first. Past the budget the oldest are left unjudged, their project is still
+named (unless the memory is plainly live), `truncated` is set and `withheld` is partial: narrow the scope.
+The read lock is taken per memory, not across the request.
