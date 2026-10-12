@@ -151,7 +151,8 @@ func (f *memberFleet) itemState(id string) string {
 	return rows[0]
 }
 
-// race runs every fn at the same instant and returns their results in order.
+// race dispatches every fn concurrently from one barrier and returns their results in order.
+// It does not prove the requests overlapped inside the CP; the unit tests own that.
 func race(fns ...func() (int, map[string]any)) ([]int, []map[string]any) {
 	codes, outs := make([]int, len(fns)), make([]map[string]any, len(fns))
 	start := make(chan struct{})
@@ -175,6 +176,37 @@ func (f *memberFleet) inboxRowCounts() string {
 	return strings.Join(f.sql(`SELECT
 		(SELECT count(*) FROM inbox_item), (SELECT count(*) FROM inbox_participant),
 		(SELECT count(*) FROM inbox_attachment), (SELECT count(*) FROM inbox_sender_rule)`), "")
+}
+
+// markSeen moves the member's read cursor to the newest change and returns that seq, so a
+// later unseen item can only come from a change made after this point.
+func (m *member) markSeen() int64 {
+	m.t.Helper()
+	seq := m.inbox().Mailbox.LastSeq
+	m.postJSON("/api/inbox/cursor", map[string]any{"seq": seq}, 200)
+	return seq
+}
+
+// waitMailboxFrame waits for an inbox stream frame whose lastSeq is past after, and fails
+// if the stream ends first.
+func waitMailboxFrame(t *testing.T, s *eventStream, after int64, what string) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		frame, ok := s.next(time.Until(deadline))
+		if !ok {
+			break
+		}
+		var f struct {
+			Data struct {
+				LastSeq int64 `json:"lastSeq"`
+			} `json:"data"`
+		}
+		if json.Unmarshal([]byte(frame), &f) == nil && f.Data.LastSeq > after {
+			return
+		}
+	}
+	t.Fatalf("%s: no stream frame past seq %d (stream open: %v, err: %v)", what, after, s.isOpen(), s.err)
 }
 
 func noInboxFleet(t *testing.T) *memberFleet {
@@ -330,6 +362,9 @@ func TestInboxTenants(t *testing.T) {
 	}
 	if frame, ok := s2.next(4 * time.Second); ok {
 		t.Fatalf("A-3: bob's T2 stream sent %s on a T1 send", frame)
+	}
+	if !s2.isOpen() { // a dropped connection would be silent too
+		t.Fatalf("A-3: bob's T2 stream ended during the silence: %v", s2.err)
 	}
 	if l := b2.inbox(); len(l.Items) != 0 || l.Mailbox.Unseen != 0 {
 		t.Fatalf("A-3: bob's T2 list holds %d items, unseen %d; want 0, 0", len(l.Items), l.Mailbox.Unseen)
@@ -521,10 +556,7 @@ func TestInboxClaimRaces(t *testing.T) {
 		}
 		got := b.inboxGet(it.ID)
 		switch codes[0] {
-		case 200: // claimed first: bob is told it was withdrawn
-			if got.State != "withdrawn" || !got.Unseen {
-				t.Fatalf("R-2 round %d: bob sees %+v after the withdraw, want withdrawn and unseen", i, got)
-			}
+		case 200: // claimed first; that bob is told is checked in order below
 		case 409:
 			if _, state, _ := conflictOf(outs[0]); state != "withdrawn" {
 				t.Fatalf("R-2 round %d: late claim's 409 = %v, want withdrawn", i, outs[0])
@@ -535,6 +567,25 @@ func TestInboxClaimRaces(t *testing.T) {
 		if got.State != "withdrawn" || got.CanClaim {
 			t.Fatalf("R-2 round %d: bob holds %+v, want withdrawn with nothing to claim", i, got)
 		}
+	}
+
+	// R-2, what bob is told: the race above can order the claim after the cursor, so the
+	// notice itself is checked here in order. Bob holds the claim and has seen everything;
+	// the withdraw must reach his mailbox (a new seq, a stream frame) and the item unseen.
+	notice := s2.send("request", "R-2 notice", b)
+	b.mustAct(notice.ID, "claim", 200)
+	stream := b.openStream("/api/inbox/stream")
+	seen := b.markSeen()
+	if got := b.inboxGet(notice.ID); got.Unseen {
+		t.Fatalf("R-2: the claimed request is unseen after the cursor moved: %+v", got)
+	}
+	s2.mustAct(notice.ID, "withdraw", 200)
+	waitMailboxFrame(t, stream, seen, "R-2: bob's stream after the withdraw")
+	if l := b.inbox(); l.Mailbox.LastSeq <= seen {
+		t.Fatalf("R-2: bob's mailbox did not move on the withdraw (lastSeq %d, seen %d)", l.Mailbox.LastSeq, seen)
+	}
+	if got := b.inboxGet(notice.ID); got.State != "withdrawn" || !got.Unseen {
+		t.Fatalf("R-2: bob sees %+v after the withdraw, want withdrawn and unseen", got)
 	}
 
 	// R-3: done against withdraw, then release against withdraw.
@@ -603,7 +654,7 @@ func TestInboxClaimRaces(t *testing.T) {
 func TestInboxMemberRemoval(t *testing.T) {
 	t.Parallel()
 	f := startMemberFleet(t)
-	a, b, c := f.addMember("alice"), f.addMember("bob"), f.addMember("carol")
+	a, b, c, d := f.addMember("alice"), f.addMember("bob"), f.addMember("carol"), f.addMember("dan")
 	aID, bID := a.membershipID(), b.membershipID()
 	// A workspace record for alice and bob, so M-7 meets the hard delete's real precondition.
 	// GET /api/workspace is a withResolved route: it creates the record, it starts nothing.
@@ -638,9 +689,15 @@ func TestInboxMemberRemoval(t *testing.T) {
 	if _, ok := stream.next(10 * time.Second); !ok {
 		t.Fatalf("M-5: bob's stream sent no first frame")
 	}
+	if !stream.isOpen() {
+		t.Fatalf("M-5: bob's stream ended before the removal: %v", stream.err)
+	}
 	b.remove()
 	if !stream.endsWithin(10 * time.Second) {
 		t.Fatalf("M-5: bob's stream is still open after the removal")
+	}
+	if stream.err != nil {
+		t.Fatalf("M-5: bob's stream broke instead of ending: %v", stream.err)
 	}
 	if code, body := b.do(http.MethodGet, "/api/inbox", nil); code != http.StatusUnauthorized && code != http.StatusForbidden {
 		t.Fatalf("M-5: removed bob lists the inbox: %d %s, want 401 or 403", code, truncate(body))
@@ -685,13 +742,24 @@ func TestInboxMemberRemoval(t *testing.T) {
 	m3open := a.send("request", "M-3 open", c)
 	m3claimed := a.send("request", "M-3 claimed", c)
 	c.mustAct(m3claimed.ID, "claim", 200)
+	cStream := c.openStream("/api/inbox/stream")
+	seen := c.markSeen()
+	for _, id := range []string{m3open.ID, m3claimed.ID} {
+		if got := c.inboxGet(id); got.Unseen {
+			t.Fatalf("M-3: %s is unseen for carol before the removal", id)
+		}
+	}
 	a.remove()
+	waitMailboxFrame(t, cStream, seen, "M-3: carol's stream after alice's removal")
+	if l := c.inbox(); l.Mailbox.LastSeq <= seen {
+		t.Fatalf("M-3: carol's mailbox did not move on the removal (lastSeq %d, seen %d)", l.Mailbox.LastSeq, seen)
+	}
 	for _, id := range []string{m3open.ID, m3claimed.ID} {
 		if got := state(id); got != "withdrawn" {
 			t.Fatalf("M-3: alice's request is %s after her removal, want withdrawn", got)
 		}
 		if got := c.inboxGet(id); got.State != "withdrawn" || got.CanClaim || !got.Unseen {
-			t.Fatalf("M-3: carol sees %+v, want withdrawn, unseen, nothing to do", got)
+			t.Fatalf("M-3: carol sees %+v, want withdrawn, newly unseen, nothing to do", got)
 		}
 	}
 
@@ -734,24 +802,69 @@ func TestInboxMemberRemoval(t *testing.T) {
 	}
 
 	// --- M-8: the purge, twice ---
+	// What the purge has left to remove here is planted with the CP stopped, as the passing
+	// of time and an older CP's hard delete would leave it: a DM and a finished request past
+	// their 90 days, and mailbox and rule rows of a membership that no longer exists. Their
+	// disappearance is the barrier that the start-up purge has run, which /healthz is not.
+	dm := c.send("dm", "M-8 expired dm", d)
+	done := c.send("request", "M-8 expired request", d)
+	d.mustAct(done.ID, "claim", 200)
+	d.mustAct(done.ID, "done", 200)
+	kept := c.send("dm", "M-8 live dm", d)
+	plantOrphans := func(id string) {
+		f.sqlWhileStopped(`INSERT INTO inbox_mailbox (membership_id, last_seq) VALUES (?, 1)`, id)
+		f.sqlWhileStopped(`INSERT INTO inbox_sender_rule (membership_id, sender_membership_id, rule) VALUES (?, ?, 'block')`, id, c.membershipID())
+	}
+	planted := func(id string) int {
+		return f.count(`SELECT (SELECT count(*) FROM inbox_mailbox WHERE membership_id=?)
+			+ (SELECT count(*) FROM inbox_sender_rule WHERE membership_id=?)`, id, id)
+	}
+	cID := c.membershipID()
+	f.cp.stop()
+	const longAgo = "2000-01-01T00:00:00Z"
+	f.sqlWhileStopped(`UPDATE inbox_item SET created_at=? WHERE id=?`, longAgo, dm.ID)
+	f.sqlWhileStopped(`UPDATE inbox_item SET final_at=? WHERE id=?`, longAgo, done.ID)
+	plantOrphans("e2e-gone-1")
+	f.cp.start()
+	waitFor(t, 30*time.Second, "the first purge removed what was planted", func() (bool, string) {
+		n := f.count(`SELECT count(*) FROM inbox_item WHERE id IN (?, ?)`, dm.ID, done.ID) + planted("e2e-gone-1")
+		return n == 0, fmt.Sprint(n, " planted rows left")
+	})
 	orphans := `SELECT
 		(SELECT count(*) FROM inbox_participant p WHERE NOT EXISTS (SELECT 1 FROM membership m WHERE m.id=p.membership_id))
 		+ (SELECT count(*) FROM inbox_mailbox x WHERE NOT EXISTS (SELECT 1 FROM membership m WHERE m.id=x.membership_id))
+		+ (SELECT count(*) FROM inbox_sender_rule x WHERE NOT EXISTS (SELECT 1 FROM membership m WHERE m.id=x.membership_id))
 		+ (SELECT count(*) FROM inbox_participant p WHERE NOT EXISTS (SELECT 1 FROM inbox_item i WHERE i.id=p.item_id))
 		+ (SELECT count(*) FROM inbox_attachment x WHERE NOT EXISTS (SELECT 1 FROM inbox_item i WHERE i.id=x.item_id))
 		+ (SELECT count(*) FROM inbox_item i WHERE NOT EXISTS (SELECT 1 FROM inbox_participant p
 			JOIN membership m ON m.id=p.membership_id WHERE p.item_id=i.id AND m.status='active'))`
-	f.cp.restart()
 	if n := f.count(orphans); n != 0 {
 		t.Fatalf("M-8: %d orphan inbox rows after the first purge", n)
 	}
-	first := f.inboxRowCounts()
-	f.cp.restart()
+	// Every inbox table, the live members' mailboxes included: the second purge must keep
+	// all of it. One more planted orphan is its barrier.
+	tables := `SELECT (SELECT count(*) FROM inbox_item), (SELECT count(*) FROM inbox_participant),
+		(SELECT count(*) FROM inbox_attachment), (SELECT count(*) FROM inbox_sender_rule),
+		(SELECT count(*) FROM inbox_mailbox), (SELECT count(*) FROM inbox_session_origin)`
+	if n := f.count(`SELECT count(*) FROM inbox_mailbox WHERE membership_id IN (?, ?)`, cID, d.membershipID()); n != 2 {
+		t.Fatalf("M-8: %d live mailboxes, want carol's and dan's", n)
+	}
+	first := strings.Join(f.sql(tables), "")
+	f.cp.stop()
+	plantOrphans("e2e-gone-2")
+	f.cp.start()
+	waitFor(t, 30*time.Second, "the second purge ran", func() (bool, string) {
+		n := planted("e2e-gone-2")
+		return n == 0, fmt.Sprint(n, " planted rows left")
+	})
 	if n := f.count(orphans); n != 0 {
 		t.Fatalf("M-8: %d orphan inbox rows after the second purge", n)
 	}
-	if again := f.inboxRowCounts(); again != first {
+	if again := strings.Join(f.sql(tables), ""); again != first {
 		t.Fatalf("M-8: the second purge changed the inbox tables: %s -> %s", first, again)
+	}
+	if got := d.inboxGet(kept.ID); got.Body != "M-8 live dm" {
+		t.Fatalf("M-8: the purge took a live DM: %+v", got)
 	}
 	if got := c.inboxGet(m3open.ID); got.Body != "M-3 open" {
 		t.Fatalf("M-8: the purge took carol's item: %+v", got)

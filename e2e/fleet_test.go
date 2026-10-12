@@ -243,9 +243,17 @@ func (p *cpProcess) start() {
 // restart stops the CP (SIGTERM, then kill) and starts it again.
 func (p *cpProcess) restart() {
 	p.t.Helper()
-	stopCP(p.cmd)
+	p.stop()
 	p.start()
 }
+
+// stop stops the CP; start brings it back.
+func (p *cpProcess) stop() {
+	stopCP(p.cmd)
+	p.cmd = nil
+}
+
+func (p *cpProcess) running() bool { return p.cmd != nil }
 
 // sendPrompt types a prompt into the session's pane, absorbing the 409 that tmux
 // returns for a moment right after it starts.

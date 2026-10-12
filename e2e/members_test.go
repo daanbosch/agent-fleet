@@ -410,10 +410,12 @@ func (m *member) notifications() []map[string]any {
 // --- a member's event stream ------------------------------------------------
 
 // eventStream is a member's open server-sent-events connection. Each data: payload arrives
-// on frames; closed is closed when the server ends the stream or the connection drops.
+// on frames; closed is closed when the stream ends, and err then says how: nil for a clean
+// end of the response, the read error for a dropped connection.
 type eventStream struct {
 	frames chan string
 	closed chan struct{}
+	err    error
 }
 
 // openStream opens path as an SSE stream and fails unless it answers 200. The connection is
@@ -449,6 +451,7 @@ func (m *member) openStream(path string) *eventStream {
 				}
 			}
 		}
+		s.err = sc.Err() // written before closed is closed, read only after it
 	}()
 	return s
 }
@@ -460,6 +463,17 @@ func (s *eventStream) next(d time.Duration) (string, bool) {
 		return f, true
 	case <-time.After(d):
 		return "", false
+	}
+}
+
+// isOpen reports whether the stream has not ended. A silence is only evidence while the
+// stream is still open: a dropped connection is silent too.
+func (s *eventStream) isOpen() bool {
+	select {
+	case <-s.closed:
+		return false
+	default:
+		return true
 	}
 }
 
@@ -479,14 +493,31 @@ func (s *eventStream) endsWithin(d time.Duration) bool {
 // the e2e module keeps no dependencies, and opens the database read-only (mode=ro), so a
 // query cannot change what the CP sees.
 const sqlQuery = `import json, sqlite3, sys, urllib.parse
-db = sqlite3.connect("file:" + urllib.parse.quote(sys.argv[1]) + "?mode=ro", uri=True, timeout=10)
+db = sqlite3.connect("file:" + urllib.parse.quote(sys.argv[1]) + "?mode=" + sys.argv[4], uri=True, timeout=10)
 for row in db.execute(sys.argv[2], json.loads(sys.argv[3])):
     print("|".join("" if v is None else str(v) for v in row))
+db.commit()
 `
 
 // sql runs a query against the CP's SQLite database and returns each row as its columns
 // joined by "|". It is the checklist's "look in the table" observation point.
 func (f *memberFleet) sql(query string, args ...any) []string {
+	f.t.Helper()
+	return f.runSQL("ro", query, args...)
+}
+
+// sqlWhileStopped changes the CP's database, for state only an older CP or the passing of
+// time would leave behind. It refuses while the CP runs: the CP must find the change at its
+// next start, not race it.
+func (f *memberFleet) sqlWhileStopped(query string, args ...any) {
+	f.t.Helper()
+	if f.cp.running() {
+		f.t.Fatalf("sqlWhileStopped with the CP running: %s", query)
+	}
+	f.runSQL("rw", query, args...)
+}
+
+func (f *memberFleet) runSQL(mode, query string, args ...any) []string {
 	f.t.Helper()
 	py, err := exec.LookPath("python3")
 	if err != nil {
@@ -497,7 +528,7 @@ func (f *memberFleet) sql(query string, args ...any) []string {
 	}
 	a, _ := json.Marshal(args)
 	var stderr bytes.Buffer
-	cmd := exec.Command(py, "-I", "-c", sqlQuery, filepath.Join(f.dataDir, "e2e-cp.db"), query, string(a))
+	cmd := exec.Command(py, "-I", "-c", sqlQuery, filepath.Join(f.dataDir, "e2e-cp.db"), query, string(a), mode)
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil || stderr.Len() > 0 { // a warning is a query to fix, not noise to parse past
