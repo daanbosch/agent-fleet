@@ -34,6 +34,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -503,6 +504,23 @@ func agentMemScanText(path, text string) []memorySecretFinding {
 // shown under, so the index does not rescan every file on every call.
 var agentMemScanCache sync.Map // sha256(raw) + "\x00" + name -> bool (true = clean)
 
+// agentMemScanRuns counts verdicts computed rather than found in agentMemScanCache. Tests read
+// it to tell a rescan from a hit without timing anything.
+var agentMemScanRuns atomic.Int64
+
+// agentMemWarmScan fills agentMemScanCache for what c can read, without agentMemMu. Readers call
+// it before taking the read lock so a cold scan (regex over every file: measured ~1.6 s for 500
+// files, all of it in the scan) does not hold up a writer queued behind the lock.
+// Race-free because the verdict is a pure function of the bytes read and the key is their
+// hash: a file replaced meanwhile only leaves an unused entry, and the locked read that follows
+// re-reads the file and still goes through agentMemClean, so nothing unscanned is returned.
+// Errors are ignored; the locked read reports them.
+func agentMemWarmScan(c agentMemCaller) {
+	for _, scope := range agentMemScopes(c) {
+		_, _, _ = agentMemLoadScope(scope, c)
+	}
+}
+
 // agentMemPublished is every value of an entry a reader is shown, decoded. It is what gets
 // scanned: the raw file can hide a value behind a JSON escape (\u0041) or an escaped quote.
 func agentMemPublished(e agentMemEntry) string {
@@ -519,9 +537,19 @@ func agentMemClean(raw []byte, e agentMemEntry) bool {
 	if v, ok := agentMemScanCache.Load(key); ok {
 		return v.(bool)
 	}
+	agentMemScanRuns.Add(1)
 	clean := len(agentMemScanText("", string(raw))) == 0 && len(agentMemScanText("", agentMemPublished(e))) == 0
 	agentMemScanCache.Store(key, clean)
 	return clean
+}
+
+// agentMemPrimeScan records the verdict on a file just written, judged exactly as a reader
+// would (parsed back from the bytes on disk), so the first read after a save finds it cached.
+func agentMemPrimeScan(data []byte, scope, name string) {
+	if e, ok := agentMemParse(data); ok {
+		e.Name, e.Scope = name, scope
+		agentMemClean(data, e)
+	}
 }
 
 // agentMemLoaded is one stored file as read: its entry, or why it is withheld.
@@ -629,6 +657,7 @@ type agentMemIndex struct {
 
 // agentMemListIndex ranks what the caller sees and applies the byte budget (0 = default).
 func agentMemListIndex(c agentMemCaller, budget int) (agentMemIndex, error) {
+	agentMemWarmScan(c)
 	agentMemMu.RLock()
 	defer agentMemMu.RUnlock()
 	out := agentMemIndex{Project: c.Project, Entries: []agentMemEntry{}}
@@ -980,6 +1009,7 @@ func agentMemSave(c agentMemCaller, req agentMemSaveReq, now time.Time) (agentMe
 		agentMemRemoveTomb(rel, req.Name)
 		agentMemClearUsage(rel, req.Name)
 	}
+	agentMemPrimeScan(data, req.Scope, req.Name)
 	return agentMemWriteResult{Name: e.Name, Scope: e.Scope, Revision: e.Revision, Commit: rev, Created: !exists,
 		Warnings: agentMemSaveWarnings(req)}, nil
 }
