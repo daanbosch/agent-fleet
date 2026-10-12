@@ -91,6 +91,10 @@ type InboxRetention struct {
 // InboxStore is the inbox's narrow view of the store.
 type InboxStore interface {
 	CreateInboxItem(ctx context.Context, it InboxItem, recipients []string, lim InboxSendLimits) (InboxSendResult, error)
+	CreateInboxItemWith(ctx context.Context, it InboxItem, recipients []string, lim InboxSendLimits, extras InboxSendExtras) (InboxSendResult, error)
+	ListInboxAttachments(ctx context.Context, itemID string) ([]InboxAttachment, error)
+	TakeInInboxRecipe(ctx context.Context, itemID, membershipID string, m Memo) (Memo, InboxTakeIn, error)
+	FindMemoByOrigin(ctx context.Context, itemID, membershipID string) (Memo, bool, error)
 	GetInboxItem(ctx context.Context, id string) (InboxItem, bool, error)
 	ListInboxParticipants(ctx context.Context, itemID string) ([]InboxParticipant, error)
 	ListInboxEntries(ctx context.Context, membershipID string, ret InboxRetention) ([]InboxEntry, error)
@@ -270,6 +274,13 @@ func (s *SQL) inboxTx(ctx context.Context, f func(tx *sqlTx) (bool, error)) (boo
 // sender's limits in the same transaction. Every mailbox involved is locked first, so two
 // sends by the same sender queue behind each other and cannot both pass a count.
 func (s *SQL) CreateInboxItem(ctx context.Context, it InboxItem, recipients []string, lim InboxSendLimits) (InboxSendResult, error) {
+	return s.CreateInboxItemWith(ctx, it, recipients, lim, InboxSendExtras{})
+}
+
+// CreateInboxItemWith is CreateInboxItem with the item's attachments and the shares a
+// session attachment grants, all in the one transaction: if any part fails, nothing of the
+// item, its attachments or its shares is kept (decision 5).
+func (s *SQL) CreateInboxItemWith(ctx context.Context, it InboxItem, recipients []string, lim InboxSendLimits, extras InboxSendExtras) (InboxSendResult, error) {
 	var out InboxSendResult
 	_, err := s.inboxTx(ctx, func(tx *sqlTx) (bool, error) {
 		if err := lockMemberships(ctx, tx, append([]string{it.SenderMembershipID}, recipients...)); err != nil {
@@ -358,6 +369,9 @@ func (s *SQL) CreateInboxItem(ctx context.Context, it InboxItem, recipients []st
 				VALUES(?,?,'recipient','unread')`, it.ID, rid); err != nil {
 				return false, err
 			}
+		}
+		if err := insertInboxExtras(ctx, tx, it, extras); err != nil {
+			return false, err
 		}
 		if err := bumpInboxItem(ctx, tx, it.ID); err != nil {
 			return false, err
@@ -899,6 +913,9 @@ func inboxMembershipInactiveTx(ctx context.Context, tx *sqlTx, membershipID, now
 		if _, err := tx.ExecContext(ctx, `DELETE FROM inbox_participant WHERE item_id=?`, id); err != nil {
 			return err
 		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM inbox_attachment WHERE item_id=?`, id); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM inbox_item WHERE id=?`, id); err != nil {
 			return err
 		}
@@ -945,11 +962,15 @@ func (s *SQL) PurgeInbox(ctx context.Context, ret InboxRetention) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	// The participant rows of the items just deleted go with them. ON DELETE CASCADE does
-	// that only where foreign keys are enforced, so it is spelled out.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM inbox_participant
-		WHERE NOT EXISTS (SELECT 1 FROM inbox_item i WHERE i.id=inbox_participant.item_id)`); err != nil {
-		return 0, err
+	// The participant rows and attachments of the items just deleted go with them. ON
+	// DELETE CASCADE does that only where foreign keys are enforced, so it is spelled out.
+	for _, q := range []string{
+		`DELETE FROM inbox_participant WHERE NOT EXISTS (SELECT 1 FROM inbox_item i WHERE i.id=inbox_participant.item_id)`,
+		`DELETE FROM inbox_attachment WHERE NOT EXISTS (SELECT 1 FROM inbox_item i WHERE i.id=inbox_attachment.item_id)`,
+	} {
+		if _, err := tx.ExecContext(ctx, q); err != nil {
+			return 0, err
+		}
 	}
 	return int(n), tx.Commit()
 }

@@ -15,7 +15,7 @@ import { useToast } from "../../ui/ToastProvider.tsx";
 import { t, useT } from "../../lib/i18n/index.ts";
 import { errText } from "../../core/api/client.ts";
 import { memoFlush } from "./api.ts";
-import { composeMemoMessage } from "./compose.ts";
+import { composeMemoMessage, splitForSend } from "./compose.ts";
 import { FILE_PROMPT } from "../../lib/pastedImages.ts";
 import { useSessionsStore } from "../sessions/store.ts";
 import { useLaunchSeed } from "../repos/store.ts";
@@ -57,7 +57,12 @@ export function SendMemoModal({ memos, onClose, onSent }: SendMemoModalProps) {
   const tr = useT();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [assistants, setAssistants] = useState<Assistant[]>([]);
-  const [text, setText] = useState(() => composeMemoMessage(memos));
+  // Memos taken in from the inbox are sent on their own (ADR 0111 decision 3). With other
+  // memos in the selection only a running session can take them, one message each; the
+  // editable text is the member's own memos.
+  const { own, origins } = useMemo(() => splitForSend(memos), [memos]);
+  const mixed = origins.length > 0 && memos.length > 1;
+  const [text, setText] = useState(() => composeMemoMessage(mixed ? own : memos));
   const [target, setTarget] = useState<Target | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -85,11 +90,12 @@ export function SendMemoModal({ memos, onClose, onSent }: SendMemoModalProps) {
   // Default target: the top-ranked alive session, else launching a new one.
   useEffect(() => {
     if (target) return;
-    setTarget(aliveSessions[0] ? { type: "session", name: aliveSessions[0].name } : { type: "new" });
-  }, [aliveSessions, target]);
+    if (aliveSessions[0]) setTarget({ type: "session", name: aliveSessions[0].name });
+    else if (!mixed) setTarget({ type: "new" });
+  }, [aliveSessions, target, mixed]);
 
   const isNew = target?.type === "new";
-  const canSend = !!target && !busy && text.trim().length > 0;
+  const canSend = !!target && !busy && (text.trim().length > 0 || (mixed && own.length === 0)) && (!mixed || target.type === "session");
 
   const send = async () => {
     if (!target || busy) return;
@@ -99,9 +105,34 @@ export function SendMemoModal({ memos, onClose, onSent }: SendMemoModalProps) {
     const outText = appendImagePaths(text, memos);
     try {
       if (target.type === "session") {
-        const res = await memoFlush(target.name, ids, outText);
+        let res: { sent?: number; error?: unknown } = { sent: 0 };
+        if (!mixed) {
+          res = await memoFlush(target.name, ids, outText);
+        } else {
+          // The member's own memos as edited, then each taken-in memo as a message of its
+          // own; the server composes those and heads them with their origin.
+          let sent = 0;
+          if (own.length > 0) {
+            const r = await memoFlush(target.name, own.map((m) => m.id), appendImagePaths(text, own));
+            if (r.error) {
+              toast(errText(r.error as never) || t("common.send_failed"));
+              return;
+            }
+            sent += r.sent ?? own.length;
+          }
+          for (const o of origins) {
+            const r = await memoFlush(target.name, [o.id], "");
+            if (r.error) {
+              toast(errText(r.error as never) || t("common.send_failed"));
+              onSent();
+              return;
+            }
+            sent += r.sent ?? 1;
+          }
+          res = { sent };
+        }
         if (res.error) {
-          toast(errText(res.error) || t("common.send_failed"));
+          toast(errText(res.error as never) || t("common.send_failed"));
           return;
         }
         const s = sessions.find((x) => x.name === target.name);
@@ -123,6 +154,8 @@ export function SendMemoModal({ memos, onClose, onSent }: SendMemoModalProps) {
         // Seed the launch hub's first prompt and open it — the launch itself (repo /
         // agent / worktree) happens in the hub. Memos stay queued until then.
         setSeed(outText);
+        // A lone memo taken in from the inbox: the session it starts carries its provenance.
+        if (origins.length === 1 && memos.length === 1) useLaunchSeed.getState().setInboxMemo(origins[0].id);
         openStart();
         toast(t("memo.new_session_started"), { kind: "success" });
         onClose();
@@ -188,8 +221,8 @@ export function SendMemoModal({ memos, onClose, onSent }: SendMemoModalProps) {
               </button>
             ))}
 
-            <div className="memo-tgroup">{tr("memo.target_other")}</div>
-            <button
+            {!mixed && <div className="memo-tgroup">{tr("memo.target_other")}</div>}
+            {!mixed && <button
               type="button"
               className={"memo-tgt" + (on({ type: "new" }) ? " on" : "")}
               onClick={() => setTarget({ type: "new" })}
@@ -202,8 +235,8 @@ export function SendMemoModal({ memos, onClose, onSent }: SendMemoModalProps) {
                 <span className="memo-tgt-sub">{tr("memo.target_new_sub")}</span>
               </span>
               <span className="memo-tgt-state new">NEW</span>
-            </button>
-            {assistants.map((a) => (
+            </button>}
+            {!mixed && assistants.map((a) => (
               <button
                 key={a.id}
                 type="button"
@@ -220,6 +253,11 @@ export function SendMemoModal({ memos, onClose, onSent }: SendMemoModalProps) {
               </button>
             ))}
           </div>
+          {mixed && (
+            <div className="ui-field-hint memo-origin-hint" role="note">
+              {tr("inbox.memo_send_separately", { n: String(origins.length) })}
+            </div>
+          )}
           <div className="ui-field-hint">
             {isNew ? tr("memo.new_hint") : target?.type === "assistant" ? tr("memo.assistant_hint") : ""}
           </div>

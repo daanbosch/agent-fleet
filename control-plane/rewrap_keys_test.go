@@ -104,6 +104,8 @@ func seedLegacyRows(t *testing.T, st *store.SQL, local *localCustodian) (map[str
 	exec(`INSERT INTO inbox_item(id, tenant_id, sender_membership_id, kind, state, ciphertext, key_ref, created_at, updated_at)
 		VALUES('I1', ?, ?, 'request', 'open', ?, ?, ?, ?)`,
 		tn.ID, owner, put("inbox_item", "I1", tn.ID, []byte("please look at the flaky test")), tn.ID, now, now)
+	exec(`INSERT INTO inbox_attachment(id, item_id, kind, ciphertext, key_ref, created_at) VALUES('IA1', 'I1', 'recipe', ?, ?, ?)`,
+		put("inbox_attachment", "IA1", tn.ID, []byte(`{"prompt":"fix it"}`)), tn.ID, now)
 
 	setting := func(k, v string) {
 		t.Helper()
@@ -445,6 +447,7 @@ var rewrapSealSites = map[string]string{
 	"session_share.go:sealProposal":             "session_share_proposal",
 	"session_handoff.go:seal":                   "session_handoff_offer",
 	"inbox.go:seal":                             "inbox_item",
+	"inbox_recipes.go:sealAttachment":           "inbox_attachment",
 	"tenant_idp_secret.go:sealTenantSecret":     "",
 	"tenant_idp_api.go:upsert":                  "tenant_idp",
 	"tenant_git_oauth_api.go:save":              "tenant_git_oauth",

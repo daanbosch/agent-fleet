@@ -69,6 +69,7 @@ func registerInboxRoutes(mux *http.ServeMux, cfg config) {
 	mux.HandleFunc("POST /api/inbox/items/{id}/done", a.withMembership(a.done))
 	mux.HandleFunc("POST /api/inbox/items/{id}/withdraw", a.withMembership(a.withdraw))
 	mux.HandleFunc("PUT /api/inbox/items/{id}/pr", a.withMembership(a.setPR))
+	mux.HandleFunc("POST /api/inbox/items/{id}/take-in", a.withMembership(a.takeIn))
 	// Launch resolves the workspace itself, and only after the CP has checked the claim.
 	mux.HandleFunc("POST /api/inbox/items/{id}/launch", a.withMembership(a.launch))
 	mux.HandleFunc("POST /api/inbox/cursor", a.withMembership(a.cursor))
@@ -224,6 +225,9 @@ type inboxItemWire struct {
 	FinalAt   string            `json:"finalAt"`
 	Session   *inboxSessionWire `json:"session"`
 	PR        *inboxPRWire      `json:"pr"`
+	// Attachments as this reader sees them: a recipe, and sessions the reader may see or an
+	// opaque placeholder for each one they may not.
+	Attachments []inboxAttachmentWire `json:"attachments"`
 }
 
 type inboxMailboxWire struct {
@@ -320,6 +324,9 @@ func (v inboxView) item(ctx context.Context, it store.InboxItem, mine store.Inbo
 	}
 	if it.PRURL != "" || it.PRBranch != "" {
 		out.PR = &inboxPRWire{URL: it.PRURL, Branch: it.PRBranch}
+	}
+	if out.Attachments, err = v.attachments(ctx, it, mine); err != nil {
+		return inboxItemWire{}, err
 	}
 	return out, nil
 }
@@ -458,9 +465,10 @@ func (a inboxAPI) detail(w http.ResponseWriter, r *http.Request, _ store.Identit
 }
 
 type inboxSendBody struct {
-	Kind       string   `json:"kind"`
-	Recipients []string `json:"recipients"`
-	Body       string   `json:"body"`
+	Kind        string              `json:"kind"`
+	Recipients  []string            `json:"recipients"`
+	Body        string              `json:"body"`
+	Attachments []inboxAttachmentIn `json:"attachments"`
 }
 
 // receiveRefusal reports whether recipient (a membership id) does not accept items from
@@ -560,6 +568,11 @@ func (a inboxAPI) send(w http.ResponseWriter, r *http.Request, ident store.Ident
 			inboxErrWire{Recipients: refused})
 		return
 	}
+	extras, aerr := a.prepareAttachments(r, mv, ids, order, in.Attachments)
+	if aerr != nil {
+		writeAPIErr(w, aerr)
+		return
+	}
 	ct, kr, err := a.seal(ctx, mv.TenantID, []byte(in.Body))
 	if err != nil {
 		writeAPIErr(w, internalErr(err))
@@ -571,9 +584,13 @@ func (a inboxAPI) send(w http.ResponseWriter, r *http.Request, ident store.Ident
 	if in.Kind == "request" {
 		it.State = "open"
 	}
-	res, err := a.mgr.store.CreateInboxItem(ctx, it, ids, store.InboxSendLimits{
+	res, err := a.mgr.store.CreateInboxItemWith(ctx, it, ids, store.InboxSendLimits{
 		PerHour: inboxSendsPerHour, HourStart: now.Add(-time.Hour).Format(time.RFC3339), PendingPerPair: inboxPendingPerPair,
-	})
+	}, extras)
+	if isShareBusy(err) {
+		writeAPIErr(w, &apiError{http.StatusConflict, "share_operation_in_progress", "an approved Agent operation is in progress; retry the share"})
+		return
+	}
 	if err != nil {
 		writeAPIErr(w, internalErr(err))
 		return
@@ -608,7 +625,7 @@ func (a inboxAPI) send(w http.ResponseWriter, r *http.Request, ident store.Ident
 	sort.Strings(order)
 	_ = a.mgr.store.InsertAudit(context.WithoutCancel(ctx), store.AuditLog{ID: store.NewID(), TenantID: mv.TenantID,
 		ActorKind: "user", ActorID: ident.ID, Action: "inbox.send", Target: it.ID,
-		Detail: "kind=" + in.Kind + " recipients=" + strings.Join(order, ","), HTTPStatus: http.StatusCreated, At: store.NowTS()})
+		Detail: "kind=" + in.Kind + " recipients=" + strings.Join(order, ",") + attachmentAudit(extras), HTTPStatus: http.StatusCreated, At: store.NowTS()})
 	a.writeItem(w, ctx, mv, it.ID, http.StatusCreated)
 }
 

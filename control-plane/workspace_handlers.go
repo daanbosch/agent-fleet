@@ -915,6 +915,10 @@ type sessionWire struct {
 	// carries a lineage too). The Console's "don't notify when a child session is waiting for
 	// input" setting reads it; absent here that setting silently does nothing.
 	Origin string `json:"origin,omitempty"`
+	// InboxOrigin: the inbox item a session was launched from and its sender (ADR 0111
+	// decision 3), which the CP stamped on the create. The Console's provenance badge reads
+	// it; absent here the badge never appears. No DB-mirror column, like Origin.
+	InboxOrigin json.RawMessage `json:"inboxOrigin,omitempty"`
 	// GeneratedImages / GeneratedImagesPath: how many images this session has generated and
 	// the folder holding them, browse-root relative (ADR 0080 decision 8). They are what the
 	// Console's "Generated images (N)" entry turns on, so a gap here does not degrade the
@@ -966,7 +970,7 @@ func (a workspaceAPI) sessionsPayload(ctx context.Context, res *resolved) map[st
 				})
 			}
 			_ = a.mgr.store.ReplaceSessions(ctx, res.ws.ID, rows)
-			return map[string]any{"sessions": list}
+			return map[string]any{"sessions": a.verifyInboxOrigins(ctx, res.mv, list)}
 		}
 		// Agent unreachable (e.g. mid-start): fall through to the DB mirror.
 	}
@@ -1012,6 +1016,10 @@ func (a workspaceAPI) sessionCreateThen(w http.ResponseWriter, r *http.Request, 
 	// server-side and rewrite the body with the (non-secret) instance/document/SSO
 	// coordinates before proxying — the client only sends ssm_host_id.
 	if aerr := a.rewriteSSMCreate(ctx, res, r); aerr != nil {
+		writeAPIErr(w, aerr)
+		return
+	}
+	if aerr := a.stampInboxOrigin(ctx, res, r); aerr != nil {
 		writeAPIErr(w, aerr)
 		return
 	}

@@ -23,6 +23,9 @@ export type SessionState = "" | "working" | "idle" | "question" | "plan" | "perm
 // A session as returned by GET /api/sessions and used across the left pane, the
 // terminal header, and the chat mirror. Optional fields may be absent per kind.
 export interface Session {
+  /** The member inbox item this session was launched from and its sender (ADR 0111), as the
+   *  Control Plane checked it. Absent on an older Agent: the badge just does not show. */
+  inboxOrigin?: { sender: string; item: string };
   name: string; // auto-allocated unique slug ("s" + 6 base32 chars, e.g. "sukbq4s") — the session's immutable identity
   kind: SessionKind;
   // Control route (docs/log/27): "managed" = shared runtime + structured RPC (AF is the only

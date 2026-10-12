@@ -171,8 +171,12 @@ interface LaunchSeedStore {
 	 *  through the CP's request launch, which checks that the caller is still the assignee
 	 *  before the session is created and records the session on the request. */
 	inboxItemId: string;
+	/** The memo taken in from the inbox this launch was seeded from (ADR 0111); "" = none. The
+	 *  Control Plane looks it up and stamps the session's provenance from the memo's origin. */
+	inboxMemoId: string;
 	set(p: string, title?: string, handoffSession?: string, handoffId?: string, handoffOfferId?: string, workItem?: LaunchWorkItem | null): void;
 	setInboxItem(id: string): void;
+	setInboxMemo(id: string): void;
   clear(): void;
 }
 
@@ -184,12 +188,14 @@ export const useLaunchSeed = create<LaunchSeedStore>((set) => ({
 	handoffOfferId: "",
 	workItem: null,
 	inboxItemId: "",
+	inboxMemoId: "",
 	// set() drops inboxItemId: a seed left over from a cancelled inbox launch must not send an
 	// unrelated launch through the request route. The inbox calls setInboxItem after set().
 	set: (prompt, title = "", handoffSession = "", handoffId = "", handoffOfferId = "", workItem = null) =>
-		set({ prompt, title, handoffSession, handoffId, handoffOfferId, workItem, inboxItemId: "" }),
+		set({ prompt, title, handoffSession, handoffId, handoffOfferId, workItem, inboxItemId: "", inboxMemoId: "" }),
 	setInboxItem: (inboxItemId) => set({ inboxItemId }),
-	clear: () => set({ prompt: "", title: "", handoffSession: "", handoffId: "", handoffOfferId: "", workItem: null, inboxItemId: "" }),
+	setInboxMemo: (inboxMemoId) => set({ inboxMemoId }),
+	clear: () => set({ prompt: "", title: "", handoffSession: "", handoffId: "", handoffOfferId: "", workItem: null, inboxItemId: "", inboxMemoId: "" }),
 }));
 
 /** Poll every 60s while the tab is visible AND the workspace is running, so the

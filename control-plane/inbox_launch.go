@@ -133,7 +133,13 @@ func (a inboxAPI) launch(w http.ResponseWriter, r *http.Request, ident store.Ide
 	defer untrack()
 	body["idempotency_key"] = inboxLaunchKey(id, token)
 	raw, _ = json.Marshal(body)
-	sub := r.Clone(tctx)
+	// The session carries its provenance badge (decision 3): the request and its sender, set
+	// here by the CP, never taken from the body.
+	origin := inboxOriginRef{Item: id}
+	if v, _, err := a.view(ctx, mv); err == nil {
+		origin.Sender = v.person(it.SenderMembershipID).UserKey
+	}
+	sub := r.Clone(context.WithValue(tctx, inboxOriginKey{}, origin))
 	sub.URL.Path, sub.URL.RawPath, sub.URL.RawQuery = "/api/sessions", "", ""
 	sub.RequestURI = "/api/sessions"
 	sub.Body = io.NopCloser(bytes.NewReader(raw))

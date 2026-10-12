@@ -1343,6 +1343,7 @@ func membershipCascade(membershipID string) []struct {
 		{`DELETE FROM inbox_participant WHERE membership_id=?`, id},
 		{`DELETE FROM inbox_sender_rule WHERE membership_id=? OR sender_membership_id=?`, both},
 		{`DELETE FROM inbox_item WHERE NOT EXISTS (SELECT 1 FROM inbox_participant p WHERE p.item_id=inbox_item.id)`, nil},
+		{`DELETE FROM inbox_attachment WHERE NOT EXISTS (SELECT 1 FROM inbox_item i WHERE i.id=inbox_attachment.item_id)`, nil},
 		// The parent goes last: with foreign keys on, deleting it before its children
 		// fails.
 		{`DELETE FROM membership WHERE id=?`, id},
@@ -2971,12 +2972,14 @@ func (s *SQL) DeleteSSMHost(ctx context.Context, id, membershipID string) error 
 
 // --- Memo queue (docs/log/21) --------------------------------------------------------
 
-const memoCols = `SELECT id, membership_id, repo, category, kind, body, ref_path, attachments, position, created_at, sent_at FROM memo`
+const memoCols = `SELECT id, membership_id, repo, category, kind, body, ref_path, attachments, position, created_at, sent_at,
+	origin_item_id, origin_sender_membership_id, origin_sender_key FROM memo`
 
 func scanMemo(row scanner) (Memo, error) {
 	var m Memo
 	err := row.Scan(&m.ID, &m.MembershipID, &m.Repo, &m.Category, &m.Kind,
-		&m.Body, &m.RefPath, &m.Attachments, &m.Position, &m.CreatedAt, &m.SentAt)
+		&m.Body, &m.RefPath, &m.Attachments, &m.Position, &m.CreatedAt, &m.SentAt,
+		&m.OriginItemID, &m.OriginSenderMembershipID, &m.OriginSenderKey)
 	return m, err
 }
 
@@ -3010,6 +3013,8 @@ func (s *SQL) GetMemo(ctx context.Context, id string) (Memo, bool, error) {
 	return m, err == nil, err
 }
 
+// CreateMemo inserts a memo a member or their agent wrote. It never writes an origin: a
+// taken-in memo is created only by TakeInInboxRecipe.
 func (s *SQL) CreateMemo(ctx context.Context, m Memo) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO memo(id, membership_id, repo, category, kind, body, ref_path, attachments, position, created_at, sent_at)
