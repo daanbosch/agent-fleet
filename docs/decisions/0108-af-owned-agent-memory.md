@@ -458,3 +458,18 @@ The member-only routes (pin, revert/forget) cannot tell the Console from a sessi
 `AGENT_TOKEN`: the author they record is the route, not a verified person. That is acceptable for
 them because they cannot write new free text. A member create/edit route could, and would bypass
 decision 4's switch, so it is not built; it waits for a member mark the Agent can verify (#1997).
+
+## Note (2026-10-12): the browser searches bodies and forgets without the 300-change window (#1999)
+
+Two limits of the browser note above are lifted, both with read-only routes (no new write path).
+`entries/member-search` ranks the user scope and every project (or the one named by `scope` and
+`project`) with the ranking of the tools' search (#1981), over names, descriptions and bodies. It is
+not gated by the `agentMemory` switch, needs no calling session, counts no use (a Console search
+must not feed the usage ranking of #1703), ignores the entries' `kinds` filter as the list does, and
+never sees a memory whose file fails the scan: those are not loaded, so neither text nor name can
+reach a hit. `entries/member-latest` returns the newest change of one memory (the same marks as the
+changes list's newest row), so forget no longer needs that change to be among the 300 loaded ones.
+Forget and restore still go through the existing revert route with its newest-change and
+`expectRevision` checks; the resolved commit is only what the Console names there. The forgotten
+list is still built from the 300 most recent changes, because nothing else enumerates memories that
+no longer exist.

@@ -214,15 +214,21 @@ func agentMemListChanges(limit int) (agentMemChangesWire, error) {
 			v.Project = projects[pid]
 		}
 		if first {
-			v.Latest = true
-			_, live, _ := agentMemReadFile(filepath.Join(agentMemDir(), filepath.FromSlash(rel)))
-			v.Live = live
-			_, beforeOK, _, afterOK, err := agentMemSides(v.Commit, rel)
-			v.Revertible = err == nil && (beforeOK || afterOK)
+			agentMemMarkLatest(&v, rel)
 		}
 		out.Changes = append(out.Changes, v)
 	}
 	return out, nil
+}
+
+// agentMemMarkLatest sets what only the newest change of a memory carries: that it is the newest,
+// whether the memory exists now, and whether the history holds a text to go back to.
+func agentMemMarkLatest(v *agentMemChangeView, rel string) {
+	v.Latest = true
+	_, live, _ := agentMemReadFile(filepath.Join(agentMemDir(), filepath.FromSlash(rel)))
+	v.Live = live
+	_, beforeOK, _, afterOK, err := agentMemSides(v.Commit, rel)
+	v.Revertible = err == nil && (beforeOK || afterOK)
 }
 
 // agentMemChangeFrom builds a row from one commit, or ok=false when anything in it is not in the

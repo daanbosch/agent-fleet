@@ -37,6 +37,7 @@ type agentMemScored struct {
 	e       agentMemEntry
 	matched []string
 	score   int
+	src     agentMemSearchSrc
 }
 
 // agentMemScore matches the words against one entry: which words occur anywhere, and the sum of
@@ -80,26 +81,57 @@ func agentMemSearchRanked(c agentMemCaller, query string, limit int) (hits []age
 	if len(terms) == 0 {
 		return nil, "", memoryErrf(http.StatusBadRequest, errCodeMemoryBadRequest, "query is required")
 	}
+	srcs := make([]agentMemSearchSrc, 0, 2)
+	for _, scope := range agentMemScopes(c) {
+		srcs = append(srcs, agentMemSearchSrc{c: c, scope: scope})
+	}
+	agentMemMu.RLock()
+	defer agentMemMu.RUnlock()
+	found, fallback, err := agentMemRankLocked(srcs, c.Kind, terms, limit)
+	if err != nil {
+		return nil, "", err
+	}
+	hits = make([]agentMemHit, 0, len(found))
+	for _, s := range found {
+		hits = append(hits, agentMemHitOf(s, fallback))
+	}
+	// Counted after the limit, under the read lock: a hit the caller never saw was not used, and
+	// a forget or re-create cannot slip between the search and the count.
+	for _, s := range found {
+		agentMemRecordUses(s.src.c, s.e)
+	}
+	return hits, fallback, nil
+}
+
+// agentMemSearchSrc is one scope directory to search and the caller it is resolved for.
+type agentMemSearchSrc struct {
+	c     agentMemCaller
+	scope string
+}
+
+// agentMemRankLocked scores and orders the memories of srcs (the caller holds agentMemMu). It
+// only reads: counting a use is the caller's choice, so a Console search can share the ranking
+// without feeding it. Each result keeps the src it came from.
+func agentMemRankLocked(srcs []agentMemSearchSrc, kind string, terms []string, limit int) (found []agentMemScored, fallback string, err error) {
 	if limit <= 0 {
 		limit = agentMemSearchDefault
 	}
 	limit = min(limit, agentMemSearchMax)
-	agentMemMu.RLock()
-	defer agentMemMu.RUnlock()
 	var all, partial []agentMemScored
-	for _, scope := range agentMemScopes(c) {
-		es, _, lerr := agentMemLoadScope(scope, c)
+	for _, src := range srcs {
+		es, _, lerr := agentMemLoadScope(src.scope, src.c)
 		if lerr != nil {
 			return nil, "", lerr
 		}
-		if rel, derr := agentMemScopeDir(scope, c); derr == nil {
+		if rel, derr := agentMemScopeDir(src.scope, src.c); derr == nil {
 			agentMemSetUses(es, rel)
 		}
 		for _, e := range es {
-			if !agentMemAppliesTo(e, c.Kind) {
+			if !agentMemAppliesTo(e, kind) {
 				continue
 			}
 			s := agentMemScore(e, terms)
+			s.src = src
 			switch {
 			case len(s.matched) == len(terms):
 				all = append(all, s)
@@ -108,7 +140,7 @@ func agentMemSearchRanked(c agentMemCaller, query string, limit int) (hits []age
 			}
 		}
 	}
-	found := all
+	found = all
 	if len(found) == 0 && len(terms) > 1 {
 		found, fallback = partial, agentMemFallbackAny
 	}
@@ -131,21 +163,17 @@ func agentMemSearchRanked(c agentMemCaller, query string, limit int) (hits []age
 	if len(found) > limit {
 		found = found[:limit]
 	}
-	hits = make([]agentMemHit, 0, len(found))
-	for _, s := range found {
-		h := agentMemHit{agentMemEntry: s.e, Snippets: agentMemSnippets(s.e.Body, s.matched)}
-		if fallback != "" {
-			h.MatchedTerms = s.matched
-		}
-		h.Body, h.Uses = "", 0 // Uses is ranking input, not part of the answer (as in the index)
-		hits = append(hits, h)
+	return found, fallback, nil
+}
+
+// agentMemHitOf is the answer row of a scored entry.
+func agentMemHitOf(s agentMemScored, fallback string) agentMemHit {
+	h := agentMemHit{agentMemEntry: s.e, Snippets: agentMemSnippets(s.e.Body, s.matched)}
+	if fallback != "" {
+		h.MatchedTerms = s.matched
 	}
-	// Counted after the limit, under the read lock: a hit the caller never saw was not used, and
-	// a forget or re-create cannot slip between the search and the count.
-	for _, h := range hits {
-		agentMemRecordUses(c, h.agentMemEntry)
-	}
-	return hits, fallback, nil
+	h.Body, h.Uses = "", 0 // Uses is ranking input, not part of the answer (as in the index)
+	return h
 }
 
 // agentMemSnippets returns the first body lines that contain any of the matched words.

@@ -112,3 +112,121 @@ func TestAgentMemoryRevertExpectRevision(t *testing.T) {
 		t.Fatalf("forget at the reloaded revision: %v", err)
 	}
 }
+
+func memberSearch(t *testing.T, q string) (int, agentMemMemberSearchOut, []byte) {
+	t.Helper()
+	code, b := memberDo(t, http.MethodGet, "/agents/memory/entries/member-search?"+q, nil)
+	var out agentMemMemberSearchOut
+	_ = json.Unmarshal(b, &out)
+	return code, out, b
+}
+
+// The member finds a body in the user scope and in a project, ranked like the tools' search,
+// while the sessions' switch is off; the search is not a use of any hit. Withheld text and names
+// never show.
+func TestAgentMemoryMemberSearchIsUngatedUncountedAndNeverLeaks(t *testing.T) {
+	_, _, _ = agentMemTestEnv(t)
+	c := agentMemCallerT(t, "claude-main")
+	now := time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC)
+	memSearchSave(t, c, "proj-note", "about builds", "the zebra rule applies here", now)
+	if _, err := agentMemSave(c, agentMemSaveReq{Scope: "user", Name: "user-note", Description: "about me", Body: "zebra in user scope"}, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	memSearchSave(t, c, "leaky-name", "d", "zebra body", now.Add(2*time.Minute))
+	f := filepath.Join(agentMemDir(), "projects", c.Project.ID, "leaky-name.md")
+	raw, _ := os.ReadFile(f)
+	secret := agentMemFakeAWS()
+	if err := os.WriteFile(f, []byte(strings.Replace(string(raw), "zebra body", "zebra "+secret, 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	AgentMemoryEnabled = func() bool { return false }
+
+	code, out, b := memberSearch(t, "q=zebra")
+	if code != http.StatusOK || len(out.Hits) != 2 {
+		t.Fatalf("search: %d %s", code, b)
+	}
+	byName := map[string]agentMemMemberHit{}
+	for _, h := range out.Hits {
+		byName[h.Name] = h
+	}
+	if h := byName["proj-note"]; h.Project == nil || h.Project.ID != c.Project.ID || h.Scope != "project" || len(h.Snippets) == 0 || h.Body != "" {
+		t.Errorf("project hit = %+v", h)
+	}
+	if h := byName["user-note"]; h.Project != nil || h.Scope != "user" {
+		t.Errorf("user hit = %+v", h)
+	}
+	if strings.Contains(string(b), secret) || strings.Contains(string(b), "leaky-name") {
+		t.Fatalf("a withheld memory reached the answer: %s", b)
+	}
+	for _, rel := range []string{"user", "projects/" + c.Project.ID} {
+		if u := agentMemLoadUsage(rel); len(u) != 0 {
+			t.Fatalf("a member search counted uses in %s: %v", rel, u)
+		}
+	}
+	// The scope parameters narrow it; a bad one is refused; the query is required.
+	if _, out, _ := memberSearch(t, "q=zebra&scope=user"); len(out.Hits) != 1 || out.Hits[0].Name != "user-note" {
+		t.Errorf("scope=user: %+v", out.Hits)
+	}
+	if _, out, _ := memberSearch(t, "q=zebra&scope=project&project="+c.Project.ID); len(out.Hits) != 1 || out.Hits[0].Name != "proj-note" {
+		t.Errorf("scope=project: %+v", out.Hits)
+	}
+	for _, q := range []string{"q=", "q=zebra&scope=other", "q=zebra&scope=project&project=nope"} {
+		if code, _, _ := memberSearch(t, q); code < 400 {
+			t.Errorf("%s: status %d", q, code)
+		}
+	}
+	// The tools' search, by contrast, counts: the sidecar check above is not vacuous.
+	AgentMemoryEnabled = func() bool { return true }
+	if _, err := agentMemSearch(c, "zebra", 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := agentMemLoadUsage("projects/" + c.Project.ID)["proj-note"]; got != 1 {
+		t.Fatalf("the tools' search should count one use, got %d", got)
+	}
+}
+
+// A memory whose newest change is older than any window of the changes list is still found, as
+// live or forgotten, with the commit a revert has to name.
+func TestAgentMemoryMemberLatestFindsChangeOutsideTheWindow(t *testing.T) {
+	_, _, _ = agentMemTestEnv(t)
+	c := agentMemCallerT(t, "claude-main")
+	now := time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC)
+	agentMemSaveN(t, c, "old", "project", now)
+	for i, n := range []string{"n1", "n2", "n3"} {
+		agentMemSaveN(t, c, n, "project", now.Add(time.Duration(i+1)*time.Minute))
+	}
+	win, err := agentMemListChanges(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ch := range win.Changes {
+		if ch.Name == "old" {
+			t.Fatalf("fixture: old is inside the window: %+v", win.Changes)
+		}
+	}
+	AgentMemoryEnabled = func() bool { return false }
+	code, b := memberDo(t, http.MethodGet, "/agents/memory/entries/member-latest?scope=project&project="+c.Project.ID+"&name=old", nil)
+	var v agentMemChangeView
+	if code != http.StatusOK || json.Unmarshal(b, &v) != nil || v.Name != "old" || !v.Latest || !v.Live || !v.Revertible || v.Project == nil || v.Op != "create" {
+		t.Fatalf("latest: %d %s", code, b)
+	}
+	// The commit it names goes through the existing revert, with its revision check.
+	if _, err := agentMemRevert(agentMemRevertReq{Commit: v.Commit, Forget: true, ExpectRevision: 1}, now); err != nil {
+		t.Fatalf("forget from the resolved change: %v", err)
+	}
+	code, b = memberDo(t, http.MethodGet, "/agents/memory/entries/member-latest?scope=project&project="+c.Project.ID+"&name=old", nil)
+	var gone agentMemChangeView
+	if code != http.StatusOK || json.Unmarshal(b, &gone) != nil || gone.Op != "forget" || gone.Live || !gone.Revertible || gone.Commit == v.Commit {
+		t.Fatalf("latest of a forgotten memory: %d %s", code, b)
+	}
+	for _, q := range []string{
+		"scope=project&project=" + c.Project.ID + "&name=never-saved",
+		"scope=project&project=nope&name=old",
+		"scope=other&name=old",
+		"scope=user&name=../x",
+	} {
+		if code, _ := memberDo(t, http.MethodGet, "/agents/memory/entries/member-latest?"+q, nil); code < 400 {
+			t.Errorf("%s: status %d", q, code)
+		}
+	}
+}
