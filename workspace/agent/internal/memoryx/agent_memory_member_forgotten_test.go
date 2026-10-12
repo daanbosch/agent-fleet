@@ -122,7 +122,12 @@ func TestAgentMemoryMemberForgottenRefusesUntrustedTombstones(t *testing.T) {
 	if err := os.Symlink("gone", filepath.Join(tomb, "linked")); err != nil {
 		t.Fatal(err)
 	}
-	secretName := strings.ToLower(agentMemFakeAWS())
+	// All lowercase and a valid name, so only the scan can refuse it (the upper-case AWS fixture
+	// would fail the name check instead).
+	secretName := "ghp_" + strings.Repeat("q7zx", 9)
+	if agentMemCleanText(secretName) || !agentMemValidName(secretName) {
+		t.Fatalf("fixture: %q must be a valid name that the scanner rejects", secretName)
+	}
 	for n, content := range map[string]string{"big": strings.Repeat("1", 4096), "Bad Name": "1\n", secretName: "1\n"} {
 		if err := os.WriteFile(filepath.Join(tomb, n), []byte(content), 0o600); err != nil {
 			t.Fatal(err)
@@ -314,7 +319,7 @@ func TestAgentMemoryMemberForgottenUnpublishedTombstonesSpendNoBudget(t *testing
 		}
 	}
 	code, w, body := forgottenGet(t, "")
-	if code != http.StatusOK || namesOf(w) != "only-gone" || w.Truncated || len(w.Projects) != 1 {
+	if code != http.StatusOK || namesOf(w) != "only-gone" || w.Truncated || w.Incomplete || len(w.Projects) != 1 {
 		t.Fatalf("unpublished tombstones: %d %s", code, body)
 	}
 }
@@ -337,7 +342,34 @@ func TestAgentMemoryMemberForgottenBudgetSpendsOnTheNewestFirst(t *testing.T) {
 	forgeForgotten(t, "user", "z", "2026-03-01T00:00:00Z", false)
 	forgeForgotten(t, proj, "oldest", "2025-12-01T00:00:00Z", false)
 	code, w, body := forgottenGet(t, "")
-	if code != http.StatusOK || namesOf(w) != "z,b" || !w.Truncated || len(w.Projects) != 1 || w.Projects[0].ID != c.Project.ID {
+	if code != http.StatusOK || namesOf(w) != "z,b" || w.Truncated || !w.Incomplete || len(w.Projects) != 1 || w.Projects[0].ID != c.Project.ID {
 		t.Fatalf("budget: %d %s", code, body)
+	}
+}
+
+// A token-shaped project id passes the form check, so the id of an unjudged (over-budget) memory
+// must be scanned before it is named, as the judged path does: withheld either way, never listed.
+func TestAgentMemoryMemberForgottenWithholdsSecretProjectIDOutsideTheBudget(t *testing.T) {
+	secretID := "ghp_" + strings.Repeat("q7zx", 9)
+	if agentMemCleanText(secretID) || !agentMemValidProjectID(secretID) {
+		t.Fatalf("fixture: %q must be a valid project id that the scanner rejects", secretID)
+	}
+	for _, budget := range []int{1, 2} {
+		t.Run(string(rune('0'+budget)), func(t *testing.T) {
+			_, _, _ = agentMemTestEnv(t)
+			old := agentMemTombJudgeMax
+			agentMemTombJudgeMax = budget
+			t.Cleanup(func() { agentMemTombJudgeMax = old })
+			proj := "projects/" + secretID
+			if _, err := agentMemCheckDir(proj, true); err != nil {
+				t.Fatal(err)
+			}
+			forgeForgotten(t, proj, "old", "2026-01-01T00:00:00Z", false)
+			forgeForgotten(t, "user", "fresh", "2026-03-01T00:00:00Z", false)
+			code, w, body := forgottenGet(t, "")
+			if code != http.StatusOK || strings.Contains(body, secretID) || len(w.Projects) != 0 || w.Withheld != 1 || namesOf(w) != "fresh" {
+				t.Fatalf("budget %d: %d %s", budget, code, body)
+			}
+		})
 	}
 }

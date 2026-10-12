@@ -452,4 +452,27 @@ describe("MemoryBrowserPanel", () => {
     await setValue(select(), "project:" + project.id);
     expect(select().value).toBe("project:" + project.id);
   });
+
+  it("says the forgotten list is incomplete when the Agent ran out of checking budget", async () => {
+    api.mockImplementation(async (url: string) => {
+      if (url.startsWith("api/agents/memory/entries/list")) return { entries };
+      if (url.startsWith("api/agents/memory/entries/member-forgotten")) return { forgotten: [], projects: [], withheld: 1, incomplete: true };
+      return {};
+    });
+    await act(async () => root!.unmount());
+    root = createRoot(host!);
+    await act(async () => {
+      root!.render(
+        <ToastProvider>
+          <ConfirmProvider>
+            <MemoryBrowserPanel reload={0} onChanged={() => {}} />
+          </ConfirmProvider>
+        </ToastProvider>,
+      );
+    });
+    await flush();
+    const warns = Array.from(document.body.querySelectorAll(".mem-warn")).map((e) => e.textContent ?? "");
+    expect(warns.some((w) => w.includes("minimum") || w.includes("最小値"))).toBe(true);
+    expect(warns.some((w) => w.includes("Only the newest") || w.includes("新しい順"))).toBe(false);
+  });
 });

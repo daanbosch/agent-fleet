@@ -34,9 +34,8 @@ const (
 // agentMemForgottenWire is the forgotten list, newest forgotten first. Rows are the same view the
 // changes list gives its newest row, so Revertible says whether the commit can be restored.
 // Withheld counts names left out because the name failed the scan or the newest change of the
-// memory did; they are never listed. Truncated says memories that could be listed were left out
-// (more than one answer holds, or more published tombstones than one request judges, the oldest
-// being left unjudged: withheld is then partial): narrow the scope.
+// memory did; they are never listed. Truncated says listable memories were left out because more than one
+// answer holds: narrow the scope.
 // Projects names every project that has a listable forgotten memory, cut or not, so the Console can
 // keep offering a scope whose rows did not fit.
 type agentMemForgottenWire struct {
@@ -44,6 +43,10 @@ type agentMemForgottenWire struct {
 	Projects  []*agentMemProject   `json:"projects"`
 	Withheld  int                  `json:"withheld,omitempty"`
 	Truncated bool                 `json:"truncated,omitempty"`
+	// Incomplete says the request ran out of judging budget: the oldest published tombstones were
+	// not judged, so rows may be missing even after narrowing the scope, and Withheld is a lower
+	// bound.
+	Incomplete bool `json:"incomplete,omitempty"`
 }
 
 // agentMemTombNames lists the names with a tombstone under one scope directory. The directory is
@@ -176,19 +179,26 @@ func agentMemMemberForgotten(scope, project string) (agentMemForgottenWire, erro
 	sort.SliceStable(found, func(i, j int) bool { return found[i].at.After(found[j].at) })
 
 	projects := map[string]bool{}
-	addProject := func(id string) {
-		if id != "" && !projects[id] {
-			projects[id] = true
-			out.Projects = append(out.Projects, agentMemProjectInfo(id))
+	// A project id is shown to the Console, and its form check does not scan it: a token-shaped
+	// id is withheld whether or not the memory was judged.
+	addProject := func(id string) bool {
+		if id == "" || projects[id] {
+			return true
 		}
+		if !agentMemCleanText(id) {
+			return false
+		}
+		projects[id] = true
+		out.Projects = append(out.Projects, agentMemProjectInfo(id))
+		return true
 	}
 	for i, c := range found {
 		if i >= agentMemTombJudgeMax {
 			// Out of judging budget, oldest first. The project is still offered (unless the
-			// memory is plainly live), and the answer says it is not complete.
-			out.Truncated = true
-			if _, err := os.Lstat(filepath.Join(agentMemDir(), filepath.FromSlash(c.rel))); err != nil {
-				addProject(c.project)
+			// memory is plainly live), and the answer says it is incomplete.
+			out.Incomplete = true
+			if _, err := os.Lstat(filepath.Join(agentMemDir(), filepath.FromSlash(c.rel))); err != nil && !addProject(c.project) {
+				out.Withheld++
 			}
 			continue
 		}
@@ -207,7 +217,7 @@ func agentMemMemberForgotten(scope, project string) (agentMemForgottenWire, erro
 		if v.Live {
 			continue
 		}
-		addProject(c.project)
+		addProject(c.project) // already scanned by agentMemChangeFrom
 		if len(out.Forgotten) >= agentMemForgottenMax {
 			out.Truncated = true
 			continue

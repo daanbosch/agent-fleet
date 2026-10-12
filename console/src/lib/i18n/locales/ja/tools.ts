@@ -864,6 +864,7 @@ export const tools = {
   "mem.br_forgotten_note": "忘れさせたメモリは履歴に残っています。復元すると、その直前のテキストに戻ります。",
   "mem.br_forgotten_withheld": "{n} 件の忘れさせたメモリは、名前またはテキストが秘密情報を含む可能性があるか読み取れないため表示していません。",
   "mem.br_forgotten_truncated": "忘れさせたメモリは新しい順に {n} 件まで表示しています。残りはスコープを絞ると表示されます。",
+  "mem.br_forgotten_incomplete": "忘れさせたメモリが多すぎて全件は確認できず、古いものは確認していません。この一覧には抜けがあるかもしれず、表示していない件数は最小値です。スコープを絞っても出ないことがあります。",
   "mem.br_forgotten_failed": "忘れさせたメモリを読み込めませんでした。",
   "mem.br_restore": "復元",
   "mem.br_restored": "{name} を復元しました。",

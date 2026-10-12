@@ -525,11 +525,11 @@ with no published change, or a memory that is live again, is not listed. One ans
 (`truncated`; narrow the scope). The route is read-only, counts no use and is not gated by the switch;
 restore still goes through the revert route with its newest-change and `expectRevision` checks.
 
-The newest rows are chosen after every tombstone has been judged (by the newest change's time, found
+The newest rows are chosen after the tombstones have been judged (within the budget below) (by the newest change's time, found
 in one history pass), so the cut never drops a newer memory for an older one, and `truncated` is set
-only when a listable row was left out. `projects` names every project with a listable forgotten
+only when a listable row was left out (within the judging budget below). `projects` names every project with a listable forgotten
 memory, cut or not, so the Console keeps offering a scope whose rows did not fit. Every tombstone is looked up in that one
 history pass and those without a published change are dropped; the scan of the rest is budgeted at 2000
 memories per request, newest first. Past the budget the oldest are left unjudged, their project is still
-named (unless the memory is plainly live), `truncated` is set and `withheld` is partial: narrow the scope.
+named (unless the memory is plainly live), `incomplete` (not `truncated`) is set and `withheld` is a lower bound; narrowing the scope may not complete it. The project id of an unjudged memory is scanned before it is named, as the judged path does.
 The read lock is taken per memory, not across the request.

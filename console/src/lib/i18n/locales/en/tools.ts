@@ -863,6 +863,7 @@ export const tools: Record<keyof typeof jaTools, string> = {
   "mem.br_forgotten_note": "Forgotten memories stay in history. Restore brings back the text as it was before.",
   "mem.br_forgotten_withheld": "{n} forgotten memories are hidden because their name or text looks like it contains a secret or cannot be read.",
   "mem.br_forgotten_truncated": "Only the newest {n} forgotten memories are shown. Pick one scope to see the rest.",
+  "mem.br_forgotten_incomplete": "There are too many forgotten memories to check them all, so the oldest were not looked at. This list may be missing some, and the hidden count is a minimum; narrowing the scope may not show them.",
   "mem.br_forgotten_failed": "The forgotten memories could not be loaded.",
   "mem.br_restore": "Restore",
   "mem.br_restored": "Restored {name}.",

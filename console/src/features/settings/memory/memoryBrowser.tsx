@@ -41,6 +41,7 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
   const [goneWithheld, setGoneWithheld] = useState(0);
   const [goneTruncated, setGoneTruncated] = useState(false);
   const [goneErr, setGoneErr] = useState(false);
+  const [goneIncomplete, setGoneIncomplete] = useState(false);
   // The projects that hold a forgotten memory, as the Agent last named them (it names them even
   // when their rows did not fit). Kept across scope changes so a project stays selectable.
   const [goneProjects, setGoneProjects] = useState<Map<string, string>>(new Map());
@@ -89,6 +90,7 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
     }
     setGoneWithheld(res?.error ? 0 : (res?.withheld ?? 0));
     setGoneTruncated(!res?.error && !!res?.truncated);
+    setGoneIncomplete(!res?.error && !!res?.incomplete);
     return true;
   }, [scope]);
   useRetryLoad(loadGone, [reload, mine, scope]);
@@ -329,12 +331,13 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
           <pre className="mem-br-body">{open.body}</pre>
         </div>
       )}
-      {(gone.length > 0 || goneWithheld > 0 || goneTruncated || goneErr) && (
+      {(gone.length > 0 || goneWithheld > 0 || goneTruncated || goneIncomplete || goneErr) && (
         <>
           <h5>{tr("mem.br_forgotten")}</h5>
           <p className="muted ds-hint">{tr("mem.br_forgotten_note")}</p>
           {goneErr && <p className="mem-warn">{tr("mem.br_forgotten_failed")}</p>}
           {goneWithheld > 0 && <p className="mem-warn">{tr("mem.br_forgotten_withheld", { n: goneWithheld })}</p>}
+          {goneIncomplete && <p className="mem-warn">{tr("mem.br_forgotten_incomplete")}</p>}
           {goneTruncated && <p className="mem-warn">{tr("mem.br_forgotten_truncated", { n: gone.length })}</p>}
           <ul className="mem-pin-list mem-br-list">
             {gone.map((c) => (
