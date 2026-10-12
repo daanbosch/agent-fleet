@@ -916,18 +916,17 @@ func NewWorktreeStartPoint(dir, base string) (string, error) {
 		return base, nil // EnsureWorktree refuses the '-' case with its own message
 	}
 	resolves := func(ref string) bool { return OK(dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}") }
-	if branchExists(dir, base) {
+	// A local branch, tag, commit or full ref keeps the start point the bare name has
+	// always had; only a name that resolves to nothing falls back to origin.
+	if branchExists(dir, base) || resolves(base) {
 		return base, nil
 	}
 	tracking := "refs/remotes/origin/" + base
-	if !resolves(tracking) && !resolves(base) {
+	if !resolves(tracking) {
 		EnsureBranchRef(dir, base)
 	}
 	if resolves(tracking) {
 		return tracking, nil
-	}
-	if resolves(base) {
-		return base, nil // a tag, a commit, or a ref spelled out in full
 	}
 	return "", fmt.Errorf("base %q exists neither in this working copy nor on origin", base)
 }

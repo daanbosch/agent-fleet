@@ -160,3 +160,46 @@ func TestCreateSessionNewBranchResolvableBaseDoesNotFetch(t *testing.T) {
 		t.Fatal("positive control: the unfetched base did not fetch, so the detector proves nothing")
 	}
 }
+
+// A base that already resolves as something other than a branch — here a local tag
+// that shares its name with origin/feature but points elsewhere — keeps its own commit.
+// Only a name that resolves to nothing falls back to the remote-tracking ref.
+func TestCreateSessionNewBranchKeepsResolvableTagBase(t *testing.T) {
+	_, parent, srv := newBranchBaseFixture(t)
+	commitIntegrationFile(t, parent, "local-only.txt")
+	runIntegrationGit(t, parent, "tag", "feature")
+	tagged := gitRev(t, parent, "refs/tags/feature")
+	if tagged == gitRev(t, parent, "origin/feature") {
+		t.Fatal("fixture is wrong: the tag and origin/feature must differ")
+	}
+
+	created := launchNewBranch(t, srv, parent, "feature", "after-tag")
+	if got := gitRev(t, created.Dir, "HEAD"); got != tagged {
+		t.Errorf("after-tag started at %s, want the tag's commit %s", got, tagged)
+	}
+}
+
+// The remote-collision guard for an explicit new_branch must also see branches the
+// start-point fetch only just brought in; otherwise the launch mints a local branch
+// divergent from an existing origin branch of the same name.
+func TestCreateSessionNewBranchRechecksRemoteNameAfterFetch(t *testing.T) {
+	up, parent, srv := newBranchBaseFixture(t)
+	pushBranch(t, up, "late-base")
+	pushBranch(t, up, "already-remote")
+
+	code, body := roundtrip(t, srv, "POST", "/sessions", map[string]any{
+		"worktree": true, "dir": parent, "branch": "late-base", "new_branch": "already-remote", "kind": "shell",
+	})
+	if code != http.StatusConflict {
+		t.Fatalf("new_branch colliding with a just-fetched remote branch = %d (%s), want 409", code, body)
+	}
+	if got := errPayload(t, body); got["code"] != "branch_exists_remote" {
+		t.Errorf("error code = %q, want branch_exists_remote", got["code"])
+	}
+	if gitx.GitBranchExists(parent, "already-remote") {
+		t.Error("the refused launch created a local already-remote")
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(parent), "app@already-remote")); err == nil {
+		t.Error("the refused launch left its worktree folder behind")
+	}
+}

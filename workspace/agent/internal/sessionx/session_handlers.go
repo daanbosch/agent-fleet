@@ -1001,6 +1001,15 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 			}
 			var start string
 			start, err = gitx.NewWorktreeStartPoint(parent, req.Branch) // base pushed since our last fetch => fetch once
+			if err == nil && strings.TrimSpace(req.NewBranch) != "" {
+				// The fetch above may have just brought in a same-named remote branch the
+				// check before it could not see; ask again (local refs only, no network).
+				if _, remote := gitx.BranchNameStatus(parent, nb); remote {
+					httpx.WriteErr(w, http.StatusConflict, "branch_exists_remote",
+						fmt.Sprintf("a remote branch %q already exists; rename it or work on the existing branch", nb))
+					return
+				}
+			}
 			if err == nil {
 				dir, err = gitx.EnsureWorktree(parent, start, nb, folderSeg)
 			}
