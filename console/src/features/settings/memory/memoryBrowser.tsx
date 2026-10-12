@@ -187,7 +187,9 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
     return [m];
   });
   const shown = q ? [...fieldRows, ...bodyRows] : inScope;
-  const gone = forgotten;
+  // The answer may be for the scope shown before a switch while the new one is still loading: a row of
+  // another scope must never be on screen, since its Restore writes that scope.
+  const gone = forgotten.filter((c) => scope === ALL || scopeKey(c) === scope);
   const whereOf = (m: { scope: string; project?: { display: string } }) =>
     m.scope === "user" ? tr("mem.af_scope_user") : (m.project?.display ?? "");
   const who = (m: { authorKind: string; authorSession: string }) =>

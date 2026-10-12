@@ -552,4 +552,38 @@ describe("MemoryBrowserPanel", () => {
     expect(warns.some((w) => w.includes("minimum") || w.includes("最小値"))).toBe(true);
     expect(warns.some((w) => w.includes("Only the newest") || w.includes("新しい順"))).toBe(false);
   });
+
+  it("drops another scope's forgotten rows at once when the scope changes, before the new list arrives", async () => {
+    let release: (v: unknown) => void = () => {};
+    api.mockImplementation(async (url: string) => {
+      if (url.startsWith("api/agents/memory/entries/list")) return { entries };
+      if (url === "api/agents/memory/entries/member-forgotten") return { forgotten: [changes[2]], projects: [project] };
+      if (url.startsWith("api/agents/memory/entries/member-forgotten?scope=user"))
+        return new Promise((resolve) => {
+          release = resolve;
+        });
+      return {};
+    });
+    await act(async () => root!.unmount());
+    root = createRoot(host!);
+    await act(async () => {
+      root!.render(
+        <ToastProvider>
+          <ConfirmProvider>
+            <MemoryBrowserPanel reload={0} onChanged={() => {}} />
+          </ConfirmProvider>
+        </ToastProvider>,
+      );
+    });
+    await flush();
+    expect(document.body.textContent).toContain("old-note");
+    await setValue(select(), "user");
+    expect(api).toHaveBeenCalledWith("api/agents/memory/entries/member-forgotten?scope=user");
+    // The user scope's answer is still pending: the project's row and its Restore are gone already.
+    expect(document.body.textContent).not.toContain("old-note");
+    expect(text("Restore") ?? text("復元")).toBeUndefined();
+    await act(async () => release({ forgotten: [], projects: [project] }));
+    await flush();
+    expect(document.body.textContent).not.toContain("old-note");
+  });
 });
