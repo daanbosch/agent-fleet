@@ -552,8 +552,24 @@ func TestHandoffCreateIsFencedByTheTake(t *testing.T) {
 		t.Fatalf("accept after a slow create = %d %s", rec.Code, rec.Body.String())
 	}
 
+	// Unsharing during a confirmed launch keeps the take; giving it back then expires the
+	// offer, and the release answers with that status.
+	o2 := f.mustOffer(nil)
+	token = f.take(o2.ID)
+	if rec := rc.create(t, map[string]any{"kind": "claude", "handoff_take": map[string]any{"offerId": o2.ID, "token": token}}); rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+	}
+	if err := f.st.DeleteSessionShare(context.Background(), f.shareID, f.owner.mv.MembershipID); err != nil {
+		t.Fatal(err)
+	}
+	f.requireConflict(f.as(f.owner, f.api.withdraw, http.MethodDelete, o2.ID, nil), "handoff_being_taken", "pending")
+	rec = f.as(f.recipient, f.api.release, http.MethodPost, o2.ID, map[string]any{"token": token})
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"expired"`) {
+		t.Fatalf("release after the unshare = %d %s, want 200 status expired", rec.Code, rec.Body.String())
+	}
+
 	// A create without a take is passed through untouched.
-	if rec := rc.create(t, map[string]any{"kind": "shell"}); rec.Code != http.StatusCreated || len(rc.bodies) != 2 {
+	if rec := rc.create(t, map[string]any{"kind": "shell"}); rec.Code != http.StatusCreated || len(rc.bodies) != 3 {
 		t.Fatalf("plain create = %d (%d bodies)", rec.Code, len(rc.bodies))
 	}
 }

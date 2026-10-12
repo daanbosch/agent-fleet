@@ -657,7 +657,8 @@ func (a sessionHandoffAPI) release(w http.ResponseWriter, r *http.Request, _ sto
 		writeHandoffErr(w, http.StatusConflict, "handoff_not_taken", "this launch does not hold the handoff", offerStatusDetail(a.statusOf(r.Context(), o.ID)))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "pending"})
+	// Usually pending again; expired when the share was revoked during a confirmed launch.
+	writeJSON(w, http.StatusOK, map[string]any{"status": a.statusOf(r.Context(), o.ID)})
 }
 
 // accept (POST /api/session-handoff-offers/{id}/accept) settles the recipient's take once
