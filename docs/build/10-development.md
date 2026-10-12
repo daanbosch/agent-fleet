@@ -321,8 +321,13 @@ module, standard library only). **L3** is `console-e2e/` (Playwright). **L4**
   the docker bridge gateway. `TestMemberHandoff` drives ADR 0057's handover on it: the
   push gate, share, offer, the recipient's inbox and notification while both workspaces
   are stopped, the launch from the offer (its HEAD is the offer's `head_sha`), accept,
-  decline and unshare → expired. The file's doc comment says how to add another
-  scenario; `TestGitRemote` and `TestMemberFleetSetup` cover the harness without docker.
+  decline and unshare → expired. `e2e/limit_board_test.go` checks what other members see
+  on the limit board: `TestLimitBoardVisibility` (no docker) feeds it through the
+  Console's usage-observation post, and `TestLimitBoardReaperPull` through the reaper's
+  read of a running workspace whose claude capture is written inside the container, with
+  the sweep shortened to 2 s in that test's CP only. The file's doc comment says how to
+  add another scenario; `TestGitRemote` and `TestMemberFleetSetup` cover the harness
+  without docker.
 - **L3** opens the Console in a real browser, opens a session, types into xterm, and
   observes the effect through the filesystem API — because xterm draws to a canvas and
   the characters cannot be read from the DOM. It needs a built `console/dist`, and uses
