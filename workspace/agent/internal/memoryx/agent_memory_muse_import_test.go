@@ -418,3 +418,90 @@ func TestMuseImportDoesNotOverwriteClaudeImport(t *testing.T) {
 		t.Errorf("the claude import was overwritten: %+v", got)
 	}
 }
+
+// The project mapping and the git query run against the opened directory, not the path: swapping
+// another repository in under the name for the duration of the queries (and back afterwards)
+// must not pair this working copy's notes with that repository's project.
+func TestMuseImportProjectMappingFollowsPinnedDirectory(t *testing.T) {
+	e := newMuseImportEnv(t)
+	e.note("note", "d", "user", "from the original repo")
+	other := filepath.Join(e.home, "repos", "other")
+	replacement := filepath.Join(e.home, "repos", "other-wt")
+	saved := filepath.Join(e.home, "repos", "demo-saved")
+	e.git("init", "--quiet", "-b", "main", other)
+	e.git("-C", other, "commit", "--quiet", "--allow-empty", "-m", "init")
+	e.git("-C", other, "worktree", "add", "--quiet", "-b", "temp", replacement)
+	otherPID := agentMemProjectFor(other).ID
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Before the first git call the clone is moved away and the other repository's worktree takes
+	// its name; after ls-files everything is put back.
+	script := fmt.Sprintf(`#!/bin/sh
+if [ ! -f '%[1]s/once' ]; then
+  touch '%[1]s/once'
+  mv '%[2]s' '%[3]s'
+  mv '%[4]s' '%[2]s'
+fi
+'%[5]s' "$@"
+rc=$?
+case "$*" in
+  *ls-files*)
+    if [ -d '%[3]s' ]; then
+      mv '%[2]s' '%[4]s'
+      mv '%[3]s' '%[2]s'
+    fi
+    ;;
+esac
+exit "$rc"
+`, e.home, e.clone, saved, replacement, realGit)
+	memoryWrite(t, filepath.Join(e.home, "bin", "git"), script)
+	if err := os.Chmod(filepath.Join(e.home, "bin", "git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", filepath.Join(e.home, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
+	pv, err := agentMemMusePreviewFor(e.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, serr := os.Stat(filepath.Join(e.home, "once")); serr != nil {
+		t.Fatalf("the swap never ran, the probe proves nothing")
+	}
+	// The directory was asked while it sat under another name, so its path-derived id may differ
+	// from e.pid (apply then refuses on the project check); what must never happen is the other
+	// repository's id.
+	if pv.Project == nil || pv.Project.ID == otherPID || len(pv.Items) != 1 {
+		t.Errorf("project = %+v, items = %d; must not be %s", pv.Project, len(pv.Items), otherPID)
+	}
+}
+
+// A forgotten text renamed in muse onto the name of a memory that exists in AF must not replace it,
+// and a rename onto a free name is refused as well.
+func TestMuseImportForgottenRenameIntoLiveMemory(t *testing.T) {
+	e := newMuseImportEnv(t)
+	t0 := time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
+	gone := e.note("gone", "d", "user", "forgotten text")
+	live := e.note("live", "d", "user", "other text")
+	e.apply(t0, "gone", "live")
+	if _, err := agentMemForget(agentMemCallerT(t, "claude-main"), agentMemForgetReq{Name: "gone", Revision: 1}, t0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	// muse's gone.md becomes live.md with the forgotten bytes, newer than AF's copy.
+	if err := os.Rename(gone, live); err != nil {
+		t.Fatal(err)
+	}
+	later := t0.Add(5 * time.Hour)
+	_ = os.Chtimes(live, later, later)
+	pv := e.preview()
+	if it := e.item(pv, "live"); it.Status != claudeImportForgotten {
+		t.Fatalf("live = %+v, want forgotten", it)
+	}
+	out := e.apply(later.Add(time.Hour), "live")
+	if r := out.Results[0]; r.Result != "skipped" || r.Reason != "status_forgotten" {
+		t.Errorf("result = %+v", r)
+	}
+	if got, _ := agentMemRead(agentMemCallerT(t, "claude-main"), "", "live"); got.Body != "other text" {
+		t.Errorf("the forgotten text replaced the live memory: %+v", got)
+	}
+}

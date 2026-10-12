@@ -480,6 +480,10 @@ func agentMemImportEvaluateSrc(mem *os.File, file string, src agentMemImportSrc,
 		switch {
 		case src.Muse && le.SourceHash == it.SourceHash:
 			it.Status = claudeImportUnchanged
+		case src.Muse && src.ForgottenHashes[it.SourceHash]:
+			// The forgotten text, renamed in muse onto a name that exists in AF: it must not
+			// replace that memory either.
+			it.Status = claudeImportForgotten
 		case src.Muse && !strings.HasPrefix(le.Source, agentMemMuseSourcePrefix):
 			// AF holds a memory of this name that is not muse's import (written in AF, or imported
 			// from claude); muse's file never replaces it.

@@ -15,8 +15,10 @@ package memoryx
 // MEMORY.md is muse's index and is not a memory. Subdirectories are not entered.
 
 import (
+	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -24,6 +26,7 @@ import (
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/gitx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/projcfg"
 )
 
 const (
@@ -72,68 +75,70 @@ func agentMemMuseDirOK(dir string) bool {
 
 // agentMemMuseOpen opens <repos>/<dir>/.agents/memory one component at a time with O_NOFOLLOW,
 // the working copy included: a symlink under ~/repos could otherwise point outside it. The caller
-// reads every file relative to the returned handle so nothing is swapped between check and read.
-// wc is the working copy's identity at open time, for agentMemMuseSame.
-func agentMemMuseOpen(dir string) (mem *os.File, wc museWC, ok bool) {
+// reads every file relative to mem, and runs the project mapping and git through wc, so nothing
+// is swapped between a check and a use. Both handles are the caller's to close.
+func agentMemMuseOpen(dir string) (mem, wc *os.File, ok bool) {
 	flags := syscall.O_RDONLY | syscall.O_DIRECTORY | syscall.O_CLOEXEC | syscall.O_NOFOLLOW
 	fd, err := syscall.Open(gitx.ReposRoot(), flags&^syscall.O_NOFOLLOW, 0)
 	if err != nil {
-		return nil, wc, false
+		return nil, nil, false
 	}
 	for i, seg := range append([]string{dir}, strings.Split(agentMemMuseSubdir, "/")...) {
 		next, err := syscall.Openat(fd, seg, flags, 0)
 		_ = syscall.Close(fd)
 		if err != nil {
-			return nil, wc, false
+			if wc != nil {
+				wc.Close()
+			}
+			return nil, nil, false
 		}
 		fd = next
 		if i == 0 {
-			var st syscall.Stat_t
-			if syscall.Fstat(fd, &st) != nil {
+			// A second descriptor for the working copy: the walk below consumes fd.
+			dup, err := syscall.Dup(fd)
+			if err != nil {
 				_ = syscall.Close(fd)
-				return nil, wc, false
+				return nil, nil, false
 			}
-			wc = museWC{uint64(st.Dev), uint64(st.Ino)}
+			syscall.CloseOnExec(dup)
+			wc = os.NewFile(uintptr(dup), "muse-working-copy")
 		}
 	}
 	return os.NewFile(uintptr(fd), "muse-memory"), wc, true
 }
 
-// museWC is a working copy's device and inode.
-type museWC struct{ dev, ino uint64 }
+// agentMemMuseFdPath names the opened working copy for a child process (chdir into it) and for
+// path checks. It follows the descriptor, not the working copy's current path.
+func agentMemMuseFdPath(wc *os.File) string {
+	return fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), wc.Fd())
+}
 
-// agentMemMuseSame says whether the path still names the working copy that was opened. The
-// project mapping and the git query below work on the path, so a swap in between would pair the
-// pinned files with another copy's project.
-func agentMemMuseSame(dir string, wc museWC) bool {
-	cur, err := os.Lstat(filepath.Join(gitx.ReposRoot(), dir))
-	if err != nil {
-		return false
-	}
-	st, ok := cur.Sys().(*syscall.Stat_t)
-	return ok && uint64(st.Dev) == wc.dev && uint64(st.Ino) == wc.ino
+func agentMemMuseGit(wc *os.File, args ...string) *exec.Cmd {
+	cmd := gitx.Cmd("", args...)
+	cmd.Dir = agentMemMuseFdPath(wc)
+	return cmd
 }
 
 // agentMemMuseTracked returns the file names git tracks under .agents/memory of a working copy.
-// A directory that is not a git repository tracks nothing. When git cannot say, every file counts as tracked: the warning errs toward "shared".
-func agentMemMuseTracked(dir string, files []string) map[string]bool {
+// A directory that is not a git repository tracks nothing. When git cannot say, every file counts
+// as tracked: the warning errs toward "shared".
+func agentMemMuseTracked(wc *os.File, files []string) map[string]bool {
 	out := map[string]bool{}
-	if !gitx.IsGitRepo(filepath.Join(gitx.ReposRoot(), dir)) {
+	if projcfg.DetectVCS(agentMemMuseFdPath(wc)) != projcfg.VCSGit {
 		return out
 	}
 	// The repository's own config is the member's, but a cloned repo's is not: core.fsmonitor runs
 	// an arbitrary command for ls-files, so it is forced off (measured: a marker script ran on
 	// every preview without it).
-	b, err := gitx.Cmd(filepath.Join(gitx.ReposRoot(), dir), "-c", "core.fsmonitor=false",
-		"-c", "core.hooksPath=/dev/null", "ls-files", "-z", "--", agentMemMuseSubdir).Output()
-	raw := string(b)
+	b, err := agentMemMuseGit(wc, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+		"ls-files", "-z", "--", agentMemMuseSubdir).Output()
 	if err != nil {
 		for _, f := range files {
 			out[f] = true
 		}
 		return out
 	}
-	for _, p := range strings.Split(raw, "\x00") {
+	for _, p := range strings.Split(string(b), "\x00") {
 		if n, ok := strings.CutPrefix(p, agentMemMuseSubdir+"/"); ok {
 			out[n] = true
 		}
@@ -141,9 +146,14 @@ func agentMemMuseTracked(dir string, files []string) map[string]bool {
 	return out
 }
 
-// agentMemMuseProject maps a working copy to its AF project; reason says why it has none.
-func agentMemMuseProject(dir string) (*agentMemProject, string) {
-	p := agentMemProjectFor(filepath.Join(gitx.ReposRoot(), dir))
+// agentMemMuseProject maps the opened working copy to its AF project; reason says why it has
+// none. The directory name only labels it: git answers about the descriptor's own directory.
+func agentMemMuseProject(dir string, wc *os.File) (*agentMemProject, string) {
+	p := agentMemProjectWith(filepath.Join(gitx.ReposRoot(), dir), agentMemMuseFdPath(wc),
+		func(args ...string) (string, error) {
+			out, err := agentMemMuseGit(wc, args...).Output()
+			return strings.TrimSpace(string(out)), err
+		})
 	switch {
 	case p == nil:
 		return nil, claudeImportNoProject
@@ -161,26 +171,27 @@ func agentMemMuseList() agentMemMuseSources {
 		return out
 	}
 	for _, d := range ents {
-		mem, _, ok := agentMemMuseOpen(d.Name())
+		mem, wc, ok := agentMemMuseOpen(d.Name())
 		if !ok {
 			continue
 		}
 		files, _ := agentMemImportFiles(mem)
 		mem.Close()
-		if len(files) == 0 {
-			continue
-		}
-		if !agentMemMuseDirOK(d.Name()) {
-			out.Withheld++
+		if len(files) == 0 || !agentMemMuseDirOK(d.Name()) {
+			wc.Close()
+			if len(files) > 0 {
+				out.Withheld++
+			}
 			continue
 		}
 		s := agentMemMuseSource{Dir: d.Name(), Count: len(files)}
-		for f := range agentMemMuseTracked(d.Name(), files) {
+		for f := range agentMemMuseTracked(wc, files) {
 			if strings.HasSuffix(f, ".md") && f != agentMemImportIndex && !strings.Contains(f, "/") {
 				s.Shared++
 			}
 		}
-		s.Project, s.Reason = agentMemMuseProject(d.Name())
+		s.Project, s.Reason = agentMemMuseProject(d.Name(), wc)
+		wc.Close()
 		out.Sources = append(out.Sources, s)
 	}
 	sort.Slice(out.Sources, func(i, j int) bool { return out.Sources[i].Dir < out.Sources[j].Dir })
@@ -198,9 +209,10 @@ func agentMemMuseBuild(dir string) (*agentMemMusePreview, error) {
 		return nil, memoryErrf(http.StatusNotFound, errCodeMemoryNotFound, "no muse project memory in that working copy")
 	}
 	defer mem.Close()
+	defer wc.Close()
 	pv := &agentMemMusePreview{Dir: dir, Items: []agentMemImportItem{}, Counts: map[string]int{},
 		byName: map[string]*agentMemImportItem{}}
-	pv.Project, pv.Reason = agentMemMuseProject(dir)
+	pv.Project, pv.Reason = agentMemMuseProject(dir, wc)
 	if pv.Project == nil {
 		return pv, nil
 	}
@@ -211,13 +223,10 @@ func agentMemMuseBuild(dir string) (*agentMemMusePreview, error) {
 	}
 	files, trunc := agentMemImportFiles(mem)
 	pv.Truncate = trunc
-	tracked := agentMemMuseTracked(dir, files)
+	tracked := agentMemMuseTracked(wc, files)
 	gone, err := agentMemMuseForgottenHashes(rel)
 	if err != nil {
 		return nil, err
-	}
-	if !agentMemMuseSame(dir, wc) {
-		return nil, memoryErrf(http.StatusConflict, errCodeMemoryConflict, "the working copy changed while it was read; preview it again")
 	}
 	for _, f := range files {
 		src := agentMemImportSrc{Source: agentMemMuseSourcePrefix + "project/" + agentMemMuseSubdir + "/" + f,
