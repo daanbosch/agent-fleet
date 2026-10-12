@@ -113,6 +113,13 @@ beforeEach(async () => {
   api.mockImplementation(async (url: string) => {
     if (url.startsWith("api/agents/memory/entries/list")) return { entries, withheld: 2 };
     if (url.startsWith("api/agents/memory/entries/changes")) return { changes };
+    if (url.startsWith("api/agents/memory/entries/member-latest")) {
+      const u = new URL("http://x/" + url);
+      const c = changes.find((ch) => ch.name === u.searchParams.get("name") && ch.latest);
+      return c ?? { error: { code: "memory_not_found", message: "none" } };
+    }
+    if (url.startsWith("api/agents/memory/entries/member-search"))
+      return { hits: [{ ...entries[0], snippets: ["the zebra rule"] }] };
     if (url.startsWith("api/agents/memory/entries/member-read"))
       return { ...entries[0], body: "always run the tests" };
     return {};
@@ -164,6 +171,75 @@ describe("MemoryBrowserPanel", () => {
     expect(document.body.querySelectorAll(".mem-br-row")).toHaveLength(1);
   });
 
+  it("asks the body search after a pause and shows the matching lines of a memory the list fields miss", async () => {
+    const input = document.body.querySelector<HTMLInputElement>('input[type="search"]')!;
+    const searchCalls = () => api.mock.calls.filter((c) => String(c[0]).startsWith("api/agents/memory/entries/member-search"));
+    await setValue(input, "zeb");
+    await setValue(input, "zebra");
+    // Nothing is asked while the user is still typing, and the list fields match nothing yet.
+    expect(searchCalls()).toHaveLength(0);
+    expect(document.body.querySelectorAll(".mem-br-row")).toHaveLength(0);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 400));
+    });
+    await flush();
+    expect(searchCalls()).toHaveLength(1);
+    expect(searchCalls()[0][0]).toBe("api/agents/memory/entries/member-search?scope=user&limit=50&q=zebra");
+    const rows = document.body.querySelectorAll(".mem-br-row");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].textContent).toContain("rules");
+    expect(rows[0].textContent).toContain("the zebra rule");
+    // Clearing the box brings the plain list back and drops the snippets.
+    await setValue(input, "");
+    expect(document.body.querySelectorAll(".mem-br-row")[0].textContent).not.toContain("the zebra rule");
+  });
+
+  it("orders body-only hits by the server's rank, after the instant field matches", async () => {
+    const more = [
+      ...entries,
+      { ...entries[0], name: "second", description: "other", authorKind: "codex", authorSession: "c1" },
+      { ...entries[0], name: "third", description: "other", authorKind: "codex", authorSession: "c2" },
+    ];
+    const base = api.getMockImplementation()!;
+    api.mockImplementation(async (url: string) => {
+      if (url.startsWith("api/agents/memory/entries/list")) return { entries: more };
+      if (url.startsWith("api/agents/memory/entries/member-search"))
+        return { hits: [{ ...more[3], snippets: ["zebra 3"] }, { ...more[2], snippets: ["zebra 2"] }, { ...more[0], snippets: ["zebra 1"] }] };
+      return base(url);
+    });
+    await act(async () => root!.unmount());
+    root = createRoot(host!);
+    await act(async () => {
+      root!.render(
+        <ToastProvider>
+          <ConfirmProvider>
+            <MemoryBrowserPanel reload={0} onChanged={() => {}} />
+          </ConfirmProvider>
+        </ToastProvider>,
+      );
+    });
+    await flush();
+    await setValue(document.body.querySelector<HTMLInputElement>('input[type="search"]')!, "zebra");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 400));
+    });
+    await flush();
+    const names = Array.from(document.body.querySelectorAll(".mem-br-row .mem-af-name")).map((e) => e.textContent);
+    // listed order is rules, second, third; the server ranked third, second, rules
+    expect(names).toEqual(["third", "second", "rules"]);
+  });
+
+  it("scopes the body search to the selected project", async () => {
+    await setValue(select(), "project:" + project.id);
+    await setValue(document.body.querySelector<HTMLInputElement>('input[type="search"]')!, "zebra");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 400));
+    });
+    expect(api).toHaveBeenCalledWith(
+      `api/agents/memory/entries/member-search?scope=project&project=${project.id}&limit=50&q=zebra`,
+    );
+  });
+
   it("shows a body from the member-read route", async () => {
     await click(text("View") ?? text("表示"));
     expect(api).toHaveBeenCalledWith(
@@ -185,11 +261,14 @@ describe("MemoryBrowserPanel", () => {
     });
   });
 
-  it("offers no forget when the memory's newest change is outside the loaded window", async () => {
-    expect(document.body.querySelectorAll(".mem-br-row")[0].querySelectorAll("button")[1].disabled).toBe(false);
-    api.mockImplementation(async (url: string) =>
-      url.startsWith("api/agents/memory/entries/list") ? { entries } : { changes: [] },
-    );
+  it("forgets a memory whose newest change is outside the loaded changes, resolving it on demand", async () => {
+    api.mockImplementation(async (url: string) => {
+      if (url.startsWith("api/agents/memory/entries/list")) return { entries };
+      if (url.startsWith("api/agents/memory/entries/changes")) return { changes: [] };
+      if (url.startsWith("api/agents/memory/entries/member-latest"))
+        return { ...changes[1], commit: "oldcommit9" };
+      return {};
+    });
     await act(async () => root!.unmount());
     root = createRoot(host!);
     await act(async () => {
@@ -202,7 +281,42 @@ describe("MemoryBrowserPanel", () => {
       );
     });
     await flush();
-    expect(document.body.querySelectorAll(".mem-br-row")[0].querySelectorAll("button")[1].disabled).toBe(true);
+    const forgetBtn = document.body.querySelectorAll(".mem-br-row")[0].querySelectorAll("button")[1];
+    expect(forgetBtn.disabled).toBe(false);
+    await click(forgetBtn);
+    expect(api).toHaveBeenCalledWith("api/agents/memory/entries/member-latest?scope=user&project=&name=rules");
+    await click(confirmButton());
+    expect(apiJSON).toHaveBeenCalledWith("api/agents/memory/entries/revert?commit=oldcommit9", "POST", {
+      commit: "oldcommit9",
+      forget: true,
+      ack: false,
+      expectRevision: 3,
+    });
+  });
+
+  it("does not forget when no change can be resolved", async () => {
+    api.mockImplementation(async (url: string) => {
+      if (url.startsWith("api/agents/memory/entries/list")) return { entries };
+      if (url.startsWith("api/agents/memory/entries/changes")) return { changes: [] };
+      if (url.startsWith("api/agents/memory/entries/member-latest"))
+        return { error: { code: "memory_not_found", message: "no published change" } };
+      return {};
+    });
+    await act(async () => root!.unmount());
+    root = createRoot(host!);
+    await act(async () => {
+      root!.render(
+        <ToastProvider>
+          <ConfirmProvider>
+            <MemoryBrowserPanel reload={0} onChanged={() => {}} />
+          </ConfirmProvider>
+        </ToastProvider>,
+      );
+    });
+    await flush();
+    await click(document.body.querySelectorAll(".mem-br-row")[0].querySelectorAll("button")[1]);
+    expect(confirmButton()).toBeNull();
+    expect(apiJSON).not.toHaveBeenCalled();
   });
 
   it("restores a forgotten memory through the revert route", async () => {

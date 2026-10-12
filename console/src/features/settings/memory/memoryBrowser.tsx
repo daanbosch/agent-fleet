@@ -1,22 +1,27 @@
 // MemoryBrowserPanel — the member's browser of AF-owned agent memory (#1985): the memories of one
 // scope with their author, use count and pin, a search, the body of one, forget, and the
 // forgotten ones with a way back. It adds no write route: forget and restore are the changes
-// list's own revert route, on the newest change of the memory. Writing a memory by hand waits for
-// a member mark the Agent can verify (#1997).
+// list's own revert route, on the newest change of the memory, which a forget resolves on demand
+// (member-latest) so it does not depend on how many recent changes were loaded. Writing a memory
+// by hand waits for a member mark the Agent can verify (#1997).
 //
 // A memory whose text fails the secret scan is never listed (the Agent sends a count), so no
-// name or body of one reaches this DOM. Search matches what the list carries (name, description,
-// type, author), not bodies.
+// name or body of one reaches this DOM. Search matches the list's own fields at once (name,
+// description, type, author) and, after a pause, bodies through member-search, which counts no
+// use of the memories it finds.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, apiJSON, errDetail, errText, isTransientErr } from "../../../core/api/client.ts";
 import { useRetryLoad } from "../../../lib/retryLoad.ts";
 import { useToast } from "../../../ui/ToastProvider.tsx";
 import { useConfirm } from "../../../ui/ConfirmProvider.tsx";
 import { useT } from "../../../lib/i18n/index.ts";
 import { fmtDateTime, DATETIME_FULL } from "../../../lib/intl.ts";
-import type { MemoryBody, MemoryChange, MemoryListed } from "./memoryTypes.ts";
+import type { MemoryBody, MemoryChange, MemoryListed, MemorySearchHit } from "./memoryTypes.ts";
 
+
+/** Pause after the last keystroke before the body search is asked. */
+const SEARCH_DELAY_MS = 300;
 
 // "user" or "project:<id>": one browsable scope.
 const scopeKey = (m: { scope: string; project?: { id: string } }) =>
@@ -34,7 +39,9 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState<MemoryBody | null>(null);
   const [openErr, setOpenErr] = useState("");
-  const [live, setLive] = useState<MemoryChange[]>([]);
+  const [hits, setHits] = useState<MemorySearchHit[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searchErr, setSearchErr] = useState(false);
   const [busy, setBusy] = useState(false);
   const [mine, setMine] = useState(0);
 
@@ -52,8 +59,6 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
     // revert brings the memory back.
     const changes: MemoryChange[] = ch?.error ? [] : (ch?.changes ?? []);
     setForgotten(changes.filter((c) => c.latest && !c.live && c.revertible));
-    // A live memory is forgotten from its newest change; one older than the window has none here.
-    setLive(changes.filter((c) => c.latest && c.live));
     return true;
   }, []);
   useRetryLoad(load, [reload, mine]);
@@ -72,11 +77,54 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
   }, [scopes, scope]);
 
   const q = query.trim().toLowerCase();
-  const shown = (rows ?? []).filter(
-    (m) =>
-      scopeKey(m) === scope &&
-      (!q || `${m.name}\n${m.description}\n${m.type ?? ""}\n${m.authorKind}\n${m.authorSession}`.toLowerCase().includes(q)),
-  );
+  // Body search: asked after a pause, for the scope on screen. A newer question or a scope change
+  // drops the answer of an older one.
+  const searchSeq = useRef(0);
+  useEffect(() => {
+    const seq = ++searchSeq.current;
+    setHits([]);
+    setSearchErr(false);
+    if (!q) {
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    const [kind, projectId = ""] = scope.split(":");
+    const timer = setTimeout(() => {
+      const scopeQ = kind === "user" ? "scope=user" : `scope=project&project=${encodeURIComponent(projectId)}`;
+      api(`api/agents/memory/entries/member-search?${scopeQ}&limit=50&q=${encodeURIComponent(q)}`)
+        .then((res) => {
+          if (seq !== searchSeq.current) return;
+          if (res?.error) setSearchErr(true);
+          else setHits(res?.hits ?? []);
+        })
+        .catch(() => {
+          if (seq === searchSeq.current) setSearchErr(true);
+        })
+        .finally(() => {
+          if (seq === searchSeq.current) setSearching(false);
+        });
+    }, SEARCH_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [q, scope]);
+
+  // The rows of the scope that match by a listed field (instant) or by a body hit; a body hit
+  // brings its matching lines. Order: listed matches as listed, then body-only hits in rank order.
+  const snippets = new Map(hits.map((h) => [scopeKey(h) + "/" + h.name, h.snippets ?? []]));
+  const inScope = (rows ?? []).filter((m) => scopeKey(m) === scope);
+  const byField = (m: MemoryListed) =>
+    `${m.name}\n${m.description}\n${m.type ?? ""}\n${m.authorKind}\n${m.authorSession}`.toLowerCase().includes(q);
+  const keyOf = (m: { scope: string; project?: { id: string }; name: string }) => scopeKey(m) + "/" + m.name;
+  const fieldRows = inScope.filter(byField);
+  const seen = new Set(fieldRows.map(keyOf));
+  const byKey = new Map(inScope.map((m) => [keyOf(m), m]));
+  const bodyRows = hits.flatMap((h) => {
+    const m = byKey.get(keyOf(h));
+    if (!m || seen.has(keyOf(h))) return [];
+    seen.add(keyOf(h));
+    return [m];
+  });
+  const shown = q ? [...fieldRows, ...bodyRows] : inScope;
   const gone = forgotten.filter((c) => scopeKey(c) === scope);
   const who = (m: { authorKind: string; authorSession: string }) =>
     m.authorKind === "member" ? tr("mem.af_by_member") : `${m.authorKind} · ${m.authorSession}`;
@@ -95,11 +143,26 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
     }
   };
 
-  const newest = (m: MemoryListed) =>
-    live.find((c) => c.name === m.name && scopeKey(c) === scopeKey(m) && c.scope === m.scope);
+  // The newest change of a memory, wherever it sits in the history. null: none could be resolved
+  // (a toast says why).
+  const newest = async (m: MemoryListed): Promise<MemoryChange | null> => {
+    try {
+      const res = await api(
+        `api/agents/memory/entries/member-latest?scope=${m.scope}&project=${encodeURIComponent(m.project?.id ?? "")}&name=${encodeURIComponent(m.name)}`,
+      );
+      if (res?.error) toast(errDetail(res.error));
+      else if (!res?.commit || !res.live || !res.revertible) toast(tr("mem.br_forget_unavailable", { name: m.name }));
+      else return res as MemoryChange;
+    } catch {
+      toast(tr("mem.af_failed"));
+    }
+    return null;
+  };
 
   const forget = async (m: MemoryListed) => {
-    const c = newest(m);
+    setBusy(true);
+    const c = await newest(m);
+    setBusy(false);
     if (!c) return;
     const ok = await askConfirm({
       title: tr("mem.af_forget_title"),
@@ -175,11 +238,12 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
           onChange={(e) => setQuery(e.target.value)}
         />
       </div>
+      {searchErr && <p className="mem-warn">{tr("mem.br_search_failed")}</p>}
       <ul className="mem-pin-list mem-br-list">
         {rows === null ? (
           <li className="muted pad">{tr("common.loading")}</li>
         ) : shown.length === 0 ? (
-          <li className="muted pad">{tr(q ? "mem.br_no_match" : "mem.br_empty")}</li>
+          <li className="muted pad">{tr(q ? (searching ? "mem.br_searching" : "mem.br_no_match") : "mem.br_empty")}</li>
         ) : (
           shown.map((m) => (
             <li key={scopeKey(m) + "/" + m.name} className="mem-br-row">
@@ -196,10 +260,15 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
                 {" · "}
                 {tr("mem.pin_uses", { n: m.uses })}
               </span>
+              {(snippets.get(scopeKey(m) + "/" + m.name) ?? []).length > 0 && (
+                <span className="mem-snap-what muted mem-br-snip">
+                  {(snippets.get(scopeKey(m) + "/" + m.name) ?? []).join(" … ")}
+                </span>
+              )}
               <button type="button" disabled={busy} onClick={() => void view(m)}>
                 {tr("mem.br_view")}
               </button>
-              <button type="button" disabled={busy || !newest(m)} onClick={() => void forget(m)}>
+              <button type="button" disabled={busy} onClick={() => void forget(m)}>
                 {tr("mem.af_forget")}
               </button>
             </li>

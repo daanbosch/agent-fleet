@@ -216,6 +216,10 @@ func TestAgentMemoryColdScanRunsOutsideReadLock(t *testing.T) {
 			hits, _, err := agentMemSearchRanked(c, "builds", 0)
 			return len(hits), err
 		},
+		"member-search": func(agentMemCaller) (int, error) {
+			out, err := agentMemMemberSearch("", "", "builds", 0)
+			return len(out.Hits), err
+		},
 	}
 	for name, read := range readers {
 		t.Run(name, func(t *testing.T) {

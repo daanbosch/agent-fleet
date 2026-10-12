@@ -10,6 +10,9 @@ package memoryx
 import (
 	"net/http"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
 )
@@ -76,4 +79,192 @@ func HandleAgentMemoryMemberRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, e)
+}
+
+// agentMemMemberHit is a search hit with the project it belongs to, since the Console searches
+// every scope at once.
+type agentMemMemberHit struct {
+	agentMemHit
+	Project *agentMemProject `json:"project,omitempty"`
+}
+
+// agentMemMemberSearchOut is the Console's search answer.
+type agentMemMemberSearchOut struct {
+	Hits     []agentMemMemberHit `json:"hits"`
+	Fallback string              `json:"fallback,omitempty"`
+}
+
+// agentMemMemberSearch ranks the memories of the user scope and every project (or the one scope
+// named) with the ranking of the tools' search, over names, descriptions and bodies. It counts no
+// use and is not gated by the switch. A memory whose file fails the scan is not loaded at all, so
+// neither its name nor its text can reach a hit. The kind filter is off: the Console lists every
+// memory, whatever kinds it is meant for.
+func agentMemMemberSearch(scope, project, query string, limit int) (agentMemMemberSearchOut, error) {
+	out := agentMemMemberSearchOut{Hits: []agentMemMemberHit{}}
+	terms := agentMemSearchTerms(query)
+	if len(terms) == 0 {
+		return out, memoryErrf(http.StatusBadRequest, errCodeMemoryBadRequest, "query is required")
+	}
+	var srcs []agentMemSearchSrc
+	add := func(scope, project string) error {
+		c, err := agentMemMemberCaller(scope, project)
+		if err == nil {
+			srcs = append(srcs, agentMemSearchSrc{c: c, scope: scope})
+		}
+		return err
+	}
+	if scope != "" {
+		if err := add(scope, project); err != nil {
+			return out, err
+		}
+	} else {
+		if err := add(agentMemScopeUser, ""); err != nil {
+			return out, err
+		}
+		if dir, err := agentMemCheckDir("projects", false); err == nil {
+			ents, _ := os.ReadDir(dir)
+			for _, d := range ents {
+				if d.IsDir() && agentMemValidProjectID(d.Name()) {
+					if err := add(agentMemScopeProject, d.Name()); err != nil {
+						return out, err
+					}
+				}
+			}
+		}
+	}
+	// The cold scan of every searched scope runs before the read lock, as the tools' search does,
+	// so a writer queued behind this read is not held up by it; the ranking below re-reads under
+	// the lock and still goes through the scan.
+	agentMemWarmSrcs(srcs)
+	agentMemMu.RLock()
+	defer agentMemMu.RUnlock()
+	found, fallback, err := agentMemRankLocked(srcs, agentMemUnknown, terms, limit)
+	if err != nil {
+		return out, err
+	}
+	out.Fallback = fallback
+	for _, s := range found {
+		out.Hits = append(out.Hits, agentMemMemberHit{agentMemHit: agentMemHitOf(s, fallback), Project: s.src.c.Project})
+	}
+	return out, nil
+}
+
+// HandleAgentMemoryMemberSearch is the Console's body search. Read-only.
+func HandleAgentMemoryMemberSearch(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	out, err := agentMemMemberSearch(q.Get("scope"), q.Get("project"), q.Get("q"), limit)
+	if err != nil {
+		agentMemWriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+// agentMemMemberLatest is the newest published change of one memory, with the same Live and
+// Revertible marks the changes list gives its newest row. The list is a window of recent
+// changes; this finds the change for a memory outside it, so a forget or restore does not depend
+// on the window. It resolves nothing that agentMemRevert does not check again: a revert still
+// has to name this commit and pass its own revision check.
+func agentMemMemberLatest(scope, project, name string) (agentMemChangeView, error) {
+	if err := agentMemCheckName(name); err != nil {
+		return agentMemChangeView{}, err
+	}
+	var rel string
+	switch scope {
+	case agentMemScopeUser:
+		rel = "user"
+	case agentMemScopeProject:
+		if !agentMemValidProjectID(project) {
+			return agentMemChangeView{}, memoryErrf(http.StatusBadRequest, errCodeMemoryBadRequest, "project is not a project id")
+		}
+		rel = "projects/" + project
+	default:
+		return agentMemChangeView{}, memoryErrf(http.StatusBadRequest, errCodeMemoryBadRequest, "scope must be %q or %q", agentMemScopeUser, agentMemScopeProject)
+	}
+	rel += "/" + name + ".md"
+	agentMemMu.RLock()
+	defer agentMemMu.RUnlock()
+	notFound := memoryErrf(http.StatusNotFound, errCodeMemoryNotFound, "no published change for that memory")
+	if !memoryHasCommits() {
+		return agentMemChangeView{}, notFound
+	}
+	commit, err := agentMemLatestChange(rel)
+	if err != nil {
+		return agentMemChangeView{}, err
+	}
+	if commit == "" {
+		return agentMemChangeView{}, notFound
+	}
+	at, err := memoryGitRun("log", "-1", "--format=%aI", commit)
+	if err != nil {
+		return agentMemChangeView{}, err
+	}
+	body, err := memoryGitRun("log", "-1", "--format=%B", commit)
+	if err != nil {
+		return agentMemChangeView{}, err
+	}
+	v, rel2, pid, ok := agentMemChangeFrom(commit, strings.TrimSpace(at), body)
+	if !ok {
+		return agentMemChangeView{}, memoryErrf(http.StatusUnprocessableEntity, errCodeMemorySecretDetected,
+			"the newest change of this memory is withheld: a value in it failed the scan or the expected form")
+	}
+	// The trailers say nothing about the text. A live file that fails the scan (or cannot be read)
+	// is withheld like the list does, and so is a forgotten memory whose earlier text would: the
+	// answer then names nothing.
+	withheld := memoryErrf(http.StatusUnprocessableEntity, errCodeMemorySecretDetected,
+		"this memory is withheld: its text looks like it contains a secret or cannot be checked")
+	exists := false
+	if dir, derr := agentMemCheckDir(filepath.ToSlash(filepath.Dir(rel2)), false); derr == nil {
+		l, ok, lerr := agentMemLoadFile(filepath.Join(dir, name+".md"), scope, name)
+		if lerr != nil || l.Withheld {
+			return agentMemChangeView{}, withheld
+		}
+		exists = ok
+	} else if !os.IsNotExist(derr) {
+		return agentMemChangeView{}, withheld
+	}
+	if !exists {
+		// Judged as a reader would judge the file (agentMemClean: raw bytes and decoded values),
+		// and closed on anything that cannot be read or parsed: the earlier text may have entered
+		// the history by import or a hand edit, which the save path's scan never saw.
+		before, beforeOK, after, afterOK, serr := agentMemSides(commit, rel2)
+		if serr != nil {
+			return agentMemChangeView{}, withheld
+		}
+		// Both sides: with the live file gone, the newest change may still have left text behind
+		// (a create or update whose file was removed by hand).
+		for _, side := range []struct {
+			data []byte
+			ok   bool
+		}{{before, beforeOK}, {after, afterOK}} {
+			if !side.ok {
+				continue
+			}
+			e, pok := agentMemParse(side.data)
+			if !pok {
+				return agentMemChangeView{}, withheld
+			}
+			e.Name, e.Scope = name, scope
+			if !agentMemClean(side.data, e) {
+				return agentMemChangeView{}, withheld
+			}
+		}
+	}
+	if pid != "" {
+		v.Project = agentMemProjectInfo(pid)
+	}
+	agentMemMarkLatest(&v, filepath.ToSlash(rel))
+	return v, nil
+}
+
+// HandleAgentMemoryMemberLatest returns the newest change of one memory to the Console.
+func HandleAgentMemoryMemberLatest(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	v, err := agentMemMemberLatest(q.Get("scope"), q.Get("project"), q.Get("name"))
+	if err != nil {
+		agentMemWriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, v)
 }
