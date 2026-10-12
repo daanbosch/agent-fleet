@@ -1,8 +1,10 @@
 package main
 
 import (
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -142,5 +144,32 @@ func TestMemorySnapshotIsAudited(t *testing.T) {
 		if _, _, ok := auditActionTarget(httptest.NewRequest(http.MethodGet, p, nil)); ok {
 			t.Errorf("GET %s should not be audited", p)
 		}
+	}
+}
+
+// A transport failure on a memory import preview must not put the (unscanned) query in the CP log.
+func TestMemoryImportRelayLogDoesNotQuoteQuery(t *testing.T) {
+	proxy, res, _, cleanup := newFSProxyTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	logs := &lockedBuf{}
+	old := log.Writer()
+	log.SetOutput(logs)
+	t.Cleanup(func() { log.SetOutput(old) })
+	cleanup() // the Agent is stopped
+	secret := "ghp_" + strings.Repeat("q7Zx", 9)
+	for _, p := range []string{
+		"/api/agents/memory/muse-import/preview?dir=" + secret,
+		"/api/agents/memory/claude-import/preview?slug=" + secret,
+	} {
+		rec := httptest.NewRecorder()
+		proxy.rest(rec, httptest.NewRequest(http.MethodGet, p, nil), res)
+		if rec.Code != http.StatusBadGateway {
+			t.Fatalf("%s: %d", p, rec.Code)
+		}
+	}
+	if !strings.Contains(logs.String(), "agent proxy: GET /api/agents/memory/muse-import/preview") {
+		t.Fatalf("the failure was not logged: %q", logs.String())
+	}
+	if strings.Contains(logs.String(), secret) {
+		t.Errorf("the query reached the CP log: %s", logs.String())
 	}
 }
