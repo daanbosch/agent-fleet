@@ -94,6 +94,10 @@ func auditActionTarget(r *http.Request) (action, target string, ok bool) {
 			// ADR 0108 decision 6: the one-time import of claude's memory writes the store. The
 			// Console repeats the project id in the query; only an id-shaped value is recorded.
 			return "memory.claude_import", auditProjectHint(q.Get("project")), true
+		case p == "/api/agents/memory/muse-import":
+			// #1991: the one-time import of muse's project memory writes the store; the project id
+			// in the query is the only value recorded, as for the claude import.
+			return "memory.muse_import", auditProjectHint(q.Get("project")), true
 		case p == "/api/agents/memory/claude-export":
 			// #1914: the write-back changes claude's store. The Console repeats the project id in
 			// the query; only an id-shaped value is recorded.

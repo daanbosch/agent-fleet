@@ -458,3 +458,40 @@ The member-only routes (pin, revert/forget) cannot tell the Console from a sessi
 `AGENT_TOKEN`: the author they record is the route, not a verified person. That is acceptable for
 them because they cannot write new free text. A member create/edit route could, and would bypass
 decision 4's switch, so it is not built; it waits for a member mark the Agent can verify (#1997).
+
+## Note (2026-10-12): importing muse's project-scope memory (#1991)
+
+Decision 6 step 1 for muse: Settings > Agent memory gains **Import from muse**, and `af-memory` gains
+`muse-import-sources` / `muse-import --dir <name> [--dry-run]`. It runs the claude import's evaluation
+(`memoryx/agent_memory_claude_import.go`, generalised by a source parameter; the claude path and its tests are
+unchanged): preview first, applying needs the switch, an unchanged file is skipped by `source_hash`, a forgotten
+name is never brought back, a secret hit is skipped and listed with a masked hint, `source` is
+`muse:project/.agents/memory/<file>`, the author is unknown, and `MEMORY.md` is not a memory. The apply route is
+audited in the Control Plane as `memory.muse_import`.
+
+**Scope handled: only `project`**, i.e. `<working copy>/.agents/memory` of a working copy under `~/repos`, into
+that working copy's AF project. It is never written into AF's user scope. `.agents/memory` may be committed and
+shared, so the preview marks every file git tracks as shared and warns before the confirm. Subdirectories are
+not entered, a symlinked `.agents` or `memory` is refused.
+
+**Update rule (new here).** A newer muse file replaces an AF copy only when that copy's `source` is muse's and the
+#1921 history check says it is still intact (newest change is an import, file byte for byte its text). Otherwise
+the item is listed as `diverged` (`af_changed` or `other_source`) and never sent; a claude import or an AF save
+of the same name is not overwritten.
+
+Measured (muse 1.4.4 binary on this machine, no logged-in run): the strings of the bundled `migrate` skill give
+the scope names and `project` = `<repo>/.agents/memory`, "shared through the repo", the `MEMORY.md` index and the
+note shape; the Settings schema has `memory.destinations.*` and a message that `memory.destinations.project`
+cannot select a git destination (`local` or `notes` are the choices); `muse --help` offers no way to call
+`add_memory` without a model, and `--provider echo` does not call tools. This machine has no muse memory store
+of any scope (no `.agents/memory` under `~/repos`, none under muse's config or data directories).
+
+**Inferred, not measured**: the note shape of a real `.agents/memory` (taken from the skill text and the claude
+shape; the import is tested with fixtures of it); that top-level files are the only ones muse writes there.
+
+**Not done**: the on-disk location of `personal` and `personal_project` is not established. `memory.destinations.*`
+makes it configurable (`local` and `notes`; the error message implies a git destination exists for the
+personal scopes, which is inferred), so a fixed path would be a guess; those two scopes are not read, and nothing is imported into AF's user scope. Establishing the location
+needs one logged-in muse run that calls `add_memory` (a member's quota). Write-back to muse is out of scope:
+with the switch on muse's native memory is off (#1990), so nothing writes there. Follow-up: #2005 (personal
+scopes), the codex import stays with #1950 and the phase-based switch with #1972.

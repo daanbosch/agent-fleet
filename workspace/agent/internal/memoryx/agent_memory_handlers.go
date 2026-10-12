@@ -256,6 +256,40 @@ func HandleAgentMemoryClaudeApply(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, res)
 }
 
+// HandleAgentMemoryMuseSources lists the working copies that have muse project memory. Like the
+// preview it works while the switch is off.
+func HandleAgentMemoryMuseSources(w http.ResponseWriter, r *http.Request) {
+	httpx.WriteJSON(w, http.StatusOK, agentMemMuseList())
+}
+
+// HandleAgentMemoryMusePreview says what an import of one working copy's muse memory would do.
+func HandleAgentMemoryMusePreview(w http.ResponseWriter, r *http.Request) {
+	pv, err := agentMemMusePreviewFor(r.URL.Query().Get("dir"))
+	if err != nil {
+		agentMemWriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, pv)
+}
+
+// HandleAgentMemoryMuseApply imports the listed items; like the claude import it needs the switch on.
+func HandleAgentMemoryMuseApply(w http.ResponseWriter, r *http.Request) {
+	if !agentMemRequireEnabled(w) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	var req agentMemMuseReq
+	if !httpx.DecodeJSON(w, r, &req) {
+		return
+	}
+	res, err := agentMemMuseApply(req, time.Now())
+	if err != nil {
+		agentMemWriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, res)
+}
+
 // HandleAgentMemoryClaudeExportSources lists the AF projects that have memory to write back. The
 // write-back does not need the switch: it writes claude's store, not AF's, and its main use is
 // after the member turned AF memory off.

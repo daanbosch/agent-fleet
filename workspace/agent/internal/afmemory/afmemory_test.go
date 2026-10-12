@@ -103,3 +103,55 @@ func TestAFMemoryUsageAndTokenNeverPrinted(t *testing.T) {
 		t.Errorf("bad token: %d %q %q", code, o, e)
 	}
 }
+
+func TestAFMemoryMuseImport(t *testing.T) {
+	var posted []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /agents/memory/muse-import":
+			io.WriteString(w, `{"sources":[{"dir":"demo","count":2,"shared":1,"project":{"id":"demo-0123456789ab","display":"demo"}}]}`)
+		case "GET /agents/memory/muse-import/preview":
+			if r.URL.Query().Get("dir") != "demo" {
+				io.WriteString(w, `{"reason":"no_project","items":[],"counts":{}}`)
+				return
+			}
+			io.WriteString(w, `{"project":{"id":"demo-0123456789ab","display":"demo"},"counts":{"new":1,"diverged":1},"items":[`+
+				`{"name":"team","status":"new","sourceHash":"h","shared":true},`+
+				`{"name":"mine","status":"diverged","reason":"af_changed"}]}`)
+		case "POST /agents/memory/muse-import":
+			var req struct {
+				Project, Dir string
+				Items        []struct{ Name string }
+			}
+			json.NewDecoder(r.Body).Decode(&req)
+			if req.Dir != "demo" || len(req.Items) != 1 || req.Items[0].Name != "team" || r.URL.Query().Get("project") != req.Project {
+				w.WriteHeader(400)
+				return
+			}
+			posted = append(posted, req.Items[0].Name)
+			io.WriteString(w, `{"results":[{"name":"team","result":"imported"}]}`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	c := &Client{Base: srv.URL, Token: "tok", HTTP: srv.Client()}
+
+	if code, out, _ := run(c, "muse-import-sources"); code != 0 || !strings.Contains(out, "-> demo") || !strings.Contains(out, "may be shared") {
+		t.Errorf("sources: %d\n%s", code, out)
+	}
+	code, out, _ := run(c, "muse-import", "--dir", "demo", "--dry-run")
+	if code != 0 || len(posted) != 0 || !strings.Contains(out, "(shared: git tracks this file") ||
+		!strings.Contains(out, "mine: af_changed") || !strings.Contains(out, "dry run: 1 would be imported") {
+		t.Errorf("dry run: %d posted=%v\n%s", code, posted, out)
+	}
+	if code, out, _ = run(c, "muse-import", "--dir", "demo"); code != 0 || len(posted) != 1 || !strings.Contains(out, "done: 1 imported, 0 skipped") {
+		t.Errorf("apply: %d posted=%v\n%s", code, posted, out)
+	}
+	if code, _, e := run(c, "muse-import", "--dir", "other"); code != 1 || !strings.Contains(e, "muse working copy cannot be imported") {
+		t.Errorf("no project: %d %s", code, e)
+	}
+	if code, _, _ := run(c, "muse-import"); code != 2 {
+		t.Errorf("missing --dir: %d", code)
+	}
+}

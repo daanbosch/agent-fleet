@@ -489,6 +489,9 @@ func buildMux() *http.ServeMux {
 	mux.HandleFunc("GET /agents/memory/claude-import", memoryx.HandleAgentMemoryClaudeSources)
 	mux.HandleFunc("GET /agents/memory/claude-import/preview", memoryx.HandleAgentMemoryClaudePreview)
 	mux.HandleFunc("POST /agents/memory/claude-import", memoryx.HandleAgentMemoryClaudeApply)
+	mux.HandleFunc("GET /agents/memory/muse-import", memoryx.HandleAgentMemoryMuseSources)
+	mux.HandleFunc("GET /agents/memory/muse-import/preview", memoryx.HandleAgentMemoryMusePreview)
+	mux.HandleFunc("POST /agents/memory/muse-import", memoryx.HandleAgentMemoryMuseApply)
 	// The reverse, explicit and previewed: AF memory copied into claude's own (#1914).
 	mux.HandleFunc("GET /agents/memory/claude-export", memoryx.HandleAgentMemoryClaudeExportSources)
 	mux.HandleFunc("GET /agents/memory/claude-export/preview", memoryx.HandleAgentMemoryClaudeExportPreview)

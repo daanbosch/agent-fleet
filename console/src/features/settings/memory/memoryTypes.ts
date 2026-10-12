@@ -155,6 +155,28 @@ export interface ClaudeImportResult {
   commit?: string;
 }
 
+/** One working copy with muse project memory (`<working copy>/.agents/memory`, #1991). */
+export interface MuseImportSource {
+  dir: string;
+  count: number;
+  /** Files git tracks in the working copy: they may be shared with teammates. */
+  shared: number;
+  project?: MemoryChangeProject;
+  reason?: string;
+}
+/** `diverged`: AF has its own version of that name, so muse's file is shown and not applied. */
+export type MuseImportStatus = ClaudeImportStatus | "diverged";
+export interface MuseImportItem extends Omit<ClaudeImportItem, "status"> {
+  status: MuseImportStatus;
+  /** git tracks this file in the working copy. */
+  shared?: boolean;
+}
+export interface MuseImportPreview extends Omit<ClaudeImportPreview, "slug" | "items" | "counts"> {
+  dir: string;
+  items: MuseImportItem[];
+  counts: Partial<Record<MuseImportStatus, number>>;
+}
+
 /** One AF project whose memory can be written back to claude's own (#1914). */
 export interface ClaudeExportSource {
   project: MemoryChangeProject;

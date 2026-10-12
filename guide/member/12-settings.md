@@ -302,9 +302,24 @@ Version control over the memory an agent accumulates by itself (claude's auto-me
     the af tools like every other kind. The setting wins over the same variable in your own environment while
     the switch is on; with the switch off Agent Fleet sets nothing and Muse keeps its default. This covers
     Muse sessions and the assistant chat. Only Muse hosts *started* after the change are affected; a running
-    session keeps what it started with. What Muse saved natively is not imported.
+    session keeps what it started with.
+  - **Import from muse**: below the Claude Code import, brings the project memory Muse Code kept in a working
+    copy (its `.agents/memory` folder, the `project` scope) into Agent Fleet memory for that project, once.
+    It works like the Claude Code import: pick a working copy, read the preview, then confirm. **New**
+    files are added, **newer in muse** files update an Agent Fleet copy only while it is still exactly what
+    this import wrote (a memory you saved, edited, pinned or reverted in Agent Fleet since is listed as **Agent Fleet has
+    its own version** and left alone, and so is a memory of the same name that did not come from muse), a
+    memory you forgot is never brought back, and a file the secret scan flags is skipped and listed. The
+    author is recorded as unknown, `MEMORY.md` (muse's index) is not a memory, and subfolders are not read.
+    `.agents/memory` lives inside the repository and a team may commit it: files git tracks there are marked
+    **shared** and the preview warns before you confirm, because importing copies teammates' text into the
+    memory your sessions read. Nothing is ever imported into your user-wide memory. Muse's `personal` and
+    `personal_project` memories are **not read** (where Muse stores them is not established), and Agent
+    Fleet does not write back into Muse. Applying needs the switch on; the preview works while it is off.
   - **From a terminal**: `af-memory import-sources`, `af-memory import --project <slug> --dry-run` (preview) and
-    `af-memory import --project <slug>` (import); `af-memory changes` lists the latest changes. The import is
+    `af-memory import --project <slug>` (import); `af-memory changes` lists the latest changes. For muse:
+    `af-memory muse-import-sources`, `af-memory muse-import --dir <name> --dry-run` and
+    `af-memory muse-import --dir <name>`. The imports are
     gated by the same switch and the same secret scan as the Console.
   - **Write back to Claude Code**: below the import, the other direction, once and only when you ask. When you
     turn Agent Fleet memory off, Claude Code goes back to its own memory, which lacks what was learned through

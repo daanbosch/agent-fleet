@@ -920,6 +920,9 @@ func registerAgentEnvRoutes(mux *http.ServeMux, cfg config) {
 	mux.HandleFunc("GET /api/agents/memory/claude-import", rest)
 	mux.HandleFunc("GET /api/agents/memory/claude-import/preview", rest)
 	mux.HandleFunc("POST /api/agents/memory/claude-import", rest)
+	mux.HandleFunc("GET /api/agents/memory/muse-import", rest)
+	mux.HandleFunc("GET /api/agents/memory/muse-import/preview", rest)
+	mux.HandleFunc("POST /api/agents/memory/muse-import", rest)
 	// The reverse: AF memory written back into claude's own, previewed first (#1914).
 	mux.HandleFunc("GET /api/agents/memory/claude-export", rest)
 	mux.HandleFunc("GET /api/agents/memory/claude-export/preview", rest)

@@ -88,6 +88,9 @@ type agentMemImportItem struct {
 	SourceModified string                `json:"sourceModified,omitempty"`
 	AFUpdated      string                `json:"afUpdated,omitempty"`
 	Findings       []memorySecretFinding `json:"findings,omitempty"`
+	// Shared (muse import only): git tracks this file in the working copy, so teammates may have
+	// the same text; it says nothing about AF.
+	Shared bool `json:"shared,omitempty"`
 
 	entry agentMemEntry // the converted memory, for apply
 	live  *agentMemEntry
@@ -338,14 +341,26 @@ func agentMemImportOpen(mem *os.File, file string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), "claude-memory"), nil
 }
 
+// agentMemImportSrc says where an evaluated file comes from and which rule decides an update.
+type agentMemImportSrc struct {
+	Source string // the AF memory's `source` field
+	Muse   bool   // muse rules: an update only replaces a copy that is still the muse import's own
+	Shared bool   // the file is tracked by git in its working copy
+}
+
 // agentMemImportEvaluate reads one claude file and decides its status. withheld=true: the file
 // name itself cannot be shown, so the caller only counts it. Callers hold agentMemMu.
 func agentMemImportEvaluate(mem *os.File, file, slug, rel string, history map[string]bool) (it agentMemImportItem, withheld bool) {
+	return agentMemImportEvaluateSrc(mem, file, agentMemImportSrc{Source: "claude:projects/" + slug + "/memory/" + file}, rel, history)
+}
+
+// agentMemImportEvaluateSrc is agentMemImportEvaluate for any source directory.
+func agentMemImportEvaluateSrc(mem *os.File, file string, src agentMemImportSrc, rel string, history map[string]bool) (it agentMemImportItem, withheld bool) {
 	stem := strings.TrimSuffix(file, ".md")
 	if !agentMemImportShowable(stem) {
 		return it, true
 	}
-	it.Name = stem
+	it.Name, it.Shared = stem, src.Shared
 	invalid := func(reason string) (agentMemImportItem, bool) {
 		it.Status, it.Reason = claudeImportInvalid, reason
 		return it, false
@@ -413,7 +428,7 @@ func agentMemImportEvaluate(mem *os.File, file, slug, rel string, history map[st
 		return invalid("too_large")
 	}
 
-	source := "claude:projects/" + slug + "/memory/" + file
+	source := src.Source
 	conv := agentMemEntry{
 		Name: stem, Scope: agentMemScopeProject, Description: desc, Type: typ,
 		AuthorKind: agentMemUnknown, AuthorSession: agentMemUnknown,
@@ -460,6 +475,24 @@ func agentMemImportEvaluate(mem *os.File, file, slug, rel string, history map[st
 		it.live, it.AFUpdated = &le, le.Updated
 		at, perr := time.Parse(time.RFC3339, le.Updated)
 		switch {
+		case src.Muse && le.SourceHash == it.SourceHash:
+			it.Status = claudeImportUnchanged
+		case src.Muse && !strings.HasPrefix(le.Source, agentMemMuseSourcePrefix):
+			// AF holds a memory of this name that is not muse's import (written in AF, or imported
+			// from claude); muse's file never replaces it.
+			it.Status, it.Reason = museImportDiverged, "other_source"
+		case src.Muse && perr != nil:
+			return invalid("store_unreadable")
+		case src.Muse && !st.ModTime().After(at):
+			it.Status = claudeImportUnchanged
+		case src.Muse:
+			// Newer than the AF copy. Only a copy that is still the import's own text is replaced:
+			// a later AF save, pin or revert is the member's, and a missing history proves nothing.
+			if agentMemImportStateFor(rel, stem) == agentMemImportIntact {
+				it.Status = claudeImportUpdate
+			} else {
+				it.Status, it.Reason = museImportDiverged, "af_changed"
+			}
 		case le.SourceHash == it.SourceHash && agentMemImportLegacyShortened(le, desc, body) && agentMemImportStateFor(rel, stem) == agentMemImportIntact:
 			// Imported when long descriptions were cut. Claude's file is what was imported and AF
 			// has not touched the copy since, so the full text replaces the cut one.
@@ -498,7 +531,7 @@ func agentMemImportStateFor(rel, name string) agentMemImportState {
 
 var claudeImportOrder = map[string]int{
 	claudeImportNew: 0, claudeImportUpdate: 1, claudeImportUnchanged: 2,
-	claudeImportForgotten: 3, claudeImportSecret: 4, claudeImportInvalid: 5,
+	claudeImportForgotten: 3, museImportDiverged: 3, claudeImportSecret: 4, claudeImportInvalid: 5,
 }
 
 // agentMemImportBuild evaluates every file of a source. Callers hold agentMemMu.
@@ -597,10 +630,16 @@ func agentMemImportApply(req agentMemImportReq, now time.Time) (agentMemImportAp
 		return agentMemImportApplied{}, memoryErrf(http.StatusConflict, errCodeMemoryConflict,
 			"the project this claude directory maps to has changed; preview it again")
 	}
-	rel := "projects/" + pv.Project.ID
+	return agentMemImportApplyItems(pv.Project, pv.byName, req.Items, now), nil
+}
+
+// agentMemImportApplyItems writes the listed items of an evaluated preview. Callers hold both
+// store locks and have checked the project and the item count.
+func agentMemImportApplyItems(p *agentMemProject, byName map[string]*agentMemImportItem, items []agentMemImportReqItem, now time.Time) agentMemImportApplied {
+	rel := "projects/" + p.ID
 	out := agentMemImportApplied{Results: []agentMemImportResult{}}
 	seen := map[string]bool{}
-	for _, ri := range req.Items {
+	for _, ri := range items {
 		res := agentMemImportResult{Name: ri.Name, Result: "skipped"}
 		if !agentMemValidName(ri.Name) || len(agentMemScanText("name", ri.Name)) > 0 {
 			// The name came from the request and is not echoed.
@@ -608,7 +647,7 @@ func agentMemImportApply(req agentMemImportReq, now time.Time) (agentMemImportAp
 			out.Results = append(out.Results, res)
 			continue
 		}
-		it := pv.byName[ri.Name]
+		it := byName[ri.Name]
 		switch {
 		case seen[ri.Name]:
 			res.Reason = "duplicate"
@@ -619,7 +658,7 @@ func agentMemImportApply(req agentMemImportReq, now time.Time) (agentMemImportAp
 		case it.Status != claudeImportNew && it.Status != claudeImportUpdate:
 			res.Reason = "status_" + it.Status
 		default:
-			commit, err := agentMemImportWrite(*pv.Project, rel, it, now)
+			commit, err := agentMemImportWrite(*p, rel, it, now)
 			if errors.Is(err, errAgentMemImportForgotten) {
 				res.Reason = "status_forgotten"
 			} else if err != nil {
@@ -636,7 +675,7 @@ func agentMemImportApply(req agentMemImportReq, now time.Time) (agentMemImportAp
 		seen[ri.Name] = true
 		out.Results = append(out.Results, res)
 	}
-	return out, nil
+	return out
 }
 
 // errAgentMemImportForgotten: a tombstone says this name was forgotten, whatever the history lists.
