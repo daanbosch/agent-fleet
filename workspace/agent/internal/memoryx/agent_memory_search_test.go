@@ -203,53 +203,72 @@ func TestAgentMemoryFirstReadAfterSavesDoesNotRescan(t *testing.T) {
 }
 
 // A cold cache (a new process) is filled before the read lock is taken: with a writer holding
-// agentMemMu the search scans every file and only then waits, and finishes without scanning again.
+// agentMemMu the read scans every file and only then waits, and finishes without scanning again.
+// Each reader is its own subtest, so dropping the warm-up from one of them is caught.
 func TestAgentMemoryColdScanRunsOutsideReadLock(t *testing.T) {
-	agentMemTestEnv(t)
-	c := agentMemCallerT(t, "claude-main")
-	now := time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC)
 	const n = 12
-	for i := 0; i < n; i++ {
-		memSearchSave(t, c, fmt.Sprintf("mem-%02d", i), "about builds", "body", now.Add(time.Duration(i)*time.Minute))
+	readers := map[string]func(c agentMemCaller) (int, error){
+		"index": func(c agentMemCaller) (int, error) {
+			ix, err := agentMemListIndex(c, 0)
+			return len(ix.Entries), err
+		},
+		"search": func(c agentMemCaller) (int, error) {
+			hits, _, err := agentMemSearchRanked(c, "builds", 0)
+			return len(hits), err
+		},
 	}
-	agentMemDropScanCache()
-	before := agentMemScanRuns.Load()
+	for name, read := range readers {
+		t.Run(name, func(t *testing.T) {
+			agentMemTestEnv(t)
+			c := agentMemCallerT(t, "claude-main")
+			now := time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC)
+			for i := 0; i < n; i++ {
+				memSearchSave(t, c, fmt.Sprintf("mem-%02d", i), "about builds", "body", now.Add(time.Duration(i)*time.Minute))
+			}
+			agentMemDropScanCache()
+			before := agentMemScanRuns.Load()
 
-	agentMemMu.Lock() // stands in for a write in progress
-	locked := true
-	defer func() {
-		if locked {
+			agentMemMu.Lock() // stands in for a write in progress
+			locked := true
+			defer func() {
+				if locked {
+					agentMemMu.Unlock()
+				}
+			}()
+			type result struct {
+				n   int
+				err error
+			}
+			done := make(chan result, 1)
+			go func() {
+				got, err := read(c)
+				done <- result{got, err}
+			}()
+			deadline := time.Now().Add(60 * time.Second)
+			for agentMemScanRuns.Load()-before < n {
+				if time.Now().After(deadline) {
+					t.Fatalf("only %d of %d files scanned while the write lock was held", agentMemScanRuns.Load()-before, n)
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			select {
+			case <-done:
+				t.Fatal("read returned while the write lock was held")
+			default:
+			}
 			agentMemMu.Unlock()
-		}
-	}()
-	done := make(chan []agentMemHit, 1)
-	go func() {
-		hits, _, _ := agentMemSearchRanked(c, "builds", 0)
-		done <- hits
-	}()
-	deadline := time.Now().Add(60 * time.Second)
-	for agentMemScanRuns.Load()-before < n {
-		if time.Now().After(deadline) {
-			t.Fatalf("only %d of %d files scanned while the write lock was held", agentMemScanRuns.Load()-before, n)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	select {
-	case <-done:
-		t.Fatal("search returned while the write lock was held")
-	default:
-	}
-	agentMemMu.Unlock()
-	locked = false
-	select {
-	case hits := <-done:
-		if len(hits) != n {
-			t.Fatalf("%d hits, want %d", len(hits), n)
-		}
-	case <-time.After(60 * time.Second):
-		t.Fatal("search did not finish after the lock was released")
-	}
-	if got := agentMemScanRuns.Load() - before; got != n {
-		t.Fatalf("%d scans for %d files", got, n)
+			locked = false
+			select {
+			case r := <-done:
+				if r.err != nil || r.n != n {
+					t.Fatalf("%d results, err=%v, want %d", r.n, r.err, n)
+				}
+			case <-time.After(60 * time.Second):
+				t.Fatal("read did not finish after the lock was released")
+			}
+			if got := agentMemScanRuns.Load() - before; got != n {
+				t.Fatalf("%d scans for %d files", got, n)
+			}
+		})
 	}
 }
