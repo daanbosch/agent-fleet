@@ -57,3 +57,24 @@ func TestCurrentChangesOnlyOnAnotherAccount(t *testing.T) {
 		t.Errorf("A again = %+v", st3)
 	}
 }
+
+// Review finding (#2017, round 2): two logins recognised in the same instant (or after the
+// clock went back) must still be ordered, at full precision, or the CP can never switch.
+func TestSeenIsStrictlyIncreasingEvenWithoutClockProgress(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	at := time.Date(2026, 10, 12, 11, 58, 0, 0, time.UTC)
+	a, _ := Current("claude", "a", at)
+	b, _ := Current("claude", "b", at)
+	c, _ := Current("codex", "x", at.Add(-time.Hour)) // the clock went back
+	d, _ := Current("claude", "a", at.Add(-time.Hour))
+	order := []Stamp{a, b, c, d}
+	for i := 1; i < len(order); i++ {
+		if order[i].SeenText() <= order[i-1].SeenText() {
+			t.Fatalf("Seen not increasing at %d: %q then %q", i, order[i-1].SeenText(), order[i].SeenText())
+		}
+	}
+	// The switch to b happened "at" 11:58:00; a reading stamped 11:58:00 is a's, not b's.
+	if Admit(b.Since, at) {
+		t.Fatal("a reading from the switch's own second was admitted under the new account")
+	}
+}

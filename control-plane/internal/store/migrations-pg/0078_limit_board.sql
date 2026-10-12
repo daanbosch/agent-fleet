@@ -38,6 +38,8 @@ CREATE TABLE limit_publication_member (
     PRIMARY KEY (membership_id, viewer_membership_id)
 );
 CREATE INDEX idx_limit_publication_member_viewer ON limit_publication_member(viewer_membership_id);
+ALTER TABLE notification_usage_state ADD COLUMN epoch TEXT NOT NULL DEFAULT '';
+ALTER TABLE notification_usage_state ADD COLUMN epoch_since TEXT NOT NULL DEFAULT '';
 CREATE TABLE limit_board_tenant (
     tenant_id  TEXT PRIMARY KEY REFERENCES tenant(id),
     enabled    INTEGER NOT NULL DEFAULT 1,

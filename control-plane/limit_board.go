@@ -126,14 +126,22 @@ func limitTS(s string) (string, time.Time, bool) {
 	return t.Format(time.RFC3339), t, true
 }
 
-// limitEpochSince validates an epoch's login time. Without one the epoch cannot be ordered
-// against the stored one, so the kind is skipped rather than allowed to replace anything.
-func limitEpochSince(s string, now time.Time) (string, bool) {
-	ts, t, ok := limitTS(s)
-	if !ok || t.After(now.Add(limitClockSkew)) {
+// limitEpochSinceLayout is the Agent's generation stamp format (limitepoch.SeenLayout): UTC,
+// fixed-width nanoseconds, so the store orders generations by comparing strings. Truncating it
+// to seconds, as the observation times are, made two logins in one second equal and the
+// second one could never replace the first.
+const limitEpochSinceLayout = "2006-01-02T15:04:05.000000000Z"
+
+// limitEpochSince validates and normalises an epoch's login generation. Without one the epoch
+// cannot be ordered against the stored one, so the kind is skipped rather than allowed to
+// replace anything. It is not checked against the CP clock: it only orders values from the
+// same Agent ledger, which keeps them strictly increasing.
+func limitEpochSince(s string, _ time.Time) (string, bool) {
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
 		return "", false
 	}
-	return ts, true
+	return t.UTC().Format(limitEpochSinceLayout), true
 }
 
 // limitClockSkew bounds how far in the future an observation may claim to be. A workspace

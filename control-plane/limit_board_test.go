@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -609,6 +610,65 @@ func TestUsageObservationLatePostFromBeforeAReloginIsRefused(t *testing.T) {
 	obs, _ := st.ListLimitObservations(context.Background(), []string{mv.MembershipID})
 	if len(obs) != 1 || obs[0].Epoch != "b" || obs[0].UsedPct != 3 {
 		t.Fatalf("the late post replaced the new account: %+v", obs)
+	}
+	// Round 2: nor may it arm the reset notification, even with no notification state yet: the
+	// board already knows a later login.
+	if ns, found, _ := st.GetUsageNotificationState(context.Background(), mv.MembershipID, "claude", "5h"); found && ns.Armed == 1 {
+		t.Fatalf("the previous login's 90%% armed the reset notification: %+v", ns)
+	}
+}
+
+// Round 2: the reset notification is fenced on its own state too (it works with the board
+// off). An older login's post does nothing, and a newer login does not inherit the old armed
+// state, so its first reading is not taken for a reset.
+func TestUsageResetNotificationIsFencedByLogin(t *testing.T) {
+	st := openLimitStore(t)
+	f := newLimitFixture(t, st, "alice")
+	mv := f.members["alice"]
+	if err := st.SetLimitBoardEnabled(context.Background(), f.tenant.ID, false, "t"); err != nil {
+		t.Fatal(err)
+	}
+	a := notificationAPI{store: st, limits: st, now: func() time.Time { return limitNow }}
+	post := func(epoch, gen string, pct int, resets string) {
+		t.Helper()
+		body := fmt.Sprintf(`{"source":"claude","limitEpoch":%q,"limitEpochSince":%q,"windows":[{"windowKey":"5h","percent":%d,"resetsAt":%q,"observedAt":"2026-10-12T11:59:00Z"}]}`, epoch, gen, pct, resets)
+		w := httptest.NewRecorder()
+		a.observeUsage(w, httptest.NewRequest("POST", "/", bytes.NewBufferString(body)), store.Identity{}, mv)
+		if w.Code != 204 {
+			t.Fatalf("%d %s", w.Code, w.Body)
+		}
+	}
+	state := func() store.UsageNotificationState {
+		ns, _, _ := st.GetUsageNotificationState(context.Background(), mv.MembershipID, "claude", "5h")
+		return ns
+	}
+	post("a", "2026-10-12T08:00:00Z", 95, "2026-10-12T12:30:00Z")
+	if state().Armed != 1 {
+		t.Fatalf("armed = %+v", state())
+	}
+	// Signed in to b: a low reading with a later reset is b's first, not a's reset.
+	post("b", "2026-10-12T11:58:00.000000001Z", 5, "2026-10-12T16:00:00Z")
+	if ns := state(); ns.Armed != 0 || ns.Epoch != "b" {
+		t.Fatalf("b inherited a's state: %+v", ns)
+	}
+	if n, _ := st.ListNotifications(context.Background(), mv.MembershipID, "", 50); len(n) != 0 {
+		t.Fatalf("a re-login fired a reset notification: %+v", n)
+	}
+	// A late post of a's (older generation) arms nothing.
+	post("a", "2026-10-12T08:00:00Z", 99, "2026-10-12T12:30:00Z")
+	if ns := state(); ns.Armed != 0 || ns.Epoch != "b" {
+		t.Fatalf("an older login's post moved the state: %+v", ns)
+	}
+}
+
+// Round 2: two logins recognised in the same second are still ordered (the generation keeps
+// its nanoseconds all the way to the store).
+func TestLimitBoardSameSecondReloginSwitches(t *testing.T) {
+	f := newLimitFixture(t, openLimitStore(t), "alice", "bob")
+	f.observe(t, "alice", `{"v":1,"kinds":{"claude":{"epoch":"a","epochSince":"2026-10-12T11:58:00.000000000Z","units":[{"unit":"5h","usedPct":90,"resetsAt":"2026-10-12T14:00:00Z","observedAt":"2026-10-12T11:57:00Z"}]}}}`)
+	f.observe(t, "alice", `{"v":1,"kinds":{"claude":{"epoch":"b","epochSince":"2026-10-12T11:58:00.000000001Z","units":[]}}}`)
+	if obs, _ := f.st.ListLimitObservations(context.Background(), []string{f.members["alice"].MembershipID}); len(obs) != 0 {
+		t.Fatalf("a's 90%% survived a re-login in the same second: %+v", obs)
 	}
 }
 

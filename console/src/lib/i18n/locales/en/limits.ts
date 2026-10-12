@@ -47,6 +47,7 @@ export const limits: Record<keyof typeof jaLimits, string> = {
     "Any agent not in this table is unknown. Values are collected periodically while the workspace runs, and also from an open browser. While neither reaches it, a value stays old or unknown.",
   "limits.unknown": "Unknown",
   "limits.saved": "Saved",
+  "limits.refresh_failed": "Not shown: the values could not be re-checked. They come back with the next successful read.",
   "limits.load_failed": "The limit board could not be loaded.",
   "limits.ago.now": "just now",
   "limits.ago.min": "{n} min ago",

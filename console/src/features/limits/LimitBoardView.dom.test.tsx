@@ -168,4 +168,72 @@ describe("LimitBoardView", () => {
     expect(document.body.textContent).not.toContain("99% 以上");
     expect(document.querySelector<HTMLSelectElement>(".lb-form select")!.value).toBe("tenant");
   });
+
+  const flush = async () => {
+    await act(async () => {
+      await Promise.resolve();
+    });
+  };
+  const visible = async () => {
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await flush();
+  };
+  const revoked = { ...board, members: board.members.map((m) => ({ ...m, kinds: [] })) };
+
+  // Review finding (#2017, round 2): a "show more" answer held across a newer re-read (here one
+  // that found the publications revoked) must not draw the old values again.
+  it("drops a held page that answers after a newer read", async () => {
+    api.mockImplementation((path: string) => Promise.resolve(path.startsWith("api/limit-board/me") ? me : { ...board, next: "cat" }));
+    await mount();
+    let releaseMore: (v: unknown) => void = () => {};
+    api.mockImplementation((path: string) =>
+      path.includes("after=") ? new Promise((r) => (releaseMore = r)) : Promise.resolve(path.startsWith("api/limit-board/me") ? me : revoked),
+    );
+    const more = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent?.includes("さらに表示"))!;
+    await act(async () => {
+      more.click();
+    });
+    await visible();
+    await act(async () => {
+      releaseMore({ enabled: true, next: "", members: [{ userKey: "dan", email: "dan@example.com", kinds: board.members[0].kinds }] });
+      await Promise.resolve();
+    });
+    expect(document.body.textContent).not.toContain("99% 以上");
+    expect(document.body.textContent).not.toContain("dan@example.com");
+  });
+
+  it("keeps the newer of two reads that finish out of order", async () => {
+    await mount();
+    let releaseOld: (v: unknown) => void = () => {};
+    api.mockImplementationOnce(() => Promise.resolve(me)).mockImplementationOnce(() => new Promise((r) => (releaseOld = r)));
+    await visible(); // read 1: its board answer is held
+    api.mockImplementation((path: string) => Promise.resolve(path.startsWith("api/limit-board/me") ? me : revoked));
+    await visible(); // read 2: the publication was revoked
+    await act(async () => {
+      releaseOld(board); // read 1 answers last, with the pre-revocation values
+      await Promise.resolve();
+    });
+    expect(document.body.textContent).not.toContain("99% 以上");
+  });
+
+  it("hides values when a re-read fails", async () => {
+    await mount();
+    expect(document.body.textContent).toContain("99% 以上");
+    api.mockImplementation(() => Promise.resolve({ error: { code: "http_500", message: "x" } }));
+    await visible();
+    expect(document.body.textContent).not.toContain("99% 以上");
+    expect(document.body.textContent).toContain("再確認できなかった");
+  });
+
+  it("draws nobody's values once a re-read finds the board switched off", async () => {
+    await mount();
+    api.mockImplementation((path: string) =>
+      Promise.resolve(path.startsWith("api/limit-board/me") ? { ...me, enabled: false } : { ...board, enabled: false }),
+    );
+    await visible();
+    expect(document.body.textContent).not.toContain("99% 以上");
+    expect(document.body.textContent).not.toContain("amy@example.com");
+  });
 });

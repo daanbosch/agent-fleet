@@ -501,9 +501,13 @@ left open.
   observed before the Agent first saw the current account is dropped. It is conservative in one
   direction only (a new account's first reading can be dropped once). A kind whose account can be
   named is always reported, with no units if nothing is admitted yet: that epoch alone clears the
-  previous account's values on the CP. Each epoch carries the Agent's time for that login
-  (`epochSince`), and the CP replaces its stored epoch only with a strictly later one, so a
-  browser post read before a re-login and delivered after it is refused.
+  previous account's values on the CP. Each epoch carries its login generation (`epochSince`):
+  a time with nanoseconds that the Agent's ledger keeps strictly increasing, even within one
+  second or when the clock goes back. The CP accepts observations only from the current
+  generation and replaces it only with a strictly later one, so a post from before a re-login,
+  including one from an earlier login to the same account, is refused. The usage-reset
+  notification's armed state is fenced by the same generation on its own row, so it keeps
+  working with the board switched off and a new login does not inherit the old armed state.
 - **Observed time.** claude's statusLine capture moves `observedAt` only when the captured
   values change, because claude re-renders from what it already holds; codex's account cache
   keeps the last success apart from the last attempt; a window rolled past its reset is flagged

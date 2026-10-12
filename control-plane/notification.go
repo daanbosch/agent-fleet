@@ -256,6 +256,12 @@ func (a notificationAPI) observeUsage(w http.ResponseWriter, r *http.Request, _ 
 		now = a.now()
 	}
 	a.recordBoardObservations(r.Context(), mv, in.Source, in.LimitEpoch, in.LimitEpochSince, in.Windows, now)
+	// The reset notification is fenced by the same login generation as the board, but on its
+	// own state, so it keeps working with the tenant's board switched off.
+	gen := ""
+	if in.LimitEpoch != "" {
+		gen, _ = limitEpochSince(in.LimitEpochSince, now)
+	}
 	for _, obs := range in.Windows {
 		// The reset notification's armed state is never set from a derived or stale value: a
 		// window rolled past its reset is the Agent's guess, and an old reading is no evidence
@@ -273,6 +279,30 @@ func (a notificationAPI) observeUsage(w http.ResponseWriter, r *http.Request, _ 
 			writeAPIErr(w, internalErr(err))
 			return
 		}
+		// The newest generation known for this kind: the notification state's own, or the
+		// board's when the reaper has stored a later login (it may not have, with the board off).
+		floorEpoch, floorGen := "", ""
+		if found {
+			floorEpoch, floorGen = st.Epoch, st.EpochSince
+		}
+		if boardEpoch, boardGen := a.boardGeneration(r.Context(), mv.MembershipID, in.Source); boardGen > floorGen {
+			floorEpoch, floorGen = boardEpoch, boardGen
+		}
+		if floorGen != "" {
+			switch {
+			// A post that cannot be placed, or that comes from an older login, neither arms,
+			// disarms nor fires: its numbers may be the previous account's.
+			case gen == "" || gen < floorGen:
+				continue
+			case gen == floorGen && in.LimitEpoch != floorEpoch:
+				continue
+			}
+		}
+		// A newer login starts clean: it does not inherit the previous login's armed state,
+		// and its first reading is not a "reset" of the old one.
+		if found && gen != "" && gen > st.EpochSince && st.EpochSince != "" {
+			found, st = false, store.UsageNotificationState{}
+		}
 		previousReset, _ := time.Parse(time.RFC3339, st.ResetsAt)
 		observedReset, _ := time.Parse(time.RFC3339, obs.ResetsAt)
 		reset := found && st.Armed == 1 && st.ResetsAt != "" && observedReset.After(previousReset)
@@ -282,7 +312,8 @@ func (a notificationAPI) observeUsage(w http.ResponseWriter, r *http.Request, _ 
 		} else if reset {
 			armed = 0
 		}
-		st = store.UsageNotificationState{MembershipID: mv.MembershipID, Source: in.Source, WindowKey: obs.WindowKey, ResetsAt: obs.ResetsAt, Armed: armed}
+		st = store.UsageNotificationState{MembershipID: mv.MembershipID, Source: in.Source, WindowKey: obs.WindowKey,
+			ResetsAt: obs.ResetsAt, Armed: armed, Epoch: in.LimitEpoch, EpochSince: gen}
 		if err := a.store.PutUsageNotificationState(r.Context(), st); err != nil {
 			writeAPIErr(w, internalErr(err))
 			return
@@ -340,4 +371,17 @@ func (a notificationAPI) recordBoardObservations(ctx context.Context, mv store.M
 	if _, err := a.limits.RecordLimitObservations(ctx, mv.MembershipID, kind, epoch, since, now.UTC().Format(time.RFC3339), obs); err != nil {
 		log.Printf("limit board: browser observation %s/%s: %v", mv.MembershipID, kind, err)
 	}
+}
+
+// boardGeneration is the board's stored login for kind, or "" when there is none (no board
+// store wired, nothing recorded, or a read error: the notification then fences on its own state).
+func (a notificationAPI) boardGeneration(ctx context.Context, membershipID, kind string) (string, string) {
+	if a.limits == nil {
+		return "", ""
+	}
+	epoch, gen, found, err := a.limits.GetLimitEpoch(ctx, membershipID, kind)
+	if err != nil || !found {
+		return "", ""
+	}
+	return epoch, gen
 }

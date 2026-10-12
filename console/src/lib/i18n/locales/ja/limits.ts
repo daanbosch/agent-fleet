@@ -45,6 +45,7 @@ export const limits = {
     "表にないエージェントはすべて「不明」です。値はワークスペースが動いている間に定期的に集め、ブラウザを開いている間はそこからも届きます。どちらも届かない間は古い値か不明のままです。",
   "limits.unknown": "不明",
   "limits.saved": "保存しました",
+  "limits.refresh_failed": "値を再確認できなかったため表示していません。次の読み込みに成功すると表示されます。",
   "limits.load_failed": "利用枠ボードを読み込めませんでした。",
   "limits.ago.now": "たった今",
   "limits.ago.min": "{n} 分前",

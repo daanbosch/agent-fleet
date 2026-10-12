@@ -133,6 +133,14 @@ func TestLimitObservationsNewerWinsAndEpochDrops(t *testing.T) {
 		if r := get(); len(r) != 1 || r[0].Epoch != "e1" || r[0].UsedPct != 7 {
 			t.Fatalf("after A→B→A = %+v", r)
 		}
+		// Round 2: a late post from the FIRST login to A carries the same epoch but an older
+		// generation. It must not bring back what that login had (the 90%, or anything else).
+		if ok, _ := st.RecordLimitObservations(ctx, m, "claude", "e1", "2026-10-01T10:00:00Z", "t5b", obs(90, "2026-10-01T13:00:30Z", "browser")); ok {
+			t.Fatal("a late post from A's earlier login was accepted under A's later login")
+		}
+		if r := get(); len(r) != 1 || r[0].UsedPct != 7 {
+			t.Fatalf("A's earlier login came back: %+v", r)
+		}
 		// …and B's late post (login time before A's return) cannot take it back.
 		if ok, _ := st.RecordLimitObservations(ctx, m, "claude", "e2", "2026-10-01T12:35:00Z", "t6", obs(50, "2026-10-01T13:02:00Z", "browser")); ok {
 			t.Fatal("B's late post outranked the later return to A")

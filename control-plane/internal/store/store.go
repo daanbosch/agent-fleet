@@ -786,6 +786,9 @@ type Notification struct {
 type UsageNotificationState struct {
 	MembershipID, Source, WindowKey, ResetsAt string
 	Armed                                     int
+	// Epoch / EpochSince: the login generation the state was last set under (ADR 0111
+	// decision 6). Empty when it was set by a post that carried none.
+	Epoch, EpochSince string
 }
 
 // Workspace is one container per Membership (= identity × tenant).

@@ -36,15 +36,17 @@ type LimitPublication struct {
 }
 
 type LimitBoardStore interface {
-	// RecordLimitObservations stores one kind's observations under epoch. A different epoch
-	// replaces the stored one only when its epochSince is strictly later, and then deletes the
-	// kind's other-epoch rows; otherwise the call is refused (accepted=false) and nothing is
-	// written. Per unit, a row is replaced only by a strictly newer observation, so an older or
+	// RecordLimitObservations stores one kind's observations under (epoch, epochSince), the
+	// login and its generation. A strictly later generation replaces the stored one and deletes
+	// the kind's rows; anything but the current generation is refused (accepted=false) and
+	// nothing is written. Per unit, a row is replaced only by a strictly newer observation, so an older or
 	// identical one is a no-op whichever source sends it. obs may be empty: an epoch on its own
 	// is what clears the previous account's values.
 	RecordLimitObservations(ctx context.Context, membershipID, kind, epoch, epochSince, at string, obs []LimitObservation) (accepted bool, err error)
 	// ListLimitObservations returns the current-epoch observations of the given memberships.
 	ListLimitObservations(ctx context.Context, membershipIDs []string) ([]LimitObservation, error)
+	// GetLimitEpoch is the kind's current login and generation as the board last stored them.
+	GetLimitEpoch(ctx context.Context, membershipID, kind string) (epoch, epochSince string, found bool, err error)
 	PutLimitSessionStates(ctx context.Context, row LimitSessionStates) error
 	ListLimitSessionStates(ctx context.Context, membershipIDs []string) (map[string]LimitSessionStates, error)
 	// GetLimitPublication: found=false means hidden, the default.
@@ -69,35 +71,35 @@ func (s *SQL) RecordLimitObservations(ctx context.Context, membershipID, kind, e
 		ON CONFLICT(membership_id, kind) DO NOTHING`, membershipID, kind, epoch, epochSince, at); err != nil {
 		return false, err
 	}
-	// The switch is fenced on epoch_since, not on arrival order: a browser post read before a
-	// re-login and delivered after the reaper stored the new account would otherwise delete the
-	// new rows and bring the old account back. The UPDATE also takes the row lock, so two racing
-	// switches serialise here and the SELECT below sees the winner.
-	if _, err := tx.ExecContext(ctx, `UPDATE limit_epoch SET epoch=?, epoch_since=?, changed_at=?
-		WHERE membership_id=? AND kind=? AND epoch<>? AND epoch_since < ?`,
-		epoch, epochSince, at, membershipID, kind, epoch, epochSince); err != nil {
+	// The generation (epoch_since) is what orders logins, not the epoch: the epoch is an HMAC of
+	// the account, so signing back in to A after B brings back A's epoch with a later
+	// generation. Only a strictly later generation replaces the stored one, and the UPDATE takes
+	// the row lock, so racing switches serialise here and the SELECT below sees the winner.
+	res, err := tx.ExecContext(ctx, `UPDATE limit_epoch SET epoch=?, epoch_since=?, changed_at=?
+		WHERE membership_id=? AND kind=? AND epoch_since < ?`,
+		epoch, epochSince, at, membershipID, kind, epochSince)
+	if err != nil {
 		return false, err
 	}
-	// The same account seen again after a login elsewhere raises its own bound, so a late report
-	// from the login in between cannot outrank it.
-	if _, err := tx.ExecContext(ctx, `UPDATE limit_epoch SET epoch_since=?
-		WHERE membership_id=? AND kind=? AND epoch=? AND epoch_since < ?`,
-		epochSince, membershipID, kind, epoch, epochSince); err != nil {
+	switched, _ := res.RowsAffected()
+	var curEpoch, curSince string
+	if err := tx.QueryRowContext(ctx, `SELECT epoch, epoch_since FROM limit_epoch WHERE membership_id=? AND kind=?`,
+		membershipID, kind).Scan(&curEpoch, &curSince); err != nil {
 		return false, err
 	}
-	var current string
-	if err := tx.QueryRowContext(ctx, `SELECT epoch FROM limit_epoch WHERE membership_id=? AND kind=?`,
-		membershipID, kind).Scan(&current); err != nil {
-		return false, err
-	}
-	if current != epoch {
+	// Observations are taken only from the current generation itself. A report from an older
+	// login of the same account carries the same epoch, and must still be refused: it would
+	// bring back values the newer login already dropped.
+	if curEpoch != epoch || curSince != epochSince {
 		return false, nil
 	}
-	// Unconditional rather than only on a change: it is what guarantees no row of another
-	// epoch survives, even one written by a transaction that raced this one.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM limit_observation WHERE membership_id=? AND kind=? AND epoch<>?`,
-		membershipID, kind, epoch); err != nil {
-		return false, err
+	if switched > 0 {
+		// A new generation, of another account or the same one: everything stored for the
+		// kind belongs to an older login.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM limit_observation WHERE membership_id=? AND kind=?`,
+			membershipID, kind); err != nil {
+			return false, err
+		}
 	}
 	for _, o := range obs {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO limit_observation
@@ -287,4 +289,14 @@ func (s *SQL) ListMembersByTenantPage(ctx context.Context, tenantID, afterUserKe
 		out = append(out, mi)
 	}
 	return out, rows.Err()
+}
+
+func (s *SQL) GetLimitEpoch(ctx context.Context, membershipID, kind string) (string, string, bool, error) {
+	var epoch, since string
+	err := s.db.QueryRowContext(ctx, `SELECT epoch, epoch_since FROM limit_epoch WHERE membership_id=? AND kind=?`,
+		membershipID, kind).Scan(&epoch, &since)
+	if err == sql.ErrNoRows {
+		return "", "", false, nil
+	}
+	return epoch, since, err == nil, err
 }

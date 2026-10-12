@@ -46,12 +46,20 @@ type Stamp struct {
 	Seen  time.Time
 }
 
+// SeenLayout is how Seen travels: UTC, fixed-width nanoseconds, so the CP can order two
+// values by comparing the strings and no precision is lost on the way.
+const SeenLayout = "2006-01-02T15:04:05.000000000Z"
+
 // SeenText is Seen as the wire carries it.
-func (s Stamp) SeenText() string { return s.Seen.UTC().Format(time.RFC3339) }
+func (s Stamp) SeenText() string { return s.Seen.UTC().Format(SeenLayout) }
 
 type ledger struct {
 	Key   []byte           `json:"key"`
 	Kinds map[string]entry `json:"kinds"`
+	// Last is the latest Seen this ledger ever issued, across kinds. A new Seen is always
+	// strictly after it, so two logins recognised in the same instant, or after the clock went
+	// back, are still ordered.
+	Last time.Time `json:"last"`
 }
 
 var (
@@ -124,7 +132,12 @@ func Current(kind, identity string, now time.Time) (Stamp, bool) {
 	id := hex.EncodeToString(m.Sum(nil))
 	e, known := cur.Kinds[kind]
 	if !known || e.ID != id || e.Seen.IsZero() {
-		since := now.UTC().Truncate(time.Second)
+		seen := now.UTC()
+		if !seen.After(cur.Last) {
+			seen = cur.Last.Add(time.Nanosecond)
+		}
+		cur.Last = seen
+		since := seen
 		switch {
 		case !known:
 			since = time.Time{}
@@ -132,7 +145,7 @@ func Current(kind, identity string, now time.Time) (Stamp, bool) {
 			// A ledger written before Seen existed: same account, keep its bound.
 			since = e.Since
 		}
-		e = entry{ID: id, Since: since, Seen: now.UTC().Truncate(time.Second)}
+		e = entry{ID: id, Since: since, Seen: seen}
 		cur.Kinds[kind] = e
 		save()
 	}
@@ -141,8 +154,15 @@ func Current(kind, identity string, now time.Time) (Stamp, bool) {
 
 // Admit reports whether a reading observed at observedAt may be shown under the account first
 // seen at since. A reading with no observation time is never admitted: its age is unknown.
+//
+// Strictly after since: collectors stamp whole seconds, so a reading of the previous account
+// taken in the same second as the switch would otherwise pass. The cost is that a reading of
+// the new account in that second is dropped too, and comes back with the next one.
 func Admit(since, observedAt time.Time) bool {
-	return !observedAt.IsZero() && !observedAt.Before(since)
+	if observedAt.IsZero() {
+		return false
+	}
+	return since.IsZero() || observedAt.After(since)
 }
 
 // Annotate adds to a usage-chip response what the Console's usage-observation post needs to

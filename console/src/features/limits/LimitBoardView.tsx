@@ -55,6 +55,13 @@ export function LimitBoardView() {
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const dirtyRef = useRef(false);
+  // Every load and every page request belongs to one roster generation. A newer load bumps it,
+  // so an older load or a "show more" that answers late (from before a revocation, or before
+  // the board was switched off) is dropped rather than painted over the newer answer.
+  const genRef = useRef(0);
+  // A refresh that failed leaves values whose audience could not be re-checked; they are not
+  // shown until a read succeeds again.
+  const [unverified, setUnverified] = useState(false);
   const shownRef = useRef(0);
   shownRef.current = members.length;
 
@@ -72,14 +79,17 @@ export function LimitBoardView() {
   const load = useCallback(
     async (initial: boolean) => {
       const at = scopeRef.current;
+      const gen = ++genRef.current;
       const limit = Math.min(100, Math.max(PAGE, shownRef.current));
       const [m, b] = await Promise.all([api("api/limit-board/me"), api(`api/limit-board?limit=${limit}`)]);
-      if (scopeRef.current !== at) return;
+      if (scopeRef.current !== at || genRef.current !== gen) return;
       if (m?.error || b?.error) {
         if (initial) setFailed(true);
+        else setUnverified(true);
         return;
       }
       setFailed(false);
+      setUnverified(false);
       applyMe(m as BoardMe, initial);
       setEnabled(!!b.enabled);
       setMembers(b.members || []);
@@ -94,6 +104,7 @@ export function LimitBoardView() {
     setMembers([]);
     setNext("");
     setFailed(false);
+    setUnverified(false);
     dirtyRef.current = false;
     void load(true);
   }, [scope, load]);
@@ -116,8 +127,9 @@ export function LimitBoardView() {
 
   const more = async () => {
     const at = scopeRef.current;
+    const gen = genRef.current;
     const b = await api(`api/limit-board?limit=${PAGE}&after=${encodeURIComponent(next)}`);
-    if (scopeRef.current !== at || b?.error) return;
+    if (scopeRef.current !== at || genRef.current !== gen || b?.error) return;
     setMembers((cur) => [...cur, ...(b.members || [])]);
     setNext(b.next || "");
   };
@@ -222,21 +234,31 @@ export function LimitBoardView() {
 
       <section className="ds-group">
         <h4 className="ds-title">{tr("limits.own_title")}</h4>
-        {enabled ? <LimitEntry view={me.own} now={now} /> : <p className="muted lb-unknown">{tr("limits.tenant_off_short")}</p>}
+        {!enabled ? (
+          <p className="muted lb-unknown">{tr("limits.tenant_off_short")}</p>
+        ) : unverified ? (
+          <p className="muted lb-unknown">{tr("limits.refresh_failed")}</p>
+        ) : (
+          <LimitEntry view={me.own} now={now} />
+        )}
       </section>
 
       <section className="ds-group">
         <h4 className="ds-title">{tr("limits.team_title")}</h4>
-        {enabled && members.length === 0 && <p className="muted ds-note">{tr("limits.no_members")}</p>}
-        <ul className="lb-roster">
-          {members.map((m) => (
-            <li key={m.userKey}>
-              <div className="lb-who">{m.email || m.userKey}</div>
-              <LimitEntry view={m} now={now} />
-            </li>
-          ))}
-        </ul>
-        {next && (
+        {/* Off, or not re-verified: nothing of anyone is drawn, whatever a late answer held. */}
+        {unverified && <p className="muted ds-note">{tr("limits.refresh_failed")}</p>}
+        {enabled && !unverified && members.length === 0 && <p className="muted ds-note">{tr("limits.no_members")}</p>}
+        {enabled && !unverified && (
+          <ul className="lb-roster">
+            {members.map((m) => (
+              <li key={m.userKey}>
+                <div className="lb-who">{m.email || m.userKey}</div>
+                <LimitEntry view={m} now={now} />
+              </li>
+            ))}
+          </ul>
+        )}
+        {enabled && !unverified && next && (
           <button type="button" className="linklike" onClick={more}>
             {tr("limits.more")}
           </button>
