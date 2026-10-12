@@ -326,6 +326,11 @@
   border-color: var(--err);
 }
 
+.mem-badge.ci-diverged {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
 .mem-badge.ci-update {
   color: var(--accent);
   border-color: var(--accent);

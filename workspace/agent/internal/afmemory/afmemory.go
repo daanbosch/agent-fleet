@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -33,6 +34,10 @@ Usage:
   af-memory import --project <slug> --dry-run
                                              preview: what an import would do, nothing written
   af-memory import --project <slug>          import every new and updated memory
+  af-memory muse-import-sources              working copies that have muse project memory to import
+  af-memory muse-import --dir <name> --dry-run
+                                             preview: what a muse import would do, nothing written
+  af-memory muse-import --dir <name>         import every new and updated muse project memory
   af-memory export-sources                   AF projects whose memory can be written back to claude
   af-memory export --project <id|name> --dry-run
                                              preview: what a write-back would do, nothing written
@@ -42,6 +47,11 @@ Usage:
 
 <slug> is a name from import-sources. The import needs "Agent Fleet memory" turned on in
 Settings > Agent memory; a file the secret scan flags is listed and skipped, never imported.
+
+muse-import reads <working copy>/.agents/memory (muse's project scope) only, into that working
+copy's AF project. <name> is a directory name from muse-import-sources. A file git tracks there
+may be shared with teammates; it is marked "shared" in the preview. muse's personal scopes are
+not read. Same switch and secret scan as import.
 
 export is the other direction, one-shot: new and changed AF memories become files in claude's
 memory directory for the project, MEMORY.md is regenerated, and claude's memory is snapshotted
@@ -88,6 +98,10 @@ func Main(c *Client, args []string, out, errw io.Writer) int {
 		err = cmdSources(c, out)
 	case "import":
 		err = cmdImport(c, args[1:], out)
+	case "muse-import-sources":
+		err = cmdMuseSources(c, out)
+	case "muse-import":
+		err = runImport(c, args[1:], out, museImportSpec)
 	case "export-sources":
 		err = cmdExportSources(c, out)
 	case "export":
@@ -211,12 +225,59 @@ func cmdSources(c *Client, out io.Writer) error {
 	return nil
 }
 
+func cmdMuseSources(c *Client, out io.Writer) error {
+	var res struct {
+		Sources []struct {
+			Dir     string
+			Count   int
+			Shared  int
+			Project *project
+			Reason  string
+		}
+		Withheld int
+	}
+	if err := c.do("GET", "/agents/memory/muse-import", nil, &res); err != nil {
+		return err
+	}
+	for _, s := range res.Sources {
+		dest := s.Reason
+		if s.Project != nil {
+			dest = "-> " + s.Project.Display
+		}
+		shared := ""
+		if s.Shared > 0 {
+			shared = fmt.Sprintf("  (%d tracked by git: may be shared with teammates)", s.Shared)
+		}
+		fmt.Fprintf(out, "%-60s %4d files  %s%s\n", s.Dir, s.Count, dest, shared)
+	}
+	if len(res.Sources) == 0 {
+		fmt.Fprintln(out, "no muse project memory to import")
+	}
+	if res.Withheld > 0 {
+		fmt.Fprintf(out, "(%d working copy(ies) not listed: the name did not pass the secret scan)\n", res.Withheld)
+	}
+	return nil
+}
+
+// importSpec is what differs between the claude import and the muse import.
+type importSpec struct {
+	cmd, flag, what string // "import", "project" | "muse-import", "dir"
+	base, query     string // REST path and the preview's query parameter
+	reqKey          string // the apply body's source key
+}
+
+var (
+	claudeImportSpec = importSpec{"import", "project", "claude project", "/agents/memory/claude-import", "slug", "slug"}
+	museImportSpec   = importSpec{"muse-import", "dir", "muse working copy", "/agents/memory/muse-import", "dir", "dir"}
+)
+
 type previewItem struct {
 	Name           string
 	Status, Reason string
 	SourceHash     string
 	SourceModified string
 	AFUpdated      string
+	Shared         bool
 	Findings       []struct {
 		Path, Rule, Hint string
 		Line             int
@@ -233,23 +294,27 @@ type preview struct {
 }
 
 func cmdImport(c *Client, args []string, out io.Writer) error {
-	fs := flag.NewFlagSet("import", flag.ContinueOnError)
+	return runImport(c, args, out, claudeImportSpec)
+}
+
+func runImport(c *Client, args []string, out io.Writer, sp importSpec) error {
+	fs := flag.NewFlagSet(sp.cmd, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	slug := fs.String("project", "", "")
+	slug := fs.String(sp.flag, "", "")
 	dry := fs.Bool("dry-run", false, "")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 || *slug == "" {
-		return &usageError{"import needs --project <slug> (see import-sources) and optionally --dry-run"}
+		return &usageError{fmt.Sprintf("%s needs --%s <name> (see %s-sources) and optionally --dry-run", sp.cmd, sp.flag, sp.cmd)}
 	}
 	var pv preview
-	if err := c.do("GET", "/agents/memory/claude-import/preview?slug="+queryEscape(*slug), nil, &pv); err != nil {
+	if err := c.do("GET", sp.base+"/preview?"+sp.query+"="+queryEscape(*slug), nil, &pv); err != nil {
 		return err
 	}
 	if pv.Project == nil {
-		return fmt.Errorf("this claude project cannot be imported (%s)", pv.Reason)
+		return fmt.Errorf("this %s cannot be imported (%s)", sp.what, pv.Reason)
 	}
-	fmt.Fprintf(out, "claude project -> %s\n", pv.Project.Display)
+	fmt.Fprintf(out, "%s -> %s\n", sp.what, pv.Project.Display)
 	var todo []previewItem
-	for _, st := range []string{"new", "update", "unchanged", "forgotten", "secret", "invalid"} {
+	for _, st := range []string{"new", "update", "unchanged", "diverged", "forgotten", "secret", "invalid"} {
 		if pv.Counts[st] == 0 {
 			continue
 		}
@@ -262,17 +327,20 @@ func cmdImport(c *Client, args []string, out io.Writer) error {
 			case "new", "update":
 				todo = append(todo, it)
 				note := ""
+				if it.Shared {
+					note = "  (shared: git tracks this file, teammates may have it)"
+				}
 				if st == "update" && it.Reason == "refresh_shortened" {
 					note = "  (AF copy was imported with a cut description; refreshed from claude's file)"
 				} else if st == "update" {
-					note = fmt.Sprintf("  (claude file %s is newer than AF %s)", it.SourceModified, it.AFUpdated)
+					note += fmt.Sprintf("  (%s file %s is newer than AF %s)", strings.Fields(sp.what)[0], it.SourceModified, it.AFUpdated)
 				}
 				fmt.Fprintf(out, "  %s%s\n", it.Name, note)
 			case "secret":
 				for _, f := range it.Findings {
 					fmt.Fprintf(out, "  %s: %s in %s, line %d  %s\n", it.Name, f.Rule, f.Path, f.Line, f.Hint)
 				}
-			case "invalid":
+			case "invalid", "diverged":
 				fmt.Fprintf(out, "  %s: %s\n", it.Name, it.Reason)
 			}
 		}
@@ -294,18 +362,16 @@ func cmdImport(c *Client, args []string, out io.Writer) error {
 	imported, skipped := 0, 0
 	for start := 0; start < len(todo); start += importBatch {
 		batch := todo[start:min(start+importBatch, len(todo))]
-		req := struct {
-			Project string              `json:"project"`
-			Slug    string              `json:"slug"`
-			Items   []map[string]string `json:"items"`
-		}{Project: pv.Project.ID, Slug: *slug}
+		req := map[string]any{"project": pv.Project.ID, sp.reqKey: *slug}
+		items := []map[string]string{}
 		for _, it := range batch {
-			req.Items = append(req.Items, map[string]string{"name": it.Name, "sourceHash": it.SourceHash})
+			items = append(items, map[string]string{"name": it.Name, "sourceHash": it.SourceHash})
 		}
+		req["items"] = items
 		var res struct {
 			Results []struct{ Name, Result, Reason string }
 		}
-		if err := c.do("POST", "/agents/memory/claude-import?project="+queryEscape(pv.Project.ID), req, &res); err != nil {
+		if err := c.do("POST", sp.base+"?project="+queryEscape(pv.Project.ID), req, &res); err != nil {
 			fmt.Fprintf(out, "imported %d, skipped %d before the failure\n", imported, skipped)
 			return err
 		}

@@ -17,7 +17,7 @@ const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.met
 // memoryTransfer (export and import), so the family is concatenated and read as one tab body.
 // Add any new file here: forget one and the check that is supposed to watch for unregistered
 // REST paths silently stops covering it.
-const tab = ["./MemoryTab.tsx", "./memoryTypes.ts", "./memoryRestore.tsx", "./memoryTransfer.tsx", "./memoryChanges.tsx", "./memoryClaudeImport.tsx", "./memoryClaudeExport.tsx"]
+const tab = ["./MemoryTab.tsx", "./memoryTypes.ts", "./memoryRestore.tsx", "./memoryTransfer.tsx", "./memoryChanges.tsx", "./memoryClaudeImport.tsx", "./memoryMuseImport.tsx", "./memoryClaudeExport.tsx"]
   .map(read)
   .join("\n");
 const dialog = read("../SettingsDialog.tsx");
@@ -52,6 +52,8 @@ describe("agent memory tab in the settings modal", () => {
         "api/agents/memory/entries",
         // The claude-memory import (the regex stops at the hyphen; full paths are checked below).
         "api/agents/memory/claude",
+        // The muse project-memory import (#1991; same regex stop).
+        "api/agents/memory/muse",
       ]),
     );
     for (const p of new Set(paths)) {

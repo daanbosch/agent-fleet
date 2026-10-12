@@ -151,6 +151,17 @@ func agentMemResolveCaller(name string) (agentMemCaller, error) {
 // agentMemProjectFor maps a session's working copy to its project. A worktree shares its main
 // clone's memory; anything outside ~/repos (a shell in the home directory) has no project.
 func agentMemProjectFor(dir string) *agentMemProject {
+	return agentMemProjectWith(dir, dir, func(args ...string) (string, error) { return gitx.Run(dir, args...) })
+}
+
+// agentMemGitRunner runs git in one fixed directory.
+type agentMemGitRunner func(args ...string) (string, error)
+
+// agentMemProjectWith is agentMemProjectFor for a directory that is named by label (under
+// ~/repos) but inspected through vcsDir and run: the muse import passes a pinned handle's
+// /proc path, so what git answers is about the directory it opened, not about the path.
+func agentMemProjectWith(label, vcsDir string, run agentMemGitRunner) *agentMemProject {
+	dir := label
 	if dir == "" {
 		return nil
 	}
@@ -159,9 +170,9 @@ func agentMemProjectFor(dir string) *agentMemProject {
 	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
 		return nil
 	}
-	root, key, vcs := filepath.Clean(dir), filepath.Clean(dir), projcfg.DetectVCS(dir)
+	root, key, vcs := filepath.Clean(dir), filepath.Clean(dir), projcfg.DetectVCS(vcsDir)
 	if vcs == projcfg.VCSGit {
-		if r, k := agentMemGitIdentity(dir); k != "" {
+		if r, k := agentMemGitIdentityWith(run); k != "" {
 			root, key = r, k
 		}
 	}
@@ -177,19 +188,23 @@ func agentMemProjectFor(dir string) *agentMemProject {
 // repositories do. The parent of git-common-dir is not the key: with --separate-git-dir or in a
 // submodule it is a metadata directory that several repositories can share.
 func agentMemGitIdentity(dir string) (root, key string) {
-	common, err := gitx.Run(dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	return agentMemGitIdentityWith(func(args ...string) (string, error) { return gitx.Run(dir, args...) })
+}
+
+func agentMemGitIdentityWith(run agentMemGitRunner) (root, key string) {
+	common, err := run("rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil || common == "" {
 		return "", ""
 	}
-	top, err := gitx.Run(dir, "rev-parse", "--show-toplevel")
+	top, err := run("rev-parse", "--show-toplevel")
 	if err != nil || top == "" {
 		return "", ""
 	}
 	root = filepath.Clean(top)
-	gitDir, err := gitx.Run(dir, "rev-parse", "--absolute-git-dir")
+	gitDir, err := run("rev-parse", "--absolute-git-dir")
 	if err == nil && filepath.Clean(gitDir) != filepath.Clean(common) {
 		// A linked worktree: the main one is git's first entry, when it is a real checkout.
-		if out, err := gitx.Run(dir, "worktree", "list", "--porcelain"); err == nil {
+		if out, err := run("worktree", "list", "--porcelain"); err == nil {
 			first, _, _ := strings.Cut(out, "\n")
 			if p, ok := strings.CutPrefix(first, "worktree "); ok {
 				if _, err := os.Lstat(filepath.Join(p, ".git")); err == nil {

@@ -61,6 +61,9 @@ var memoryTestRoutes = map[string]http.HandlerFunc{
 	"GET /agents/memory/claude-import":         HandleAgentMemoryClaudeSources,
 	"GET /agents/memory/claude-import/preview": HandleAgentMemoryClaudePreview,
 	"POST /agents/memory/claude-import":        HandleAgentMemoryClaudeApply,
+	"GET /agents/memory/muse-import":           HandleAgentMemoryMuseSources,
+	"GET /agents/memory/muse-import/preview":   HandleAgentMemoryMusePreview,
+	"POST /agents/memory/muse-import":          HandleAgentMemoryMuseApply,
 
 	"GET /agents/memory/claude-export":         HandleAgentMemoryClaudeExportSources,
 	"GET /agents/memory/claude-export/preview": HandleAgentMemoryClaudeExportPreview,
