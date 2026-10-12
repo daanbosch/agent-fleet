@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,7 @@ func memoryTestEnv(t *testing.T) (home, cfg, slug string) {
 	t.Setenv("HOME", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
 	t.Setenv("AF_SESSIONS_DIR", filepath.Join(home, "sessions"))
+	memoryTestGitForeground(t)
 
 	slug = "-home-dev-repos-demo"
 	proj := filepath.Join(cfg, "projects", slug)
@@ -54,6 +56,17 @@ func memoryTestEnv(t *testing.T) (home, cfg, slug string) {
 	memoryWrite(t, filepath.Join(codex, "phase2_workspace_diff.md"), "intermediate\n")
 	memoryWrite(t, filepath.Join(home, ".codex", "memories_1.sqlite"), "sqlite")
 	return home, cfg, slug
+}
+
+// memoryTestGitForeground makes git's automatic gc run in the foreground. By default `commit`
+// and `gc --auto` detach it once it triggers, and the daemon keeps writing into af-memory.git
+// after the test returns, so TempDir cleanup fails with "directory not empty". memoryGit
+// inherits the environment, so this reaches every git call of the code under test.
+func memoryTestGitForeground(t *testing.T) {
+	t.Helper()
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "gc.autoDetach")
+	t.Setenv("GIT_CONFIG_VALUE_0", "false")
 }
 
 func memoryWrite(t *testing.T, p, s string) {
@@ -266,3 +279,47 @@ func TestMemoryListSnapshotsAndIdentity(t *testing.T) {
 
 // claudeProjectsDirForTest is the live projects directory, for locating things inside tests.
 func claudeProjectsDirForTest() string { return memoryRootDecls()[0].Dir }
+
+// An automatic gc has finished by the time the git call that triggers it returns; a detached
+// one would still be writing into the repo when the test's TempDir is removed.
+func TestMemoryTestEnvRunsAutoGCInForeground(t *testing.T) {
+	memoryTestEnv(t)
+	if err := memoryEnsureRepo(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_COUNT", "2")
+	t.Setenv("GIT_CONFIG_KEY_1", "gc.auto")
+	t.Setenv("GIT_CONFIG_VALUE_1", "1")
+	// pre-auto-gc runs only when gc --auto is about to do work, so it proves the trigger fired.
+	marker := filepath.Join(t.TempDir(), "triggered")
+	memoryWrite(t, filepath.Join(memoryRepoDir(), "hooks", "pre-auto-gc"), "#!/bin/sh\n: > '"+marker+"'\n")
+	if err := os.Chmod(filepath.Join(memoryRepoDir(), "hooks", "pre-auto-gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// gc --auto only triggers once objects/17 holds more than gc.auto/256 loose objects; 1500
+	// blobs leave it with ~6, and the check below fails loudly rather than skipping the proof.
+	srcDir := t.TempDir()
+	var paths strings.Builder
+	for i := 0; i < 1500; i++ {
+		p := filepath.Join(srcDir, strconv.Itoa(i))
+		memoryWrite(t, p, strings.Repeat("x", i+1))
+		paths.WriteString(p + "\n")
+	}
+	cmd := memoryGit("hash-object", "-w", "--stdin-paths")
+	cmd.Stdin = strings.NewReader(paths.String())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("hash-object: %v: %s", err, out)
+	}
+	if ents, _ := os.ReadDir(filepath.Join(memoryRepoDir(), "objects", "17")); len(ents) < 2 {
+		t.Fatalf("objects/17 holds %d loose objects, gc --auto would not trigger", len(ents))
+	}
+	if out, err := memoryGit("gc", "--auto").CombinedOutput(); err != nil {
+		t.Fatalf("gc --auto: %v: %s", err, out)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("gc --auto did not trigger")
+	}
+	if _, err := os.Stat(filepath.Join(memoryRepoDir(), "gc.pid")); err == nil {
+		t.Fatal("gc is still running after the call returned (detached)")
+	}
+}
