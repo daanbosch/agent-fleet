@@ -453,3 +453,44 @@ AF での保存で同名のものがあっても上書きしない。
 スコープへも何も取り込まない。場所の確定には、`add_memory` を呼ぶログイン済みの muse 実行が 1 回必要（メンバーの
 クォータを使う）。muse への書き戻しは対象外：スイッチがオンの間は muse のネイティブメモリはオフ（#1990）で、
 そこへ書く者がいない。後続：#2005（personal スコープ）、codex の取り込みは #1950、フェーズ制のスイッチは #1972。
+
+
+## 追記（2026-10-12）：muse の personal 系スコープ、フロントマターなしのメモ、入れ子のパス（#2005）
+
+上の #1991 の追記は書き換えず、実測で補う。ログイン済みの `muse exec --model muse-spark-1.3`（muse 1.4.4、
+`MUSE_EXPERIMENTAL_MEMORY` 未設定、使い捨ての git リポジトリ、メンバー本人のホーム、設定・認証情報には触れていない）で
+スコープごとに 1 回ずつ偽の内容で `add_memory` を呼び、その後ファイルを消した。
+
+**実測**
+- `project`：`<repo>/.agents/memory/<path>.md` と隣の `.muse-memory.lock`。git 未追跡で `.gitignore` にも追加されない。
+- `personal_project`：`~/.local/share/muse/memory/projects/<slug>-<16 桁の hex>/<path>.md` とロック。`<slug>` は絶対 cwd の
+  `/` と `.` を `-` にし先頭の `-` を落としたもの（`/home/dev/.af-work/x/probe-repo` → `home-dev--af-work-x-probe-repo`）。
+  **16 桁は絶対 cwd の FNV-1a 64 ビットハッシュ**（sha256・sha1・md5・sha512・blake2・sha3・crc32・FNV-1/1a を、末尾スラッシュの
+  有無も含めて試し、パスそのものの FNV-1a だけが一致した：`/home/dev/.af-work/s3cq7ox/probe-repo` → `51d45085345c6000`。
+  単体テストで固定）。
+- `personal`：`~/.local/share/muse/memory/personal/<path>.md` とロック。最初の書き込み前は `~/.local/share/muse/memory/` 自体が無かった。
+- `path` に `/` を含められる：`af-probe-2005-sub/nested.md` で `personal_project` ストアにディレクトリが作られた
+  （ほかの 2 スコープも同じ規則だが、入れ子で書いたのはこの 1 つだけ）。
+- 内容はそのまま保存され、フロントマターも末尾改行も足されない。`MEMORY.md` は作られなかった。
+
+**結果（コードの挙動）**
+- #1991 は muse のスキル文面からフロントマターを前提にしており、素のメモは `no_frontmatter` で拒否されていた。今は
+  フロントマターなしのメモも取り込む：名前はファイル名（AF の名前規則に合わなければ `bad_name`）、説明は最初の空でない行
+  （2,000 文字で切る）、種別なし（空の種別が「種別なし」の定義）、本文は全文。閉じていないフロントマターで始まるファイルは
+  従来どおり `no_frontmatter`。
+- 入れ子のメモは固定したディレクトリハンドルで歩く（シンボリックリンクはたどらず、隠しディレクトリは飛ばし、深さ 6・2,000
+  ファイルまで）。`a/b.md` はメモリ `a--b`、同じ名前になるファイルが複数あれば全て `name_collision`。`.muse-memory.lock`・
+  `MEMORY.md`・`.md` 以外は飛ばす。
+- `personal_project` は順方向に対応づける：`~/repos` 配下の各作業コピーのパスのハッシュがディレクトリ名と一致すれば確定。
+  どのハッシュにも合わなければ slug で比べ（一致、または作業コピーのサブディレクトリ）、1 プロジェクトならそれ、別々の
+  2 つ以上なら `ambiguous`、なければ `no_project`。slug の規則は 1 つのパスでしか実測していないため、slug は正規化して比べ、
+  信用するのはハッシュ。
+- `personal` は全プロジェクトが読む AF の**ユーザー**スコープへ入るので、リクエストが `into=user` を明示したときだけ読む
+  （Console のチェックボックス、`af-memory muse-import --scope personal --into-user`）。なければプレビューは何も評価せず、
+  取り込みは拒否する。`source` は `muse:personal_project/<path>` または `muse:personal/<path>`。
+
+**未検証・未実施**：`personal_project` と作業コピーの対応は、単体テストと実物のディレクトリ名では確かめたが、`~/repos`
+内での実機実行では確かめていない（プローブは使い捨てディレクトリで実行したため、正しく「プロジェクトなし」になる）。
+`XDG_DATA_HOME` で muse のデータディレクトリが動くかは不明で、取り込みは AF のほかの部分と同じく `~/.local/share/muse` を読む。
+入れ子で書いたのは `personal_project` のみ。`add_memory` の `type` 引数は試しておらず、`memory.destinations.*` も依然として値が
+見えない。muse への書き戻しは対象外のまま。後続：#1972（フェーズ制のスイッチ）。

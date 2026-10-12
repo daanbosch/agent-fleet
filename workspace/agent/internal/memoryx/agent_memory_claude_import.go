@@ -91,6 +91,12 @@ type agentMemImportItem struct {
 	// Shared (muse import only): git tracks this file in the working copy, so teammates may have
 	// the same text; it says nothing about AF.
 	Shared bool `json:"shared,omitempty"`
+	// Path (muse import only) is the note's path under its scope root when the name is not simply
+	// that path minus ".md": a nested note, whose "/" became "--".
+	Path string `json:"path,omitempty"`
+	// Derived (muse import only): the note has no frontmatter, so its name came from the file name,
+	// its description from the first non-empty line and it carries no type.
+	Derived bool `json:"derived,omitempty"`
 
 	entry agentMemEntry // the converted memory, for apply
 	live  *agentMemEntry
@@ -333,10 +339,30 @@ func agentMemImportShowable(name string) bool {
 }
 
 // agentMemImportOpen opens one file of the pinned memory directory without following a symlink.
+// A path with "/" (a nested muse note) is walked one component at a time: O_NOFOLLOW only guards
+// the last component of an openat, so a symlinked parent would otherwise be followed.
 func agentMemImportOpen(mem *os.File, file string) (*os.File, error) {
-	fd, err := syscall.Openat(int(mem.Fd()), file, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	segs := strings.Split(file, "/")
+	dirFlags := syscall.O_RDONLY | syscall.O_DIRECTORY | syscall.O_NOFOLLOW | syscall.O_CLOEXEC
+	fd, err := syscall.Dup(int(mem.Fd()))
 	if err != nil {
 		return nil, err
+	}
+	for i, seg := range segs {
+		if seg == "" || seg == "." || seg == ".." {
+			_ = syscall.Close(fd)
+			return nil, syscall.EINVAL
+		}
+		flags := dirFlags
+		if i == len(segs)-1 {
+			flags = syscall.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK | syscall.O_CLOEXEC
+		}
+		next, err := syscall.Openat(fd, seg, flags, 0)
+		_ = syscall.Close(fd)
+		if err != nil {
+			return nil, err
+		}
+		fd = next
 	}
 	return os.NewFile(uintptr(fd), "claude-memory"), nil
 }
@@ -346,6 +372,8 @@ type agentMemImportSrc struct {
 	Source string // the AF memory's `source` field
 	Muse   bool   // muse rules: an update only replaces a copy that is still the muse import's own
 	Shared bool   // the file is tracked by git in its working copy
+	// Scope is the AF scope the memory lands in; empty means project.
+	Scope string
 	// ForgottenHashes (muse): source hashes of memories that no longer exist, so the same bytes
 	// under a new file name are still the forgotten memory.
 	ForgottenHashes map[string]bool
@@ -359,11 +387,19 @@ func agentMemImportEvaluate(mem *os.File, file, slug, rel string, history map[st
 
 // agentMemImportEvaluateSrc is agentMemImportEvaluate for any source directory.
 func agentMemImportEvaluateSrc(mem *os.File, file string, src agentMemImportSrc, rel string, history map[string]bool) (it agentMemImportItem, withheld bool) {
-	stem := strings.TrimSuffix(file, ".md")
-	if !agentMemImportShowable(stem) {
+	// A nested muse note "a/b.md" is the AF memory "a--b": names are one path segment.
+	stem := strings.ReplaceAll(strings.TrimSuffix(file, ".md"), "/", "--")
+	if !agentMemImportShowable(stem) || !agentMemImportShowable(strings.TrimSuffix(file, ".md")) {
 		return it, true
 	}
 	it.Name, it.Shared = stem, src.Shared
+	if file != stem+".md" {
+		it.Path = file
+	}
+	scope := src.Scope
+	if scope == "" {
+		scope = agentMemScopeProject
+	}
 	invalid := func(reason string) (agentMemImportItem, bool) {
 		it.Status, it.Reason = claudeImportInvalid, reason
 		return it, false
@@ -405,7 +441,12 @@ func agentMemImportEvaluateSrc(mem *os.File, file string, src agentMemImportSrc,
 	}
 	e, ok := agentMemParse(raw)
 	if !ok {
-		return invalid("no_frontmatter")
+		// muse writes a note's content as given, so frontmatter is the exception. A file that opens
+		// a frontmatter block it never closes is a broken one, not a plain note.
+		if !src.Muse || strings.HasPrefix(string(raw), "---") {
+			return invalid("no_frontmatter")
+		}
+		e, it.Derived = agentMemMuseDerive(raw), true
 	}
 	desc := strings.TrimSpace(e.Description)
 	body := strings.TrimSpace(e.Body)
@@ -433,7 +474,7 @@ func agentMemImportEvaluateSrc(mem *os.File, file string, src agentMemImportSrc,
 
 	source := src.Source
 	conv := agentMemEntry{
-		Name: stem, Scope: agentMemScopeProject, Description: desc, Type: typ,
+		Name: stem, Scope: scope, Description: desc, Type: typ,
 		AuthorKind: agentMemUnknown, AuthorSession: agentMemUnknown,
 		Source: source, SourceHash: it.SourceHash, Body: body,
 	}
@@ -465,7 +506,7 @@ func agentMemImportEvaluateSrc(mem *os.File, file string, src agentMemImportSrc,
 	var live agentMemLoaded
 	liveOK := false
 	if err == nil {
-		live, liveOK, err = agentMemLoadFile(filepath.Join(liveDir, stem+".md"), agentMemScopeProject, stem)
+		live, liveOK, err = agentMemLoadFile(filepath.Join(liveDir, stem+".md"), scope, stem)
 	}
 	if err != nil && !os.IsNotExist(err) {
 		return invalid("store_unreadable")
@@ -643,7 +684,12 @@ func agentMemImportApply(req agentMemImportReq, now time.Time) (agentMemImportAp
 // agentMemImportApplyItems writes the listed items of an evaluated preview. Callers hold both
 // store locks and have checked the project and the item count.
 func agentMemImportApplyItems(p *agentMemProject, byName map[string]*agentMemImportItem, items []agentMemImportReqItem, now time.Time) agentMemImportApplied {
-	rel := "projects/" + p.ID
+	return agentMemImportApplyRel("projects/"+p.ID, p, byName, items, now)
+}
+
+// agentMemImportApplyRel is agentMemImportApplyItems for any scope directory; p is nil for the
+// user scope, which has no project record.
+func agentMemImportApplyRel(rel string, p *agentMemProject, byName map[string]*agentMemImportItem, items []agentMemImportReqItem, now time.Time) agentMemImportApplied {
 	out := agentMemImportApplied{Results: []agentMemImportResult{}}
 	seen := map[string]bool{}
 	for _, ri := range items {
@@ -665,7 +711,7 @@ func agentMemImportApplyItems(p *agentMemProject, byName map[string]*agentMemImp
 		case it.Status != claudeImportNew && it.Status != claudeImportUpdate:
 			res.Reason = "status_" + it.Status
 		default:
-			commit, err := agentMemImportWrite(*p, rel, it, now)
+			commit, err := agentMemImportWriteTo(p, rel, it, now)
 			if errors.Is(err, errAgentMemImportForgotten) {
 				res.Reason = "status_forgotten"
 			} else if err != nil {
@@ -690,6 +736,11 @@ var errAgentMemImportForgotten = errors.New("memory was forgotten")
 
 // agentMemImportWrite publishes one converted memory with the member as the commit's author.
 func agentMemImportWrite(p agentMemProject, rel string, it *agentMemImportItem, now time.Time) (string, error) {
+	return agentMemImportWriteTo(&p, rel, it, now)
+}
+
+// agentMemImportWriteTo is agentMemImportWrite with p nil for a scope that has no project record.
+func agentMemImportWriteTo(p *agentMemProject, rel string, it *agentMemImportItem, now time.Time) (string, error) {
 	e := it.entry
 	stamp := now.UTC().Format(time.RFC3339)
 	e.Created, e.Updated = stamp, stamp
@@ -711,10 +762,12 @@ func agentMemImportWrite(p agentMemProject, rel string, it *agentMemImportItem, 
 	}
 	repoRel := rel + "/" + e.Name + ".md"
 	changes := []agentMemChange{{Rel: repoRel, Data: data}}
-	extra, err := agentMemProjectInfoChange(p)
-	if err != nil {
-		return "", err
+	if p != nil {
+		extra, err := agentMemProjectInfoChange(*p)
+		if err != nil {
+			return "", err
+		}
+		changes = append(changes, extra...)
 	}
-	changes = append(changes, extra...)
 	return agentMemApplyLocked(changes, "import", repoRel, agentMemMember, now)
 }
