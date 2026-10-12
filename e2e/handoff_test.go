@@ -102,6 +102,13 @@ func TestMemberHandoff(t *testing.T) {
 	// The launched session is a shell so its HEAD can be read from inside it; the kind is
 	// the recipient's choice in the launch dialog and the offer does not depend on it.
 	b.startWorkspace()
+	// The Console takes the offer before it creates the session (#2020). While the take
+	// holds it the sender cannot withdraw it, so the same work cannot start on both sides.
+	token := takeOffer(t, b, offer.ID)
+	a.postJSON("/api/session-handoff-offers/"+offer.ID+"/take", map[string]any{}, http.StatusNotFound) // only the recipient takes
+	if c, _ := apiErr(a.call(http.MethodDelete, "/api/session-handoff-offers/"+offer.ID, nil, http.StatusConflict)); c != "handoff_being_taken" {
+		t.Fatalf("withdraw during the recipient's take refused with %q, want handoff_being_taken", c)
+	}
 	launched := b.createSession(map[string]any{
 		"kind": "shell", "title": in[0].Title, "dir": repoDir,
 		"worktree": true, "use_existing": true, "branch": in[0].Branch,
@@ -112,7 +119,7 @@ func TestMemberHandoff(t *testing.T) {
 	if got := b.shell(launched, "git branch --show-current"); got != branch {
 		t.Fatalf("launched session is on %q, want %s", got, branch)
 	}
-	acceptOffer(t, b, offer.ID, launched)
+	acceptOffer(t, b, offer.ID, launched, token)
 
 	// --- A, workspace stopped, is told; the offer is accepted (H-11) ---
 	a.requireStopped("before reading the accept")
@@ -136,6 +143,10 @@ func TestMemberHandoff(t *testing.T) {
 	}
 	if o := ownedOffer(t, a, declined.ID); o.Status != "declined" {
 		t.Fatalf("A's ledger: declined offer reads %s", o.Status)
+	}
+	// A decided offer can no longer be taken, and the refusal says why (#2020).
+	if c, _ := apiErr(b.postJSON("/api/session-handoff-offers/"+declined.ID+"/take", map[string]any{}, http.StatusConflict)); c != "handoff_already_decided" {
+		t.Fatalf("take of a declined offer refused with %q, want handoff_already_decided", c)
 	}
 	for _, n := range a.notifications() {
 		if p, _ := n["payload"].(map[string]any); p["offerId"] == declined.ID {
@@ -235,12 +246,23 @@ func createOffer(t *testing.T, m *member, body map[string]any) handoffOffer {
 	return o
 }
 
-// acceptOffer reports the launch to the CP, which is what the Console does once the
-// launch from the offer succeeded (console/src/features/sharing/acceptHandoff.ts). It is
-// the one place the scenario accepts, so a change to that contract (#2020) lands here.
-func acceptOffer(t *testing.T, m *member, offerID, sessionName string) {
+// takeOffer and acceptOffer are what the Console does around a launch from an offer
+// (console/src/features/sharing/acceptHandoff.ts): take it before the session is created,
+// accept it with the take's token once the session exists. They are the one place the
+// scenario accepts, so a change to that contract lands here.
+func takeOffer(t *testing.T, m *member, offerID string) string {
 	t.Helper()
-	got := m.postJSON("/api/session-handoff-offers/"+offerID+"/accept", map[string]any{"sessionName": sessionName}, 200)
+	got := m.postJSON("/api/session-handoff-offers/"+offerID+"/take", map[string]any{}, 200)
+	token, _ := got["token"].(string)
+	if token == "" {
+		t.Fatalf("take answered %v", got)
+	}
+	return token
+}
+
+func acceptOffer(t *testing.T, m *member, offerID, sessionName, token string) {
+	t.Helper()
+	got := m.postJSON("/api/session-handoff-offers/"+offerID+"/accept", map[string]any{"sessionName": sessionName, "token": token}, 200)
 	if got["status"] != "accepted" {
 		t.Fatalf("accept answered %v", got)
 	}

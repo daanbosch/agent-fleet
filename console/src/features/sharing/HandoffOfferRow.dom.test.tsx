@@ -1,0 +1,110 @@
+// The recipient's side of a handoff before the launch (ADR 0057, docs/log/77 §77.18). These
+// replace run-sheet steps on #1960:
+//   H-8  — the working copy is guessed from the remote's basename only, with the first working
+//          copy as the fallback (recorded as it behaves: no repository identity check);
+//   H-9  — with no working copy the accept button is disabled and the reason is shown;
+//   H-17 — accepting opens the launch dialog wherever StartHost is mounted, which in a popout
+//          tab is only true because the popout shell mounts it too (app/startHost.test.ts).
+// Accepting here takes nothing: the offer is taken only when the launch is pressed (#2020).
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import type { HandoffOffer } from "./handoffStore.ts";
+
+const apiJSON = vi.fn();
+vi.mock("../../core/api/client.ts", async (orig) => {
+  const real = (await orig()) as Record<string, unknown>;
+  return { ...real, apiJSON: (...a: unknown[]) => apiJSON(...a), api: vi.fn(async () => ({ offers: [] })) };
+});
+vi.mock("../repos/useRepoRail.ts", () => ({ useRepoRailContext: () => ({ launchKinds: ["claude"], connsSettling: false }) }));
+vi.mock("../repos/StartModal.tsx", () => ({ StartModal: () => null }));
+vi.mock("../mirror/HandoffProposal.tsx", () => ({ markHandoffLaunched: vi.fn() }));
+vi.mock("../repos/LaunchModal.tsx", () => ({
+  LaunchModal: (p: { repo: string; branch?: string; initialPrompt?: string }) => (
+    <div data-testid="launch-dialog">
+      {p.repo}|{p.branch}|{p.initialPrompt}
+    </div>
+  ),
+}));
+
+const { HandoffOfferRow, repoNameFromRemote } = await import("./HandoffOfferRow.tsx");
+const { StartHost } = await import("../repos/StartHost.tsx");
+const { useLaunchSeed, useLaunchTarget, useReposStore } = await import("../repos/store.ts");
+const { ToastProvider } = await import("../../ui/ToastProvider.tsx");
+const { t } = await import("../../lib/i18n/index.ts");
+
+const offer: HandoffOffer = {
+  id: "offer-1", sessionId: "cat-1", sessionName: "session-1", recipientUserKey: "bob", ownerUserKey: "alice",
+  title: "Carry on", status: "pending", branch: "feature/x", headSha: "abcdef1234567890",
+  repoRemote: "https://example.com/team/private.git", prompt: "Continue the work.",
+};
+
+let root: Root | null = null;
+let host: HTMLDivElement;
+
+async function render(repos: { name: string; path?: string }[], withStartHost = false) {
+  useReposStore.setState({ repos } as never);
+  await act(async () => {
+    root!.render(
+      <ToastProvider>
+        <ul>
+          <HandoffOfferRow offer={offer} onDone={() => undefined} />
+        </ul>
+        {withStartHost && <StartHost />}
+      </ToastProvider>,
+    );
+  });
+}
+
+const select = () => host.querySelector("select") as HTMLSelectElement;
+const acceptButton = () =>
+  [...host.querySelectorAll("button")].find((b) => b.textContent?.includes(t("handoff.accept"))) as HTMLButtonElement;
+
+beforeEach(() => {
+  apiJSON.mockReset();
+  host = document.createElement("div");
+  document.body.appendChild(host);
+  root = createRoot(host);
+});
+
+afterEach(async () => {
+  await act(async () => root?.unmount());
+  host.remove();
+  root = null;
+  useLaunchSeed.getState().clear();
+  useLaunchTarget.getState().clear();
+  useReposStore.setState({ repos: [] } as never);
+});
+
+describe("the received handoff row", () => {
+  it("guesses the working copy from the remote's basename (H-8)", async () => {
+    expect(repoNameFromRemote("https://example.com/team/private.git")).toBe("private");
+    expect(repoNameFromRemote("git@example.com:team/private.git/")).toBe("private");
+    await render([{ name: "other", path: "/r/other" }, { name: "private", path: "/r/private" }]);
+    expect(select().value).toBe("private");
+  });
+
+  it("falls back to the first working copy when no folder matches the basename (H-8)", async () => {
+    // Recorded as it behaves: a clone of the same repository under another folder name is
+    // not recognised, and nothing checks repository identity or HEAD.
+    await render([{ name: "alpha", path: "/r/alpha" }, { name: "private-clone", path: "/r/private-clone" }]);
+    expect(select().value).toBe("alpha");
+  });
+
+  it("disables accepting and says why when there is no working copy (H-9)", async () => {
+    await render([]);
+    expect(acceptButton().disabled).toBe(true);
+    expect(host.textContent).toContain(t("handoff.accept_no_repo_hint"));
+  });
+
+  it("opens the pre-filled launch dialog on accept and takes nothing yet (H-17)", async () => {
+    await render([{ name: "private", path: "/r/private" }], true);
+    expect(document.querySelector("[data-testid=launch-dialog]")).toBeNull();
+    await act(async () => acceptButton().click());
+    const dialog = document.querySelector("[data-testid=launch-dialog]");
+    expect(dialog?.textContent).toBe("private|feature/x|Continue the work.");
+    expect(useLaunchSeed.getState().handoffOfferId).toBe("offer-1");
+    // Opening the dialog must not hold the offer: a cancelled dialog leaves it pending.
+    expect(apiJSON).not.toHaveBeenCalled();
+  });
+});

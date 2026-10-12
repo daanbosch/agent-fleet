@@ -721,6 +721,13 @@ export const sessions: Record<keyof typeof jaSessions, string> = {
   "handoff.row_badge": "A handoff is waiting",
   "handoff.banner_title": "A handoff for this conversation is waiting",
   "handoff.banner_open": "Review and take it over",
+  "handoff.take_withdrawn": "The sender withdrew this handoff. No session was started.",
+  "handoff.take_expired": "This handoff expired or is no longer shared with you. No session was started.",
+  "handoff.take_declined": "This handoff was declined. No session was started.",
+  "handoff.take_accepted": "This handoff was already taken over. No session was started.",
+  "handoff.take_busy": "This handoff is being launched from another window. No session was started.",
+  "handoff.take_failed": "Could not secure the handoff, so nothing was launched ({err}).",
+  "handoff.accept_unrecorded": "The session started, but the handoff could not be marked as taken over ({err}). Let the sender know.",
   // --- sessions overview pane (ADR 0078) ---
   "ovw.count_alive": "{n} running",
   "ovw.count_hint": "Running sessions on this grid (after the working-set filter)",

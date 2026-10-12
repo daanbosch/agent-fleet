@@ -731,6 +731,13 @@ export const sessions = {
   "handoff.row_badge": "引き継ぎが届いています",
   "handoff.banner_title": "この会話の引き継ぎが届いています",
   "handoff.banner_open": "内容を見て引き継ぐ",
+  "handoff.take_withdrawn": "送り手がこの引き継ぎを取り下げました。セッションは起動していません。",
+  "handoff.take_expired": "この引き継ぎは期限切れか、共有が解除されています。セッションは起動していません。",
+  "handoff.take_declined": "この引き継ぎは辞退済みです。セッションは起動していません。",
+  "handoff.take_accepted": "この引き継ぎは受領済みです。セッションは起動していません。",
+  "handoff.take_busy": "この引き継ぎは別の画面で起動中です。セッションは起動していません。",
+  "handoff.take_failed": "引き継ぎを確保できなかったため、起動しませんでした（{err}）。",
+  "handoff.accept_unrecorded": "セッションは起動しましたが、引き継ぎを受領済みにできませんでした（{err}）。送り手に知らせてください。",
   // --- sessions overview pane (ADR 0078) ---
   "ovw.count_alive": "稼働中 {n}",
   "ovw.count_hint": "この一覧に出ている稼働中セッションの数（作業グループで絞った後）",
