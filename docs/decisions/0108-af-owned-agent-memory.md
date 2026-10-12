@@ -555,3 +555,26 @@ uses an absolute `XDG_DATA_HOME` and otherwise `~/.local/share`. The store is op
 symlink above it (a persisted home) is followed. Only the `personal_project` store was written nested. `type` passed to
 `add_memory` was not exercised, and `memory.destinations.*` still shows no value. Write-back to muse stays out of
 scope. Follow-ups: #1972 (phase-based switch).
+
+## Note (2026-10-12): the browser lists every forgotten memory (#2003)
+
+The forgotten list of the browser was built from the 300 most recent changes, so a memory forgotten
+earlier could not be restored from it. `entries/member-forgotten` lists them from the store's
+tombstones (`<scope dir>/.forgotten/<name>`) for the user scope and every project, or the one named by
+`scope` and `project`. A row is the same view the changes list gives its newest row (who forgot it and
+when, the commit to revert, `revertible`), resolved with the scan of `entries/member-latest`: raw and
+decoded text, both sides of the newest change. A name or text that fails it is counted in `withheld`,
+never listed. The tombstone directory is untrusted like the rest of the store: a symlink on the way, a
+non-regular or oversized entry, or a name that is not a memory name is not a tombstone, and a tombstone
+with no published change, or a memory that is live again, is not listed. One answer holds at most 300 rows
+(`truncated`; narrow the scope). The route is read-only, counts no use and is not gated by the switch;
+restore still goes through the revert route with its newest-change and `expectRevision` checks.
+
+The newest rows are chosen after the tombstones have been judged (within the budget below) (by the newest change's time, found
+in one history pass), so the cut never drops a newer memory for an older one, and `truncated` is set
+only when a listable row was left out (within the judging budget below). `projects` names every project with a listable forgotten
+memory, cut or not, so the Console keeps offering a scope whose rows did not fit. Every tombstone is looked up in that one
+history pass and those without a published change are dropped; the scan of the rest is budgeted at 2000
+memories per request, newest first. Past the budget the oldest are left unjudged, their project is still
+named (unless the memory is plainly live), `incomplete` (not `truncated`) is set and `withheld` is a lower bound; narrowing the scope may not complete it. The project id of an unjudged memory is scanned before it is named, as the judged path does.
+The read lock is taken per memory, not across the request.

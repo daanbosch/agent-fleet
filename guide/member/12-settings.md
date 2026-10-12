@@ -270,8 +270,10 @@ Version control over the memory an agent accumulates by itself (claude's auto-me
     every agent's view, and **Forgotten memories** lists those you can **Restore** (the text comes back as it
     was before; if it now looks like a secret, restore it from the recent changes, where you can confirm).
     Both are the same revert and forget as the recent changes, recorded as made by you and undoable. Forget works on any listed memory: its newest change is looked
-    up when you press it, however old. **Forgotten memories** shows those forgotten within the latest 300 changes. A memory whose
-    text looks like a secret is never listed, only counted. Writing or editing a memory by hand is not
+    up when you press it, however old. **Forgotten memories** lists every memory forgotten in the scope you have selected (all scopes by default), however long ago,
+    up to 300 at a time (pick one scope to see the rest). With a very large number of forgotten memories (over about
+    2000) the oldest are not checked: the list says so, may then be missing some, and the hidden count is a minimum. A memory whose
+    name or text looks like a secret is never listed, only counted. Writing or editing a memory by hand is not
     available yet (#1997): the Agent cannot tell a Console request from a session holding the workspace's
     agent token, so pin, revert and forget are recorded as made by you but are not proof of it.
   - **Import from Claude Code**: below the list, brings the memory Claude Code kept for a project into Agent
