@@ -299,17 +299,25 @@ func TestMemoryTestEnvRunsAutoGCInForeground(t *testing.T) {
 	// gc --auto only triggers once objects/17 holds more than gc.auto/256 loose objects; 1500
 	// blobs leave it with ~6, and the check below fails loudly rather than skipping the proof.
 	srcDir := t.TempDir()
-	var paths strings.Builder
 	for i := 0; i < 1500; i++ {
-		p := filepath.Join(srcDir, strconv.Itoa(i))
-		memoryWrite(t, p, strings.Repeat("x", i+1))
-		paths.WriteString(p + "\n")
+		memoryWrite(t, filepath.Join(srcDir, strconv.Itoa(i)), strings.Repeat("x", i+1))
 	}
-	cmd := memoryGit("hash-object", "-w", "--stdin-paths")
-	cmd.Stdin = strings.NewReader(paths.String())
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("hash-object: %v: %s", err, out)
+	// Reachable, so that gc has something to pack (unreachable loose objects are left alone).
+	index := filepath.Join(t.TempDir(), "index")
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := memoryGit(args...)
+		cmd.Dir = srcDir
+		cmd.Env = append(cmd.Env, "GIT_WORK_TREE="+srcDir, "GIT_INDEX_FILE="+index)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
 	}
+	run("add", "-A")
+	tree := run("write-tree")
+	run("update-ref", "refs/heads/gc-proof", run("commit-tree", tree, "-m", "x"))
 	if ents, _ := os.ReadDir(filepath.Join(memoryRepoDir(), "objects", "17")); len(ents) < 2 {
 		t.Fatalf("objects/17 holds %d loose objects, gc --auto would not trigger", len(ents))
 	}
@@ -319,7 +327,12 @@ func TestMemoryTestEnvRunsAutoGCInForeground(t *testing.T) {
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatal("gc --auto did not trigger")
 	}
-	if _, err := os.Stat(filepath.Join(memoryRepoDir(), "gc.pid")); err == nil {
-		t.Fatal("gc is still running after the call returned (detached)")
+	// The repack must be complete when the call returns. A pidfile check alone cannot prove it:
+	// a detaching gc removes gc.pid in the parent before the child recreates it.
+	if out, err := memoryGitRun("count-objects"); err != nil || !strings.HasPrefix(out, "0 objects") {
+		t.Fatalf("loose objects left after gc --auto returned: %q, %v", out, err)
+	}
+	if packs, _ := filepath.Glob(filepath.Join(memoryRepoDir(), "objects", "pack", "*.pack")); len(packs) == 0 {
+		t.Fatal("gc --auto left no pack")
 	}
 }
