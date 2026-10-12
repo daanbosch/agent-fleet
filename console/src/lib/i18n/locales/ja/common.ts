@@ -262,6 +262,7 @@ export const common = {
   "onb.start": "起動",
   "onb.connect_agent": "エージェントを接続",
   "onb.connect_agent_hint": "Claude / Codex / opencode のいずれかにログイン",
+  "onb.connect_agent_hint_default": "このチームの既定は {agent} です（ほかのエージェントでも構いません）",
   "onb.connect": "接続",
   "onb.connect_git": "git プロバイダを接続",
   "onb.optional": "任意",

@@ -15,9 +15,18 @@ export interface OnboardingState {
   track: "" | "dev";
 }
 
-/** The whole document. Mirrors memberUIStateWire; a PATCH replaces the top-level keys it carries. */
+/** The tenant's defaults for its members (ADR 0114 decision 8). Mirrors tenantMemberDefaultsWire
+ *  (control-plane/tenant_member_defaults.go). Read-only here: only a tenant admin sets them. */
+export interface TenantMemberDefaults {
+  /** The agent the first-run card names; "" = none. */
+  agent: string;
+}
+
+/** The whole document. Mirrors memberUIStateWire; a PATCH replaces the top-level keys it carries.
+ *  `defaults` comes back on every answer and is never sent. */
 export interface MemberUIState {
   onboarding?: OnboardingState;
+  defaults?: TenantMemberDefaults;
 }
 
 // The keys the first-run card used before ADR 0114. Read once to migrate, then removed.

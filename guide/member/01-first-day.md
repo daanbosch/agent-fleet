@@ -27,7 +27,7 @@ off. The first time, a card titled **"Welcome to Agent Fleet"** sits at the top 
 are checked off automatically. Only the top two items are required for everyone.
 
 1. **Start workspace**: the "Start" button brings up your own private work environment. While it's starting you'll see "Starting…", and when it finishes it shows "Running" and the item is checked off. Nothing that follows (including connecting) works until you do this.
-2. **Connect an agent**: from "Connect", sign in to Claude, Codex, or opencode. Connecting at least one checks the item off (see [06 Agents](06-agents.md) for connection details).
+2. **Connect an agent**: from "Connect", sign in to Claude, Codex, or opencode. Connecting at least one checks the item off (see [06 Agents](06-agents.md) for connection details). If your administrator has chosen the team's agent, the step names it ("Your team's default is Claude"). Start with that one; any other agent still completes the step.
 
 Next comes a two-way choice: **"Where do you want to start?"** (you can use both later).
 

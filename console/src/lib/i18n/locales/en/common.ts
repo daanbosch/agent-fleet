@@ -260,6 +260,7 @@ export const common: Record<keyof typeof jaCommon, string> = {
   "onb.start": "Start",
   "onb.connect_agent": "Connect an agent",
   "onb.connect_agent_hint": "Sign in to Claude, Codex, or opencode",
+  "onb.connect_agent_hint_default": "Your team's default is {agent} (any other agent works too)",
   "onb.connect": "Connect",
   "onb.connect_git": "Connect a git provider",
   "onb.optional": "Optional",

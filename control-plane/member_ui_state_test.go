@@ -12,6 +12,9 @@ import (
 	"github.com/k-k1/agent-fleet/control-plane/internal/store"
 )
 
+// emptyUIState is the answer for a member who never saved anything in a tenant with no defaults.
+const emptyUIState = `{"defaults":{"agent":""}}`
+
 type uiStateEnv struct {
 	st  *store.SQL
 	mux *http.ServeMux
@@ -56,10 +59,10 @@ func TestMemberUIStateRoundTrip(t *testing.T) {
 	for name, st := range ssmAPIStores(t) {
 		t.Run(name, func(t *testing.T) {
 			e := newUIStateEnv(t, st)
-			if code, body := e.do(t, "GET", "", "u@x"); code != 200 || body != "{}" {
-				t.Fatalf("fresh GET = %d %s, want 200 {}", code, body)
+			if code, body := e.do(t, "GET", "", "u@x"); code != 200 || body != emptyUIState {
+				t.Fatalf("fresh GET = %d %s, want 200 %s", code, body, emptyUIState)
 			}
-			want := `{"onboarding":{"dismissed":true,"track":"dev"}}`
+			want := `{"onboarding":{"dismissed":true,"track":"dev"},"defaults":{"agent":""}}`
 			if code, body := e.do(t, "PATCH", `{"onboarding":{"dismissed":true,"track":"dev"}}`, "u@x"); code != 200 || body != want {
 				t.Fatalf("PATCH = %d %s, want 200 %s", code, body, want)
 			}
@@ -136,8 +139,8 @@ func TestMemberUIStateUndecodableRowReadsEmpty(t *testing.T) {
 	if ok, err := st.PutMemberUIState(ctx, store.MemberUIState{MembershipID: e.mv, State: `{"future":1}`, UpdatedAt: "x"}, 0); err != nil || !ok {
 		t.Fatalf("seed ok=%v err=%v", ok, err)
 	}
-	if code, body := e.do(t, "GET", "", "u@x"); code != 200 || body != "{}" {
-		t.Fatalf("GET = %d %s, want 200 {}", code, body)
+	if code, body := e.do(t, "GET", "", "u@x"); code != 200 || body != emptyUIState {
+		t.Fatalf("GET = %d %s, want 200 %s", code, body, emptyUIState)
 	}
 	if code, _ := e.do(t, "PATCH", `{"onboarding":{"dismissed":true,"track":""}}`, "u@x"); code != 200 {
 		t.Fatalf("PATCH over an undecodable row = %d", code)
@@ -169,7 +172,7 @@ func TestMemberUIStateIsPerMembership(t *testing.T) {
 			if code, _ := e.do(t, "PATCH", `{"onboarding":{"dismissed":true,"track":""}}`, "u@x"); code != 200 {
 				t.Fatalf("PATCH = %d", code)
 			}
-			if code, body := e.do(t, "GET", "", "v@x"); code != 200 || body != "{}" {
+			if code, body := e.do(t, "GET", "", "v@x"); code != 200 || body != emptyUIState {
 				t.Fatalf("other member GET = %d %s, want their own empty document", code, body)
 			}
 			if err := st.DeleteMembership(ctx, e.mv); err != nil {

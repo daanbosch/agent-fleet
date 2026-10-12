@@ -980,6 +980,7 @@ type Store interface {
 	EngineAccessStore
 	TenantBranchRulesStore
 	MemberUIStateStore
+	TenantMemberDefaultsStore
 	HomeOperationStore
 	CPLeaseStore
 	LimitBoardStore

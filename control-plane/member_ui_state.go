@@ -4,7 +4,7 @@ package main
 // is stopped and has to follow the member across devices. Settings the Agent acts on stay in the
 // workspace's ui-prefs; never keep one setting in both (decision 1).
 //
-//	Console ──▶ GET   /api/me/ui-state   the member's document ({} when never saved)
+//	Console ──▶ GET   /api/me/ui-state   the member's document, plus the tenant's `defaults`
 //	        ──▶ PATCH /api/me/ui-state   replaces the top-level keys it carries, keeps the rest
 //
 // Both resolve with withMembership, so they never build or wake a workspace.
@@ -73,9 +73,22 @@ func decodeMemberUIState(b []byte) (memberUIStateWire, error) {
 	return s, s.validate()
 }
 
+// memberUIStateResponse is what both routes answer: the member's own document, and beside it the
+// tenant's defaults (decision 8). The defaults are read-only here: a PATCH carrying `defaults`
+// is refused as an unknown key, because only a tenant admin sets them.
+type memberUIStateResponse struct {
+	memberUIStateWire
+	Defaults tenantMemberDefaultsWire `json:"defaults"`
+}
+
+type memberUIStateStore interface {
+	store.MemberUIStateStore
+	store.TenantMemberDefaultsStore
+}
+
 type memberUIStateAPI struct {
 	memberAuth
-	store store.MemberUIStateStore
+	store memberUIStateStore
 }
 
 func newMemberUIStateAPI(m *manager) memberUIStateAPI {
@@ -97,13 +110,23 @@ func (a memberUIStateAPI) load(ctx context.Context, membershipID string) (member
 	return s, row.Version, nil
 }
 
+// respond answers s together with the member's tenant defaults.
+func (a memberUIStateAPI) respond(w http.ResponseWriter, r *http.Request, mv store.MembershipView, s memberUIStateWire) {
+	_, d, err := loadTenantMemberDefaults(r, a.store, mv.TenantID)
+	if err != nil {
+		writeAPIErr(w, &apiError{http.StatusInternalServerError, "store", err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, memberUIStateResponse{memberUIStateWire: s, Defaults: d})
+}
+
 func (a memberUIStateAPI) get(w http.ResponseWriter, r *http.Request, _ store.Identity, mv store.MembershipView) {
 	s, _, err := a.load(r.Context(), mv.MembershipID)
 	if err != nil {
 		writeAPIErr(w, &apiError{http.StatusInternalServerError, "store", err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, s)
+	a.respond(w, r, mv, s)
 }
 
 func (a memberUIStateAPI) patch(w http.ResponseWriter, r *http.Request, _ store.Identity, mv store.MembershipView) {
@@ -148,7 +171,7 @@ func (a memberUIStateAPI) patch(w http.ResponseWriter, r *http.Request, _ store.
 			return
 		}
 		if ok {
-			writeJSON(w, http.StatusOK, cur)
+			a.respond(w, r, mv, cur)
 			return
 		}
 	}
