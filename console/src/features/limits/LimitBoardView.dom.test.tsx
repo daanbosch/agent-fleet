@@ -8,7 +8,8 @@ import { createRoot, type Root } from "react-dom/client";
 const api = vi.fn();
 const apiJSON = vi.fn();
 const toast = vi.fn();
-vi.mock("../../core/api/client.ts", () => ({
+vi.mock("../../core/api/client.ts", async (orig) => ({
+  ...(await orig<typeof import("../../core/api/client.ts")>()),
   api: (...args: unknown[]) => api(...args),
   apiJSON: (...args: unknown[]) => apiJSON(...args),
   errText: (e: { message?: string }) => e?.message || "",
@@ -16,6 +17,7 @@ vi.mock("../../core/api/client.ts", () => ({
 vi.mock("../../ui/ToastProvider.tsx", () => ({ useToast: () => toast }));
 
 import { LimitBoardView } from "./LimitBoardView.tsx";
+import { useTenantStore } from "../../core/store/tenant.ts";
 
 const me = {
   enabled: true,
@@ -94,5 +96,76 @@ describe("LimitBoardView", () => {
       save.click();
     });
     expect(apiJSON).toHaveBeenCalledWith("api/limit-board/me", "PUT", { audience: "tenant", level: "band", members: [] });
+  });
+
+  // Review finding (#2017): a tenant switch while the board is open must not leave tenant A's
+  // roster on screen (or A's draft saveable under B), and a late answer for A is dropped.
+  it("clears and re-reads on a tenant switch", async () => {
+    useTenantStore.setState({ tenant: "a" });
+    await mount();
+    expect(document.body.textContent).toContain("amy@example.com");
+    api.mockImplementation((path: string) =>
+      Promise.resolve(
+        path.startsWith("api/limit-board/me")
+          ? me
+          : { enabled: true, next: "", members: [{ userKey: "zed", email: "zed@b.example", kinds: [] }] },
+      ),
+    );
+    await act(async () => {
+      useTenantStore.setState({ tenant: "b" });
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(document.body.textContent).not.toContain("amy@example.com");
+    expect(document.body.textContent).toContain("zed@b.example");
+  });
+
+  it("drops an answer that arrives after the tenant changed", async () => {
+    useTenantStore.setState({ tenant: "a" });
+    let releaseA: (v: unknown) => void = () => {};
+    api.mockImplementation((path: string) =>
+      path.startsWith("api/limit-board/me") ? Promise.resolve(me) : new Promise((r) => (releaseA = r)),
+    );
+    await mount();
+    const pendingA = releaseA;
+    api.mockImplementation((path: string) =>
+      Promise.resolve(
+        path.startsWith("api/limit-board/me")
+          ? me
+          : { enabled: true, next: "", members: [{ userKey: "zed", email: "zed@b.example", kinds: [] }] },
+      ),
+    );
+    await act(async () => {
+      useTenantStore.setState({ tenant: "b" });
+    });
+    await act(async () => {
+      pendingA(board);
+      await Promise.resolve();
+    });
+    expect(document.body.textContent).toContain("zed@b.example");
+    expect(document.body.textContent).not.toContain("amy@example.com");
+  });
+
+  // Review finding (#2017): an open board re-reads the CP (here on becoming visible), so a
+  // revoked publication disappears, while the member's unsaved draft is left alone.
+  it("re-reads on visibility without overwriting the draft", async () => {
+    await mount();
+    const sel = document.querySelector<HTMLSelectElement>(".lb-form select")!;
+    await act(async () => {
+      sel.value = "tenant";
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    api.mockImplementation((path: string) =>
+      Promise.resolve(path.startsWith("api/limit-board/me") ? me : { ...board, members: board.members.map((m) => ({ ...m, kinds: [] })) }),
+    );
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(document.body.textContent).not.toContain("99% 以上");
+    expect(document.querySelector<HTMLSelectElement>(".lb-form select")!.value).toBe("tenant");
   });
 });

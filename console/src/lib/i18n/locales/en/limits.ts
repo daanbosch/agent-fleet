@@ -10,7 +10,7 @@ export const limits: Record<keyof typeof jaLimits, string> = {
   "limits.tab": "Limit board",
   "limits.tenant_tab": "Limit board",
   "limits.intro":
-    "Choose who in this tenant may see where you stand against your usage limits, and how much. Hidden by default. A value is a lower bound from when it was observed, not a promise about what is left now.",
+    "Choose who in this tenant may see where you stand against your usage limits, and how much. Hidden by default. A value is the share used when it was observed; it may be higher now.",
   "limits.tenant_off": "A tenant administrator has turned the limit board off for this tenant. Nobody's values are collected or shown.",
   "limits.publish_title": "What you publish (this tenant)",
   "limits.publish_note":
@@ -23,8 +23,8 @@ export const limits: Record<keyof typeof jaLimits, string> = {
   "limits.level.state": "State only",
   "limits.level.band": "Band",
   "limits.level.exact": "Exact",
-  "limits.level.state_note": "Shows only whether a session has hit a limit, a spend limit, a block or a sign-in problem. No quota.",
-  "limits.level.band_note": "Shows each quota unit as under 50% / under 80% / under 95% / 95% or more. Units are never combined.",
+  "limits.level.state_note": "Shows only whether a session has hit a limit, a spend limit, a block or a sign-in problem. No usage.",
+  "limits.level.band_note": "Shows the share used of each quota unit as under 50% / under 80% / under 95% / 95% or more. Units are never combined.",
   "limits.level.exact_note": "Shows the used percentage and the reset time as they are.",
   "limits.no_members": "No other members.",
   "limits.publishes_none": "You publish to no tenant.",

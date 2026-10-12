@@ -95,6 +95,7 @@ interface UsageReading {
   // browser fallback (usageResetNotify.ts). claude and codex only.
   observedAt?: string;
   limitEpoch?: string;
+  limitEpochSince?: string;
   user?: string;
   plan?: string;
   planType?: string;

@@ -34,10 +34,16 @@ type Snapshot struct {
 }
 
 // Kind is one agent kind's quota. Epoch is the opaque login epoch (limitepoch); the CP drops
-// what it holds for the kind when the epoch changes.
+// what it holds for the kind when the epoch changes. EpochSince orders epochs (a later value is
+// a later login), so the CP can refuse a late report from before a re-login.
+//
+// Units may be empty: a kind whose account is known but has nothing admitted yet still reports
+// its epoch, which is how a re-login clears the previous account's values on the CP before the
+// new account has been observed at all.
 type Kind struct {
-	Epoch string `json:"epoch"`
-	Units []Unit `json:"units"`
+	Epoch      string `json:"epoch"`
+	EpochSince string `json:"epochSince"`
+	Units      []Unit `json:"units"`
 }
 
 // Unit is one quota unit as last observed.
@@ -63,24 +69,25 @@ var sources = map[string]func() limitobs.Reading{
 
 // Build reads every covered kind once.
 //
-// A kind with no reading is left out without touching its epoch ledger: a collector that has
-// nothing (copilot before the chip's first fetch) cannot name the account either, and
-// recording "no account" in between would make the next real reading look like a new login.
-// Units observed before the current account was first seen are dropped (limitepoch).
+// Every kind whose account can be named is reported, with or without units: an epoch-only
+// entry is what tells the CP that the account changed (or signed out) before anything of the
+// new one was observed. Only a kind that cannot name its account at all is left out, without
+// touching its epoch ledger. Units observed before the current account was first seen are
+// dropped (limitepoch).
 func Build(now time.Time) Snapshot {
 	s := Snapshot{V: Version, Kinds: map[string]Kind{}}
 	for kind, read := range sources {
 		r := read()
-		if len(r.Windows) == 0 {
+		if r.NoIdentity {
 			continue
 		}
-		epoch, since, ok := limitepoch.Current(kind, r.Identity, now)
+		st, ok := limitepoch.Current(kind, r.Identity, now)
 		if !ok {
 			continue
 		}
-		var units []Unit
+		units := []Unit{}
 		for _, w := range r.Windows {
-			if !limitepoch.Admit(since, w.ObservedAt) {
+			if !limitepoch.Admit(st.Since, w.ObservedAt) {
 				continue
 			}
 			u := Unit{Unit: w.Unit, UsedPct: w.UsedPct, WindowMins: w.WindowMins,
@@ -90,11 +97,8 @@ func Build(now time.Time) Snapshot {
 			}
 			units = append(units, u)
 		}
-		if len(units) == 0 {
-			continue
-		}
 		sort.Slice(units, func(i, j int) bool { return units[i].Unit < units[j].Unit })
-		s.Kinds[kind] = Kind{Epoch: epoch, Units: units}
+		s.Kinds[kind] = Kind{Epoch: st.Epoch, EpochSince: st.SeenText(), Units: units}
 	}
 	return s
 }

@@ -22,11 +22,14 @@ CREATE TABLE limit_observation (
 );
 -- The current login epoch per kind. It is an opaque value from the member's own Agent and is
 -- never returned by any route. When it changes, the kind's observations under the old epoch
--- are deleted.
+-- are deleted. epoch_since is the Agent's time for that login (RFC3339 UTC): only a strictly
+-- later one may replace the epoch, so a report sent before a re-login and delivered after it
+-- is refused instead of bringing the previous account back.
 CREATE TABLE limit_epoch (
     membership_id TEXT NOT NULL REFERENCES membership(id) ON DELETE CASCADE,
     kind          TEXT NOT NULL,
     epoch         TEXT NOT NULL,
+    epoch_since   TEXT NOT NULL DEFAULT '',
     changed_at    TEXT NOT NULL,
     PRIMARY KEY (membership_id, kind)
 );

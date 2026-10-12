@@ -7,13 +7,15 @@
 //
 // Members are listed in roster order. There is deliberately no sort by headroom and no chart:
 // limits are never pooled or compared (decision 7).
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, apiJSON, errText } from "../../core/api/client.ts";
 import { useT } from "../../lib/i18n/index.ts";
+import { useTenantStore } from "../../core/store/tenant.ts";
 import type { MsgKey } from "../../lib/i18n/index.ts";
 import { useToast } from "../../ui/ToastProvider.tsx";
 import {
   COVERAGE,
+  effectiveStatus,
   kindName,
   sessionText,
   unitLabel,
@@ -27,54 +29,101 @@ import {
 import "./limits.css";
 
 const PAGE = 50;
+// How often an open board re-reads the CP: values age, publishers revoke, and a tenant
+// admin may switch the board off. The CP decides what is shown; the client only re-asks.
+const REFRESH_MS = 60_000;
+const TICK_MS = 30_000;
 
 export function LimitBoardView() {
   const tr = useT();
   const toast = useToast();
+  // The scope every request belongs to. A tenant switch (or a different identity) while the
+  // board is open clears everything shown and re-reads: tenant A's roster, values and draft
+  // must never be shown, or saved, under tenant B.
+  const scope = useTenantStore((s) => `${s.tenant}|${s.identityRev}`);
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
   const [me, setMe] = useState<BoardMe | null>(null);
   const [members, setMembers] = useState<BoardMember[]>([]);
   const [next, setNext] = useState("");
   const [enabled, setEnabled] = useState(true);
   const [failed, setFailed] = useState(false);
-  // The draft of the member's own setting; saved explicitly.
+  // The draft of the member's own setting; saved explicitly, never overwritten by a refresh.
   const [audience, setAudience] = useState<Audience>("none");
   const [level, setLevel] = useState<Level>("state");
   const [chosen, setChosen] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  const dirtyRef = useRef(false);
+  const shownRef = useRef(0);
+  shownRef.current = members.length;
 
-  const applyMe = (d: BoardMe) => {
+  const applyMe = useCallback((d: BoardMe, force: boolean) => {
     setMe(d);
-    setAudience(d.audience);
-    setLevel(d.level);
-    setChosen(d.members.map((m) => m.userKey));
-  };
-
-  const load = useCallback(async () => {
-    const [m, b] = await Promise.all([api("api/limit-board/me"), api(`api/limit-board?limit=${PAGE}`)]);
-    if (m?.error || b?.error) {
-      setFailed(true);
-      return;
+    if (force || !dirtyRef.current) {
+      setAudience(d.audience);
+      setLevel(d.level);
+      setChosen(d.members.map((m) => m.userKey));
     }
-    setFailed(false);
-    applyMe(m as BoardMe);
-    setEnabled(!!b.enabled);
-    setMembers(b.members || []);
-    setNext(b.next || "");
-    setNow(Date.now());
   }, []);
+
+  // load re-reads the setting and the roster pages shown so far. A response for a scope that
+  // is no longer current is dropped.
+  const load = useCallback(
+    async (initial: boolean) => {
+      const at = scopeRef.current;
+      const limit = Math.min(100, Math.max(PAGE, shownRef.current));
+      const [m, b] = await Promise.all([api("api/limit-board/me"), api(`api/limit-board?limit=${limit}`)]);
+      if (scopeRef.current !== at) return;
+      if (m?.error || b?.error) {
+        if (initial) setFailed(true);
+        return;
+      }
+      setFailed(false);
+      applyMe(m as BoardMe, initial);
+      setEnabled(!!b.enabled);
+      setMembers(b.members || []);
+      setNext(b.next || "");
+      setNow(Date.now());
+    },
+    [applyMe],
+  );
+
   useEffect(() => {
-    void load();
+    setMe(null);
+    setMembers([]);
+    setNext("");
+    setFailed(false);
+    dirtyRef.current = false;
+    void load(true);
+  }, [scope, load]);
+
+  useEffect(() => {
+    const refresh = setInterval(() => {
+      if (document.visibilityState !== "hidden") void load(false);
+    }, REFRESH_MS);
+    const tick = setInterval(() => setNow(Date.now()), TICK_MS);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void load(false);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(refresh);
+      clearInterval(tick);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [load]);
 
   const more = async () => {
+    const at = scopeRef.current;
     const b = await api(`api/limit-board?limit=${PAGE}&after=${encodeURIComponent(next)}`);
-    if (b?.error) return;
+    if (scopeRef.current !== at || b?.error) return;
     setMembers((cur) => [...cur, ...(b.members || [])]);
     setNext(b.next || "");
   };
 
   const save = async () => {
+    const at = scopeRef.current;
     setBusy(true);
     try {
       const res = await apiJSON("api/limit-board/me", "PUT", {
@@ -82,11 +131,13 @@ export function LimitBoardView() {
         level,
         members: audience === "members" ? chosen : [],
       });
+      if (scopeRef.current !== at) return;
       if (res?.error) {
         toast(errText(res.error));
         return;
       }
-      applyMe(res as BoardMe);
+      dirtyRef.current = false;
+      applyMe(res as BoardMe, true);
       toast(tr("limits.saved"));
     } finally {
       setBusy(false);
@@ -109,6 +160,7 @@ export function LimitBoardView() {
     audience !== me.audience ||
     level !== me.level ||
     (audience === "members" && chosen.join("\n") !== me.members.map((m) => m.userKey).join("\n"));
+  dirtyRef.current = dirty;
 
   return (
     <div className="display-settings limit-board">
@@ -170,7 +222,7 @@ export function LimitBoardView() {
 
       <section className="ds-group">
         <h4 className="ds-title">{tr("limits.own_title")}</h4>
-        <LimitEntry view={me.own} now={now} />
+        {enabled ? <LimitEntry view={me.own} now={now} /> : <p className="muted lb-unknown">{tr("limits.tenant_off_short")}</p>}
       </section>
 
       <section className="ds-group">
@@ -229,7 +281,7 @@ export function LimitEntry({ view, now }: { view: LimitView; now: number }) {
         <li key={k.kind}>
           <span className="lb-kind">{kindName(k.kind)}</span>
           {(k.units ?? []).map((u) => (
-            <span key={u.unit} className={"lb-unit lb-" + u.status}>
+            <span key={u.unit} className={"lb-unit lb-" + effectiveStatus(u, now)}>
               {unitLabel(tr, k.kind, u)}: {unitText(tr, u, now)}
             </span>
           ))}

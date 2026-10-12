@@ -17,7 +17,8 @@ func TestStatusLineRerenderDoesNotRefreshTheObservation(t *testing.T) {
 	captureFromStatusLine(payload("30"))
 	c, _ := readCapturedUsage()
 	old := time.Now().Add(-2 * time.Hour).Unix()
-	c.ObservedAt, c.CapturedAt = old, old
+	// A capture from before the per-window fields: only the capture-wide time.
+	c.ObservedAt, c.CapturedAt, c.FiveHourObservedAt, c.SevenDayObservedAt = old, old, 0, 0
 	writeCapturedUsage(*c)
 
 	captureFromStatusLine(payload("30"))
@@ -60,5 +61,41 @@ func TestAccountIDKeepsTheLastGoodAnswerOnATornWrite(t *testing.T) {
 	os.Remove(claudeJSONPath())
 	if got := accountID(); got != "" {
 		t.Fatalf("no file should be no identity, got %q", got)
+	}
+}
+
+// Review finding (#2017): a render where only the 5-hour percentage moved must not refresh the
+// weekly window's observation time, and a reader that takes one time for both (the chip's
+// observedAt) gets the older one.
+func TestStatusLineObservationTimeIsPerWindow(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	payload := func(fh string) []byte {
+		return []byte(`{"rate_limits":{"five_hour":{"used_percentage":` + fh +
+			`,"resets_at":9999999999},"seven_day":{"used_percentage":10,"resets_at":9999999998}}}`)
+	}
+	captureFromStatusLine(payload("30"))
+	c, _ := readCapturedUsage()
+	old := time.Now().Add(-2 * time.Hour).Unix()
+	c.ObservedAt, c.FiveHourObservedAt, c.SevenDayObservedAt = old, old, old
+	writeCapturedUsage(*c)
+
+	captureFromStatusLine(payload("31"))
+	c, _ = readCapturedUsage()
+	if c.SevenDayObservedAt != old {
+		t.Fatalf("unchanged weekly window moved to %d (was %d)", c.SevenDayObservedAt, old)
+	}
+	if time.Since(time.Unix(c.FiveHourObservedAt, 0)) > time.Minute {
+		t.Fatalf("changed 5-hour window kept %d", c.FiveHourObservedAt)
+	}
+	if c.ObservedAt != old {
+		t.Fatalf("capture-wide observedAt = %d, want the older window's %d", c.ObservedAt, old)
+	}
+	r := LimitReading()
+	got := map[string]int64{}
+	for _, w := range r.Windows {
+		got[w.Unit] = w.ObservedAt.Unix()
+	}
+	if got["7d"] != old || got["5h"] == old {
+		t.Fatalf("LimitReading times = %v", got)
 	}
 }

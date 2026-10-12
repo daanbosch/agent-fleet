@@ -24,10 +24,14 @@ type Window struct {
 	ObservedAt time.Time
 }
 
-// Reading is one kind's captured state. Identity names the provider account the windows
-// were captured under ("" when it cannot be read locally). It never leaves the Agent: the
+// Reading is one kind's captured state. Identity names the provider account now signed in
+// ("" = signed out, which is an account state of its own). It never leaves the Agent: the
 // snapshot turns it into an opaque epoch.
+//
+// NoIdentity says the account cannot be named at the moment at all (copilot before gh was
+// ever asked for a token). The kind is then left out, and its epoch ledger is not touched.
 type Reading struct {
-	Identity string
-	Windows  []Window
+	Identity   string
+	NoIdentity bool
+	Windows    []Window
 }

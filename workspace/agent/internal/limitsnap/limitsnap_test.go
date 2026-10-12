@@ -34,8 +34,12 @@ func TestBuildDropsReadingsFromBeforeARelogin(t *testing.T) {
 	// Signed in to account b; the capture on disk is still a's.
 	reading.Identity = "b"
 	s2 := Build(t0.Add(2 * time.Minute))
-	if k, ok := s2.Kinds["claude"]; ok {
-		t.Fatalf("re-login: the previous account's reading was reported as the new one's: %+v", k)
+	k2, ok := s2.Kinds["claude"]
+	if !ok {
+		t.Fatal("re-login: the kind vanished instead of reporting the new account; the CP would keep showing the old values")
+	}
+	if len(k2.Units) != 0 || k2.Epoch == k1.Epoch || k2.EpochSince <= k1.EpochSince {
+		t.Fatalf("re-login = %+v (old %+v): want the new epoch, a later epochSince and no units", k2, k1)
 	}
 	// b's own first reading comes through, under a different epoch.
 	reading.Windows[0].ObservedAt = t0.Add(3 * time.Minute)
@@ -54,6 +58,7 @@ func TestBuildReportsOnlyObservedUnits(t *testing.T) {
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	stubSources(t, map[string]func() limitobs.Reading{
 		"codex": func() limitobs.Reading { return limitobs.Reading{Identity: "x"} },
+		"agy":   func() limitobs.Reading { return limitobs.Reading{NoIdentity: true} },
 		"copilot": func() limitobs.Reading {
 			return limitobs.Reading{Identity: "y", Windows: []limitobs.Window{{Unit: "chat", UsedPct: 10}}}
 		},
@@ -62,11 +67,14 @@ func TestBuildReportsOnlyObservedUnits(t *testing.T) {
 		},
 	})
 	s := Build(now)
-	if _, ok := s.Kinds["codex"]; ok {
-		t.Error("a kind with no reading was reported")
+	if k, ok := s.Kinds["codex"]; !ok || len(k.Units) != 0 || k.Epoch == "" {
+		t.Errorf("a signed-in kind with nothing observed must report its epoch alone: %+v", k)
 	}
-	if _, ok := s.Kinds["copilot"]; ok {
+	if k := s.Kinds["copilot"]; len(k.Units) != 0 {
 		t.Error("a reading without an observation time was reported")
+	}
+	if _, ok := s.Kinds["agy"]; ok {
+		t.Error("a kind that cannot name its account was reported")
 	}
 	if k := s.Kinds["muse"]; len(k.Units) != 1 || k.Units[0].ObservedAt != "2026-10-01T12:00:00Z" {
 		t.Errorf("muse = %+v", k)

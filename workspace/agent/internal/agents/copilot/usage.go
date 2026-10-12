@@ -123,6 +123,7 @@ func HandleUsage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		usageCached, usageAt, usageToken = res, time.Now(), tok
+		usagePublished.Store(&usagePub{res: res, at: usageAt, token: tok})
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"ok":         true,

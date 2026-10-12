@@ -42,6 +42,24 @@ type capturedUsage struct {
 	// older than it is, which only ever under-states freshness. 0 in a capture written
 	// before this field existed.
 	ObservedAt int64 `json:"observedAt,omitempty"`
+	// FiveHourObservedAt / SevenDayObservedAt are the same, per window: a render where only the
+	// 5-hour percentage moved must not make an hours-old weekly reading look fresh. ObservedAt
+	// is then the older of the two, for a reader that takes one time for the whole capture.
+	FiveHourObservedAt int64 `json:"fiveHourObservedAt,omitempty"`
+	SevenDayObservedAt int64 `json:"sevenDayObservedAt,omitempty"`
+}
+
+// windowObservedAt is one window's observation time, falling back to the capture's for a
+// capture written before the per-window fields existed. Zero when unknown.
+func (c *capturedUsage) windowObservedAt(fiveHour bool) time.Time {
+	at := c.SevenDayObservedAt
+	if fiveHour {
+		at = c.FiveHourObservedAt
+	}
+	if at > 0 {
+		return time.Unix(at, 0)
+	}
+	return c.observedAt()
 }
 
 // observedAt is the capture's observation time, falling back to CapturedAt for a capture
@@ -126,9 +144,27 @@ func captureFromStatusLine(b []byte) bool {
 	if rl.SevenDay != nil {
 		c.SevenDay = &capturedWindow{UsedPercent: rl.SevenDay.UsedPercent, ResetsAt: rl.SevenDay.ResetsAt}
 	}
-	if prev, _ := readCapturedUsage(); prev != nil && sameWindow(prev.FiveHour, c.FiveHour) && sameWindow(prev.SevenDay, c.SevenDay) {
-		if at := prev.observedAt(); !at.IsZero() {
-			c.ObservedAt = at.Unix()
+	prev, _ := readCapturedUsage()
+	keep := func(fiveHour bool, was, is *capturedWindow) int64 {
+		if is == nil {
+			return 0
+		}
+		if prev != nil && was != nil && sameWindow(was, is) {
+			if at := prev.windowObservedAt(fiveHour); !at.IsZero() {
+				return at.Unix()
+			}
+		}
+		return now
+	}
+	var prevFH, prevSD *capturedWindow
+	if prev != nil {
+		prevFH, prevSD = prev.FiveHour, prev.SevenDay
+	}
+	c.FiveHourObservedAt = keep(true, prevFH, c.FiveHour)
+	c.SevenDayObservedAt = keep(false, prevSD, c.SevenDay)
+	for _, at := range []int64{c.FiveHourObservedAt, c.SevenDayObservedAt} {
+		if at > 0 && at < c.ObservedAt {
+			c.ObservedAt = at
 		}
 	}
 	writeCapturedUsage(c)

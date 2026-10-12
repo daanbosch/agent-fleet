@@ -19,18 +19,18 @@ func LimitReading() limitobs.Reading {
 	if c == nil {
 		return r
 	}
-	at := c.observedAt()
 	for _, w := range []struct {
 		unit string
 		mins int
 		cw   *capturedWindow
-	}{{"5h", 5 * 60, c.FiveHour}, {"7d", 7 * 24 * 60, c.SevenDay}} {
+		at   time.Time
+	}{{"5h", 5 * 60, c.FiveHour, c.windowObservedAt(true)}, {"7d", 7 * 24 * 60, c.SevenDay, c.windowObservedAt(false)}} {
 		if w.cw == nil || w.cw.ResetsAt <= 0 {
 			continue
 		}
 		r.Windows = append(r.Windows, limitobs.Window{
 			Unit: w.unit, UsedPct: w.cw.UsedPercent, ResetsAt: time.Unix(w.cw.ResetsAt, 0).UTC(),
-			WindowMins: w.mins, ObservedAt: at,
+			WindowMins: w.mins, ObservedAt: w.at,
 		})
 	}
 	return r

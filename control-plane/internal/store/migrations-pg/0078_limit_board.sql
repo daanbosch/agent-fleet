@@ -17,6 +17,7 @@ CREATE TABLE limit_epoch (
     membership_id TEXT NOT NULL REFERENCES membership(id) ON DELETE CASCADE,
     kind          TEXT NOT NULL,
     epoch         TEXT NOT NULL,
+    epoch_since   TEXT NOT NULL DEFAULT '',
     changed_at    TEXT NOT NULL,
     PRIMARY KEY (membership_id, kind)
 );

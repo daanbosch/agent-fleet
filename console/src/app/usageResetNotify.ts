@@ -37,6 +37,9 @@ export interface UsageForNotify {
   sevenDay?: Win;
   observedAt?: string;
   limitEpoch?: string;
+  // When the Agent first saw this login: it orders epochs, so a post that sat in a sleeping tab
+  // across a re-login is refused rather than bringing the previous account back.
+  limitEpochSince?: string;
 }
 
 // usageObservationBody is the POST /api/notifications/usage-observations body, or null when
@@ -65,7 +68,11 @@ export function usageObservationBody(kind: string, usage: UsageForNotify | null)
       ...(w!.derived ? { derived: true } : {}),
     }));
   if (!windows.length) return null;
-  return { source: kind, windows, ...(usage.limitEpoch ? { limitEpoch: usage.limitEpoch } : {}) };
+  return {
+    source: kind,
+    windows,
+    ...(usage.limitEpoch ? { limitEpoch: usage.limitEpoch, limitEpochSince: usage.limitEpochSince } : {}),
+  };
 }
 
 // useUsageResetNotify tracks one agent's two windows and fires once each time a

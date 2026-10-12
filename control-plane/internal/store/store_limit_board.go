@@ -37,10 +37,12 @@ type LimitPublication struct {
 
 type LimitBoardStore interface {
 	// RecordLimitObservations stores one kind's observations under epoch. A different epoch
-	// from the stored one replaces it and deletes the kind's older-epoch rows. Per unit, a row
-	// is replaced only by a strictly newer observation, so an older or identical one is a
-	// no-op whichever source sends it.
-	RecordLimitObservations(ctx context.Context, membershipID, kind, epoch, at string, obs []LimitObservation) error
+	// replaces the stored one only when its epochSince is strictly later, and then deletes the
+	// kind's other-epoch rows; otherwise the call is refused (accepted=false) and nothing is
+	// written. Per unit, a row is replaced only by a strictly newer observation, so an older or
+	// identical one is a no-op whichever source sends it. obs may be empty: an epoch on its own
+	// is what clears the previous account's values.
+	RecordLimitObservations(ctx context.Context, membershipID, kind, epoch, epochSince, at string, obs []LimitObservation) (accepted bool, err error)
 	// ListLimitObservations returns the current-epoch observations of the given memberships.
 	ListLimitObservations(ctx context.Context, membershipIDs []string) ([]LimitObservation, error)
 	PutLimitSessionStates(ctx context.Context, row LimitSessionStates) error
@@ -57,22 +59,45 @@ type LimitBoardStore interface {
 	ListMembersByTenantPage(ctx context.Context, tenantID, afterUserKey string, limit int) ([]MemberInfo, error)
 }
 
-func (s *SQL) RecordLimitObservations(ctx context.Context, membershipID, kind, epoch, at string, obs []LimitObservation) error {
+func (s *SQL) RecordLimitObservations(ctx context.Context, membershipID, kind, epoch, epochSince, at string, obs []LimitObservation) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO limit_epoch(membership_id, kind, epoch, changed_at) VALUES(?,?,?,?)
-		ON CONFLICT(membership_id, kind) DO UPDATE SET epoch=excluded.epoch, changed_at=excluded.changed_at
-		WHERE limit_epoch.epoch <> excluded.epoch`, membershipID, kind, epoch, at); err != nil {
-		return err
+	if _, err := tx.ExecContext(ctx, `INSERT INTO limit_epoch(membership_id, kind, epoch, epoch_since, changed_at) VALUES(?,?,?,?,?)
+		ON CONFLICT(membership_id, kind) DO NOTHING`, membershipID, kind, epoch, epochSince, at); err != nil {
+		return false, err
+	}
+	// The switch is fenced on epoch_since, not on arrival order: a browser post read before a
+	// re-login and delivered after the reaper stored the new account would otherwise delete the
+	// new rows and bring the old account back. The UPDATE also takes the row lock, so two racing
+	// switches serialise here and the SELECT below sees the winner.
+	if _, err := tx.ExecContext(ctx, `UPDATE limit_epoch SET epoch=?, epoch_since=?, changed_at=?
+		WHERE membership_id=? AND kind=? AND epoch<>? AND epoch_since < ?`,
+		epoch, epochSince, at, membershipID, kind, epoch, epochSince); err != nil {
+		return false, err
+	}
+	// The same account seen again after a login elsewhere raises its own bound, so a late report
+	// from the login in between cannot outrank it.
+	if _, err := tx.ExecContext(ctx, `UPDATE limit_epoch SET epoch_since=?
+		WHERE membership_id=? AND kind=? AND epoch=? AND epoch_since < ?`,
+		epochSince, membershipID, kind, epoch, epochSince); err != nil {
+		return false, err
+	}
+	var current string
+	if err := tx.QueryRowContext(ctx, `SELECT epoch FROM limit_epoch WHERE membership_id=? AND kind=?`,
+		membershipID, kind).Scan(&current); err != nil {
+		return false, err
+	}
+	if current != epoch {
+		return false, nil
 	}
 	// Unconditional rather than only on a change: it is what guarantees no row of another
 	// epoch survives, even one written by a transaction that raced this one.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM limit_observation WHERE membership_id=? AND kind=? AND epoch<>?`,
 		membershipID, kind, epoch); err != nil {
-		return err
+		return false, err
 	}
 	for _, o := range obs {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO limit_observation
@@ -83,10 +108,10 @@ func (s *SQL) RecordLimitObservations(ctx context.Context, membershipID, kind, e
 				received_at=excluded.received_at, source=excluded.source
 			WHERE limit_observation.observed_at < excluded.observed_at`,
 			membershipID, kind, o.Unit, epoch, o.UsedPct, o.ResetsAt, o.WindowMins, o.ObservedAt, o.ReceivedAt, o.Source); err != nil {
-			return err
+			return false, err
 		}
 	}
-	return tx.Commit()
+	return true, tx.Commit()
 }
 
 // inList renders "?,?,…" for n arguments.

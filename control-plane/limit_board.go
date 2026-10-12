@@ -60,8 +60,10 @@ type limitSnapshotWire struct {
 }
 
 type limitKindWire struct {
-	Epoch string          `json:"epoch"`
-	Units []limitUnitWire `json:"units"`
+	Epoch string `json:"epoch"`
+	// EpochSince is the Agent's time for this login; it orders epochs (store: epoch_since).
+	EpochSince string          `json:"epochSince"`
+	Units      []limitUnitWire `json:"units"`
 }
 
 // limitUnitWire is one quota unit as both sources send it.
@@ -74,10 +76,11 @@ type limitUnitWire struct {
 	Derived    bool    `json:"derived,omitempty"`
 }
 
-// limitKindRecord is one kind's validated observations, ready to store.
+// limitKindRecord is one kind's validated observations, ready to store. Obs may be empty: the
+// epoch alone still clears what a previous login left.
 type limitKindRecord struct {
-	Kind, Epoch string
-	Obs         []store.LimitObservation
+	Kind, Epoch, EpochSince string
+	Obs                     []store.LimitObservation
 }
 
 // parseLimitSnapshot turns the raw snapshot into per-kind records. It never fails: a snapshot
@@ -101,11 +104,12 @@ func parseLimitSnapshot(raw json.RawMessage, now time.Time) []limitKindRecord {
 		if json.Unmarshal(kraw, &k) != nil || len(k.Epoch) > 64 {
 			continue
 		}
-		obs := validLimitUnits(kind, k.Units, now, "agent")
-		if len(obs) == 0 {
+		since, ok := limitEpochSince(k.EpochSince, now)
+		if !ok {
 			continue
 		}
-		out = append(out, limitKindRecord{Kind: kind, Epoch: k.Epoch, Obs: obs})
+		out = append(out, limitKindRecord{Kind: kind, Epoch: k.Epoch, EpochSince: since,
+			Obs: validLimitUnits(kind, k.Units, now, "agent")})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Kind < out[j].Kind })
 	return out
@@ -120,6 +124,16 @@ func limitTS(s string) (string, time.Time, bool) {
 	}
 	t = t.UTC().Truncate(time.Second)
 	return t.Format(time.RFC3339), t, true
+}
+
+// limitEpochSince validates an epoch's login time. Without one the epoch cannot be ordered
+// against the stored one, so the kind is skipped rather than allowed to replace anything.
+func limitEpochSince(s string, now time.Time) (string, bool) {
+	ts, t, ok := limitTS(s)
+	if !ok || t.After(now.Add(limitClockSkew)) {
+		return "", false
+	}
+	return ts, true
 }
 
 // limitClockSkew bounds how far in the future an observation may claim to be. A workspace
@@ -208,7 +222,7 @@ func (m *manager) recordLimitsFromEnvelope(ctx context.Context, ws store.Workspa
 		return
 	}
 	for _, k := range parseLimitSnapshot(env.Limits, now) {
-		if err := m.store.RecordLimitObservations(ctx, ws.MembershipID, k.Kind, k.Epoch, now.UTC().Format(time.RFC3339), k.Obs); err != nil {
+		if _, err := m.store.RecordLimitObservations(ctx, ws.MembershipID, k.Kind, k.Epoch, k.EpochSince, now.UTC().Format(time.RFC3339), k.Obs); err != nil {
 			log.Printf("limit board: record %s/%s: %v", ws.MembershipID, k.Kind, err)
 		}
 	}
@@ -558,8 +572,15 @@ func (a limitBoardAPI) me(w http.ResponseWriter, r *http.Request, ident store.Id
 		writeAPIErr(w, aerr)
 		return
 	}
+	// With the tenant switch off nothing is shown, the member's own values included: the
+	// screen says nobody's values are collected or shown, and that must hold for this route too.
+	// The setting stays readable and editable.
+	own := projectLimits("", nil, nil, a.now())
+	if on {
+		own = projectLimits("exact", obs, ss, a.now())
+	}
 	writeJSON(w, http.StatusOK, limitBoardMe{Enabled: on, Audience: pub.Audience, Level: pub.Level, Members: audience,
-		Own: projectLimits("exact", obs, ss, a.now()), Publishes: tenants})
+		Own: own, Publishes: tenants})
 }
 
 // publishedTenants lists the caller's active memberships whose publication is not hidden.

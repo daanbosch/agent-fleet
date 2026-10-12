@@ -8,7 +8,7 @@ export const limits = {
   "limits.tab": "利用枠ボード",
   "limits.tenant_tab": "利用枠ボード",
   "limits.intro":
-    "自分の利用上限の状況を、このテナントの誰に・どこまで見せるかを選びます。既定は非公開です。値は観測した時点の下限で、今の残りを保証するものではありません。",
+    "自分の利用上限の状況を、このテナントの誰に・どこまで見せるかを選びます。既定は非公開です。値は観測した時点の使用率で、今はそれ以上かもしれません。",
   "limits.tenant_off": "このテナントではテナント管理者が利用枠ボードをオフにしています。誰の値も集められず、表示もされません。",
   "limits.publish_title": "公開設定（このテナント）",
   "limits.publish_note":
@@ -21,9 +21,9 @@ export const limits = {
   "limits.level.state": "状態のみ",
   "limits.level.band": "帯",
   "limits.level.exact": "正確な値",
-  "limits.level.state_note": "セッションが上限・利用額上限・ブロック・サインイン切れに当たっているかだけを見せます。残量は見せません。",
-  "limits.level.band_note": "残量を単位ごとに 50% 未満 / 80% 未満 / 95% 未満 / 95% 以上の帯で見せます。帯をまとめることはしません。",
-  "limits.level.exact_note": "残量の割合とリセット時刻をそのまま見せます。",
+  "limits.level.state_note": "セッションが上限・利用額上限・ブロック・サインイン切れに当たっているかだけを見せます。使用率は見せません。",
+  "limits.level.band_note": "使用率を単位ごとに 50% 未満 / 80% 未満 / 95% 未満 / 95% 以上の帯で見せます。帯をまとめることはしません。",
+  "limits.level.exact_note": "使用率（利用済みの割合）とリセット時刻をそのまま見せます。",
   "limits.no_members": "ほかのメンバーはいません。",
   "limits.publishes_none": "どのテナントにも公開していません。",
   "limits.publishes": "公開しているテナント: {tenants}",

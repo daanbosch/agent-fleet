@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
@@ -202,6 +203,7 @@ func accountUsage(ctx context.Context) (usage, bool) {
 	defer c.Unlock()
 	if c.ok && c.account != auth.Tokens.AccountID {
 		c.val, c.ok, c.observed, c.fetched = usage{}, false, time.Time{}, time.Time{}
+		accountPublished.Store(nil)
 	}
 	if !c.fetched.IsZero() && time.Since(c.fetched) < accountUsageTTL {
 		return c.aged(), c.ok
@@ -210,22 +212,34 @@ func accountUsage(ctx context.Context) (usage, bool) {
 	now := time.Now()
 	if got {
 		c.val, c.ok, c.observed, c.account = val, true, now, auth.Tokens.AccountID
+		accountPublished.Store(&accountPub{val: val, observed: now, account: auth.Tokens.AccountID})
 	}
 	c.fetched = now
 	return c.aged(), c.ok
 }
 
-// peekAccountUsage is the cached account reading without any fetch, for the limit snapshot,
-// which must never wait on the network. ok is false when nothing was ever fetched or the login
-// has changed since.
+// accountPublished is the last successful account reading, published for the limit snapshot.
+// The snapshot must not take accountUsageCache's lock: accountUsage holds it across the HTTP
+// fetch (up to 8 s), and the reaper's serial sweep waits on GET /sessions.
+var accountPublished atomic.Pointer[accountPub]
+
+type accountPub struct {
+	val      usage
+	observed time.Time
+	account  string
+}
+
+// peekAccountUsage is the last successful account reading without any fetch or lock wait.
+// ok is false when nothing was ever fetched or the login has changed since.
 func peekAccountUsage(account string) (usage, bool) {
-	c := &accountUsageCache
-	c.Lock()
-	defer c.Unlock()
-	if !c.ok || c.account != account {
+	p := accountPublished.Load()
+	if p == nil || p.account != account {
 		return usage{}, false
 	}
-	return c.aged(), true
+	u := p.val
+	u.AgeSec = int(time.Since(p.observed).Seconds())
+	u.ObservedAt = p.observed
+	return u, true
 }
 
 // aged stamps how old the cached reading is, so readUsage can compare it against a local one

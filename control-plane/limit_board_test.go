@@ -37,9 +37,9 @@ func snapshotAt(now time.Time) string {
 }
 
 const rawSnapshot = `{"v":1,"kinds":{
-	 "claude":{"epoch":"e1","units":[{"unit":"5h","usedPct":42.5,"resetsAt":"2026-10-12T14:00:00Z","windowMins":300,"observedAt":"2026-10-12T11:50:00Z"},
+	 "claude":{"epoch":"e1","epochSince":"2026-10-12T08:00:00Z","units":[{"unit":"5h","usedPct":42.5,"resetsAt":"2026-10-12T14:00:00Z","windowMins":300,"observedAt":"2026-10-12T11:50:00Z"},
 	                                  {"unit":"7d","usedPct":12,"resetsAt":"2026-10-15T00:00:00Z","windowMins":10080,"observedAt":"2026-10-12T11:50:00Z"}]},
-	 "codex":{"epoch":"e2","units":[{"unit":"5h","usedPct":97,"resetsAt":"2026-10-12T13:00:00Z","observedAt":"2026-10-12T11:00:00Z"}]}}}`
+	 "codex":{"epoch":"e2","epochSince":"2026-10-12T08:00:00Z","units":[{"unit":"5h","usedPct":97,"resetsAt":"2026-10-12T13:00:00Z","observedAt":"2026-10-12T11:00:00Z"}]}}}`
 
 // The snapshot is isolated (ADR 0111 decision 6): whatever it holds, sessions, repo jobs and
 // image jobs decode the same, and the busy decision taken from them is the same.
@@ -91,7 +91,7 @@ func TestLimitSnapshotNeverAffectsTheEnvelope(t *testing.T) {
 func TestLimitSnapshotMalformedKindIsUnknownAlone(t *testing.T) {
 	raw := json.RawMessage(`{"v":1,"kinds":{"claude":{"epoch":"e","units":"bad"},
 	 "agy":{"epoch":"e","units":[{"unit":"5h","usedPct":1,"observedAt":"2026-10-12T11:00:00Z"}]},
-	 "codex":{"epoch":"e","units":[{"unit":"5h","usedPct":1,"observedAt":"2026-10-12T11:00:00Z"},
+	 "codex":{"epoch":"e","epochSince":"2026-10-12T08:00:00Z","units":[{"unit":"5h","usedPct":1,"observedAt":"2026-10-12T11:00:00Z"},
 	   {"unit":"7d","usedPct":1,"observedAt":"2026-10-12T11:00:00Z","derived":true},
 	   {"unit":"bogus","usedPct":1,"observedAt":"2026-10-12T11:00:00Z"},
 	   {"unit":"7d","usedPct":1,"observedAt":"2026-10-12T13:00:00Z"}]}}}`)
@@ -443,12 +443,12 @@ func TestUsageObservationFeedsTheBoardOnlyWithAnObservationTime(t *testing.T) {
 		t.Fatalf("a post without observedAt reached the board: %+v", obs)
 	}
 	// An epoch alone is not enough: still no observation time to store.
-	post(`{"source":"claude","limitEpoch":"e","windows":[{"windowKey":"5h","percent":50,"resetsAt":"2026-10-12T14:00:00Z"}]}`)
+	post(`{"source":"claude","limitEpoch":"e","limitEpochSince":"2026-10-12T08:00:00Z","windows":[{"windowKey":"5h","percent":50,"resetsAt":"2026-10-12T14:00:00Z"}]}`)
 	if obs := list(); len(obs) != 0 {
 		t.Fatalf("the send time stood in for observedAt: %+v", obs)
 	}
 	// Derived: neither the board nor the armed state.
-	post(`{"source":"codex","limitEpoch":"e","windows":[{"windowKey":"5h","percent":95,"resetsAt":"2026-10-12T14:00:00Z","observedAt":"2026-10-12T11:59:00Z","derived":true}]}`)
+	post(`{"source":"codex","limitEpoch":"e","limitEpochSince":"2026-10-12T08:00:00Z","windows":[{"windowKey":"5h","percent":95,"resetsAt":"2026-10-12T14:00:00Z","observedAt":"2026-10-12T11:59:00Z","derived":true}]}`)
 	if obs := list(); len(obs) != 0 {
 		t.Fatalf("a derived value reached the board: %+v", obs)
 	}
@@ -456,12 +456,12 @@ func TestUsageObservationFeedsTheBoardOnlyWithAnObservationTime(t *testing.T) {
 		t.Fatal("a derived value armed the reset notification")
 	}
 	// Stale by age: no arming either.
-	post(`{"source":"codex","limitEpoch":"e","windows":[{"windowKey":"7d","percent":95,"resetsAt":"2026-10-14T14:00:00Z","observedAt":"2026-10-12T09:00:00Z"}]}`)
+	post(`{"source":"codex","limitEpoch":"e","limitEpochSince":"2026-10-12T08:00:00Z","windows":[{"windowKey":"7d","percent":95,"resetsAt":"2026-10-14T14:00:00Z","observedAt":"2026-10-12T09:00:00Z"}]}`)
 	if st, found, _ := st.GetUsageNotificationState(context.Background(), mv.MembershipID, "codex", "7d"); found && st.Armed == 1 {
 		t.Fatal("a three-hour-old reading armed the reset notification")
 	}
 	// A real one: stored with its own observation time, received and source apart.
-	post(`{"source":"claude","limitEpoch":"e","windows":[{"windowKey":"5h","percent":61,"resetsAt":"2026-10-12T14:00:00Z","observedAt":"2026-10-12T11:58:00+00:00"}]}`)
+	post(`{"source":"claude","limitEpoch":"e","limitEpochSince":"2026-10-12T08:00:00Z","windows":[{"windowKey":"5h","percent":61,"resetsAt":"2026-10-12T14:00:00Z","observedAt":"2026-10-12T11:58:00+00:00"}]}`)
 	obs := list()
 	var got *store.LimitObservation
 	for i := range obs {
@@ -473,12 +473,12 @@ func TestUsageObservationFeedsTheBoardOnlyWithAnObservationTime(t *testing.T) {
 		t.Fatalf("browser observation = %+v", obs)
 	}
 	// The reaper's identical observation later is a duplicate; an older one never wins.
-	f.observe(t, "alice", `{"v":1,"kinds":{"claude":{"epoch":"e","units":[{"unit":"5h","usedPct":10,"resetsAt":"2026-10-12T14:00:00Z","observedAt":"2026-10-12T11:00:00Z"}]}}}`)
+	f.observe(t, "alice", `{"v":1,"kinds":{"claude":{"epoch":"e","epochSince":"2026-10-12T08:00:00Z","units":[{"unit":"5h","usedPct":10,"resetsAt":"2026-10-12T14:00:00Z","observedAt":"2026-10-12T11:00:00Z"}]}}}`)
 	if obs := list(); obs[0].UsedPct != 61 || obs[0].Source != "browser" {
 		t.Fatalf("an older observation overwrote a newer one: %+v", obs)
 	}
 	// Re-login (another epoch) hides the previous account's values at once.
-	f.observe(t, "alice", `{"v":1,"kinds":{"claude":{"epoch":"other","units":[{"unit":"7d","usedPct":1,"resetsAt":"2026-10-14T00:00:00Z","observedAt":"2026-10-12T11:59:00Z"}]}}}`)
+	f.observe(t, "alice", `{"v":1,"kinds":{"claude":{"epoch":"other","epochSince":"2026-10-12T11:59:30Z","units":[{"unit":"7d","usedPct":1,"resetsAt":"2026-10-14T00:00:00Z","observedAt":"2026-10-12T11:59:00Z"}]}}}`)
 	for _, o := range list() {
 		if o.Kind == "claude" && o.Unit == "5h" {
 			t.Fatalf("previous account's 5h survived the re-login: %+v", o)
@@ -568,5 +568,66 @@ func TestLimitBoardPostgres(t *testing.T) {
 	}
 	if got := entryOf(t, f.board(t, "carol", ""), "alice"); !reflect.DeepEqual(got, map[string]any{"kinds": []any{}}) {
 		t.Fatalf("carol sees %v", got)
+	}
+}
+
+// Review finding (#2017): after a re-login the Agent reports the new epoch before it has
+// observed anything of the new account. That epoch alone must hide the previous account's
+// values; waiting for the first new observation left them published as current.
+func TestLimitBoardEpochOnlyReloginHidesThePreviousAccount(t *testing.T) {
+	f := newLimitFixture(t, openLimitStore(t), "alice", "bob")
+	f.observe(t, "alice", validSnapshot())
+	f.publish(t, "alice", "tenant", "exact")
+	if raw := limitJSON(entryOf(t, f.board(t, "bob", ""), "alice")); !strings.Contains(raw, "42.5") {
+		t.Fatalf("before the re-login: %s", raw)
+	}
+	f.observe(t, "alice", `{"v":1,"kinds":{"claude":{"epoch":"b","epochSince":"2026-10-12T11:55:00Z","units":[]}}}`)
+	raw := limitJSON(entryOf(t, f.board(t, "bob", ""), "alice"))
+	if strings.Contains(raw, "42.5") || strings.Contains(raw, `"kind":"claude","units"`) {
+		t.Fatalf("the previous account's claude values survived an epoch-only re-login: %s", raw)
+	}
+	if !strings.Contains(raw, `"usedPct":97`) {
+		t.Fatalf("another kind's values went with it: %s", raw)
+	}
+}
+
+// Review finding (#2017): a browser post read before a re-login and delivered after the reaper
+// stored the new account must not bring the previous account back.
+func TestUsageObservationLatePostFromBeforeAReloginIsRefused(t *testing.T) {
+	st := openLimitStore(t)
+	f := newLimitFixture(t, st, "alice")
+	mv := f.members["alice"]
+	a := notificationAPI{store: st, limits: st, now: func() time.Time { return limitNow }}
+	f.observe(t, "alice", `{"v":1,"kinds":{"claude":{"epoch":"b","epochSince":"2026-10-12T11:55:00Z","units":[{"unit":"5h","usedPct":3,"resetsAt":"2026-10-12T16:00:00Z","observedAt":"2026-10-12T11:59:00Z"}]}}}`)
+	w := httptest.NewRecorder()
+	a.observeUsage(w, httptest.NewRequest("POST", "/", bytes.NewBufferString(
+		`{"source":"claude","limitEpoch":"a","limitEpochSince":"2026-10-12T08:00:00Z","windows":[{"windowKey":"5h","percent":90,"resetsAt":"2026-10-12T14:00:00Z","observedAt":"2026-10-12T11:50:00Z"}]}`)),
+		store.Identity{}, mv)
+	if w.Code != 204 {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	obs, _ := st.ListLimitObservations(context.Background(), []string{mv.MembershipID})
+	if len(obs) != 1 || obs[0].Epoch != "b" || obs[0].UsedPct != 3 {
+		t.Fatalf("the late post replaced the new account: %+v", obs)
+	}
+}
+
+// Review finding (#2017): with the tenant switch off, /me shows no values either, and the
+// setting stays editable.
+func TestLimitBoardMeShowsNothingWhenTheTenantIsOff(t *testing.T) {
+	f := newLimitFixture(t, openLimitStore(t), "alice")
+	f.observe(t, "alice", validSnapshot())
+	if err := f.st.SetLimitBoardEnabled(context.Background(), f.tenant.ID, false, "t"); err != nil {
+		t.Fatal(err)
+	}
+	f.publish(t, "alice", "tenant", "band") // still editable
+	w := httptest.NewRecorder()
+	f.api.me(w, httptest.NewRequest("GET", "/", nil), f.idents["alice"], f.members["alice"])
+	var me limitBoardMe
+	if err := json.Unmarshal(w.Body.Bytes(), &me); err != nil {
+		t.Fatal(err)
+	}
+	if me.Enabled || len(me.Own.Kinds) != 0 || me.Own.SessionsObservedAt != "" || me.Audience != "tenant" || me.Level != "band" {
+		t.Fatalf("me with the tenant off = %s", w.Body)
 	}
 }

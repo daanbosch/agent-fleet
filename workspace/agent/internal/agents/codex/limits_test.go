@@ -2,6 +2,8 @@ package codex
 
 import (
 	"context"
+
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/limitobs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,6 +31,7 @@ func resetAccountCache(t *testing.T) {
 		c.Lock()
 		c.val, c.ok, c.fetched, c.observed, c.account = usage{}, false, time.Time{}, time.Time{}, ""
 		c.Unlock()
+		accountPublished.Store(nil)
 	}
 	clear()
 	t.Cleanup(clear)
@@ -78,6 +81,10 @@ func TestAccountUsageCacheIsPerAccount(t *testing.T) {
 	c.Lock()
 	c.val, c.ok, c.observed, c.fetched, c.account = usage{OK: true}, true, time.Now(), time.Now(), "a"
 	c.Unlock()
+	accountPublished.Store(&accountPub{val: usage{OK: true}, observed: time.Now(), account: "a"})
+	if _, ok := peekAccountUsage("a"); !ok {
+		t.Fatal("peek lost account a's own reading")
+	}
 	if _, ok := peekAccountUsage("b"); ok {
 		t.Fatal("peek served account a's cache under account b")
 	}
@@ -133,3 +140,48 @@ func TestLimitReadingReportsRawObservations(t *testing.T) {
 		t.Fatalf("window = %+v, want the recorded 88%% with its own reset and an observation time", w)
 	}
 }
+
+// Review finding (#2017): the snapshot used to take accountUsageCache's lock, which accountUsage
+// holds across the HTTP fetch. A hung account endpoint then held up GET /sessions?limits=1 and,
+// through it, the reaper's serial sweep. The snapshot must answer from what was published.
+func TestLimitReadingDoesNotWaitOnAnAccountFetch(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	resetAccountCache(t)
+	resetObservedRateLimits()
+	t.Cleanup(resetObservedRateLimits)
+	writeCodexAuth(t, "a")
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		http.Error(w, "late", http.StatusBadGateway)
+	}))
+	defer srv.Close()
+	defer close(release)
+	old := accountUsageURL
+	accountUsageURL = srv.URL
+	t.Cleanup(func() { accountUsageURL = old })
+	reset := time.Now().Add(time.Hour).Unix()
+	accountPublished.Store(&accountPub{account: "a", observed: time.Now().Add(-time.Minute),
+		val: usage{OK: true, FiveHour: adjustWindow(30, 300, reset, time.Now())}})
+
+	fetching := make(chan struct{})
+	go func() {
+		close(fetching)
+		_, _ = accountUsage(context.Background()) // holds the cache lock until the server answers
+	}()
+	<-fetching
+	time.Sleep(50 * time.Millisecond)
+
+	done := make(chan limitsReading, 1)
+	go func() { done <- limitsReading{LimitReading()} }()
+	select {
+	case got := <-done:
+		if len(got.r.Windows) != 1 || got.r.Windows[0].UsedPct != 30 {
+			t.Fatalf("reading = %+v, want the published 30%%", got.r)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("LimitReading waited on an account fetch in flight")
+	}
+}
+
+type limitsReading struct{ r limitobs.Reading }

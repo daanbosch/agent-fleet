@@ -28,9 +28,26 @@ import (
 
 type entry struct {
 	// ID is the full HMAC of the identity. Only its prefix is ever sent.
-	ID    string    `json:"id"`
+	ID string `json:"id"`
+	// Since is the admission bound: readings observed before it are dropped. Zero for the first
+	// account a ledger ever records.
 	Since time.Time `json:"since"`
+	// Seen is when this ledger entry was made, always a real time. It orders epochs for the CP
+	// (a later Seen is a later login), so a late post from before a re-login can be refused.
+	// Unlike Since it is never zero: a ledger rebuilt after a home is recreated must still
+	// outrank whatever the CP holds from before.
+	Seen time.Time `json:"seen"`
 }
+
+// Stamp is the current account's epoch as the snapshot and the chip endpoints report it.
+type Stamp struct {
+	Epoch string
+	Since time.Time
+	Seen  time.Time
+}
+
+// SeenText is Seen as the wire carries it.
+func (s Stamp) SeenText() string { return s.Seen.UTC().Format(time.RFC3339) }
 
 type ledger struct {
 	Key   []byte           `json:"key"`
@@ -95,27 +112,31 @@ func save() {
 //
 // The first account a ledger ever records gets a zero Since: nothing says the readings already
 // on disk belong to anybody else.
-func Current(kind, identity string, now time.Time) (epoch string, since time.Time, ok bool) {
+func Current(kind, identity string, now time.Time) (Stamp, bool) {
 	mu.Lock()
 	defer mu.Unlock()
 	load()
 	if len(cur.Key) == 0 {
-		return "", time.Time{}, false
+		return Stamp{}, false
 	}
 	m := hmac.New(sha256.New, cur.Key)
 	m.Write([]byte(kind + "\x00" + identity))
 	id := hex.EncodeToString(m.Sum(nil))
-	e, seen := cur.Kinds[kind]
-	if !seen || e.ID != id {
-		since := now.UTC()
-		if !seen {
+	e, known := cur.Kinds[kind]
+	if !known || e.ID != id || e.Seen.IsZero() {
+		since := now.UTC().Truncate(time.Second)
+		switch {
+		case !known:
 			since = time.Time{}
+		case e.ID == id:
+			// A ledger written before Seen existed: same account, keep its bound.
+			since = e.Since
 		}
-		e = entry{ID: id, Since: since}
+		e = entry{ID: id, Since: since, Seen: now.UTC().Truncate(time.Second)}
 		cur.Kinds[kind] = e
 		save()
 	}
-	return id[:16], e.Since, true
+	return Stamp{Epoch: id[:16], Since: e.Since, Seen: e.Seen}, true
 }
 
 // Admit reports whether a reading observed at observedAt may be shown under the account first
@@ -130,10 +151,11 @@ func Admit(since, observedAt time.Time) bool {
 // now signed in (or has no time), so the browser never posts the previous account's numbers
 // as this one's, and never has to make a time up.
 func Annotate(out map[string]any, kind, identity string, observedAt time.Time) {
-	epoch, since, ok := Current(kind, identity, time.Now())
-	if !ok || !Admit(since, observedAt) {
+	st, ok := Current(kind, identity, time.Now())
+	if !ok || !Admit(st.Since, observedAt) {
 		return
 	}
 	out["observedAt"] = observedAt.UTC().Format(time.RFC3339)
-	out["limitEpoch"] = epoch
+	out["limitEpoch"] = st.Epoch
+	out["limitEpochSince"] = st.SeenText()
 }

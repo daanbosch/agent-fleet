@@ -117,15 +117,31 @@ const BAND_KEY: Record<NonNullable<LimitUnit["band"]>, MsgKey> = {
   ge95: "limits.band.ge95",
 };
 
+// STALE_MS is the CP's limitStaleAfter (ADR 0111 addendum item 6).
+export const STALE_MS = 60 * 60_000;
+
+// effectiveStatus re-applies the CP's time boundaries at `now`: a board left open keeps its
+// entries, and an hour later a "current" value is stale and a value past its reset time no
+// longer means anything. Only ever moves towards less certain, never back.
+export function effectiveStatus(u: LimitUnit, now: number): LimitUnit["status"] {
+  if (u.status === "reset_not_observed") return u.status;
+  const reset = u.resetsAt ? Date.parse(u.resetsAt) : NaN;
+  if (!Number.isNaN(reset) && now >= reset) return "reset_not_observed";
+  const obs = u.observedAt ? Date.parse(u.observedAt) : NaN;
+  if (!Number.isNaN(obs) && now - obs > STALE_MS) return "stale";
+  return u.status;
+}
+
 // unitText is one unit's value as the board words it.
 export function unitText(tr: Tr, u: LimitUnit, now: number): string {
-  if (u.status === "reset_not_observed") return tr("limits.reset_not_observed");
+  const status = effectiveStatus(u, now);
+  if (status === "reset_not_observed") return tr("limits.reset_not_observed");
   const ago = agoText(tr, u.observedAt, now);
   let s: string;
   if (u.usedPct !== undefined) s = tr("limits.at_least", { pct: Math.round(u.usedPct), ago });
   else if (u.band) s = tr(BAND_KEY[u.band], { ago });
   else return tr("limits.unknown");
-  return u.status === "stale" ? `${s} · ${tr("limits.stale")}` : s;
+  return status === "stale" ? `${s} · ${tr("limits.stale")}` : s;
 }
 
 export function sessionText(tr: Tr, s: LimitSession): string {

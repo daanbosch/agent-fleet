@@ -56,5 +56,7 @@ func Token() string {
 	}
 	tokenVal = strings.TrimSpace(string(out))
 	tokenAt = time.Now()
+	tok := tokenVal
+	tokenPublished.Store(&tok)
 	return tokenVal
 }

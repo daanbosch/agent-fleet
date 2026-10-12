@@ -79,42 +79,63 @@ func TestLimitObservationsNewerWinsAndEpochDrops(t *testing.T) {
 			}
 			return rows
 		}
-		if err := st.RecordLimitObservations(ctx, m, "claude", "e1", "t", obs(40, "2026-10-01T12:10:00Z", "agent")); err != nil {
+		if _, err := st.RecordLimitObservations(ctx, m, "claude", "e1", "2026-10-01T10:00:00Z", "t", obs(40, "2026-10-01T12:10:00Z", "agent")); err != nil {
 			t.Fatal(err)
 		}
 		// An older observation never overwrites a newer one.
-		if err := st.RecordLimitObservations(ctx, m, "claude", "e1", "t", obs(20, "2026-10-01T12:00:00Z", "browser")); err != nil {
+		if _, err := st.RecordLimitObservations(ctx, m, "claude", "e1", "2026-10-01T10:00:00Z", "t", obs(20, "2026-10-01T12:00:00Z", "browser")); err != nil {
 			t.Fatal(err)
 		}
 		if r := get(); len(r) != 1 || r[0].UsedPct != 40 || r[0].Source != "agent" {
 			t.Fatalf("older observation overwrote a newer one: %+v", r)
 		}
 		// The identical observation from the other source is a duplicate: stored once, first kept.
-		if err := st.RecordLimitObservations(ctx, m, "claude", "e1", "t", obs(40, "2026-10-01T12:10:00Z", "browser")); err != nil {
+		if _, err := st.RecordLimitObservations(ctx, m, "claude", "e1", "2026-10-01T10:00:00Z", "t", obs(40, "2026-10-01T12:10:00Z", "browser")); err != nil {
 			t.Fatal(err)
 		}
 		if r := get(); len(r) != 1 || r[0].Source != "agent" {
 			t.Fatalf("duplicate was not deduplicated: %+v", r)
 		}
-		if err := st.RecordLimitObservations(ctx, m, "claude", "e1", "t", obs(55, "2026-10-01T12:20:00Z", "browser")); err != nil {
+		if _, err := st.RecordLimitObservations(ctx, m, "claude", "e1", "2026-10-01T10:00:00Z", "t", obs(55, "2026-10-01T12:20:00Z", "browser")); err != nil {
 			t.Fatal(err)
 		}
 		if r := get(); r[0].UsedPct != 55 || r[0].ObservedAt != "2026-10-01T12:20:00Z" {
 			t.Fatalf("newer observation not taken: %+v", r)
 		}
 		// Another login: the previous epoch's rows are gone, even with no new reading yet.
-		if err := st.RecordLimitObservations(ctx, m, "claude", "e2", "t2", nil); err != nil {
+		if _, err := st.RecordLimitObservations(ctx, m, "claude", "e2", "2026-10-01T12:35:00Z", "t2", nil); err != nil {
 			t.Fatal(err)
 		}
 		if r := get(); len(r) != 0 {
 			t.Fatalf("previous account's values survived a new epoch: %+v", r)
 		}
 		// A late post under the old epoch flips back, and still never shows the other's rows.
-		if err := st.RecordLimitObservations(ctx, m, "claude", "e2", "t3", obs(3, "2026-10-01T12:40:00Z", "agent")); err != nil {
+		if _, err := st.RecordLimitObservations(ctx, m, "claude", "e2", "2026-10-01T12:35:00Z", "t3", obs(3, "2026-10-01T12:40:00Z", "agent")); err != nil {
 			t.Fatal(err)
 		}
 		if r := get(); len(r) != 1 || r[0].Epoch != "e2" || r[0].UsedPct != 3 {
 			t.Fatalf("new account's reading = %+v", r)
+		}
+		// Review finding (#2017): a post read before the re-login and delivered after it carries
+		// the old login time. It is refused: the new account's row stays, nothing of A returns.
+		ok, err := st.RecordLimitObservations(ctx, m, "claude", "e1", "2026-10-01T10:00:00Z", "t4", obs(90, "2026-10-01T12:50:00Z", "browser"))
+		if err != nil || ok {
+			t.Fatalf("late post from the previous login: accepted=%v err=%v", ok, err)
+		}
+		if r := get(); len(r) != 1 || r[0].Epoch != "e2" || r[0].UsedPct != 3 {
+			t.Fatalf("a late post from before the re-login replaced the new account: %+v", r)
+		}
+		// A→B→A: signing back in to A is a later login, and it does switch.
+		ok, err = st.RecordLimitObservations(ctx, m, "claude", "e1", "2026-10-01T13:00:00Z", "t5", obs(7, "2026-10-01T13:01:00Z", "agent"))
+		if err != nil || !ok {
+			t.Fatalf("re-login to A refused: %v %v", ok, err)
+		}
+		if r := get(); len(r) != 1 || r[0].Epoch != "e1" || r[0].UsedPct != 7 {
+			t.Fatalf("after A→B→A = %+v", r)
+		}
+		// …and B's late post (login time before A's return) cannot take it back.
+		if ok, _ := st.RecordLimitObservations(ctx, m, "claude", "e2", "2026-10-01T12:35:00Z", "t6", obs(50, "2026-10-01T13:02:00Z", "browser")); ok {
+			t.Fatal("B's late post outranked the later return to A")
 		}
 	})
 }
@@ -142,7 +163,7 @@ func TestLimitPublicationAndCascade(t *testing.T) {
 		if p, _, _ := st.GetLimitPublication(ctx, a); len(p.Viewers) != 1 || p.Viewers[0] != c {
 			t.Fatalf("viewers not replaced: %+v", p)
 		}
-		if err := st.RecordLimitObservations(ctx, c, "codex", "e", "t", []LimitObservation{{Unit: "7d", ObservedAt: "x", ReceivedAt: "x", Source: "agent"}}); err != nil {
+		if _, err := st.RecordLimitObservations(ctx, c, "codex", "e", "2026-10-01T10:00:00Z", "t", []LimitObservation{{Unit: "7d", ObservedAt: "x", ReceivedAt: "x", Source: "agent"}}); err != nil {
 			t.Fatal(err)
 		}
 		if err := st.PutLimitSessionStates(ctx, LimitSessionStates{MembershipID: c, States: "[]", ObservedAt: "t"}); err != nil {

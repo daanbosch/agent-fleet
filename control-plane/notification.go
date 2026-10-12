@@ -227,8 +227,10 @@ func (a notificationAPI) observeUsage(w http.ResponseWriter, r *http.Request, _ 
 	var in struct {
 		Source  string             `json:"source"`
 		Windows []usageObservation `json:"windows"`
-		// LimitEpoch is the opaque login epoch the Agent stamped on the reading.
-		LimitEpoch string `json:"limitEpoch,omitempty"`
+		// LimitEpoch is the opaque login epoch the Agent stamped on the reading, and
+		// LimitEpochSince that login's time, which orders it against the stored epoch.
+		LimitEpoch      string `json:"limitEpoch,omitempty"`
+		LimitEpochSince string `json:"limitEpochSince,omitempty"`
 	}
 	if json.NewDecoder(r.Body).Decode(&in) != nil {
 		writeAPIErr(w, &apiError{http.StatusBadRequest, "bad_request", "invalid JSON body"})
@@ -253,7 +255,7 @@ func (a notificationAPI) observeUsage(w http.ResponseWriter, r *http.Request, _ 
 	if a.now != nil {
 		now = a.now()
 	}
-	a.recordBoardObservations(r.Context(), mv, in.Source, in.LimitEpoch, in.Windows, now)
+	a.recordBoardObservations(r.Context(), mv, in.Source, in.LimitEpoch, in.LimitEpochSince, in.Windows, now)
 	for _, obs := range in.Windows {
 		// The reset notification's armed state is never set from a derived or stale value: a
 		// window rolled past its reset is the Agent's guess, and an old reading is no evidence
@@ -301,9 +303,17 @@ func (a notificationAPI) observeUsage(w http.ResponseWriter, r *http.Request, _ 
 // recordBoardObservations is the browser fallback of the limit board. The board is fed only
 // when the Agent stamped both an observation time and a login epoch; the time this post was
 // sent is never used in their place.
-func (a notificationAPI) recordBoardObservations(ctx context.Context, mv store.MembershipView, kind, epoch string,
+//
+// A post can arrive long after it was read (a tab that slept). The store refuses one whose
+// epoch is not the current one unless its login time is later, so a late post from before a
+// re-login never brings the previous account back.
+func (a notificationAPI) recordBoardObservations(ctx context.Context, mv store.MembershipView, kind, epoch, epochSince string,
 	windows []usageObservation, now time.Time) {
 	if a.limits == nil || epoch == "" || len(epoch) > 64 {
+		return
+	}
+	since, ok := limitEpochSince(epochSince, now)
+	if !ok {
 		return
 	}
 	tenantID := mv.TenantID
@@ -327,7 +337,7 @@ func (a notificationAPI) recordBoardObservations(ctx context.Context, mv store.M
 	if len(obs) == 0 {
 		return
 	}
-	if err := a.limits.RecordLimitObservations(ctx, mv.MembershipID, kind, epoch, now.UTC().Format(time.RFC3339), obs); err != nil {
+	if _, err := a.limits.RecordLimitObservations(ctx, mv.MembershipID, kind, epoch, since, now.UTC().Format(time.RFC3339), obs); err != nil {
 		log.Printf("limit board: browser observation %s/%s: %v", mv.MembershipID, kind, err)
 	}
 }
