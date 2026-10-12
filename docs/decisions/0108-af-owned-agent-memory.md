@@ -545,7 +545,7 @@ credential touched) called `add_memory` once per scope with fake content; the fi
   fallback compares normalised forms and the hash is what is trusted.
 - `personal` goes to AF's **user** scope, which every project reads, so it is read only when the request says
   `into=user` (Console checkbox, `af-memory muse-import --scope personal --into-user`); otherwise the preview
-  evaluates nothing and an apply is refused. `source` is `muse:personal_project/<path>` or `muse:personal/<path>`.
+  evaluates nothing and an apply is refused. `source` is `muse:personal_project/<dir>/<path>` or `muse:personal/<path>`.
 
 **Not verified / not done.** The mapping of `personal_project` to a working copy was verified by unit tests and
 by a real directory name, but not by a real run inside `~/repos` (the probe ran under a scratch directory, which

@@ -487,7 +487,7 @@ AF での保存で同名のものがあっても上書きしない。
   信用するのはハッシュ。
 - `personal` は全プロジェクトが読む AF の**ユーザー**スコープへ入るので、リクエストが `into=user` を明示したときだけ読む
   （Console のチェックボックス、`af-memory muse-import --scope personal --into-user`）。なければプレビューは何も評価せず、
-  取り込みは拒否する。`source` は `muse:personal_project/<path>` または `muse:personal/<path>`。
+  取り込みは拒否する。`source` は `muse:personal_project/<dir>/<path>` または `muse:personal/<path>`。
 
 **未検証・未実施**：`personal_project` と作業コピーの対応は、単体テストと実物のディレクトリ名では確かめたが、`~/repos`
 内での実機実行では確かめていない（プローブは使い捨てディレクトリで実行したため、正しく「プロジェクトなし」になる）。

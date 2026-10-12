@@ -322,14 +322,9 @@ func TestMuseStoreHomeSymlinkAllowed(t *testing.T) {
 	e := newMuseImportEnv(t)
 	real := filepath.Join(e.home, "persist", "share")
 	memoryWrite(t, filepath.Join(real, "muse", "memory", "personal", "n.md"), "kept")
+	memoryMkdirAll(t, filepath.Join(e.home, ".local"))
 	if err := os.Symlink(real, filepath.Join(e.home, ".local", "share")); err != nil {
-		if err := os.Remove(filepath.Join(e.home, ".local")); err != nil {
-			t.Skip(err)
-		}
-		memoryMkdirAll(t, filepath.Join(e.home, ".local"))
-		if err := os.Symlink(real, filepath.Join(e.home, ".local", "share")); err != nil {
-			t.Fatal(err)
-		}
+		t.Fatal(err)
 	}
 	if pv := e.previewOf(museScopePersonal, "", museIntoUser); pv.Counts[claudeImportNew] != 1 {
 		t.Errorf("preview = %+v", pv)
