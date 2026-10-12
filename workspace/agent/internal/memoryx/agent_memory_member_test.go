@@ -429,3 +429,37 @@ func TestAgentMemoryMemberSave(t *testing.T) {
 		t.Fatalf("changes: %+v %v", ch, err)
 	}
 }
+
+// The browser's restore of a row from member-forgotten goes through the revert route, which takes
+// only the CP's mark: unmarked it changes nothing, marked it brings the memory back as the member.
+func TestAgentMemoryForgottenRestoreNeedsTheMark(t *testing.T) {
+	_, _, _ = agentMemTestEnv(t)
+	s := memberorigintest.Install(t)
+	c := agentMemCallerT(t, "claude-main")
+	now := time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC)
+	saveScoped(t, c, "gone", agentMemScopeUser, now)
+	forgetViaRevert(t, "gone", agentMemScopeUser, c, now)
+	code, fw, raw := forgottenGet(t, "?scope=user")
+	if code != http.StatusOK || len(fw.Forgotten) != 1 || !fw.Forgotten[0].Revertible {
+		t.Fatalf("forgotten: %d %s", code, raw)
+	}
+	body := `{"commit":"` + fw.Forgotten[0].Commit + `","forget":false,"ack":false}`
+	path := "/agents/memory/entries/revert?commit=" + fw.Forgotten[0].Commit
+	mux := buildMux()
+	if w := smokeDo(t, mux, http.MethodPost, path, "agent-token", body); w.Code != http.StatusForbidden {
+		t.Fatalf("unmarked restore: %d %s", w.Code, w.Body)
+	}
+	if _, err := agentMemMemberRead("user", "", "gone"); err == nil {
+		t.Fatal("an unmarked restore brought the memory back")
+	}
+	if w := signedDo(t, s, mux, http.MethodPost, path, body); w.Code != http.StatusOK {
+		t.Fatalf("marked restore: %d %s", w.Code, w.Body)
+	}
+	if _, err := agentMemMemberRead("user", "", "gone"); err != nil {
+		t.Fatalf("after restore: %v", err)
+	}
+	ch, err := agentMemListChanges(1)
+	if err != nil || len(ch.Changes) != 1 || ch.Changes[0].AuthorKind != "member" {
+		t.Fatalf("restore change: %+v %v", ch, err)
+	}
+}

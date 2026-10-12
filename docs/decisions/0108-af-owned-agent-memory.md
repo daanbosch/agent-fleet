@@ -511,6 +511,74 @@ needs one logged-in muse run that calls `add_memory` (a member's quota). Write-b
 with the switch on muse's native memory is off (#1990), so nothing writes there. Follow-up: #2005 (personal
 scopes), the codex import stays with #1950 and the phase-based switch with #1972.
 
+
+## Note (2026-10-12): muse's personal scopes, notes without frontmatter, nested paths (#2005)
+
+The #1991 note above is amended by a measurement; it is not rewritten. A logged-in `muse exec --model muse-spark-1.3`
+(muse 1.4.4, `MUSE_EXPERIMENTAL_MEMORY` unset, a scratch git repository, the member's real home, no setting or
+credential touched) called `add_memory` once per scope with fake content; the files were then removed.
+
+**Measured.**
+- `project`: `<repo>/.agents/memory/<path>.md` plus `.muse-memory.lock` beside it. Untracked, not added to `.gitignore`.
+- `personal_project`: `~/.local/share/muse/memory/projects/<slug>-<16 hex>/<path>.md` plus the lock. `<slug>` is the
+  absolute cwd with `/` and `.` turned into `-` and the leading `-` dropped (`/home/dev/.af-work/x/probe-repo` gave
+  `home-dev--af-work-x-probe-repo`). **The 16 hex digits are the FNV-1a 64-bit hash of the absolute cwd** (found by
+  trying sha256, sha1, md5, sha512, blake2, sha3, crc32 and FNV-1/1a on the path with and without a trailing slash; only FNV-1a
+  of the plain path matched: `/home/dev/.af-work/s3cq7ox/probe-repo` -> `51d45085345c6000`, pinned by a unit test).
+- `personal`: `~/.local/share/muse/memory/personal/<path>.md` plus the lock. `~/.local/share/muse/memory/` did not exist
+  before the first write.
+- `path` may contain `/`: `af-probe-2005-sub/nested.md` created the directory in the `personal_project` store
+  (the same rule applies to the other two scopes; only that one was written nested).
+- Content is stored verbatim, with no frontmatter and no trailing newline added. No `MEMORY.md` was created.
+
+**Consequences (what the code now does).**
+- #1991 assumed frontmatter from muse's skill text, so a plain note was refused as `no_frontmatter`. A note without
+  frontmatter now imports: name from the file name (AF's name rules, else `bad_name`), description from the first
+  non-empty line (cut to 2,000 characters), no type (an empty type is the documented absence of one), the whole text as the
+  body. A file that opens a frontmatter block it never closes is still `no_frontmatter`.
+- Nested notes are walked through pinned directory handles (no symlink followed, hidden directories skipped, depth 6,
+  2,000 files). `a/b.md` is the memory `a--b`; two files mapping to one name are both `name_collision`.
+  `.muse-memory.lock`, `MEMORY.md` and non-`.md` files are skipped.
+- `personal_project` maps forward: the hash of each working copy's path under `~/repos` names the directory exactly.
+  A directory no hash matches is compared by slug (equal, or a subdirectory of a working copy); one project is taken,
+  two different ones are `ambiguous`, none is `no_project`. The slug rule was measured on one path only, so the slug
+  fallback compares normalised forms and the hash is what is trusted.
+- `personal` goes to AF's **user** scope, which every project reads, so it is read only when the request says
+  `into=user` (Console checkbox, `af-memory muse-import --scope personal --into-user`); otherwise the preview
+  evaluates nothing and an apply is refused. `source` is `muse:personal_project/<dir>/<path>` or `muse:personal/<path>`.
+
+**Not verified / not done.** The mapping of `personal_project` to a working copy was verified by unit tests and
+by a real directory name, but not by a real run inside `~/repos` (the probe ran under a scratch directory, which
+correctly maps to no project). Whether `XDG_DATA_HOME` moves muse's data directory was not run (the probe's environment had it unset); static evidence only: the
+muse 1.4.4 binary's embedded help names the config and data roots as `$XDG_DATA_HOME/muse` or `$HOME/.local/share/muse`, so the import
+uses an absolute `XDG_DATA_HOME` and otherwise `~/.local/share`. The store is opened without following a symlink from `muse` down; a
+symlink above it (a persisted home) is followed. Only the `personal_project` store was written nested. `type` passed to
+`add_memory` was not exercised, and `memory.destinations.*` still shows no value. Write-back to muse stays out of
+scope. Follow-ups: #1972 (phase-based switch).
+
+## Note (2026-10-12): the browser lists every forgotten memory (#2003)
+
+The forgotten list of the browser was built from the 300 most recent changes, so a memory forgotten
+earlier could not be restored from it. `entries/member-forgotten` lists them from the store's
+tombstones (`<scope dir>/.forgotten/<name>`) for the user scope and every project, or the one named by
+`scope` and `project`. A row is the same view the changes list gives its newest row (who forgot it and
+when, the commit to revert, `revertible`), resolved with the scan of `entries/member-latest`: raw and
+decoded text, both sides of the newest change. A name or text that fails it is counted in `withheld`,
+never listed. The tombstone directory is untrusted like the rest of the store: a symlink on the way, a
+non-regular or oversized entry, or a name that is not a memory name is not a tombstone, and a tombstone
+with no published change, or a memory that is live again, is not listed. One answer holds at most 300 rows
+(`truncated`; narrow the scope). The route is read-only, counts no use and is not gated by the switch;
+restore still goes through the revert route with its newest-change and `expectRevision` checks.
+
+The newest rows are chosen after the tombstones have been judged (within the budget below) (by the newest change's time, found
+in one history pass), so the cut never drops a newer memory for an older one, and `truncated` is set
+only when a listable row was left out (within the judging budget below). `projects` names every project with a listable forgotten
+memory, cut or not, so the Console keeps offering a scope whose rows did not fit. Every tombstone is looked up in that one
+history pass and those without a published change are dropped; the scan of the rest is budgeted at 2000
+memories per request, newest first. Past the budget the oldest are left unjudged, their project is still
+named (unless the memory is plainly live), `incomplete` (not `truncated`) is set and `withheld` is a lower bound; narrowing the scope may not complete it. The project id of an unjudged memory is scanned before it is named, as the judged path does.
+The read lock is taken per memory, not across the request.
+
 ## Note (2026-10-12): member writes carry a mark the Agent verifies; the member can write memories (#1997)
 
 The limit stated in the #1985 note is lifted by [0113](0113-member-origin-mark.md). The CP signs the member's

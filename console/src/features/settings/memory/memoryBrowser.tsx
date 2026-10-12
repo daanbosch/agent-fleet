@@ -1,11 +1,12 @@
 // MemoryBrowserPanel — the member's browser of AF-owned agent memory (#1985): the memories of all
 // scopes at once (the default) or of one scope with their author, use count and pin, a search, the body of one, forget, and the
 // forgotten ones with a way back, and a form to write or edit one by hand. Forget and restore are
-// the changes list's own revert route, on the newest change of the memory, which a forget resolves
-// on demand (member-latest) so it does not depend on how many recent changes were loaded. A save
-// goes through member-save, which runs the agents' memory_save checks (revision, secret scan,
-// limits) and records the member as author; the CP signs it, revert and pin so the Agent can tell
-// them from a session (ADR 0113, #1997).
+// the changes list's own revert route, on the newest change of the memory. A forget resolves that
+// change on demand (member-latest) and the forgotten list comes from member-forgotten (the store's
+// tombstones), so neither depends on how many recent changes were loaded. A save goes through
+// member-save, which runs the agents' memory_save checks (revision, secret scan, limits) and
+// records the member as author; the CP signs it, revert and pin so the Agent can tell them from a
+// session (ADR 0113, #1997).
 //
 // A memory whose text fails the secret scan is never listed (the Agent sends a count), so no
 // name or body of one reaches this DOM. Search matches the list's own fields at once (name,
@@ -56,6 +57,13 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
   const [rows, setRows] = useState<MemoryListed[] | null>(null);
   const [withheld, setWithheld] = useState(0);
   const [forgotten, setForgotten] = useState<MemoryChange[]>([]);
+  const [goneWithheld, setGoneWithheld] = useState(0);
+  const [goneTruncated, setGoneTruncated] = useState(false);
+  const [goneErr, setGoneErr] = useState(false);
+  const [goneIncomplete, setGoneIncomplete] = useState(false);
+  // The projects that hold a forgotten memory, as the Agent last named them (it names them even
+  // when their rows did not fit). Kept across scope changes so a project stays selectable.
+  const [goneProjects, setGoneProjects] = useState<Map<string, string>>(new Map());
   const [loadErr, setLoadErr] = useState("");
   const [scope, setScope] = useState(ALL);
   const [query, setQuery] = useState("");
@@ -71,22 +79,43 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
   const [mine, setMine] = useState(0);
 
   const load = useCallback(async (signal: AbortSignal) => {
-    const [list, ch] = await Promise.all([
-      api("api/agents/memory/entries/list"),
-      api("api/agents/memory/entries/changes?limit=300"),
-    ]);
+    const list = await api("api/agents/memory/entries/list");
     if (signal.aborted) return true;
-    if (isTransientErr(list) || isTransientErr(ch)) return false;
+    if (isTransientErr(list)) return false;
     setLoadErr(list?.error ? errText(list.error) : "");
     setRows(list?.error ? [] : (list?.entries ?? []));
     setWithheld(list?.error ? 0 : (list?.withheld ?? 0));
-    // The newest change of a memory that does not exist now is the one that took it away; its
-    // revert brings the memory back.
-    const changes: MemoryChange[] = ch?.error ? [] : (ch?.changes ?? []);
-    setForgotten(changes.filter((c) => c.latest && !c.live && c.revertible));
     return true;
   }, []);
   useRetryLoad(load, [reload, mine]);
+
+  // The forgotten memories of the scope on screen ("all" sends no scope param, which makes the Agent
+  // list the user scope and every project). Each memory's newest change is the one that took it
+  // away; its revert brings the memory back.
+  const loadGone = useCallback(async (signal: AbortSignal) => {
+    const [kind, projectId = ""] = scope.split(":");
+    const scopeQ =
+      kind === ALL ? "" : kind === "user" ? "?scope=user" : `?scope=project&project=${encodeURIComponent(projectId)}`;
+    const res = await api("api/agents/memory/entries/member-forgotten" + scopeQ);
+    if (signal.aborted) return true;
+    if (isTransientErr(res)) return false;
+    setGoneErr(!!res?.error);
+    setForgotten(res?.error ? [] : (res?.forgotten ?? []));
+    if (!res?.error) {
+      const named: { id: string; display: string }[] = res?.projects ?? [];
+      // An answer for all scopes is the whole truth; one for a single scope only adds to it.
+      setGoneProjects((prev) => {
+        const next = new Map(kind === ALL ? [] : prev);
+        for (const p of named) next.set("project:" + p.id, p.display);
+        return next;
+      });
+    }
+    setGoneWithheld(res?.error ? 0 : (res?.withheld ?? 0));
+    setGoneTruncated(!res?.error && !!res?.truncated);
+    setGoneIncomplete(!res?.error && !!res?.incomplete);
+    return true;
+  }, [scope]);
+  useRetryLoad(loadGone, [reload, mine, scope]);
 
   // The scopes there is something to browse in. "All scopes" comes first and is the default: a
   // query is expected to cover everything, and the user scope alone is often empty. User scope is
@@ -97,11 +126,12 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
       [ALL, tr("mem.br_scope_all")],
       ["user", tr("mem.af_scope_user")],
     ]);
-    for (const m of [...(rows ?? []), ...forgotten]) {
+    for (const m of rows ?? []) {
       if (m.scope === "project" && m.project) out.set(scopeKey(m), m.project.display);
     }
+    for (const [k, display] of goneProjects) if (!out.has(k)) out.set(k, display);
     return [...out.entries()];
-  }, [rows, forgotten, tr]);
+  }, [rows, goneProjects, tr]);
   useEffect(() => {
     if (!scopes.some(([k]) => k === scope)) setScope(ALL);
   }, [scopes, scope]);
@@ -157,7 +187,7 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
     return [m];
   });
   const shown = q ? [...fieldRows, ...bodyRows] : inScope;
-  const gone = forgotten.filter((c) => scope === ALL || scopeKey(c) === scope);
+  const gone = forgotten;
   const whereOf = (m: { scope: string; project?: { display: string } }) =>
     m.scope === "user" ? tr("mem.af_scope_user") : (m.project?.display ?? "");
   const who = (m: { authorKind: string; authorSession: string }) =>
@@ -442,10 +472,14 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
           </div>
         </form>
       )}
-      {gone.length > 0 && (
+      {(gone.length > 0 || goneWithheld > 0 || goneTruncated || goneIncomplete || goneErr) && (
         <>
           <h5>{tr("mem.br_forgotten")}</h5>
           <p className="muted ds-hint">{tr("mem.br_forgotten_note")}</p>
+          {goneErr && <p className="mem-warn">{tr("mem.br_forgotten_failed")}</p>}
+          {goneWithheld > 0 && <p className="mem-warn">{tr("mem.br_forgotten_withheld", { n: goneWithheld })}</p>}
+          {goneIncomplete && <p className="mem-warn">{tr("mem.br_forgotten_incomplete")}</p>}
+          {goneTruncated && <p className="mem-warn">{tr("mem.br_forgotten_truncated", { n: gone.length })}</p>}
           <ul className="mem-pin-list mem-br-list">
             {gone.map((c) => (
               <li key={c.commit} className="mem-br-row">

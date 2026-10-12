@@ -269,7 +269,8 @@ func HandleAgentMemoryMuseSources(w http.ResponseWriter, r *http.Request) {
 
 // HandleAgentMemoryMusePreview says what an import of one working copy's muse memory would do.
 func HandleAgentMemoryMusePreview(w http.ResponseWriter, r *http.Request) {
-	pv, err := agentMemMusePreviewFor(r.URL.Query().Get("dir"))
+	q := r.URL.Query()
+	pv, err := agentMemMusePreviewFor(q.Get("scope"), q.Get("dir"), q.Get("into"))
 	if err != nil {
 		agentMemWriteErr(w, err)
 		return

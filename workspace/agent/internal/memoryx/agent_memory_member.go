@@ -191,6 +191,12 @@ func agentMemMemberLatest(scope, project, name string) (agentMemChangeView, erro
 	rel += "/" + name + ".md"
 	agentMemMu.RLock()
 	defer agentMemMu.RUnlock()
+	return agentMemMemberLatestLocked(scope, name, rel)
+}
+
+// agentMemMemberLatestLocked is agentMemMemberLatest for a validated scope and name, with
+// agentMemMu already held (the forgotten list resolves many memories under one read lock).
+func agentMemMemberLatestLocked(scope, name, rel string) (agentMemChangeView, error) {
 	notFound := memoryErrf(http.StatusNotFound, errCodeMemoryNotFound, "no published change for that memory")
 	if !memoryHasCommits() {
 		return agentMemChangeView{}, notFound
@@ -202,6 +208,12 @@ func agentMemMemberLatest(scope, project, name string) (agentMemChangeView, erro
 	if commit == "" {
 		return agentMemChangeView{}, notFound
 	}
+	return agentMemMemberChangeAt(scope, name, rel, commit)
+}
+
+// agentMemMemberChangeAt judges and marks the newest change `commit` of one memory (agentMemMu
+// held). The forgotten list finds the commits of many memories in one history pass and comes here.
+func agentMemMemberChangeAt(scope, name, rel, commit string) (agentMemChangeView, error) {
 	at, err := memoryGitRun("log", "-1", "--format=%aI", commit)
 	if err != nil {
 		return agentMemChangeView{}, err

@@ -270,8 +270,10 @@ Version control over the memory an agent accumulates by itself (claude's auto-me
     every agent's view, and **Forgotten memories** lists those you can **Restore** (the text comes back as it
     was before; if it now looks like a secret, restore it from the recent changes, where you can confirm).
     Both are the same revert and forget as the recent changes, recorded as made by you and undoable. Forget works on any listed memory: its newest change is looked
-    up when you press it, however old. **Forgotten memories** shows those forgotten within the latest 300 changes. A memory whose
-    text looks like a secret is never listed, only counted. **New memory** (in the scope on screen; the user-wide
+    up when you press it, however old. **Forgotten memories** lists every memory forgotten in the scope you have selected (all scopes by default), however long ago,
+    up to 300 at a time (pick one scope to see the rest). With a very large number of forgotten memories (over about
+    2000) the oldest are not checked: the list says so, may then be missing some, and the hidden count is a minimum. A memory whose
+    name or text looks like a secret is never listed, only counted. **New memory** (in the scope on screen; the user-wide
     scope while all scopes are shown) and **Edit** on a memory's text write it by hand: the same revision check
     and secret scan as an agent's save, recorded as written by you and undoable from the recent changes. A
     memory can be written into a project only once that project holds memory. An edit keeps the kinds the
@@ -309,23 +311,33 @@ Version control over the memory an agent accumulates by itself (claude's auto-me
     the switch is on; with the switch off Agent Fleet sets nothing and Muse keeps its default. This covers
     Muse sessions and the assistant chat. Only Muse hosts *started* after the change are affected; a running
     session keeps what it started with.
-  - **Import from muse**: below the Claude Code import, brings the project memory Muse Code kept in a working
-    copy (its `.agents/memory` folder, the `project` scope) into Agent Fleet memory for that project, once.
-    It works like the Claude Code import: pick a working copy, read the preview, then confirm. **New**
-    files are added, **newer in muse** files update an Agent Fleet copy only while it is still exactly what
+  - **Import from muse**: below the Claude Code import, brings the notes Muse Code kept into Agent Fleet memory,
+    once. It works like the Claude Code import: pick a folder, read the preview, then confirm. Muse has three
+    stores and the picker lists each: **project notes** (the working copy's `.agents/memory`, into that
+    project), **personal project notes** (Muse's own folder for a working copy, `~/.local/share/muse/memory/projects/<slug>-<hash>`,
+    into the project of the working copy under `~/repos` it belongs to; a folder that matches no working copy
+    is listed as *no working copy*, and one that fits two different projects as *more than one matches*, and
+    neither can be imported) and **personal notes** (`~/.local/share/muse/memory/personal`). The personal notes
+    would go into your **user-wide memory, which every project's sessions read**, so they are neither
+    previewed nor imported until you tick the box that says so (`--into-user` in the terminal); nothing else
+    is ever imported there. A note needs no frontmatter, because Muse stores what it is given: its name is the
+    file name (it must be a valid Agent Fleet name, otherwise it is listed as *bad name*), its description is
+    the first non-empty line (cut at 2,000 characters), and it has no type; such notes are marked *no
+    frontmatter*. A note with frontmatter is read as before. Muse paths may contain folders: `a/b.md` becomes
+    the memory `a--b`, and two files that map to one name are both refused (a folder with more than 2,000 notes is previewed only: the check cannot be completed, so it is not applied). A memory of the same name that came from a different muse file, folder or scope is never overwritten. `MEMORY.md`, Muse's
+    `.muse-memory.lock` files and anything that is not `.md` are not notes, and a symlink is never followed.
+    **New** notes are added, **newer in muse** notes update an Agent Fleet copy only while it is still exactly what
     this import wrote (a memory you saved, edited, pinned or reverted in Agent Fleet since is listed as **Agent Fleet has
     its own version** and left alone, and so is a memory of the same name that did not come from muse), a
     memory you forgot is never brought back, and a file the secret scan flags is skipped and listed. The
-    author is recorded as unknown, `MEMORY.md` (muse's index) is not a memory, and subfolders are not read.
-    `.agents/memory` lives inside the repository and a team may commit it: files git tracks there are marked
-    **shared** and the preview warns before you confirm, because importing copies teammates' text into the
-    memory your sessions read. Nothing is ever imported into your user-wide memory. Muse's `personal` and
-    `personal_project` memories are **not read** (where Muse stores them is not established), and Agent
-    Fleet does not write back into Muse. Applying needs the switch on; the preview works while it is off.
+    author is recorded as unknown. `.agents/memory` lives inside the repository and a team may commit it: files git
+    tracks there are marked **shared** and the preview warns before you confirm, because importing copies
+    teammates' text into the memory your sessions read. Agent Fleet does not write back into Muse. Applying
+    needs the switch on; the preview works while it is off.
   - **From a terminal**: `af-memory import-sources`, `af-memory import --project <slug> --dry-run` (preview) and
     `af-memory import --project <slug>` (import); `af-memory changes` lists the latest changes. For muse:
-    `af-memory muse-import-sources`, `af-memory muse-import --dir <name> --dry-run` and
-    `af-memory muse-import --dir <name>`. The imports are
+    `af-memory muse-import-sources`, `af-memory muse-import --dir <name> [--scope project|personal_project] [--dry-run]`
+    and `af-memory muse-import --scope personal --into-user [--dry-run]`. The imports are
     gated by the same switch and the same secret scan as the Console.
   - **Write back to Claude Code**: below the import, the other direction, once and only when you ask. When you
     turn Agent Fleet memory off, Claude Code goes back to its own memory, which lacks what was learned through

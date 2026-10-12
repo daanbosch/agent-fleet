@@ -104,6 +104,15 @@ Agent is therefore a key the session holds as well.
 - **As strong as the CP's authentication.** The CP signs for whoever it resolves as the member. Under
   `AUTH=dev` it trusts every caller, so the mark adds nothing there; under `oauth` it needs the member's
   session cookie, which the relays keep out of the workspace (decision 6).
+- **Two Agents of one workspace at once.** The restart fence covers a restarted process, not a second
+  live one with its own empty cache. On `ecs-ec2` there is none: the service runs with `MaximumPercent`
+  100 / `MinimumHealthyPercent` 0, so the old task stops before the new one starts. On Fargate (`ecs`) the
+  service keeps ECS's default rolling deployment (200 / 100), so a forced redeploy of a running workspace
+  can overlap two tasks for a while. A mark one accepted could then be accepted by the other, but only if
+  it reaches it: the workspace security group admits the Agent port from the CP's security group alone
+  (07-security §7.2), so a session in one task cannot send to the other's Agent, and the CP relay strips
+  any mark it is handed. The bound there is network isolation, not the cache; not verified on real
+  Fargate.
 - **The path-form preview is the Console's origin.** An app served under `/preview/{port}/` runs on the
   Console's own origin, so neither `Origin` nor `Sec-Fetch-Site` sets it apart, and it can call every
   Console API as the member, not only these routes. That is the reason [0062](0062-preview-subdomain.md)
