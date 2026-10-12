@@ -79,3 +79,26 @@ func TestMemberWriteRoutesRequireTheMark(t *testing.T) {
 		}
 	}
 }
+
+// The other half: a request the CP marked gets through the real route table to the handler. Without
+// memberorigin.Require on a route the handler's own check refuses it, so the unmarked test above
+// stays green; this one does not. An empty body is a validation error past the mark.
+func TestMemberWriteRoutesAdmitAMarkedRequest(t *testing.T) {
+	s := memberorigintest.Install(t)
+	mux := buildMux()
+	for _, p := range []string{
+		"/agents/memory/entries/pin",
+		"/agents/memory/entries/revert",
+		"/agents/memory/entries/member-save",
+	} {
+		req := httptest.NewRequest(http.MethodPost, p, strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer agent-token")
+		req.Header.Set("Content-Type", "application/json")
+		s.Sign(req, []byte(`{}`))
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest || strings.Contains(w.Body.String(), "member_origin") {
+			t.Errorf("%s with a mark: %d %s", p, w.Code, w.Body)
+		}
+	}
+}
