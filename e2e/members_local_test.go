@@ -60,7 +60,7 @@ func TestMemberFleetSetup(t *testing.T) {
 			t.Fatalf("%s: whoami resolved_user = %v, want %q", m.name, who["resolved_user"], m.key)
 		}
 	}
-	stranger := &member{f: f, t: t, name: "stranger", email: "stranger-" + f.slug + "@" + emailDomain}
+	stranger := &member{f: f, t: t, name: "stranger", email: "stranger-" + f.slug + "@" + emailDomain, tenant: f.slug}
 	got := stranger.call("GET", "/api/session-handoff-offers/received", nil, 403)
 	if code, _ := apiErr(got); code != "not_provisioned" {
 		t.Fatalf("uninvited address: error %q, want not_provisioned", code)

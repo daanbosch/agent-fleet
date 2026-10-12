@@ -325,9 +325,15 @@ module, standard library only). **L3** is `console-e2e/` (Playwright). **L4**
   on the limit board: `TestLimitBoardVisibility` (no docker) feeds it through the
   Console's usage-observation post, and `TestLimitBoardReaperPull` through the reaper's
   read of a running workspace whose claude capture is written inside the container, with
-  the sweep shortened to 2 s in that test's CP only. The file's doc comment says how to
-  add another scenario; `TestGitRemote` and `TestMemberFleetSetup` cover the harness
-  without docker.
+  the sweep shortened to 2 s in that test's CP only. The member inbox's acceptance
+  (docs/log/130) runs on the same harness: `e2e/inbox_test.go` uses the inbox routes only
+  and needs no docker (except `TestInboxMemberRemoval`, whose workspace destroy goes
+  through the runtime); `e2e/inbox_workspace_test.go` needs a member's workspace. They
+  read the CP's SQLite database read-only through `python3`, restart the CP where only
+  start-up does something (the purge), and start the CP's workspace-only listener on the
+  bridge gateway (`cpReachableEnv`) so the workspace's memo tools reach the CP. The
+  file's doc comment says how to add another scenario; `TestGitRemote` and
+  `TestMemberFleetSetup` cover the harness without docker.
 - **L3** opens the Console in a real browser, opens a session, types into xterm, and
   observes the effect through the filesystem API — because xterm draws to a canvas and
   the characters cannot be read from the DOM. It needs a built `console/dist`, and uses

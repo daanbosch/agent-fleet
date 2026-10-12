@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -176,23 +177,30 @@ func prepareWorkspaceDirs(t *testing.T, wsDir string) {
 // can register workspaces after the CP is up.
 func launchCP(t *testing.T, image, dataDir string, workspaces func() []string, env ...string) string {
 	t.Helper()
+	return startCP(t, image, dataDir, workspaces, env...).base
+}
+
+// cpProcess is a running test CP. restart stops it and starts the same binary with the
+// same environment on the same address, for what the CP only does at start-up.
+type cpProcess struct {
+	t       *testing.T
+	bin     string
+	dir     string
+	env     []string
+	base    string
+	logPath string
+	cmd     *exec.Cmd
+}
+
+// startCP is launchCP returning the process, for a harness that restarts it.
+func startCP(t *testing.T, image, dataDir string, workspaces func() []string, env ...string) *cpProcess {
+	t.Helper()
 	root := repoRoot(t)
-	tmp := t.TempDir() // CP binary and logs; no container touches it, so auto-removal is safe
-	cpBin := buildCP(t, root, tmp)
-
+	tmp := t.TempDir() // the CP's logs; no container touches it, so auto-removal is safe
 	cpAddr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
-	logPath := filepath.Join(tmp, "cp.log")
-	logFile, err := os.Create(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = logFile.Close() }) // close the fd on every exit path
-
-	cp := exec.Command(cpBin)
-	cp.Dir = tmp
-	cp.Stdout = logFile
-	cp.Stderr = logFile
-	cp.Env = append(append(cpEnviron(os.Environ()),
+	p := &cpProcess{t: t, bin: buildCP(t, root), dir: tmp, base: "http://" + cpAddr,
+		logPath: filepath.Join(tmp, "cp.log")}
+	p.env = append(append(cpEnviron(os.Environ()),
 		"AF_RUNTIME=local",
 		"AF_DB="+filepath.Join(dataDir, "e2e-cp.db"),
 		"CP_ADDR="+cpAddr,
@@ -200,22 +208,52 @@ func launchCP(t *testing.T, image, dataDir string, workspaces func() []string, e
 		"WS_DATA="+dataDir,
 		"CONSOLE_DIR="+tmp, // static serving is out of scope; point at a dir that exists
 	), env...)
-	if err := cp.Start(); err != nil {
-		t.Fatalf("start CP: %v", err)
-	}
-	t.Cleanup(func() { teardown(t, cp, logPath, workspaces()) })
+	t.Cleanup(func() { teardown(t, p.cmd, p.logPath, workspaces()) })
+	p.start()
+	return p
+}
 
-	base := "http://" + cpAddr
-	waitFor(t, 15*time.Second, "CP /healthz", func() (bool, string) {
-		resp, err := http.Get(base + "/healthz")
+// start runs the CP and waits for /healthz. Every run appends to the one log, so the tail
+// teardown prints spans a restart.
+func (p *cpProcess) start() {
+	p.t.Helper()
+	logFile, err := os.OpenFile(p.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	p.t.Cleanup(func() { _ = logFile.Close() }) // close the fd on every exit path
+	p.cmd = exec.Command(p.bin)
+	p.cmd.Dir = p.dir
+	p.cmd.Stdout = logFile
+	p.cmd.Stderr = logFile
+	p.cmd.Env = p.env
+	if err := p.cmd.Start(); err != nil {
+		p.t.Fatalf("start CP: %v", err)
+	}
+	waitFor(p.t, 15*time.Second, "CP /healthz", func() (bool, string) {
+		resp, err := http.Get(p.base + "/healthz")
 		if err != nil {
 			return false, err.Error()
 		}
 		resp.Body.Close()
 		return resp.StatusCode == 200, resp.Status
 	})
-	return base
 }
+
+// restart stops the CP (SIGTERM, then kill) and starts it again.
+func (p *cpProcess) restart() {
+	p.t.Helper()
+	p.stop()
+	p.start()
+}
+
+// stop stops the CP; start brings it back.
+func (p *cpProcess) stop() {
+	stopCP(p.cmd)
+	p.cmd = nil
+}
+
+func (p *cpProcess) running() bool { return p.cmd != nil }
 
 // sendPrompt types a prompt into the session's pane, absorbing the 409 that tmux
 // returns for a moment right after it starts.
@@ -286,15 +324,40 @@ func repoRoot(t *testing.T) string {
 	return filepath.Dir(filepath.Dir(file)) // the parent of e2e/ is the repository root
 }
 
-func buildCP(t *testing.T, root, tmp string) string {
-	t.Helper()
-	bin := filepath.Join(tmp, "af-cp")
-	cmd := exec.Command("go", "build", "-o", bin, ".")
-	cmd.Dir = filepath.Join(root, "control-plane")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build control-plane: %v\n%s", err, out)
+// cpBuild is the one CP binary every test of this run starts: scenarios run in parallel,
+// and a build per test would compile the CP that many times at once on a small runner.
+var cpBuild struct {
+	once sync.Once
+	dir  string
+	bin  string
+	err  error
+	out  []byte
+}
+
+// TestMain removes the shared CP binary after the run.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if cpBuild.dir != "" {
+		_ = os.RemoveAll(cpBuild.dir)
 	}
-	return bin
+	os.Exit(code)
+}
+
+func buildCP(t *testing.T, root string) string {
+	t.Helper()
+	cpBuild.once.Do(func() {
+		if cpBuild.dir, cpBuild.err = os.MkdirTemp("", "af-e2e-cp-"); cpBuild.err != nil {
+			return
+		}
+		cpBuild.bin = filepath.Join(cpBuild.dir, "af-cp")
+		cmd := exec.Command("go", "build", "-o", cpBuild.bin, ".")
+		cmd.Dir = filepath.Join(root, "control-plane")
+		cpBuild.out, cpBuild.err = cmd.CombinedOutput()
+	})
+	if cpBuild.err != nil {
+		t.Fatalf("build control-plane: %v\n%s", cpBuild.err, cpBuild.out)
+	}
+	return cpBuild.bin
 }
 
 func freePort(t *testing.T) int {
@@ -426,16 +489,7 @@ func cpEnviron(parent []string) []string {
 func teardown(t *testing.T, cp *exec.Cmd, logPath string, workspaces []string) {
 	t.Helper()
 	// Stop the CP first, so the reaper cannot reach back for the container mid-teardown.
-	if cp.Process != nil {
-		_ = cp.Process.Signal(syscall.SIGTERM)
-		done := make(chan struct{})
-		go func() { _, _ = cp.Process.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			_ = cp.Process.Kill()
-		}
-	}
+	stopCP(cp)
 	for _, w := range workspaces {
 		_ = exec.Command("docker", "rm", "-f", "af-ws-"+w).Run()
 		_ = exec.Command("docker", "network", "rm", "af-net-"+w).Run()
@@ -447,6 +501,22 @@ func teardown(t *testing.T, cp *exec.Cmd, logPath string, workspaces []string) {
 			}
 			t.Logf("--- control-plane log (tail) ---\n%s", b)
 		}
+	}
+}
+
+// stopCP sends SIGTERM and kills the CP if it has not exited within 10 s.
+func stopCP(cp *exec.Cmd) {
+	if cp == nil || cp.Process == nil {
+		return
+	}
+	_ = cp.Process.Signal(syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() { _, _ = cp.Process.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		_ = cp.Process.Kill()
+		<-done
 	}
 }
 
