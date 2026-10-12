@@ -13,6 +13,9 @@
 //
 //	f := startMemberFleet(t)              // CP + tenant; the image check runs here
 //	a, b := f.addMember("alice"), f.addMember("bob")
+//	other := f.addTenant()                // a second tenant on the same CP
+//	b2 := b.joinTenant(other)             // bob's membership there: same identity, own client
+//	c := f.addMemberIn(other, "carol")    // a member of that tenant only
 //	a.startWorkspace()                    // each member's container is its own
 //	got := a.getJSON("/api/...")          // or a.postJSON / a.do for any status
 //	a.shell(session, "git ...")           // run a command in a shell session, read its output
@@ -57,54 +60,70 @@ type memberFleet struct {
 	members []*member
 }
 
-// member is one identity's client: every request carries its email header and the
-// fleet's tenant.
+// member is one membership's client: every request carries the identity's email header
+// and the membership's tenant.
 type member struct {
-	f     *memberFleet
-	t     *testing.T
-	name  string
-	email string
-	key   string // the user key the CP derived from the email (also the home dir name)
-	cmds  int    // shell() call counter, for unique output file names
+	f      *memberFleet
+	t      *testing.T
+	name   string
+	email  string
+	key    string // the user key the CP derived from the email (also the home dir name)
+	tenant string // the slug sent as X-AF-Tenant
+	cmds   int    // shell() call counter, for unique output file names
 }
 
 // startMemberFleet starts the CP with AUTH=proxy and creates this test's tenant. Docker and
 // the workspace image are required (a skip without them, a failure under E2E_REQUIRE=1).
-func startMemberFleet(t *testing.T) *memberFleet {
+// env adds KEY=VAL entries to the CP environment (a short reaper sweep, for one).
+func startMemberFleet(t *testing.T, env ...string) *memberFleet {
 	t.Helper()
 	image := envOr("WS_IMAGE", "agent-fleet/workspace:dev")
 	requireDockerAndImage(t, image)
-	return bootMemberFleet(t, image)
+	return bootMemberFleet(t, image, env...)
 }
 
 // bootMemberFleet is startMemberFleet without the docker prerequisite: the CP and the
 // tenant/membership setup run without docker, which is what lets the setup be tested on a
 // host that has none (TestMemberFleetSetup). Starting a workspace still needs docker.
-func bootMemberFleet(t *testing.T, image string) *memberFleet {
+func bootMemberFleet(t *testing.T, image string, env ...string) *memberFleet {
 	t.Helper()
 	f := &memberFleet{t: t, slug: "e2e" + randHex(t, 4)}
 	f.dataDir = newDataDir(t, image)
 	f.admin = &member{f: f, t: t, name: "admin", email: "admin-" + f.slug + "@" + emailDomain}
 	// Each member's Agent port is WS_AGENT_PORT plus the order its workspace was created
 	// in, so the whole range has to be free.
-	f.base = launchCP(t, image, f.dataDir, f.workspaceNames,
+	f.base = launchCP(t, image, f.dataDir, f.workspaceNames, append([]string{
 		"AUTH=proxy",
 		"AF_PROVISION=invite",
-		"SUPER_ADMIN_EMAILS="+f.admin.email,
+		"SUPER_ADMIN_EMAILS=" + f.admin.email,
 		fmt.Sprintf("WS_AGENT_PORT=%d", freePortRange(t, 4)),
-	)
-	created := f.admin.postJSON("/api/admin/tenants", map[string]any{"slug": f.slug, "name": "e2e " + f.slug}, 200)
-	if created["slug"] != f.slug {
-		t.Fatalf("tenant create returned slug %v, want %q", created["slug"], f.slug)
-	}
+	}, env...)...)
+	f.createTenant(f.slug)
 	return f
 }
 
-// workspaceNames lists the af-ws-/af-net- suffixes of every member, for teardown.
+func (f *memberFleet) createTenant(slug string) {
+	f.t.Helper()
+	created := f.admin.postJSON("/api/admin/tenants", map[string]any{"slug": slug, "name": "e2e " + slug}, 200)
+	if created["slug"] != slug {
+		f.t.Fatalf("tenant create returned slug %v, want %q", created["slug"], slug)
+	}
+}
+
+// addTenant creates another tenant on the same CP and returns its slug. The slug extends the
+// fleet's, so teardown's per-slug names stay unique to this test.
+func (f *memberFleet) addTenant() string {
+	f.t.Helper()
+	slug := f.slug + "x" + randHex(f.t, 2)
+	f.createTenant(slug)
+	return slug
+}
+
+// workspaceNames lists the af-ws-/af-net- suffixes of every membership, for teardown.
 func (f *memberFleet) workspaceNames() []string {
 	out := make([]string, 0, len(f.members))
 	for _, m := range f.members {
-		out = append(out, f.slug+"-"+m.key)
+		out = append(out, m.tenant+"-"+m.key)
 	}
 	return out
 }
@@ -113,16 +132,33 @@ func (f *memberFleet) workspaceNames() []string {
 // the directories its workspace will mount. The workspace itself is not started.
 func (f *memberFleet) addMember(name string) *member {
 	f.t.Helper()
-	m := &member{f: f, t: f.t, name: name, email: name + "@" + emailDomain}
+	return f.addMemberIn(f.slug, name)
+}
+
+// addMemberIn is addMember for another tenant of the fleet (addTenant).
+func (f *memberFleet) addMemberIn(slug, name string) *member {
+	f.t.Helper()
+	return f.invite(&member{f: f, t: f.t, name: name, email: name + "@" + emailDomain, tenant: slug})
+}
+
+// joinTenant invites m's identity into the tenant slug as a plain member too, and returns
+// the client for that membership. Its workspace is a separate one, not started.
+func (m *member) joinTenant(slug string) *member {
+	m.t.Helper()
+	return m.f.invite(&member{f: m.f, t: m.t, name: m.name + "@" + slug, email: m.email, tenant: slug})
+}
+
+func (f *memberFleet) invite(m *member) *member {
+	f.t.Helper()
 	got := f.admin.postJSON("/api/admin/memberships", map[string]any{
-		"email": m.email, "tenant_slug": f.slug, "role": "member",
+		"email": m.email, "tenant_slug": m.tenant, "role": "member",
 	}, 200)
 	m.key, _ = got["user_key"].(string)
 	if m.key == "" {
-		f.t.Fatalf("add membership %s: no user_key in %v", m.email, got)
+		f.t.Fatalf("add membership %s to %s: no user_key in %v", m.email, m.tenant, got)
 	}
 	// manager.workspaceNames: a non-default tenant's workspace lives at <WS_DATA>/<slug>/<key>.
-	prepareWorkspaceDirs(f.t, filepath.Join(f.dataDir, f.slug, m.key))
+	prepareWorkspaceDirs(f.t, filepath.Join(f.dataDir, m.tenant, m.key))
 	f.members = append(f.members, m)
 	return m
 }
@@ -145,8 +181,8 @@ func (m *member) do(method, path string, body any) (int, []byte) {
 		return 0, []byte(err.Error())
 	}
 	req.Header.Set("X-Forwarded-Email", m.email)
-	if m.f.slug != "" && m != m.f.admin {
-		req.Header.Set("X-AF-Tenant", m.f.slug)
+	if m.tenant != "" {
+		req.Header.Set("X-AF-Tenant", m.tenant)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -184,6 +220,11 @@ func (m *member) getJSON(path string) map[string]any {
 func (m *member) postJSON(path string, body any, want int) map[string]any {
 	m.t.Helper()
 	return m.call(http.MethodPost, path, body, want)
+}
+
+func (m *member) putJSON(path string, body any, want int) map[string]any {
+	m.t.Helper()
+	return m.call(http.MethodPut, path, body, want)
 }
 
 // apiErr returns the error code of an {"error":{"code":…}} body, or "".
