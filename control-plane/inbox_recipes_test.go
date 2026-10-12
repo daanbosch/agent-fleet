@@ -488,3 +488,48 @@ func TestInboxSessionAttachment(t *testing.T) {
 		t.Fatalf("the owner's view: %+v", got)
 	}
 }
+
+// TestInboxRecoveredLaunchKeepsProvenance: a request launch whose create answer was lost (the
+// Agent made the session and the CP saw a 500) is recovered through the idempotency lookup on
+// the next press, and that session shows its provenance badge in the real session list.
+func TestInboxRecoveredLaunchKeepsProvenance(t *testing.T) {
+	e := newInboxEnv(t)
+	agent := newCapturingAgent(t)
+	var mu sync.Mutex
+	created := false
+	agent.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/sessions":
+			created = true
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":{"code":"response_lost"}}`)
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/sessions-idempotency/"):
+			if !created {
+				t.Error("looked up before the create")
+			}
+			_, _ = io.WriteString(w, `{"name":"s-recovered","dir":"/d"}`)
+		case r.Method == "GET" && r.URL.Path == "/sessions":
+			_, _ = io.WriteString(w, `{"sessions":[{"name":"s-recovered","kind":"claude"}]}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	e.workspaceFor("b", agent)
+	id := e.send("a", "request", "b")
+	_ = e.do("b", "POST", "/api/inbox/items/"+id+"/claim", nil)
+	if r := e.do("b", "POST", "/api/inbox/items/"+id+"/launch", map[string]any{"dir": "/d", "kind": "claude"}); r.Code < 500 {
+		t.Fatalf("first launch: %d %s", r.Code, r.Body.String())
+	}
+	if r := e.do("b", "POST", "/api/inbox/items/"+id+"/launch", map[string]any{"dir": "/d", "kind": "claude"}); r.Code != http.StatusConflict {
+		t.Fatalf("recovering press: %d %s", r.Code, r.Body.String())
+	}
+	it, _, _ := e.st.GetInboxItem(context.Background(), id)
+	if it.SessionName != "s-recovered" || it.LaunchState != "" {
+		t.Fatalf("the card did not recover: %+v", it)
+	}
+	if got := e.badges("b"); got["s-recovered"] != (inboxOriginRef{Sender: key("a"), Item: id}) {
+		t.Fatalf("the recovered session has no provenance badge: %+v", got)
+	}
+}

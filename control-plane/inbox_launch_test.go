@@ -185,6 +185,10 @@ func TestInboxLaunchUnrecordedIsNeverCreatedTwice(t *testing.T) {
 			if it.LaunchState != "creating" || it.SessionName != "" {
 				t.Fatalf("after a failed record: %+v", it)
 			}
+			// The badge goes with the card: neither is recorded yet.
+			if rec, _ := e.st.ListInboxSessionOrigins(context.Background(), e.members["b"]); len(rec) != 0 {
+				t.Fatalf("provenance recorded without the card: %+v", rec)
+			}
 			if _, ok := agent.keys[inboxLaunchKey(id, it.LaunchToken)]; !ok {
 				t.Fatalf("the Agent was not asked under the item's key: %v", agent.keys)
 			}
@@ -210,6 +214,11 @@ func TestInboxLaunchUnrecordedIsNeverCreatedTwice(t *testing.T) {
 			it, _, _ = e.st.GetInboxItem(context.Background(), id)
 			if agent.count() != 1 || it.SessionName != "s-1" || it.LaunchState != "" {
 				t.Fatalf("after reconciling: sessions=%d item=%+v", agent.count(), it)
+			}
+			// The recovered session has its provenance, recorded with the card.
+			rec, _ := e.st.ListInboxSessionOrigins(context.Background(), e.members["b"])
+			if o := rec["s-1"]; o.ItemID != id || o.SenderKey != key("a") {
+				t.Fatalf("the recovered session's provenance: %+v", rec)
 			}
 			if r := e.launch("b", id); r.Code != http.StatusConflict || agent.count() != 1 {
 				t.Fatalf("third press: %d, sessions=%d", r.Code, agent.count())

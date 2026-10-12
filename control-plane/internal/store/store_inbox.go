@@ -614,6 +614,10 @@ func (s *SQL) ConfirmInboxLaunch(ctx context.Context, id, membershipID, token st
 // FinishInboxLaunch records the session the confirmed launch created. It is recorded even
 // when the request was withdrawn or done in the meantime: the session exists, and the card
 // should say so. recorded=false means the launch is no longer this one (a release dropped it).
+//
+// The session's provenance badge (inbox_session_origin) is written in the same transaction,
+// so the card and the badge are recorded together or not at all, whether the session's name
+// came from the create's answer or from the idempotency lookup that recovers a lost one.
 func (s *SQL) FinishInboxLaunch(ctx context.Context, id, membershipID, token, name, dir, branch, now string) (bool, error) {
 	return s.inboxTx(ctx, func(tx *sqlTx) (bool, error) {
 		ok, err := affected(tx.ExecContext(ctx, `UPDATE inbox_item SET session_membership_id=?,session_name=?,
@@ -621,6 +625,14 @@ func (s *SQL) FinishInboxLaunch(ctx context.Context, id, membershipID, token, na
 			WHERE id=? AND launch_token=? AND launch_by=? AND launch_state='creating'`,
 			membershipID, name, dir, branch, now, now, membershipID, id, token, membershipID))
 		if err != nil || !ok {
+			return false, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO inbox_session_origin(membership_id,session_name,item_id,sender_key,created_at)
+			SELECT ?, ?, i.id, COALESCE((SELECT d.user_key FROM membership m JOIN identity d ON d.id=m.identity_id
+			                             WHERE m.id=i.sender_membership_id),''), ?
+			FROM inbox_item i WHERE i.id=?
+			ON CONFLICT(membership_id,session_name) DO UPDATE SET item_id=excluded.item_id,
+			  sender_key=excluded.sender_key,created_at=excluded.created_at`, membershipID, name, now, id); err != nil {
 			return false, err
 		}
 		return true, bumpInboxItem(ctx, tx, id)

@@ -1042,7 +1042,10 @@ func (a workspaceAPI) sessionCreateThen(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
-	if origin == nil {
+	// A request launch records its provenance with the request's session record
+	// (FinishInboxLaunch), on the normal answer and on a recovered one alike; here only a
+	// launch seeded from a taken-in memo is recorded.
+	if _, fromRequest := ctx.Value(inboxOriginKey{}).(inboxOriginRef); origin == nil || fromRequest {
 		a.proxy.rest(w, r, res)
 		return
 	}
