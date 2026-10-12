@@ -155,9 +155,14 @@ export interface ClaudeImportResult {
   commit?: string;
 }
 
-/** One working copy with muse project memory (`<working copy>/.agents/memory`, #1991). */
+export type MuseScope = "project" | "personal_project" | "personal";
+/** One muse directory with notes: a working copy's `.agents/memory` (#1991), or one of muse's personal stores (#2005). */
 export interface MuseImportSource {
+  scope: MuseScope;
+  /** Working copy name (project), muse's own directory name (personal_project), "" (personal). */
   dir: string;
+  /** "user": the personal scope lands in AF's user scope and needs an explicit choice. */
+  target?: "user";
   count: number;
   /** Files git tracks in the working copy: they may be shared with teammates. */
   shared: number;
@@ -170,9 +175,15 @@ export interface MuseImportItem extends Omit<ClaudeImportItem, "status"> {
   status: MuseImportStatus;
   /** git tracks this file in the working copy. */
   shared?: boolean;
+  /** The note's path under the scope root, when the name is not simply that path minus ".md". */
+  path?: string;
+  /** No frontmatter: name from the file name, description from the first line, no type. */
+  derived?: boolean;
 }
 export interface MuseImportPreview extends Omit<ClaudeImportPreview, "slug" | "items" | "counts"> {
+  scope: MuseScope;
   dir: string;
+  target: "project" | "user";
   items: MuseImportItem[];
   counts: Partial<Record<MuseImportStatus, number>>;
 }

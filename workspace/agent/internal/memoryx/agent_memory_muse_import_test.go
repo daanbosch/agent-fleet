@@ -43,7 +43,7 @@ func (e *museImportEnv) raw(wc, file, text string) string {
 
 func (e *museImportEnv) preview() *agentMemMusePreview {
 	e.t.Helper()
-	pv, err := agentMemMusePreviewFor(e.dir)
+	pv, err := agentMemMusePreviewFor("project", e.dir, "")
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestMuseImportSourcesAndPreview(t *testing.T) {
 	e := newMuseImportEnv(t)
 	e.note("pref", "a preference", "feedback", "use tabs")
 	e.raw(e.clone, "MEMORY.md", "- [Pref](pref.md) - a preference\n")
-	e.raw(e.clone, "sub/nested.md", "---\ndescription: d\n---\nb\n") // subdirectories are not entered
+	e.raw(e.clone, "sub/nested.md", "---\ndescription: d\n---\nb\n")
 	// A plain directory under ~/repos is its own project and nothing in it is shared through git.
 	plain := filepath.Join(e.home, "repos", "plain")
 	memoryMkdirAll(t, plain)
@@ -100,7 +100,7 @@ func TestMuseImportSourcesAndPreview(t *testing.T) {
 	for _, s := range agentMemMuseList().Sources {
 		by[s.Dir] = s
 	}
-	if s := by[e.dir]; s.Count != 1 || s.Project == nil || s.Project.ID != e.pid {
+	if s := by[e.dir]; s.Count != 2 || s.Project == nil || s.Project.ID != e.pid {
 		t.Errorf("clone source = %+v", s)
 	}
 	if _, ok := by[filepath.Base(e.wt)]; ok {
@@ -111,17 +111,20 @@ func TestMuseImportSourcesAndPreview(t *testing.T) {
 	}
 
 	pv := e.preview()
-	if len(pv.Items) != 1 {
+	if len(pv.Items) != 2 {
 		t.Fatalf("items = %+v", pv.Items)
+	}
+	if it := e.item(pv, "sub--nested"); it.Status != claudeImportNew || it.Path != "sub/nested.md" {
+		t.Errorf("nested = %+v", it)
 	}
 	if it := e.item(pv, "pref"); it.Status != claudeImportNew || it.Type != "feedback" || it.Shared {
 		t.Errorf("pref = %+v", it)
 	}
-	if pv, err := agentMemMusePreviewFor("plain"); err != nil || pv.Project == nil || pv.Items[0].Shared {
+	if pv, err := agentMemMusePreviewFor("project", "plain", ""); err != nil || pv.Project == nil || pv.Items[0].Shared {
 		t.Errorf("plain preview = %+v, %v", pv, err)
 	}
 	for _, bad := range []string{"", "..", "a/b", "nope"} {
-		if _, err := agentMemMusePreviewFor(bad); err == nil {
+		if _, err := agentMemMusePreviewFor("project", bad, ""); err == nil {
 			t.Errorf("preview of %q must fail", bad)
 		}
 	}
@@ -277,7 +280,7 @@ func TestMuseImportSymlinkedDirectoriesRefused(t *testing.T) {
 			t.Errorf("a symlinked .agents was listed: %+v", s)
 		}
 	}
-	if _, err := agentMemMusePreviewFor(e.dir); agentMemCode(err) != errCodeMemoryNotFound {
+	if _, err := agentMemMusePreviewFor("project", e.dir, ""); agentMemCode(err) != errCodeMemoryNotFound {
 		t.Errorf("preview through a symlink: %v", err)
 	}
 }
@@ -354,7 +357,7 @@ func TestMuseImportRefusesSymlinkedWorkingCopy(t *testing.T) {
 			t.Errorf("a symlinked working copy was listed: %+v", s)
 		}
 	}
-	if _, err := agentMemMusePreviewFor("linked"); agentMemCode(err) != errCodeMemoryNotFound {
+	if _, err := agentMemMusePreviewFor("project", "linked", ""); agentMemCode(err) != errCodeMemoryNotFound {
 		t.Errorf("preview: %v", err)
 	}
 	if _, err := agentMemMuseApply(agentMemMuseReq{Project: e.pid, Dir: "linked",
@@ -363,7 +366,7 @@ func TestMuseImportRefusesSymlinkedWorkingCopy(t *testing.T) {
 	}
 	// A normal "@" worktree still maps to the main project.
 	e.raw(e.wt, "wt.md", "---\nname: wt\ndescription: d\ntype: user\n---\nb\n")
-	pv, err := agentMemMusePreviewFor(filepath.Base(e.wt))
+	pv, err := agentMemMusePreviewFor("project", filepath.Base(e.wt), "")
 	if err != nil || pv.Project == nil || pv.Project.ID != e.pid {
 		t.Errorf("worktree preview = %+v, %v", pv, err)
 	}
@@ -461,7 +464,7 @@ exit "$rc"
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", filepath.Join(e.home, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
-	pv, err := agentMemMusePreviewFor(e.dir)
+	pv, err := agentMemMusePreviewFor("project", e.dir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
