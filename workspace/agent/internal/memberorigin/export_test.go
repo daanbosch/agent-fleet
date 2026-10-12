@@ -4,14 +4,5 @@ package memberorigin
 // start time.
 func RestartForTest(at int64) {
 	Reload()
-	mu.Lock()
-	startedAt = at
-	mu.Unlock()
-}
-
-// StartedBeforeForTest moves the start time back, so marks issued "now" are after it.
-func StartedBeforeForTest(at int64) {
-	mu.Lock()
-	startedAt = at
-	mu.Unlock()
+	SetStartedAt(at)
 }

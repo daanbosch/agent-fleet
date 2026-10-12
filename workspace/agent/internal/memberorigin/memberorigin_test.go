@@ -201,8 +201,8 @@ func TestCPWireVectorVerifies(t *testing.T) {
 	t.Setenv(memberorigin.EnvMembership, "mb-vector")
 	memberorigin.Reload()
 	t.Cleanup(memberorigin.Reload)
-	memberorigin.StartedBeforeForTest(1699999999)
-	t.Cleanup(func() { memberorigin.StartedBeforeForTest(0) })
+	old := memberorigin.SetStartedAt(1699999000)
+	t.Cleanup(func() { memberorigin.SetStartedAt(old) })
 
 	r := httptest.NewRequest(http.MethodPost, "/agents/memory/entries/pin?project=p-0123456789ab", strings.NewReader(`{"name":"n"}`))
 	r.Header.Set(memberorigin.Header, cpWireVector)
@@ -212,23 +212,50 @@ func TestCPWireVectorVerifies(t *testing.T) {
 	}
 }
 
-// The nonce cache is this process's alone. After a restart a mark issued before it is refused by
-// its iat, so a captured mark cannot undo a later change once the Agent has restarted.
+// The nonce cache is this process's alone. After a restart, a mark the previous process accepted is
+// refused whatever the clocks did: restarted in the same second it was used, or signed by a CP
+// whose clock runs ahead within the accepted skew. A mark signed after the fence is accepted.
 func TestReplayAcrossRestartIsRefused(t *testing.T) {
 	s := memberorigintest.Install(t)
 	body := []byte(`{}`)
-	r := newReq(string(body))
-	s.Sign(r, body)
-	mark := r.Header.Get(memberorigin.Header)
-	if w := serve(r); w.Code != http.StatusOK {
-		t.Fatalf("first: %d %s", w.Code, w.Body)
+	const t0 = 1700000000
+	signAt := func(iat int64) string {
+		r := newReq(string(body))
+		cl := memberorigintest.Claims(r, body)
+		cl.IssuedAt, cl.Expires = iat, iat+60
+		return s.Mark(cl)
 	}
-	memberorigin.RestartForTest(time.Now().Unix() + 1)
-	t.Cleanup(func() { memberorigin.StartedBeforeForTest(0) })
-	again := newReq(string(body))
-	again.Header.Set(memberorigin.Header, mark)
-	if w := serve(again); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "before this Agent started") {
-		t.Fatalf("replay after restart: %d %s", w.Code, w.Body)
+	verify := func(mark string, at time.Time) error {
+		r := newReq(string(body))
+		r.Header.Set(memberorigin.Header, mark)
+		_, err := memberorigin.VerifyAt(r, body, at)
+		return err
+	}
+	t.Cleanup(func() { memberorigin.SetStartedAt(time.Now().Unix() - 120) })
+	for name, c := range map[string]struct {
+		iat       int64
+		used      time.Time
+		restartAt int64
+	}{
+		"restart in the same second":       {t0, time.Unix(t0, 0), t0},
+		"CP clock 20 s ahead":              {t0 + 20, time.Unix(t0, 0), t0 + 5},
+		"CP clock 30 s ahead, used late":   {t0 + 30, time.Unix(t0, 900e6), t0},
+		"restart one second after its use": {t0, time.Unix(t0, 0), t0 + 1},
+	} {
+		memberorigin.RestartForTest(t0 - 300)
+		mark := signAt(c.iat)
+		if err := verify(mark, c.used); err != nil {
+			t.Fatalf("%s: first use: %v", name, err)
+		}
+		memberorigin.RestartForTest(c.restartAt)
+		if err := verify(mark, c.used.Add(10*time.Second)); err == nil {
+			t.Errorf("%s: replayed after the restart", name)
+		}
+	}
+	// After the fence, a fresh mark is accepted.
+	memberorigin.RestartForTest(t0)
+	if err := verify(signAt(t0+31), time.Unix(t0+31, 0)); err != nil {
+		t.Fatalf("a mark after the fence: %v", err)
 	}
 }
 

@@ -41,6 +41,9 @@ func Install(t testing.TB) *Signer {
 	t.Setenv(memberorigin.EnvMembership, Membership)
 	memberorigin.Reload()
 	t.Cleanup(memberorigin.Reload)
+	// Marks are signed "now", which is inside the restart fence of a test process just started.
+	old := memberorigin.SetStartedAt(time.Now().Unix() - 120)
+	t.Cleanup(func() { memberorigin.SetStartedAt(old) })
 	return &Signer{Priv: priv, KID: KID}
 }
 

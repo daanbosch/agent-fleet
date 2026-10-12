@@ -49,6 +49,8 @@ const (
 	MaxLifetime = 2 * time.Minute
 	// clockSkew is how far ahead of the Agent's clock the CP's iat may be.
 	clockSkew = 30 * time.Second
+	// restartFence covers clockSkew and the rounding of startedAt down to a whole second.
+	restartFence = clockSkew + time.Second
 	// replayCap bounds the nonce cache. Past it, with nothing expired to drop, a mark is refused
 	// rather than accepted unrecorded: a full cache must never become a replay window.
 	replayCap = 4096
@@ -86,11 +88,22 @@ var (
 	mu     sync.Mutex
 	cfg    *config
 	nonces = map[string]int64{} // nonce -> exp (unix)
-	// startedAt fences replay across a restart: the nonce cache lives in this process only, so a
-	// mark issued before the process started is refused whatever the cache says. The comparison
-	// is in whole seconds; a capture, a restart and a replay inside one second is not a case.
+	// startedAt fences replay across a restart: the nonce cache lives in this process only. A mark
+	// the previous process accepted had iat at most clockSkew past that process's clock, which was
+	// before this start; so every mark with iat < startedAt+restartFence is refused, whatever the
+	// CP's clock. The price: member writes are refused for the first ~30 s of an Agent's life.
 	startedAt = time.Now().Unix()
 )
+
+// SetStartedAt moves the start time the restart fence is measured from and returns the old one.
+// Only tests call it: they sign marks in the process's first seconds.
+func SetStartedAt(unix int64) int64 {
+	mu.Lock()
+	defer mu.Unlock()
+	old := startedAt
+	startedAt = unix
+	return old
+}
 
 // Reload re-reads the env. The Agent reads it once on first use; tests change it.
 func Reload() {
@@ -199,8 +212,10 @@ func VerifyAt(r *http.Request, body []byte, t time.Time) (Claims, error) {
 		return Claims{}, invalid("issued in the future")
 	case !t.Before(time.Unix(cl.Expires, 0)):
 		return Claims{}, invalid("expired")
-	case cl.IssuedAt < startedAt:
-		return Claims{}, invalid("issued before this Agent started")
+	}
+	if cl.IssuedAt < startedAt+int64(restartFence/time.Second) {
+		return Claims{}, &Error{Status: http.StatusServiceUnavailable, Code: CodeUnavailable,
+			Msg: "the workspace's agent started moments ago; try again in a minute"}
 	}
 	if _, seen := nonces[cl.Nonce]; seen {
 		return Claims{}, invalid("replayed")

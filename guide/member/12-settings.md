@@ -277,7 +277,8 @@ Version control over the memory an agent accumulates by itself (claude's auto-me
     memory can be written into a project only once that project holds memory. An edit keeps the kinds the
     memory was limited to. The Control Plane signs pin, revert, forget and save, and the workspace accepts
     them only with that signature, so a session in the workspace cannot make them as you. A workspace started
-    before this was available refuses them until you restart it.
+    before this was available refuses them until you restart it, and for about half a minute after a
+    workspace starts they ask you to try again in a minute.
   - **Import from Claude Code**: below the list, brings the memory Claude Code kept for a project into Agent
     Fleet memory, once. Pick a project and you see what would happen before anything is written: **new**,
     **newer in Claude** (will overwrite the Agent Fleet copy, even one you edited since; both times are shown),

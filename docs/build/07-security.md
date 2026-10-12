@@ -427,7 +427,9 @@ Where a route must accept only the member's own Console request, the CP marks it
 - **Signed fields**: method, Agent-side path, raw query, body SHA-256, workspace, membership, CP identity,
   `iat`, `exp` (60 s) and a nonce. The Agent refuses any mismatch, an expired or over-long mark, and a nonce
   it has seen (kept until `exp`, at most 4,096; full means refuse, never accept unrecorded). The cache is
-  per process, so the Agent also refuses a mark issued before it started: no replay across a restart.
+  per process, so the Agent also refuses every mark issued before its start + 31 s (the accepted 30 s skew
+  plus rounding): no replay across a restart whatever the CP's clock, at the price of member writes
+  answering 503 for the first ~31 s after the Agent starts.
 - **The CP drops any `X-AF-Member-Origin` the browser sent** on every relay (REST, SSE and the preview
   relay), signs only the listed routes, and only for the caller's own workspace. REST and SSE also drop every
   cookie and the gateway identity headers, so the member's login cookie never reaches the workspace.

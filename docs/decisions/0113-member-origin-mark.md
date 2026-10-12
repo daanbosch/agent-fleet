@@ -46,10 +46,14 @@ Agent is therefore a key the session holds as well.
    clock, an expired mark, and a nonce it has seen.
 5. **Replay cache, and a fence for restarts.** The Agent keeps each nonce until its `exp`, at most 4,096.
    When full and nothing has expired it refuses (503) rather than accept a mark it cannot remember: a full
-   cache must never become a replay window. The cache lives in the process, so a restart empties it; the
-   Agent therefore also refuses a mark whose `iat` is before its own start (whole seconds). A mark captured
-   before a restart cannot be replayed after it, as long as the CP's clock is not ahead of the Agent's by
-   more than the restart took (a container restart takes seconds; the skew accepted is 30 s).
+   cache must never become a replay window. The cache lives in the process, so a restart empties it. Any
+   mark the previous process accepted had an `iat` at most 30 s (the accepted skew) past that process's
+   clock, so at most 30 s past this process's start; the Agent therefore refuses every mark with
+   `iat` < start + 31 s (the second covers rounding the start down). That holds whatever the CP's clock
+   says, as long as the Agent's own clock does not run backwards across its restart. The price is that
+   member writes answer 503 ("try again in a minute") for the first ~31 s after the Agent starts, longer
+   by as much as the CP's clock is behind. Persisting the nonces was not chosen: the file would be
+   writable by the sessions it is meant to fence.
 6. **Which routes, and what never reaches the Agent.** The CP signs exactly
    `POST /api/agents/memory/entries/{pin,revert,member-save}` (`memberOriginRoutes`) and only when the
    workspace is the caller's own membership's. Every relay to the Agent — REST, SSE and the preview relay
@@ -90,7 +94,7 @@ Agent is therefore a key the session holds as well.
 - **In scope**: a session, or anything running in it, that holds `AGENT_TOKEN`, can set any header, can read
   the Agent's environment and files, and can capture a mark it sees in transit inside the workspace. It cannot
   produce a mark (no private key), reuse one for another route, query, body, workspace or member (all
-  signed), or replay one (nonce, expiry, and the start-time fence across a restart).
+  signed), or replay one (nonce and expiry; across a restart, the fence of decision 5).
 - **What the mark does not do.** It decides what the Agent's own routes accept; it does not make the store
   tamper-proof. A session with a shell can write the store's files and history directly, as the uid that owns
   them, and can replace binaries in `~/.local/bin` that the next start runs. That was already true of every
@@ -112,6 +116,7 @@ Agent is therefore a key the session holds as well.
 |---|---|
 | Workspace started before this change, or by a CP with signing off | 503 `member_origin_unavailable` on the three routes until it restarts |
 | No mark, or only `AGENT_TOKEN` / `X-AF-Relay` | 403 `member_origin_required` |
+| Mark issued within the restart fence (first ~31 s after the Agent starts) | 503 `member_origin_unavailable`; the Console's retry a minute later succeeds |
 | Mark for another request, workspace, member, key; expired; replayed | 403 `member_origin_invalid` |
 | Body over the CP's 2 MiB buffer | 413 at the CP; nothing reaches the Agent |
 | Request for another member's workspace | 403 at the CP; nothing is signed |
