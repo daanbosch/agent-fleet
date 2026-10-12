@@ -275,12 +275,11 @@ func (s *SQL) CreateInboxItem(ctx context.Context, it InboxItem, recipients []st
 		if err := lockMemberships(ctx, tx, append([]string{it.SenderMembershipID}, recipients...)); err != nil {
 			return false, err
 		}
-		if err := lockMailboxes(ctx, tx, append([]string{it.SenderMembershipID}, recipients...)); err != nil {
-			return false, err
-		}
-		// Who may receive is decided again here, under the mailbox locks a block, a settings
-		// change and a removal also take: checked only before the custodian sealed the body,
-		// a block saved in between would not stop the item.
+		// Who may receive is decided again here, under the membership locks a removal and a
+		// hard delete also take, and before any mailbox: a member removed or deleted while the
+		// body was being sealed is refused without this send touching their mailbox, which a
+		// hard delete may hold. The receive rules are read after the mailbox locks a block and
+		// a settings change also take.
 		if contains(recipients, it.SenderMembershipID) {
 			out.Invalid = true
 			return false, nil
@@ -295,6 +294,9 @@ func (s *SQL) CreateInboxItem(ctx context.Context, it InboxItem, recipients []st
 				out.Invalid = true
 				return false, nil
 			}
+		}
+		if err := lockMailboxes(ctx, tx, append([]string{it.SenderMembershipID}, recipients...)); err != nil {
+			return false, err
 		}
 		for _, rid := range recipients {
 			var acceptFrom, rule string

@@ -1182,3 +1182,95 @@ func TestInboxSettingsMoveTheCounter(t *testing.T) {
 		})
 	}
 }
+
+// TestInboxHardDeleteDoesNotDeadlockSend: a send to a member that is removed and then hard
+// deleted while the send seals its body. The hard delete used to take the member's mailbox
+// before its membership row, the reverse of a send, and the send failed with 40P01. Now the
+// send waits on the membership row and is refused once the member is gone.
+func TestInboxHardDeleteDoesNotDeadlockSend(t *testing.T) {
+	st, ctx := inboxPG(t)
+	f := newInboxFix(t, st, "a", "b")
+	f.send(t, "dm", "b", "a")
+	a := f.members["a"]
+	if err := st.SetMembershipStatus(ctx, a, "inactive"); err != nil {
+		t.Fatal(err)
+	}
+	gate, err := st.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { gate.Close() })
+	if _, err := gate.ExecContext(ctx, `SELECT pg_advisory_lock(hashtext($1))`, a); err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			_, _ = gate.ExecContext(context.Background(), `SELECT pg_advisory_unlock(hashtext($1))`, a)
+		}
+	}
+	t.Cleanup(release)
+	for _, q := range []string{
+		fmt.Sprintf(`CREATE FUNCTION inbox_delete_gate() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN
+		 PERFORM pg_advisory_lock(hashtext('%s')); PERFORM pg_advisory_unlock(hashtext('%s')); RETURN OLD; END$$`, a, a),
+		`CREATE TRIGGER inbox_delete_gate AFTER DELETE ON inbox_mailbox FOR EACH ROW EXECUTE FUNCTION inbox_delete_gate()`,
+	} {
+		if _, err := st.db.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deleted := make(chan error, 1)
+	type sendOutcome struct {
+		r   InboxSendResult
+		err error
+	}
+	sent := make(chan sendOutcome, 1)
+	go func() { deleted <- st.DeleteMembership(ctx, a) }()
+	waitPG(t, st, ctx, "advisory", "DELETE FROM inbox_mailbox")
+	go func() {
+		r, err := st.CreateInboxItem(ctx, InboxItem{ID: NewID(), TenantID: f.tenant, SenderMembershipID: f.members["b"],
+			Kind: "dm", Ciphertext: "Ym9keQ==", CreatedAt: NowTS()}, []string{a}, inboxTestLimits)
+		sent <- sendOutcome{r, err}
+	}()
+	// The send either waits on a row the hard delete holds (the membership row, with the
+	// delete locking it first) or is refused at once (it reads the member as inactive before
+	// any mailbox). Both are fine: what must not happen is a wait that becomes a deadlock.
+	var out sendOutcome
+	done := false
+	for end := time.Now().Add(5 * time.Second); !done; time.Sleep(10 * time.Millisecond) {
+		select {
+		case out = <-sent:
+			done = true
+			continue
+		default:
+		}
+		var n int
+		_ = st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid()
+			AND wait_event_type='Lock' AND wait_event='transactionid'`).Scan(&n)
+		if n > 0 {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatal("the send neither waited nor finished: the interleaving was not reached")
+		}
+	}
+	release()
+	if !done {
+		out = <-sent
+	}
+	if err := <-deleted; err != nil {
+		t.Fatalf("hard delete: %v", err)
+	}
+	if out.err != nil {
+		t.Fatalf("send: %v", out.err)
+	}
+	if out.r.Created || !out.r.Invalid {
+		t.Fatalf("a send to a deleted member: %+v", out.r)
+	}
+	var n int
+	_ = st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM inbox_mailbox WHERE membership_id=?`, a).Scan(&n)
+	if n != 0 {
+		t.Fatal("the refused send recreated the deleted member's mailbox")
+	}
+}

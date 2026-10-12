@@ -1367,6 +1367,23 @@ func (s *SQL) DeleteMembership(ctx context.Context, membershipID string) error {
 // deleteMembershipTx is the body above, inside somebody else's transaction — the tenant
 // delete runs it once per remaining membership so the whole tenant goes in one commit.
 func (s *SQL) deleteMembershipTx(ctx context.Context, tx *sqlTx, membershipID string) error {
+	// The membership row and then the member's inbox items are locked before the cascade
+	// touches any inbox mailbox or participant row: the lock order of store_inbox.go, which a
+	// send in flight to this member holds from its membership lock on (measured on Postgres:
+	// deleting the mailbox first deadlocked against such a send, 40P01). The row itself is
+	// deleted last, for the foreign keys.
+	if err := lockMemberships(ctx, tx, []string{membershipID}); err != nil {
+		return err
+	}
+	items, err := queryIDs(ctx, tx, `SELECT item_id FROM inbox_participant WHERE membership_id=? ORDER BY item_id`, membershipID)
+	if err != nil {
+		return err
+	}
+	for _, id := range items {
+		if _, err := tx.ExecContext(ctx, `UPDATE inbox_item SET updated_at=updated_at WHERE id=?`, id); err != nil {
+			return err
+		}
+	}
 	for _, stmt := range membershipCascade(membershipID) {
 		if _, err := tx.ExecContext(ctx, stmt.sql, stmt.args...); err != nil {
 			return fmt.Errorf("%s: %w", stmt.sql, err)
