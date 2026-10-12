@@ -720,9 +720,9 @@ func TestInboxMemberRemoval(t *testing.T) {
 		}
 	}
 	for _, id := range []string{aID, bID} {
-		if n := f.count(`SELECT (SELECT count(*) FROM inbox_participant WHERE membership_id=?1)
-			+ (SELECT count(*) FROM inbox_mailbox WHERE membership_id=?1)
-			+ (SELECT count(*) FROM inbox_sender_rule WHERE membership_id=?1 OR sender_membership_id=?1)`, id); n != 0 {
+		if n := f.count(`SELECT (SELECT count(*) FROM inbox_participant WHERE membership_id=?)
+			+ (SELECT count(*) FROM inbox_mailbox WHERE membership_id=?)
+			+ (SELECT count(*) FROM inbox_sender_rule WHERE membership_id=? OR sender_membership_id=?)`, id, id, id, id); n != 0 {
 			t.Fatalf("M-7: %d delivery/mailbox/rule rows of a deleted membership remain", n)
 		}
 	}

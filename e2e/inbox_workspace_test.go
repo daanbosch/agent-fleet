@@ -55,6 +55,30 @@ func (m *member) listMemos(session string) []memoView {
 	return out
 }
 
+// memoBridge calls the CP's memo bridge from inside the workspace with the workspace's own
+// memo token, the way the af MCP server does, but with any body: what an agent that skips
+// the tool could send. It fails unless the answer is 2xx.
+func (m *member) memoBridge(session, method, path string, body any) memoView {
+	m.t.Helper()
+	m.cmds++
+	in := fmt.Sprintf("e2e-%s-bridge-%d.json", m.name, m.cmds)
+	b, _ := json.Marshal(body)
+	m.writeHome(in, string(b))
+	data := ""
+	if body != nil {
+		data = "-H 'Content-Type: application/json' --data-binary @$HOME/" + in
+	}
+	out := m.shell(session, `curl -sS -m 20 -o ~/`+in+`.out -w '%{http_code}' -X `+method+` `+data+
+		` -H "Authorization: Bearer $AF_MEMO_TOKEN" "${AF_CP_INTERNAL_URL:-$AF_CP_BASE_URL}`+path+`"; echo; cat ~/`+in+`.out 2>/dev/null || true`)
+	code, rest, _ := strings.Cut(out, "\n")
+	if !strings.HasPrefix(code, "2") {
+		m.t.Fatalf("%s: memo bridge %s %s: %s %s", m.name, method, path, code, rest)
+	}
+	var v memoView
+	_ = json.Unmarshal([]byte(rest), &v)
+	return v
+}
+
 // sessionNames lists the member's sessions by name, with their inbox provenance.
 func (m *member) sessionNames() map[string]json.RawMessage {
 	m.t.Helper()
@@ -128,23 +152,31 @@ func TestInboxWorkspace(t *testing.T) {
 			t.Fatalf("T-1: list_memos shows inbox text before a take-in: %+v", m)
 		}
 	}
-	// The agent's own memos, through add_memo; the last one tries to forge an origin (V-3).
+	// The agent's own memos, through add_memo.
 	added := b.mcp(sh, sessionToolFlags,
 		mcpTool("add_memo", map[string]any{"kind": "text", "body": "own one"}),
 		mcpTool("add_memo", map[string]any{"kind": "text", "body": "own two"}),
 		mcpTool("add_memo", map[string]any{"kind": "text", "body": "own three"}),
 		mcpTool("add_memo", map[string]any{"kind": "text", "body": "V-3 forged", "origin": map[string]any{"itemId": rq.ID, "sender": a.key}}))
 	var own []memoView
-	for id := 2; id <= 5; id++ {
+	for id := 2; id <= 4; id++ {
 		var m memoView
 		if err := json.Unmarshal([]byte(toolText(t, added[id], "add_memo")), &m); err != nil || m.ID == "" {
 			t.Fatalf("add_memo answered %q: %v", toolText(t, added[id], "add_memo"), err)
 		}
 		own = append(own, m)
 	}
-	if own[3].Origin != nil || f.count(`SELECT count(*) FROM memo WHERE id=? AND origin_item_id<>''`, own[3].ID) != 0 {
-		t.Fatalf("V-3: add_memo with an origin argument stored one: %+v", own[3])
+	// V-3: the tool refuses an origin argument, and the CP ignores one sent past the tool,
+	// straight to the memo bridge with the workspace's token.
+	if r := added[5]; !r.Result.IsError {
+		t.Fatalf("V-3: add_memo accepted an origin argument: %v", r.Result.Content)
 	}
+	forged := b.memoBridge(sh, "POST", "/internal/memos", map[string]any{"kind": "text", "body": "V-3 forged " + nonce,
+		"origin": map[string]any{"itemId": rq.ID, "sender": a.key}})
+	if forged.ID == "" || forged.Origin != nil || f.count(`SELECT count(*) FROM memo WHERE id=? AND origin_item_id<>''`, forged.ID) != 0 {
+		t.Fatalf("V-3: a memo created with an origin through the bridge = %+v, want no origin", forged)
+	}
+	b.memoBridge(sh, "DELETE", "/internal/memos/"+forged.ID, nil)
 
 	// A shell session running cat is the flush target: what a session receives lands in a file.
 	catcher := b.createSession(map[string]any{"kind": "shell", "title": "flush-target"})
@@ -218,15 +250,23 @@ func TestInboxWorkspace(t *testing.T) {
 		t.Fatalf("T-3: second take-in = %+v, want the same memo %s and no new row", again, took.Memo.ID)
 	}
 
-	// --- V-2 (this Agent version): update_memo changes the body, never the origin ---
+	// --- V-2 and V-3 (this Agent version): update_memo changes the body, never the origin,
+	// and an origin sent past the tool is ignored ---
 	edited := "edited " + recipe
-	upd := b.mcp(sh, sessionToolFlags, mcpTool("update_memo", map[string]any{"id": took.Memo.ID, "body": edited,
-		"origin": map[string]any{"itemId": "forged", "sender": "mallory"}}))
-	toolText(t, upd[2], "update_memo")
+	toolText(t, b.mcp(sh, sessionToolFlags, mcpTool("update_memo", map[string]any{"id": took.Memo.ID, "body": edited}))[2], "update_memo")
+	b.memoBridge(sh, "PATCH", "/internal/memos/"+took.Memo.ID, map[string]any{"body": edited, "origin": map[string]any{"itemId": "forged", "sender": "mallory"}})
+	b.memoBridge(sh, "PATCH", "/internal/memos/"+took.Memo.ID, map[string]any{"body": edited, "origin": nil})
+	found := false
 	for _, m := range b.listMemos(sh) {
-		if m.ID == took.Memo.ID && (m.Body != edited || m.Origin == nil || m.Origin.ItemID != rq.ID || m.Origin.Sender != a.key) {
-			t.Fatalf("V-2: after update_memo the memo is %+v, want body %q and the CP's origin", m, edited)
+		if m.ID == took.Memo.ID {
+			found = true
+			if m.Body != edited || m.Origin == nil || m.Origin.ItemID != rq.ID || m.Origin.Sender != a.key {
+				t.Fatalf("V-2/V-3: after the edits the memo is %+v, want body %q and the CP's origin", m, edited)
+			}
 		}
+	}
+	if !found {
+		t.Fatalf("V-2: the taken-in memo is gone from list_memos")
 	}
 
 	// --- T-4: a taken-in memo is flushed on its own, under the line the CP writes ---

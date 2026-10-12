@@ -482,9 +482,12 @@ func (f *memberFleet) sql(query string, args ...any) []string {
 		args = []any{}
 	}
 	a, _ := json.Marshal(args)
-	out, err := exec.Command(py, "-I", "-c", sqlQuery, filepath.Join(f.dataDir, "e2e-cp.db"), query, string(a)).CombinedOutput()
-	if err != nil {
-		f.t.Fatalf("sql %q: %v\n%s", query, err, out)
+	var stderr bytes.Buffer
+	cmd := exec.Command(py, "-I", "-c", sqlQuery, filepath.Join(f.dataDir, "e2e-cp.db"), query, string(a))
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil || stderr.Len() > 0 { // a warning is a query to fix, not noise to parse past
+		f.t.Fatalf("sql %q: %v\n%s%s", query, err, out, stderr.Bytes())
 	}
 	text := strings.TrimRight(string(out), "\n")
 	if text == "" {
