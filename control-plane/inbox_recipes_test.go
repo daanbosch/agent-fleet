@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -184,6 +185,8 @@ type capturingAgent struct {
 	mu      sync.Mutex
 	prompts []string
 	creates []map[string]any
+	names   []string
+	spoof   map[string]any
 	srv     *httptest.Server
 }
 
@@ -201,8 +204,18 @@ func newCapturingAgent(t *testing.T) *capturingAgent {
 			_, _ = io.WriteString(w, `{"ok":true}`)
 		case r.Method == "POST" && r.URL.Path == "/sessions":
 			c.creates = append(c.creates, body)
+			name := "s-" + strconv.Itoa(len(c.creates))
+			c.names = append(c.names, name)
 			w.WriteHeader(http.StatusCreated)
-			_, _ = io.WriteString(w, `{"name":"s-new","dir":"/home/dev/repos/app"}`)
+			_, _ = io.WriteString(w, `{"name":"`+name+`","dir":"/home/dev/repos/app"}`)
+		case r.Method == "GET" && r.URL.Path == "/sessions":
+			// Every session claims a provenance, and one the CP never created claims one too:
+			// what the workspace says must not decide the badge.
+			list := []map[string]any{}
+			for _, n := range append(append([]string{}, c.names...), "spoof") {
+				list = append(list, map[string]any{"name": n, "kind": "claude", "inboxOrigin": c.spoof})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"sessions": list})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -265,68 +278,119 @@ func TestMemoFlushKeepsOriginAlone(t *testing.T) {
 	}
 }
 
-// TestInboxProvenanceStamp: the session create carries the provenance the CP decided — from
-// the memo the launch was seeded from, or from the request — and never one the client wrote.
-func TestInboxProvenanceStamp(t *testing.T) {
+// badges reads the provenance badges through the real session list route.
+func (e *inboxEnv) badges(who string) map[string]inboxOriginRef {
+	e.t.Helper()
+	r := e.do(who, "GET", "/api/sessions", nil)
+	if r.Code != http.StatusOK {
+		e.t.Fatalf("sessions: %d %s", r.Code, r.Body.String())
+	}
+	var out struct {
+		Sessions []sessionWire `json:"sessions"`
+	}
+	if err := json.Unmarshal(r.Body.Bytes(), &out); err != nil || len(out.Sessions) == 0 {
+		e.t.Fatalf("sessions: %v %s", err, r.Body.String())
+	}
+	got := map[string]inboxOriginRef{}
+	for _, s := range out.Sessions {
+		if len(s.InboxOrigin) > 0 {
+			var o inboxOriginRef
+			_ = json.Unmarshal(s.InboxOrigin, &o)
+			got[s.Name] = o
+		}
+	}
+	return got
+}
+
+// TestInboxProvenanceFromCPRecordOnly is decision 3's provenance badge end to end: it shows for
+// a session the CP created from a taken-in memo or from the request launch (with or without
+// anything about provenance in the body), and for nothing else — not for a client's
+// inbox_origin in any spelling, not for a memo that is not the member's, and not for what the
+// workspace reports about its sessions, even naming a real item with its real sender.
+func TestInboxProvenanceFromCPRecordOnly(t *testing.T) {
 	e := newInboxEnv(t)
 	agent := newCapturingAgent(t)
 	e.workspaceFor("b", agent)
 	id := decode[itemResp](t, e.sendWith("a", "request", []map[string]any{testRecipe}, "b")).Item.ID
+	agent.spoof = map[string]any{"sender": key("a"), "item": id}
 	_ = e.do("b", "POST", "/api/inbox/items/"+id+"/claim", nil)
 	memo := decode[takeInResp](t, e.do("b", "POST", "/api/inbox/items/"+id+"/take-in", nil)).Memo
-	forged := map[string]any{"sender": "boss", "item": "made-up"}
-	for _, c := range []struct {
-		body map[string]any
-		want *inboxOriginRef
-	}{
-		{map[string]any{"dir": "/d", "kind": "claude", "inbox_origin": forged}, nil},
-		{map[string]any{"dir": "/d", "kind": "claude", "inbox_memo_id": memo.ID, "inbox_origin": forged}, &inboxOriginRef{Sender: key("a"), Item: id}},
-		{map[string]any{"dir": "/d", "kind": "claude", "inbox_memo_id": "not-mine"}, nil},
-	} {
-		if r := e.do("b", "POST", "/api/sessions", c.body); r.Code != http.StatusCreated {
-			t.Fatalf("create: %d %s", r.Code, r.Body.String())
+	create := func(raw string) string {
+		t.Helper()
+		r := e.do("b", "POST", "/api/sessions", json.RawMessage(raw))
+		if r.Code != http.StatusCreated {
+			t.Fatalf("create %s: %d %s", raw, r.Code, r.Body.String())
 		}
-		got := agent.creates[len(agent.creates)-1]
-		if _, leaked := got["inbox_memo_id"]; leaked {
-			t.Fatal("inbox_memo_id reached the Agent")
+		for k := range agent.creates[len(agent.creates)-1] {
+			if strings.EqualFold(k, "inbox_origin") || strings.EqualFold(k, "inbox_memo_id") {
+				t.Fatalf("create %s: %q reached the Agent", raw, k)
+			}
 		}
-		o, has := got["inbox_origin"].(map[string]any)
-		if (c.want == nil) == has || (c.want != nil && (o["sender"] != c.want.Sender || o["item"] != c.want.Item)) {
-			t.Fatalf("body %v reached the Agent with inbox_origin %v", c.body, got["inbox_origin"])
-		}
+		return agent.names[len(agent.names)-1]
 	}
-	// The request launch stamps the request itself.
-	if r := e.do("b", "POST", "/api/inbox/items/"+id+"/launch", map[string]any{"dir": "/d", "kind": "claude", "inbox_origin": forged}); r.Code != http.StatusCreated {
+	forged := `{"sender":"boss","item":"` + id + `"}`
+	plain := create(`{"dir":"/d","kind":"claude"}`)
+	escaped := create(`{"dir":"/d","kind":"claude","\u0069nbox_origin":` + forged + `}`)
+	upper := create(`{"dir":"/d","kind":"claude","inbox_memo_id":"","INBOX_ORIGIN":` + forged + `}`)
+	dup := create(`{"dir":"/d","kind":"claude","inbox_origin":{"item":"x"},"inbox_origin":` + forged + `}`)
+	notMine := create(`{"dir":"/d","kind":"claude","inbox_memo_id":"not-mine"}`)
+	fromMemo := create(`{"dir":"/d","kind":"claude","Inbox_Memo_Id":"` + memo.ID + `","inbox_origin":` + forged + `}`)
+	// The request launch, with nothing about provenance in its body.
+	if r := e.do("b", "POST", "/api/inbox/items/"+id+"/launch", map[string]any{"dir": "/d", "kind": "claude"}); r.Code != http.StatusCreated {
 		t.Fatalf("launch: %d %s", r.Code, r.Body.String())
 	}
-	o, _ := agent.creates[len(agent.creates)-1]["inbox_origin"].(map[string]any)
-	if o["item"] != id || o["sender"] != key("a") {
-		t.Fatalf("the request launch's provenance: %v", o)
+	launched := agent.names[len(agent.names)-1]
+	got := e.badges("b")
+	want := inboxOriginRef{Sender: key("a"), Item: id}
+	for _, n := range []string{fromMemo, launched} {
+		if got[n] != want {
+			t.Errorf("%s: badge %+v, want %+v", n, got[n], want)
+		}
+	}
+	for _, n := range []string{plain, escaped, upper, dup, notMine, "spoof"} {
+		if o, ok := got[n]; ok {
+			t.Errorf("%s: a badge the CP never recorded: %+v", n, o)
+		}
+	}
+	if r := e.do("b", "POST", "/api/sessions", json.RawMessage(`[1,2]`)); r.Code != http.StatusBadRequest {
+		t.Fatalf("a body that is not an object: %d", r.Code)
 	}
 }
 
-// TestInboxProvenanceVerifiedOnRelay: a badge the Agent reports is kept only when it names an
-// item the session's owner takes part in, with that item's sender.
-func TestInboxProvenanceVerifiedOnRelay(t *testing.T) {
-	e := newInboxEnv(t)
-	id := e.send("a", "dm", "b")
-	other := e.send("a", "dm", "c")
-	ws := workspaceAPI{memberAuth: memberAuth{e.mgr}}
-	mv := store.MembershipView{MembershipID: e.members["b"], TenantID: e.t1.ID}
-	raw := func(sender, item string) json.RawMessage {
-		b, _ := json.Marshal(inboxOriginRef{Sender: sender, Item: item})
-		return b
+// removeDuringTakeIn deactivates a member right after the take-in handler read the item, the
+// last step before the store's transaction.
+type removeDuringTakeIn struct {
+	*store.SQL
+	mid string
+}
+
+func (s *removeDuringTakeIn) ListInboxAttachments(ctx context.Context, id string) ([]store.InboxAttachment, error) {
+	rows, err := s.SQL.ListInboxAttachments(ctx, id)
+	if err != nil {
+		return rows, err
 	}
-	list := ws.verifyInboxOrigins(context.Background(), mv, []sessionWire{
-		{Name: "ok", InboxOrigin: raw(key("a"), id)},
-		{Name: "wrong-sender", InboxOrigin: raw(key("c"), id)},
-		{Name: "not-mine", InboxOrigin: raw(key("a"), other)},
-		{Name: "made-up", InboxOrigin: raw(key("a"), "nope")},
-	})
-	for _, s := range list {
-		if (s.Name == "ok") != (len(s.InboxOrigin) > 0) {
-			t.Errorf("%s: badge %s", s.Name, s.InboxOrigin)
-		}
+	return rows, s.SQL.SetMembershipStatus(ctx, s.mid, "inactive")
+}
+
+// TestInboxTakeInRacesRemoval: a member removed after the handler's checks and before the
+// take-in's transaction gets no memo, for a DM and for a request they finished.
+func TestInboxTakeInRacesRemoval(t *testing.T) {
+	for _, kind := range []string{"dm", "request"} {
+		t.Run(kind, func(t *testing.T) {
+			e := newInboxEnv(t)
+			id := decode[itemResp](t, e.sendWith("a", kind, []map[string]any{testRecipe}, "b")).Item.ID
+			if kind == "request" {
+				_ = e.do("b", "POST", "/api/inbox/items/"+id+"/claim", nil)
+				_ = e.do("b", "POST", "/api/inbox/items/"+id+"/done", nil)
+			}
+			e.mgr.store = &removeDuringTakeIn{SQL: e.st, mid: e.members["b"]}
+			if r := e.do("b", "POST", "/api/inbox/items/"+id+"/take-in", nil); r.Code == http.StatusOK || r.Code == http.StatusCreated {
+				t.Fatalf("a removed member took the recipe in: %d %s", r.Code, r.Body.String())
+			}
+			if n := e.count("memo"); n != 0 {
+				t.Fatalf("%d memo(s) for a removed member", n)
+			}
+		})
 	}
 }
 

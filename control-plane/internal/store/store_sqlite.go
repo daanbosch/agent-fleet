@@ -1348,6 +1348,7 @@ func membershipCascade(membershipID string) []struct {
 		// so the remaining participants keep their copy.
 		// Mailbox before participant rows: the lock order of store_inbox.go.
 		{`DELETE FROM inbox_mailbox WHERE membership_id=?`, id},
+		{`DELETE FROM inbox_session_origin WHERE membership_id=?`, id},
 		{`DELETE FROM inbox_participant WHERE membership_id=?`, id},
 		{`DELETE FROM inbox_sender_rule WHERE membership_id=? OR sender_membership_id=?`, both},
 		{`DELETE FROM inbox_item WHERE NOT EXISTS (SELECT 1 FROM inbox_participant p WHERE p.item_id=inbox_item.id)`, nil},

@@ -174,3 +174,39 @@ func TestInboxAttachmentsGoWithTheirItem(t *testing.T) {
 		})
 	}
 }
+
+// TestInboxTakeInSeesRemoval: a removal committed before the take-in leaves no memo, for a DM
+// and for a request the member finished; a take-in committed first stays (the memo is the
+// member's own from then on, decision 9).
+func TestInboxTakeInSeesRemoval(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range inboxStores(t) {
+		t.Run(name, func(t *testing.T) {
+			for _, kind := range []string{"dm", "request"} {
+				f := newInboxFix(t, st, "a", "b")
+				b := f.members["b"]
+				id := f.send(t, kind, "a", "b")
+				if kind == "request" {
+					_, _ = st.ClaimInboxItem(ctx, id, b, NowTS())
+					_, _ = st.CompleteInboxItem(ctx, id, b, NowTS())
+				}
+				memo := Memo{ID: NewID(), Kind: "text", Body: "x", CreatedAt: NowTS()}
+				f.remove(t, "b")
+				if _, r, err := st.TakeInInboxRecipe(ctx, id, b, memo); err != nil || r.Allowed || r.Created {
+					t.Fatalf("%s: take-in after the removal: %+v %v", kind, r, err)
+				}
+				if _, found, _ := st.FindMemoByOrigin(ctx, id, b); found {
+					t.Fatalf("%s: a memo for a removed member", kind)
+				}
+				_ = st.SetMembershipStatus(ctx, b, "active")
+				if _, r, _ := st.TakeInInboxRecipe(ctx, id, b, memo); !r.Created {
+					t.Fatalf("%s: take-in by the re-invited member: %+v", kind, r)
+				}
+				f.remove(t, "b")
+				if _, found, _ := st.FindMemoByOrigin(ctx, id, b); !found {
+					t.Fatalf("%s: a removal took back a memo already taken in", kind)
+				}
+			}
+		})
+	}
+}

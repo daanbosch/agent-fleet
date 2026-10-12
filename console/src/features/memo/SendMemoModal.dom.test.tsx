@@ -5,7 +5,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-const memoFlush = vi.fn(async (_s: string, ids: string[]) => ({ sent: ids.length }));
+const memoFlush = vi.fn(async (_s: string, ids: string[], _text: string) => ({ sent: ids.length }));
 vi.mock("./api.ts", () => ({ memoFlush: (s: string, ids: string[], text: string) => memoFlush(s, ids, text) }));
 vi.mock("../chat/api.ts", () => ({ assistantList: async () => ({ assistants: [] }), chatCreate: vi.fn() }));
 

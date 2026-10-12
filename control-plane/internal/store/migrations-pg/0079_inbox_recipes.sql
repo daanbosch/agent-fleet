@@ -12,6 +12,15 @@ CREATE TABLE inbox_attachment (
 );
 CREATE INDEX idx_inbox_attachment_item ON inbox_attachment(item_id);
 
+CREATE TABLE inbox_session_origin (
+    membership_id TEXT NOT NULL,
+    session_name  TEXT NOT NULL,
+    item_id       TEXT NOT NULL,
+    sender_key    TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL,
+    PRIMARY KEY (membership_id, session_name)
+);
+
 ALTER TABLE memo ADD COLUMN origin_item_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE memo ADD COLUMN origin_sender_membership_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE memo ADD COLUMN origin_sender_key TEXT NOT NULL DEFAULT '';

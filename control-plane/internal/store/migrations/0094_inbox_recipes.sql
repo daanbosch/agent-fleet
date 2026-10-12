@@ -22,6 +22,19 @@ CREATE TABLE inbox_attachment (
 );
 CREATE INDEX idx_inbox_attachment_item ON inbox_attachment(item_id);
 
+-- inbox_session_origin is the provenance badge of a session (decision 3), written by the CP
+-- when a create it stamped succeeds: which member's session, by name, came from which item and
+-- sender. The badge is drawn from this row alone, never from what the workspace reports, so an
+-- agent cannot give a session a provenance the CP did not record.
+CREATE TABLE inbox_session_origin (
+    membership_id TEXT NOT NULL,
+    session_name  TEXT NOT NULL,
+    item_id       TEXT NOT NULL,
+    sender_key    TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL,
+    PRIMARY KEY (membership_id, session_name)
+);
+
 -- A memo taken in from the inbox carries its origin, set by the CP and never by a client:
 -- the item and its sender (membership id, and the user key at take-in time for display).
 -- Editing the memo leaves these columns alone. One memo per (item, member): the unique

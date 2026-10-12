@@ -455,9 +455,6 @@ type CreateReq struct {
 	// recorded in the meta so a later rename through POST /repos/{name}/branch-name keeps
 	// {ref} and the kind. Every other launch leaves it nil.
 	WorkItem *session.WorkItemRef `json:"work_item,omitempty"`
-	// InboxOrigin is the member inbox item a launch came from (ADR 0111 decision 3), stamped
-	// by the Control Plane. An older Control Plane never sends it.
-	InboxOrigin *session.InboxOriginRef `json:"inbox_origin,omitempty"`
 	// SSM (kind=ssm) coordinates, resolved and forwarded by the Control Plane from a
 	// host bookmark (control-plane/ssm.go). No secrets — SSO login happens in-pane.
 	// SSMAlias: the host bookmark's alias (CP disambiguates it with the profile when it
@@ -606,15 +603,6 @@ func commonPrefixLen(a, b string) int {
 // cleanWorkItemRef trims a launch's work item and bounds it: it lives in the meta file,
 // which every session listing reads. nil when there is no key, since {ref} and the kind are
 // all a rename wants from it.
-// cleanInboxOrigin keeps an inbox origin only when it names an item, and bounds what it
-// stores: it is display, and the meta is no place for an unbounded string.
-func cleanInboxOrigin(o *session.InboxOriginRef) *session.InboxOriginRef {
-	if o == nil || strings.TrimSpace(o.Item) == "" || len(o.Item) > 128 || len(o.Sender) > 128 {
-		return nil
-	}
-	return &session.InboxOriginRef{Sender: strings.TrimSpace(o.Sender), Item: strings.TrimSpace(o.Item)}
-}
-
 func cleanWorkItemRef(in *session.WorkItemRef) *session.WorkItemRef {
 	if in == nil || strings.TrimSpace(in.Key) == "" {
 		return nil
@@ -1142,7 +1130,6 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: time.Now().Format(time.RFC3339), SSM: ssm,
 		Origin: origin, OriginConv: originConv, OriginSession: originSession,
 		Studio: studio, WorkItem: cleanWorkItemRef(req.WorkItem),
-		InboxOrigin: cleanInboxOrigin(req.InboxOrigin),
 	}
 	// pending from the first write of the meta: the pane must not offer a resend while the
 	// delivery below may still be typing (ADR 0100 decision 2).

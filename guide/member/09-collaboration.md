@@ -99,7 +99,7 @@ appear in the notification centre, and an open request never expires there.
   memo, marked with where it came from. For a request only the person who took it can do
   this; a message's recipe any recipient can. Pressing it again gives the same memo. That
   memo is always sent to a session on its own, never joined to your other memos, and a
-  session started from it shows an inbox mark in the left pane (not on older workspaces).
+  session started from it, or from a request, shows an inbox mark in the left pane.
 - **Attaching a session**: pick one of your sessions, or one shared with you. Attaching
   your own session can share it read-only with every recipient (the whole conversation,
   including what is added later) — you confirm the session, the recipients and the scope,

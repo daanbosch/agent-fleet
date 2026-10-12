@@ -199,13 +199,9 @@ type Session struct {
 	// the list; the Control Plane's sessionWire has to carry them too or they vanish there.
 	Studio             string `json:"studio,omitempty"`
 	InitialPromptState string `json:"initialPromptState,omitempty"`
-	// InboxOrigin is the member inbox item this session was launched from (ADR 0111
-	// decision 3), for the Console's provenance badge. The Control Plane stamps it on the
-	// create and checks it again when it relays the list; nothing here decides on it.
-	InboxOrigin   *InboxOriginRef `json:"inboxOrigin,omitempty"`
-	Repo          string          `json:"repo"` // working dir basename (display)
-	WorkingCopyID string          `json:"workingCopyId,omitempty"`
-	Title         string          `json:"title"` // user-supplied display title (optional, any kind)
+	Repo               string `json:"repo"` // working dir basename (display)
+	WorkingCopyID      string `json:"workingCopyId,omitempty"`
+	Title              string `json:"title"` // user-supplied display title (optional, any kind)
 	// TitleSetBy mirrors Meta.TitleSetBy ("user" | "parent" | ""): who last set Title. It
 	// rides the wire so a reader outside this process can tell a name the user chose from one
 	// a parent wrote — the same reason Origin / OriginSession are here. Display-only for now;
@@ -605,15 +601,6 @@ type Meta struct {
 	// rename through POST /repos/{name}/branch-name keeps {ref} and the kind. nil for every
 	// other launch.
 	WorkItem *WorkItemRef `json:"workItem,omitempty"`
-	// InboxOrigin is the member inbox item the session was launched from (ADR 0111). nil
-	// for every other launch.
-	InboxOrigin *InboxOriginRef `json:"inboxOrigin,omitempty"`
-}
-
-// InboxOriginRef names an inbox item and its sender's user key.
-type InboxOriginRef struct {
-	Sender string `json:"sender"`
-	Item   string `json:"item"`
 }
 
 // WorkItemRef is the part of a work item the branch-name resolver renders from.

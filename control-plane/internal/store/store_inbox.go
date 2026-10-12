@@ -95,6 +95,8 @@ type InboxStore interface {
 	ListInboxAttachments(ctx context.Context, itemID string) ([]InboxAttachment, error)
 	TakeInInboxRecipe(ctx context.Context, itemID, membershipID string, m Memo) (Memo, InboxTakeIn, error)
 	FindMemoByOrigin(ctx context.Context, itemID, membershipID string) (Memo, bool, error)
+	RecordInboxSessionOrigin(ctx context.Context, membershipID, sessionName, itemID, senderKey string) error
+	ListInboxSessionOrigins(ctx context.Context, membershipID string) (map[string]InboxSessionOrigin, error)
 	GetInboxItem(ctx context.Context, id string) (InboxItem, bool, error)
 	ListInboxParticipants(ctx context.Context, itemID string) ([]InboxParticipant, error)
 	ListInboxEntries(ctx context.Context, membershipID string, ret InboxRetention) ([]InboxEntry, error)

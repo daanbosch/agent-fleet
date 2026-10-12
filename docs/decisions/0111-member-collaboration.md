@@ -19,8 +19,8 @@ English | [日本語](0111-member-collaboration.ja.md)
   github.com or bitbucket.org only, anything else is refused; a request's recipe can be taken
   in by its assignee while it is claimed or done; a taken-in memo is flushed alone, headed by
   a line the CP writes, and a flush that mixes it with other memos is refused (409
-  `memo_origin_alone`); the session's provenance badge is stamped by the CP on the create and
-  checked again when the CP relays the session list; the share an owner's attachment creates is
+  `memo_origin_alone`); the session's provenance badge is a record the CP writes when a create it
+  made succeeds, and the session list shows that record only, never what the workspace reports; the share an owner's attachment creates is
   a read-only `session`-scope rule for every recipient, and an existing rule is left as it is.
 - Tracking: #1840
 - Follow-ups: #1960, #1961, #1962

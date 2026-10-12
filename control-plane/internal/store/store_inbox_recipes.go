@@ -75,6 +75,39 @@ func (s *SQL) FindMemoByOrigin(ctx context.Context, itemID, membershipID string)
 	return m, err == nil, err
 }
 
+// InboxSessionOrigin is the CP's record of where one of a member's sessions came from.
+type InboxSessionOrigin struct {
+	ItemID, SenderKey string
+}
+
+// RecordInboxSessionOrigin writes the provenance of a session the CP just created. A session
+// name is unique within a workspace, so a later create under the same name replaces it.
+func (s *SQL) RecordInboxSessionOrigin(ctx context.Context, membershipID, sessionName, itemID, senderKey string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO inbox_session_origin(membership_id,session_name,item_id,sender_key,created_at)
+		VALUES(?,?,?,?,?) ON CONFLICT(membership_id,session_name) DO UPDATE SET item_id=excluded.item_id,
+		sender_key=excluded.sender_key,created_at=excluded.created_at`, membershipID, sessionName, itemID, senderKey, NowTS())
+	return err
+}
+
+// ListInboxSessionOrigins maps a member's session names to their recorded provenance.
+func (s *SQL) ListInboxSessionOrigins(ctx context.Context, membershipID string) (map[string]InboxSessionOrigin, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT session_name,item_id,sender_key FROM inbox_session_origin WHERE membership_id=?`, membershipID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]InboxSessionOrigin{}
+	for rows.Next() {
+		var name string
+		var o InboxSessionOrigin
+		if err := rows.Scan(&name, &o.ItemID, &o.SenderKey); err != nil {
+			return nil, err
+		}
+		out[name] = o
+	}
+	return out, rows.Err()
+}
+
 func (s *SQL) ListInboxAttachments(ctx context.Context, itemID string) ([]InboxAttachment, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,item_id,kind,ciphertext,key_ref,catalog_id,granted,created_at
 		FROM inbox_attachment WHERE item_id=? ORDER BY created_at, id`, itemID)
@@ -96,17 +129,25 @@ func (s *SQL) ListInboxAttachments(ctx context.Context, itemID string) ([]InboxA
 }
 
 // TakeInInboxRecipe copies a recipe into membershipID's memo queue as m, with the origin the
-// caller set on m. A DM's recipe may be taken in by any recipient (the handler checks the
-// role), a request's only by its current assignee, decided on the locked item row so a
-// release cannot slip between the check and the insert. Taking in again returns the memo
-// already made: one memo per (item, member), for a double click or a retry alike.
+// caller set on m. Everything that decides whether the caller may is checked here, under the
+// locks a removal and a release take, in the lock order of store_inbox.go: the caller's
+// membership row first (it must still be active in the item's tenant), then the item row (the
+// caller must be one of its recipients; for a request, its current assignee while claimed or
+// done). A removal or a release that commits first is seen; one that comes later orders after
+// the take-in. Taking in again returns the memo already made: one memo per (item, member).
 func (s *SQL) TakeInInboxRecipe(ctx context.Context, itemID, membershipID string, m Memo) (Memo, InboxTakeIn, error) {
 	var out InboxTakeIn
 	var memo Memo
 	_, err := s.inboxTx(ctx, func(tx *sqlTx) (bool, error) {
+		if err := lockMemberships(ctx, tx, []string{membershipID}); err != nil {
+			return false, err
+		}
 		ok, err := affected(tx.ExecContext(ctx, `UPDATE inbox_item SET updated_at=updated_at
-			WHERE id=? AND (kind='dm' OR (kind='request' AND state IN ('claimed','done') AND assignee_membership_id=?))`,
-			itemID, membershipID))
+			WHERE id=? AND (kind='dm' OR (kind='request' AND state IN ('claimed','done') AND assignee_membership_id=?))
+			  AND EXISTS (SELECT 1 FROM membership m WHERE m.id=? AND m.status='active' AND m.tenant_id=inbox_item.tenant_id)
+			  AND EXISTS (SELECT 1 FROM inbox_participant p WHERE p.item_id=inbox_item.id AND p.membership_id=?
+			              AND p.role='recipient')`,
+			itemID, membershipID, membershipID, membershipID))
 		if err != nil || !ok {
 			return false, err
 		}

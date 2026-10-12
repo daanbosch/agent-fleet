@@ -15,6 +15,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -488,83 +489,110 @@ type inboxOriginRef struct {
 	Item   string `json:"item"`
 }
 
-// stampInboxOrigin sets the provenance badge of a session create (decision 3). A client never
-// names it: inbox_origin in the body is dropped, and inbox_memo_id, the memo a launch was
-// seeded from, is looked up and becomes the memo's server-set origin when it has one. The
-// request launch passes its own through the context. An older Agent ignores the field, so
-// there the badge is simply absent.
-func (a workspaceAPI) stampInboxOrigin(ctx context.Context, res *resolved, r *http.Request) *apiError {
+// stampInboxOrigin decides the provenance of a session create (decision 3) and strips every
+// provenance key a client wrote. It always parses the body: a key spelled with an escape
+// (\u0069nbox_origin) or in another case (INBOX_ORIGIN) is the same key to the Agent's
+// decoder, which matches names case-insensitively, so the match here is the same fold. The
+// origin comes from the request launch (through the context) or from the memo a launch was
+// seeded from (inbox_memo_id, looked up and owned); it is not sent to the Agent at all. The
+// caller records it once the create has succeeded, and the badge is drawn from that record.
+func (a workspaceAPI) stampInboxOrigin(ctx context.Context, res *resolved, r *http.Request) (*inboxOriginRef, *apiError) {
 	body, err := readAllBody(r)
 	if err != nil {
-		return &apiError{http.StatusBadRequest, "bad_request", "cannot read body"}
+		return nil, &apiError{http.StatusBadRequest, "bad_request", "cannot read body"}
 	}
-	if !strings.Contains(string(body), "inbox_") {
-		restoreBody(r, body)
-		return nil
-	}
-	var m map[string]any
+	var m map[string]json.RawMessage
 	if json.Unmarshal(body, &m) != nil || m == nil {
-		restoreBody(r, body)
-		return nil
+		return nil, &apiError{http.StatusBadRequest, "bad_request", "invalid JSON body"}
 	}
-	memoID, _ := m["inbox_memo_id"].(string)
-	delete(m, "inbox_memo_id")
-	delete(m, "inbox_origin")
-	if o, ok := ctx.Value(inboxOriginKey{}).(inboxOriginRef); ok {
-		m["inbox_origin"] = o
-	} else if memoID != "" {
-		if memo, found, err := a.mgr.store.GetMemo(ctx, memoID); err == nil && found &&
-			memo.MembershipID == res.mv.MembershipID && memo.OriginItemID != "" {
-			m["inbox_origin"] = inboxOriginRef{Sender: memo.OriginSenderKey, Item: memo.OriginItemID}
+	memoID := ""
+	for k, v := range m {
+		switch {
+		case strings.EqualFold(k, "inbox_memo_id"):
+			var id string
+			if json.Unmarshal(v, &id) == nil && id != "" {
+				memoID = id
+			}
+			delete(m, k)
+		case strings.EqualFold(k, "inbox_origin"):
+			delete(m, k)
 		}
 	}
 	out, _ := json.Marshal(m)
 	restoreBody(r, out)
-	return nil
+	if o, ok := ctx.Value(inboxOriginKey{}).(inboxOriginRef); ok {
+		return &o, nil
+	}
+	if memoID != "" {
+		if memo, found, err := a.mgr.store.GetMemo(ctx, memoID); err == nil && found &&
+			memo.MembershipID == res.mv.MembershipID && memo.OriginItemID != "" {
+			return &inboxOriginRef{Sender: memo.OriginSenderKey, Item: memo.OriginItemID}, nil
+		}
+	}
+	return nil, nil
 }
 
-// errInboxShareBusy maps the share lease refusal of a send that grants a share.
-func isShareBusy(err error) bool { return errors.Is(err, store.ErrSessionShareOwnerBusy) }
+// teeWriter passes a response through and keeps its status and the start of its body, so a
+// create can be recorded once the Agent has answered.
+type teeWriter struct {
+	http.ResponseWriter
+	status int
+	buf    []byte
+}
 
-// verifyInboxOrigins keeps a session's provenance badge only when the CP can vouch for it: the
-// item exists in this tenant, the session's owner takes part in it, and the sender is who the
-// badge names. The Agent stores whatever its create carried, and an agent inside the
-// workspace can call the Agent without the CP, so the badge is checked where it leaves.
-func (a workspaceAPI) verifyInboxOrigins(ctx context.Context, mv store.MembershipView, list []sessionWire) []sessionWire {
-	var keys map[string]string
+func (t *teeWriter) WriteHeader(s int) {
+	if t.status == 0 {
+		t.status = s
+	}
+	t.ResponseWriter.WriteHeader(s)
+}
+func (t *teeWriter) Write(b []byte) (int, error) {
+	if t.status == 0 {
+		t.status = http.StatusOK
+	}
+	if len(t.buf) < 64<<10 {
+		t.buf = append(t.buf, b...)
+	}
+	return t.ResponseWriter.Write(b)
+}
+func (t *teeWriter) Flush() {
+	if f, ok := t.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// recordInboxOrigin writes the provenance of the session a create just made.
+func (a workspaceAPI) recordInboxOrigin(ctx context.Context, res *resolved, o *inboxOriginRef, t *teeWriter) {
+	if t.status < 200 || t.status >= 300 {
+		return
+	}
+	var s struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(t.buf, &s) != nil || s.Name == "" {
+		return
+	}
+	if err := a.mgr.store.RecordInboxSessionOrigin(context.WithoutCancel(ctx), res.mv.MembershipID, s.Name, o.Item, o.Sender); err != nil {
+		log.Printf("inbox: recording the provenance of session %s: %v", s.Name, err)
+	}
+}
+
+// applyInboxOrigins sets each session's provenance badge from the CP's own record, and only
+// from it: what the workspace reports is dropped, since an agent can call the Agent without
+// the CP and give any session any value.
+func (a workspaceAPI) applyInboxOrigins(ctx context.Context, mv store.MembershipView, list []sessionWire) []sessionWire {
+	rec, err := a.mgr.store.ListInboxSessionOrigins(ctx, mv.MembershipID)
 	for i := range list {
-		if len(list[i].InboxOrigin) == 0 {
+		list[i].InboxOrigin = nil
+		if err != nil {
 			continue
 		}
-		var o inboxOriginRef
-		ok := json.Unmarshal(list[i].InboxOrigin, &o) == nil && o.Item != ""
-		if ok {
-			it, found, err := a.mgr.store.GetInboxItem(ctx, o.Item)
-			ok = err == nil && found && it.TenantID == mv.TenantID
-			if ok {
-				parts, err := a.mgr.store.ListInboxParticipants(ctx, it.ID)
-				ok = false
-				for _, p := range parts {
-					if err == nil && p.MembershipID == mv.MembershipID {
-						ok = true
-					}
-				}
-				if ok {
-					if keys == nil {
-						keys = map[string]string{}
-						if rows, err := a.mgr.store.ListMembersByTenant(ctx, mv.TenantID); err == nil {
-							for _, m := range rows {
-								keys[m.MembershipID] = m.UserKey
-							}
-						}
-					}
-					ok = keys[it.SenderMembershipID] == o.Sender
-				}
-			}
-		}
-		if !ok {
-			list[i].InboxOrigin = nil
+		if o, ok := rec[list[i].Name]; ok {
+			list[i].InboxOrigin, _ = json.Marshal(inboxOriginRef{Sender: o.SenderKey, Item: o.ItemID})
 		}
 	}
 	return list
 }
+
+// errInboxShareBusy maps the share lease refusal of a send that grants a share.
+func isShareBusy(err error) bool { return errors.Is(err, store.ErrSessionShareOwnerBusy) }

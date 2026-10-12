@@ -916,8 +916,8 @@ type sessionWire struct {
 	// input" setting reads it; absent here that setting silently does nothing.
 	Origin string `json:"origin,omitempty"`
 	// InboxOrigin: the inbox item a session was launched from and its sender (ADR 0111
-	// decision 3), which the CP stamped on the create. The Console's provenance badge reads
-	// it; absent here the badge never appears. No DB-mirror column, like Origin.
+	// decision 3). Filled from the CP's own record (applyInboxOrigins), never relayed from the
+	// workspace; the Console's provenance badge reads it.
 	InboxOrigin json.RawMessage `json:"inboxOrigin,omitempty"`
 	// GeneratedImages / GeneratedImagesPath: how many images this session has generated and
 	// the folder holding them, browse-root relative (ADR 0080 decision 8). They are what the
@@ -970,7 +970,7 @@ func (a workspaceAPI) sessionsPayload(ctx context.Context, res *resolved) map[st
 				})
 			}
 			_ = a.mgr.store.ReplaceSessions(ctx, res.ws.ID, rows)
-			return map[string]any{"sessions": a.verifyInboxOrigins(ctx, res.mv, list)}
+			return map[string]any{"sessions": a.applyInboxOrigins(ctx, res.mv, list)}
 		}
 		// Agent unreachable (e.g. mid-start): fall through to the DB mirror.
 	}
@@ -993,7 +993,7 @@ func (a workspaceAPI) sessionsPayload(ctx context.Context, res *resolved) map[st
 			Resumable: true,
 		})
 	}
-	return map[string]any{"sessions": out}
+	return map[string]any{"sessions": a.applyInboxOrigins(ctx, res.mv, out)}
 }
 
 func (a workspaceAPI) sessionsList(w http.ResponseWriter, r *http.Request, res *resolved) {
@@ -1019,7 +1019,8 @@ func (a workspaceAPI) sessionCreateThen(w http.ResponseWriter, r *http.Request, 
 		writeAPIErr(w, aerr)
 		return
 	}
-	if aerr := a.stampInboxOrigin(ctx, res, r); aerr != nil {
+	origin, aerr := a.stampInboxOrigin(ctx, res, r)
+	if aerr != nil {
 		writeAPIErr(w, aerr)
 		return
 	}
@@ -1041,7 +1042,13 @@ func (a workspaceAPI) sessionCreateThen(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
-	a.proxy.rest(w, r, res)
+	if origin == nil {
+		a.proxy.rest(w, r, res)
+		return
+	}
+	tw := &teeWriter{ResponseWriter: w}
+	a.proxy.rest(tw, r, res)
+	a.recordInboxOrigin(ctx, res, origin, tw)
 }
 
 // sessionFork forks a session's conversation into a new one (POST
