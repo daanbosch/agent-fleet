@@ -1319,6 +1319,15 @@ func membershipCascade(membershipID string) []struct {
 		{`DELETE FROM session_share_owner_lease WHERE owner_membership_id=?`, id},
 		{`DELETE FROM workspace_stop_intent WHERE owner_membership_id=?`, id},
 		{`DELETE FROM home_operation WHERE membership_id=?`, id},
+		// The member inbox (ADR 0111 decision 9): the member's deliveries, read cursor and
+		// receive rules go, and so do rules other members hold about them. An item stays
+		// while anybody else still takes part in it, and the last statement removes the
+		// items nobody is left in, body and all. The item has no foreign key to membership,
+		// so the remaining participants keep their copy.
+		{`DELETE FROM inbox_participant WHERE membership_id=?`, id},
+		{`DELETE FROM inbox_mailbox WHERE membership_id=?`, id},
+		{`DELETE FROM inbox_sender_rule WHERE membership_id=? OR sender_membership_id=?`, both},
+		{`DELETE FROM inbox_item WHERE NOT EXISTS (SELECT 1 FROM inbox_participant p WHERE p.item_id=inbox_item.id)`, nil},
 		// The parent goes last: with foreign keys on, deleting it before its children
 		// fails.
 		{`DELETE FROM membership WHERE id=?`, id},

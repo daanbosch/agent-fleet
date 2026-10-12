@@ -108,6 +108,10 @@ const exact = {
   // Work items (docs/log/80). Unhandled routes only answer {}, so without this the rail's new
   // surface always renders empty and verifies nothing.
   "/api/work-items": () => fx.workItems(LOCALE),
+  // Member inbox (ADR 0111): one request waiting for this member, one they hold, and one
+  // they sent, so every card shape of the state table is on screen.
+  "/api/inbox": () => inboxFixture(),
+  "/api/inbox/settings": () => ({ acceptFrom: "tenant", dnd: false, allowed: [], blocked: [], sealed: true }),
   // A pull request's live read, fetched when its detail panel opens (read.ts WorkItemDetail).
   // Without it the panel shows no CI, conflict or review state — the point of opening it.
   "/api/work-items/detail": (q, method, body) => fx.workItemDetail(LOCALE, body?.key || ""),
@@ -470,6 +474,32 @@ const server = http.createServer((req, res) => {
   res.writeHead(200, { "content-type": MIME[path.extname(file)] || "application/octet-stream", "cache-control": "no-store" });
   res.end(buf);
 });
+
+function inboxFixture() {
+  const ago = (h) => new Date(Date.now() - h * 3600e3).toISOString().replace(/\.\d+Z$/, "Z");
+  const person = (k) => ({ userKey: k.replace(/[@.]/g, "-"), email: k, removed: false });
+  const base = { recipients: [], assignee: null, assignedToMe: false, canClaim: false, longOpen: false,
+    unseen: false, seq: 1, finalAt: "", session: null, pr: null };
+  return {
+    mailbox: { lastSeq: 7, readSeq: 4, unseen: 2, dnd: false, acceptFrom: "tenant" },
+    items: [
+      { ...base, id: "i1", kind: "request", state: "open", role: "recipient", delivery: "unread", canClaim: true, unseen: true,
+        sender: person("hanako@example.com"), recipients: [{ ...person("taro@example.com"), delivery: "", eligible: false }],
+        body: "Could someone look at the flaky login test on main?\nIt fails about one run in five since yesterday.",
+        createdAt: ago(2), updatedAt: ago(2), seq: 7 },
+      { ...base, id: "i2", kind: "request", state: "claimed", role: "recipient", delivery: "read", assignedToMe: true,
+        assignee: person("taro@example.com"), sender: person("jiro@example.com"),
+        body: "Please bump the Go toolchain in the CP image.", createdAt: ago(30), updatedAt: ago(5), seq: 6,
+        session: { name: "cp-go-bump", dir: "/home/dev/repos/agent-fleet", branch: "chore/go-bump", launchedAt: ago(5), by: person("taro@example.com") } },
+      { ...base, id: "i3", kind: "dm", state: "", role: "recipient", delivery: "unread", unseen: true,
+        sender: person("hanako@example.com"), body: "Thanks for the review yesterday!", createdAt: ago(1), updatedAt: ago(1), seq: 5 },
+      { ...base, id: "i4", kind: "request", state: "open", role: "sender", delivery: "read", longOpen: true,
+        sender: person("taro@example.com"),
+        recipients: [{ ...person("hanako@example.com"), delivery: "declined", eligible: false }, { ...person("jiro@example.com"), delivery: "read", eligible: true }],
+        body: "Can someone own the release notes this week?", createdAt: ago(24 * 15), updatedAt: ago(48), seq: 3 },
+    ],
+  };
+}
 
 async function streamFrames(res, frames) {
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });

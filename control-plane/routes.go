@@ -38,6 +38,7 @@ func buildMux(cfg config) *http.ServeMux {
 	registerSSMRoutes(mux, cfg)
 	registerGCPRoutes(mux, cfg)
 	registerMemoRoutes(mux, cfg)
+	registerInboxRoutes(mux, cfg)
 	registerWorkItemRoutes(mux, cfg)
 	registerScheduleRoutes(mux, cfg)
 	registerMCPServerRoutes(mux, cfg)
