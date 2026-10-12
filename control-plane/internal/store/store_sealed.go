@@ -33,6 +33,7 @@ var sealedColumns = []SealedColumn{
 	{Table: "tenant_git_oauth", ID: "id", Value: "secret_enc", KeyRef: "key_ref"},
 	{Table: "session_share_proposal", ID: "id", Value: "ciphertext", KeyRef: "key_ref"},
 	{Table: "session_handoff_offer", ID: "id", Value: "ciphertext", KeyRef: "key_ref"},
+	{Table: "inbox_item", ID: "id", Value: "ciphertext", KeyRef: "key_ref"},
 }
 
 // SealedTables lists the tables of sealedColumns, in the order the command walks them.

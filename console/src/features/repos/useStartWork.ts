@@ -15,6 +15,7 @@ import { pushPromptHistory } from "../../lib/promptHistory.ts";
 import { setLaunchSeed } from "../../lib/launchSeed.ts";
 import { useLaunchSeed, useReposStore } from "./store.ts";
 import { useFilesStore } from "../files/store.ts";
+import { useInboxStore } from "../inbox/store.ts";
 import { useSessionsStore } from "../sessions/store.ts";
 import { openSessionChat, openSessionTerminal } from "../sessions/open.ts";
 import type { LaunchOpts, LaunchResult } from "./LaunchModal.tsx";
@@ -89,7 +90,11 @@ export function useStartWork(): (target: StartTarget, opts: LaunchOpts) => Promi
       body.new_branch = newBranch;
       if (useExisting) body.use_existing = true;
     }
-    let res = await apiJSON("api/sessions", "POST", body);
+    // A launch from an inbox request goes through the CP's request launch: the same create
+    // body, but the CP checks the claim first and records the session on the request.
+    const { inboxItemId } = useLaunchSeed.getState();
+    const createPath = inboxItemId ? `api/inbox/items/${encodeURIComponent(inboxItemId)}/launch` : "api/sessions";
+    let res = await apiJSON(createPath, "POST", body);
     // Fleet rebuild lag: a P1.5-generation Agent rejects an explicit driver:"managed"
     // (driver_unsupported). If managed cannot be started, starting on tui is kinder than
     // failing — drop it once, resend, and say so in a toast.
@@ -98,7 +103,7 @@ export function useStartWork(): (target: StartTarget, opts: LaunchOpts) => Promi
       delete body.driver;
       if (!agentOf(kind).caps.tuiEffort) delete body.effort;
       if (!agentOf(kind).caps.tuiStartMode) delete body.mode;
-      res = await apiJSON("api/sessions", "POST", body);
+      res = await apiJSON(createPath, "POST", body);
     }
     if (res && res.error) {
       const code = typeof res.error === "object" ? res.error.code : "";
@@ -166,6 +171,8 @@ export function useStartWork(): (target: StartTarget, opts: LaunchOpts) => Promi
       useFilesStore.getState().bump();
     }
     void refreshSessions();
+    // The request card shows the session the CP just recorded on it.
+    if (inboxItemId) void useInboxStore.getState().refresh();
     (chat ? openSessionChat : openSessionTerminal)(res.name);
     // The created session's name is returned so that accepting a handoff (docs/log/77) can
     // tell the owner WHICH session took it. Callers may look at ok alone.

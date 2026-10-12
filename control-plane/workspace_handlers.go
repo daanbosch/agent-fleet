@@ -999,6 +999,14 @@ func (a workspaceAPI) sessionsList(w http.ResponseWriter, r *http.Request, res *
 // sessionCreate enforces the per-user session quota (docs/16 P3-4) then
 // proxies POST /api/sessions to the Agent.
 func (a workspaceAPI) sessionCreate(w http.ResponseWriter, r *http.Request, res *resolved) {
+	a.sessionCreateThen(w, r, res, nil)
+}
+
+// sessionCreateThen is sessionCreate with one last check, run once the workspace is ready and
+// the quota has passed, immediately before the Agent is asked. A non-nil answer is written
+// instead and the Agent is not called. The inbox's request launch confirms its claim there
+// (inbox_launch.go): any earlier, and a workspace start can outlast the claim.
+func (a workspaceAPI) sessionCreateThen(w http.ResponseWriter, r *http.Request, res *resolved, before func(context.Context) *apiError) {
 	ctx := r.Context()
 	// SSM sessions (docs/log/p3-ssm-session.md): resolve the host bookmark
 	// server-side and rewrite the body with the (non-secret) instance/document/SSO
@@ -1018,6 +1026,12 @@ func (a workspaceAPI) sessionCreate(w http.ResponseWriter, r *http.Request, res 
 	if aerr := a.sessionQuotaExceeded(ctx, res, peekSessionKind(r)); aerr != nil {
 		writeAPIErr(w, aerr)
 		return
+	}
+	if before != nil {
+		if aerr := before(ctx); aerr != nil {
+			writeAPIErr(w, aerr)
+			return
+		}
 	}
 	a.proxy.rest(w, r, res)
 }

@@ -1,6 +1,6 @@
 ---
 audience: "anyone working with other members on the same conversation, or tidying up after themselves"
-updated: "2026-08"
+updated: "2026-10"
 ---
 
 # 09. Working with others, and keeping things tidy
@@ -65,6 +65,41 @@ Both live in the session's ⋯ menu, and they are different things:
 A shared session appears in the other person's **Shared sessions** section and carries a
 **Shared** badge on yours, so you can always see what is visible to someone else.
 Sharing does not give access to your workspace, only to the conversation.
+
+## Asking a teammate: the inbox
+
+The **inbox** button in the top bar (beside the bell) is where members of the same tenant
+send each other a **message** or a **request**. It has its own badge; inbox items never
+appear in the notification centre, and an open request never expires there.
+
+- **Send**: open the inbox → **New**, choose *Request* or *Message*, pick up to 20
+  recipients and write the text (16 KiB at most). The item reaches every recipient or
+  none of them: if one recipient does not accept items from you, nothing is sent and the
+  inbox names who.
+- **A request** is taken by one person. Each recipient can **Take it** or **Decline**;
+  the first to take it becomes the assignee, and everyone else sees who did. The assignee
+  can **Hand back** (it is open again), **Mark done**, start a session from it, and record
+  the PR and final branch by hand. The sender can **Withdraw** it while it is open or
+  taken; work already started is not stopped. A request everybody declined, or that nobody
+  left in the tenant can take, ends as *declined*.
+- **Starting a session from a request** is for the assignee only and runs in your own
+  workspace on your own account. The Control Plane checks that you still hold the request
+  before the session is created, and records which session it was.
+  If it cannot tell whether a session was started (the connection dropped mid-launch), it
+  does not start another: check your sessions, and hand the request back and take it again
+  to start over.
+- **Receiving** (inbox → **Receiving**): accept from everyone in the tenant or from chosen
+  members only, block a sender, or turn on *do not disturb*, which mutes the badge and
+  toasts but still delivers.
+- **Agents never see the inbox.** Nothing in it reaches your agents, and agents cannot send.
+  To have an agent write a request, let it draft a memo and paste it into **New**.
+
+Limits: 20 recipients per item, 30 items per hour per sender, 10 pending items from one
+sender to one recipient. Messages are kept 90 days from sending, requests 90 days after they
+end; a request open for 14 days is marked as long open. Bodies are stored encrypted with the
+tenant key when the deployment has one (the operator can still decrypt them), and
+**Receiving** says so when it does not. Administrators get an audit record of who sent which
+kind of item to whom, never the text.
 
 ## Keeping a session awake
 

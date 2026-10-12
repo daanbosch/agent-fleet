@@ -6,6 +6,13 @@
   未解決の問いは末尾の追記で決着した。
   状態の更新（2026-10-11）: P1-A が満たすべき受信箱の受け入れ条件（P0）を
   [docs/log/130](../log/130-member-inbox-acceptance.md) に書いた。
+  状態の更新（2026-10-12）: P1-A の前半を作った（Issue #1961）。CP の表
+  `inbox_item` / `inbox_participant` / `inbox_mailbox` / `inbox_sender_rule`、`/api/inbox` の下の
+  `withMembership` のルートと専用のストリーム `GET /api/inbox/stream`、Console の受信箱ボタン。
+  本文が決めていなかった点: 担当者が同じ依頼をもう一度引き受けると 200。上限の断り方は
+  400（宛先の数）、413（本文。16 KiB）、429（1 時間の数・組ごとの未処理）。DM は未読のあいだ
+  組の未処理に数える。依頼からの起動は CP のルート `POST /api/inbox/items/{id}/launch` で、
+  ワークスペースを解決する前に担当者かどうかを確かめる。後半（レシピとセッションの添付）は未実装。
 - Tracking: #1840
 - Follow-ups: #1960, #1961, #1962
 - Related: [0057](0057-member-handoff.ja.md)（メンバー間の引き継ぎ：実行は越境しない）/

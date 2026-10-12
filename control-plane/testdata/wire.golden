@@ -1,7 +1,7 @@
 # JSON key sets of the DTOs the Console reads. Generated - do not edit by hand.
 # Update: cd control-plane && go test -run TestWireShapeGolden -update-wire-golden ./...
 # Format: <type>.<key path> <JSON type>[,omitempty] ([]=array / raw=passed-through JSON)
-# count: 258
+# count: 294
 adminSessionRow.alive bool
 adminSessionRow.dir string
 adminSessionRow.email string
@@ -75,6 +75,42 @@ gcpProfilesResponse.profiles[].zone string
 imageInfo.digest string,omitempty
 imageInfo.repo string
 imageInfo.tag string,omitempty
+inboxItemWire.assignedToMe bool
+inboxItemWire.assignee.email string
+inboxItemWire.assignee.removed bool
+inboxItemWire.assignee.userKey string
+inboxItemWire.body string
+inboxItemWire.canClaim bool
+inboxItemWire.createdAt string
+inboxItemWire.delivery string
+inboxItemWire.finalAt string
+inboxItemWire.id string
+inboxItemWire.kind string
+inboxItemWire.longOpen bool
+inboxItemWire.pr.branch string
+inboxItemWire.pr.url string
+inboxItemWire.recipients[].delivery string
+inboxItemWire.recipients[].eligible bool
+inboxItemWire.role string
+inboxItemWire.sender.email string
+inboxItemWire.sender.removed bool
+inboxItemWire.sender.userKey string
+inboxItemWire.seq number
+inboxItemWire.session.branch string
+inboxItemWire.session.by.email string
+inboxItemWire.session.by.removed bool
+inboxItemWire.session.by.userKey string
+inboxItemWire.session.dir string
+inboxItemWire.session.launchedAt string
+inboxItemWire.session.name string
+inboxItemWire.state string
+inboxItemWire.unseen bool
+inboxItemWire.updatedAt string
+inboxMailboxWire.acceptFrom string
+inboxMailboxWire.dnd bool
+inboxMailboxWire.lastSeq number
+inboxMailboxWire.readSeq number
+inboxMailboxWire.unseen number
 memoDTO.attachments[].name string
 memoDTO.attachments[].path string
 memoDTO.body string
