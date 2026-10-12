@@ -163,6 +163,30 @@ func TestLimitBoardVisibility(t *testing.T) {
 			t.Fatalf("roster in pages of %d = %v, want %v", limit, keys, want)
 		}
 	}
+
+	// --- band boundaries, each side of every edge. A member of its own, added after the
+	// roster check; each post is observed a minute after the previous one, because the store
+	// keeps the newer observation and would ignore an older or equal one ---
+	gus := f.addMember("gus")
+	setPublication(t, gus, "tenant", "band")
+	for i, c := range []struct {
+		pct  float64
+		band string
+	}{
+		{0, "lt50"}, {49.9, "lt50"}, {50, "lt80"}, {79.9, "lt80"},
+		{80, "lt95"}, {94.9, "lt95"}, {95, "ge95"}, {100, "ge95"},
+	} {
+		at := now.Add(time.Duration(i-20) * time.Minute)
+		postUsage(t, gus, "claude", epoch, usageWindow("5h", c.pct, now.Add(2*time.Hour), at))
+		raw := boardRaw(t, alice, gus)
+		if strings.Contains(raw, `"usedPct"`) || strings.Contains(raw, `"resetsAt"`) {
+			t.Fatalf("band level at %v%% carries an exact value: %s", c.pct, raw)
+		}
+		u := boardEntryOf(t, alice, gus).unit(t, "claude", "5h")
+		if u.Band != c.band || u.ObservedAt != at.Format(time.RFC3339) {
+			t.Fatalf("%v%% reads band %q observed %s, want %q observed %s", c.pct, u.Band, u.ObservedAt, c.band, at.Format(time.RFC3339))
+		}
+	}
 }
 
 // TestLimitBoardReaperPull feeds the board from a running workspace through the reaper.
