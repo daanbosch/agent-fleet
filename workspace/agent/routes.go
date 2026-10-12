@@ -24,6 +24,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/imagegen"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/mcpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin"
 )
 
 // buildMux returns a mux with every Agent route registered (docs/log/23 P0-2). Keeping it
@@ -472,18 +473,21 @@ func buildMux() *http.ServeMux {
 	mux.HandleFunc("GET /agents/memory/entries/read", memoryx.HandleAgentMemoryRead)
 	mux.HandleFunc("POST /agents/memory/entries", memoryx.HandleAgentMemorySave)
 	mux.HandleFunc("POST /agents/memory/entries/forget", memoryx.HandleAgentMemoryForget)
-	// The member's after-the-fact view of those writes (ADR 0108 decision 8). These two are
-	// for the Console, so control-plane/routes.go relays them.
+	// The member's after-the-fact view of those writes (ADR 0108 decision 8). These are for the
+	// Console, so control-plane/routes.go relays them. The member writes (revert, pin,
+	// member-save) answer only a request carrying the CP's member-origin mark (ADR 0113).
 	mux.HandleFunc("GET /agents/memory/entries/changes", memoryx.HandleAgentMemoryChanges)
 	mux.HandleFunc("GET /agents/memory/entries/diff", memoryx.HandleAgentMemoryChangeDiff)
-	mux.HandleFunc("POST /agents/memory/entries/revert", memoryx.HandleAgentMemoryRevert)
+	mux.Handle("POST /agents/memory/entries/revert", memberorigin.Require(memoryx.MemberWriteMaxRequest, http.HandlerFunc(memoryx.HandleAgentMemoryRevert)))
 	// The member's list of every memory, and the pin (#1703). No MCP tool
 	// reaches the pin route.
 	mux.HandleFunc("GET /agents/memory/entries/list", memoryx.HandleAgentMemoryList)
-	mux.HandleFunc("POST /agents/memory/entries/pin", memoryx.HandleAgentMemoryPin)
+	mux.Handle("POST /agents/memory/entries/pin", memberorigin.Require(memoryx.MemberWriteMaxRequest, http.HandlerFunc(memoryx.HandleAgentMemoryPin)))
 	// The member's read of one body (#1985): names the scope and project directly, not gated by
 	// the agentMemory switch, writes nothing.
 	mux.HandleFunc("GET /agents/memory/entries/member-read", memoryx.HandleAgentMemoryMemberRead)
+	// The member's create/edit (#1997).
+	mux.Handle("POST /agents/memory/entries/member-save", memberorigin.Require(memoryx.MemberWriteMaxRequest, http.HandlerFunc(memoryx.HandleAgentMemoryMemberSave)))
 	mux.HandleFunc("GET /agents/memory/entries/member-search", memoryx.HandleAgentMemoryMemberSearch)
 	mux.HandleFunc("GET /agents/memory/entries/member-latest", memoryx.HandleAgentMemoryMemberLatest)
 	// One-time import of claude's own auto-memory (ADR 0108 decision 6 step 1). Not

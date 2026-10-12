@@ -1005,7 +1005,9 @@ func agentMemSave(c agentMemCaller, req agentMemSaveReq, now time.Time) (agentMe
 	}
 
 	changes := []agentMemChange{{Rel: repoRel, Data: data}}
-	if c.Project != nil && req.Scope == agentMemScopeProject {
+	// The member names a project that already holds memory and has no working copy to describe
+	// it, so the project's record is left as the sessions wrote it.
+	if c.Project != nil && req.Scope == agentMemScopeProject && c.Kind != agentMemMember.Kind {
 		extra, err := agentMemProjectInfoChange(*c.Project)
 		if err != nil {
 			return agentMemWriteResult{}, err

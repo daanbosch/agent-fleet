@@ -13,8 +13,13 @@ package main
 // TestMemoryRoutesMatchAgentRouteTable in internal/memoryx/mux_test.go.
 
 import (
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin/memberorigintest"
 )
 
 func TestMemoryRoutesRegistered(t *testing.T) {
@@ -50,6 +55,27 @@ func TestMemoryP2RoutesRegistered(t *testing.T) {
 		req := httptest.NewRequest(c.method, c.path, nil)
 		if _, pattern := mux.Handler(req); pattern != c.want {
 			t.Errorf("%s %s resolved to %q, want %q", c.method, c.path, pattern, c.want)
+		}
+	}
+}
+
+// The member writes are wrapped in the real route table, not only in memoryx's copy: AGENT_TOKEN
+// and the relay hint alone are refused before any handler runs (ADR 0113).
+func TestMemberWriteRoutesRequireTheMark(t *testing.T) {
+	memberorigintest.Install(t)
+	mux := buildMux()
+	for _, p := range []string{
+		"/agents/memory/entries/pin",
+		"/agents/memory/entries/revert",
+		"/agents/memory/entries/member-save",
+	} {
+		req := httptest.NewRequest(http.MethodPost, p, strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer agent-token")
+		req.Header.Set("X-AF-Relay", "cp")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), memberorigin.CodeRequired) {
+			t.Errorf("%s without a mark: %d %s", p, w.Code, w.Body)
 		}
 	}
 }

@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin/memberorigintest"
 )
 
 func agentMemIndexNames(t *testing.T, c agentMemCaller, budget int) (agentMemIndex, string) {
@@ -249,7 +251,7 @@ func TestAgentMemoryListAndPinRoutes(t *testing.T) {
 	}
 	mux := buildMux()
 	body, _ := json.Marshal(agentMemPinReq{Scope: "user", Name: "user-one", Pinned: true})
-	if w := smokeDo(t, mux, http.MethodPost, "/agents/memory/entries/pin", "", string(body)); w.Code != http.StatusOK {
+	if w := signedDo(t, memberorigintest.Install(t), mux, http.MethodPost, "/agents/memory/entries/pin", string(body)); w.Code != http.StatusOK {
 		t.Fatalf("pin: %d %s", w.Code, w.Body)
 	}
 	smokeDo(t, mux, http.MethodGet, "/agents/memory/entries/read?session=claude-main&name=proj-one", "", "")

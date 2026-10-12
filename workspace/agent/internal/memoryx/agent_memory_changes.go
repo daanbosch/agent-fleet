@@ -31,9 +31,8 @@ const (
 	agentMemChangesMax     = 300
 )
 
-// agentMemMember is the author of a change made from the Console. The CP's relay header is
-// only a hint an agent could also send, so this records the route the change came by, not a
-// verified person.
+// agentMemMember is the author of a change made from the Console. The routes that write as it
+// answer only a request carrying the CP's member-origin mark (memberorigin, ADR 0113).
 var agentMemMember = agentMemCaller{Session: "console", Kind: "member"}
 
 var (
