@@ -97,8 +97,8 @@ func TestMemberHandoff(t *testing.T) {
 	// --- B starts the workspace and launches from the offer (H-7b, H-8, H-10b) ---
 	// The launch takes the existing-branch path (use_existing): it fetches a branch the
 	// working copy has never seen (gitx.EnsureBranchRef), and the offered branch was pushed
-	// after B cloned. The Console's default new-branch-off-the-offered-branch path does not
-	// fetch a missing base yet (#2019), so this scenario does not use it.
+	// after B cloned. The Console's default new-branch path fetches a missing base the same
+	// way (gitx.NewWorktreeStartPoint); its own tests cover it in workspace/agent.
 	// The launched session is a shell so its HEAD can be read from inside it; the kind is
 	// the recipient's choice in the launch dialog and the offer does not depend on it.
 	b.startWorkspace()
