@@ -31,7 +31,7 @@ agent unchanged (§5.3). "CP" means the CP answers it itself, usually from its d
 
 | Group | Representative paths | Handled | Detail |
 |---|---|---|---|
-| identity / tenant | `GET /api/whoami`, `GET /api/tenants`, `GET /api/version`, `GET/DELETE /api/me/login-methods` | CP | [03](03-control-plane.md) |
+| identity / tenant | `GET /api/whoami`, `GET /api/tenants`, `GET /api/version`, `GET/DELETE /api/me/login-methods`, `GET/PATCH /api/me/ui-state` ([ADR 0114](../decisions/0114-member-ui-state-in-the-cp.md)) | CP | [03](03-control-plane.md) |
 | events | `GET /api/events` (SSE; see below) | CP | [ADR 0084](../decisions/0084-engine-indicator-and-tenant-gate.md) |
 | workspace | `GET /api/workspace`, `POST /api/workspace/{start,stop,recreate,clean-home,attention}`, `GET /api/workspace/{stats,machine}` | CP (Runtime). `stats` asks the agent where the CP cannot read the host's cgroup; `machine` merges the agent's measurement with what the configuration declares | [03](03-control-plane.md) |
 | sessions | `GET/POST /api/sessions`; `DELETE /api/sessions/{name}` (to the trash; `?stop=1` stops it first; `POST …/stop` is its old name); lifecycle `POST …/{halt,recreate,archive,restore,fork,start,lock}`; semantic `POST …/{turn,respond,settings,driver,plan-respond,carried-answer}`; terminal `POST …/{input,paste-image}`; `GET …/{status,output,messages,settings,skills,plan-file}`; `POST …/{keep-awake,stop-after-turn,spend-cap}`; `GET …/spend` (the spend budget, #1054); title, branch, marks, translation, handoff proposal; `GET /api/sessions/archived` | create, fork, start and carried-answer are CP handlers (the session quota, auto-start), which then relay. The rest is relayed | [04](04-agent.md) / [ADR 0101](../decisions/0101-session-delete-via-trash.md) |
