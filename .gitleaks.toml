@@ -54,3 +54,12 @@ generic-api-key ルールが `Key=='...'` の右辺を値と読んで拾う。\
 condition = "AND"
 paths = ['''deploy/local/ecs-lifecycle-stub-test\.sh''']
 regexes = ['''SlotAmiIdArm64''']
+
+[[allowlists]]
+description = """The environment entry `AF_KEY_CUSTODIAN=kms` in the e2e CP environment \
+filter test: a setting name and the custodian kind the test proves is dropped, not a key. \
+generic-api-key reads the right-hand side of `..._KEY_...=` as a value. Only that entry is \
+excluded, not the file."""
+condition = "AND"
+paths = ['''e2e/members_local_test\.go''']
+regexes = ['''AF_KEY_CUSTODIAN=kms''']
