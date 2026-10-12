@@ -486,6 +486,7 @@ func buildMux() *http.ServeMux {
 	mux.HandleFunc("GET /agents/memory/entries/member-read", memoryx.HandleAgentMemoryMemberRead)
 	mux.HandleFunc("GET /agents/memory/entries/member-search", memoryx.HandleAgentMemoryMemberSearch)
 	mux.HandleFunc("GET /agents/memory/entries/member-latest", memoryx.HandleAgentMemoryMemberLatest)
+	mux.HandleFunc("GET /agents/memory/entries/member-forgotten", memoryx.HandleAgentMemoryMemberForgotten)
 	// One-time import of claude's own auto-memory (ADR 0108 decision 6 step 1). Not
 	// /agents/memory/import: that is the bundle import of the 0022 history.
 	mux.HandleFunc("GET /agents/memory/claude-import", memoryx.HandleAgentMemoryClaudeSources)

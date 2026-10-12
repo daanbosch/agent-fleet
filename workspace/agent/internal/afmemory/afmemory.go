@@ -34,10 +34,13 @@ Usage:
   af-memory import --project <slug> --dry-run
                                              preview: what an import would do, nothing written
   af-memory import --project <slug>          import every new and updated memory
-  af-memory muse-import-sources              working copies that have muse project memory to import
-  af-memory muse-import --dir <name> --dry-run
+  af-memory muse-import-sources              muse memory directories that can be imported
+  af-memory muse-import --dir <name> [--scope project|personal_project] --dry-run
                                              preview: what a muse import would do, nothing written
-  af-memory muse-import --dir <name>         import every new and updated muse project memory
+  af-memory muse-import --dir <name> [--scope ...]
+                                             import every new and updated muse note
+  af-memory muse-import --scope personal --into-user [--dry-run]
+                                             muse's personal notes, into your user memory
   af-memory export-sources                   AF projects whose memory can be written back to claude
   af-memory export --project <id|name> --dry-run
                                              preview: what a write-back would do, nothing written
@@ -48,10 +51,15 @@ Usage:
 <slug> is a name from import-sources. The import needs "Agent Fleet memory" turned on in
 Settings > Agent memory; a file the secret scan flags is listed and skipped, never imported.
 
-muse-import reads <working copy>/.agents/memory (muse's project scope) only, into that working
-copy's AF project. <name> is a directory name from muse-import-sources. A file git tracks there
-may be shared with teammates; it is marked "shared" in the preview. muse's personal scopes are
-not read. Same switch and secret scan as import.
+muse-import reads one of muse's three stores. project (the default): <working copy>/.agents/memory
+into that working copy's AF project; <name> is the working copy's directory name. A file git
+tracks there may be shared with teammates; it is marked "shared" in the preview.
+personal_project: muse's own directory for a working copy (~/.local/share/muse/memory/projects),
+<name> as listed by muse-import-sources, into that working copy's AF project.
+personal: muse's notes for all projects, into AF's USER scope, which every project reads; it is
+never imported unless you pass --into-user. A note needs no frontmatter: its name is the file
+name ("a/b.md" becomes "a--b"), its description the first non-empty line, and it has no type.
+Same switch and secret scan as import.
 
 export is the other direction, one-shot: new and changed AF memories become files in claude's
 memory directory for the project, MEMORY.md is regenerated, and claude's memory is snapshotted
@@ -228,9 +236,11 @@ func cmdSources(c *Client, out io.Writer) error {
 func cmdMuseSources(c *Client, out io.Writer) error {
 	var res struct {
 		Sources []struct {
+			Scope   string
 			Dir     string
 			Count   int
 			Shared  int
+			Target  string
 			Project *project
 			Reason  string
 		}
@@ -244,14 +254,21 @@ func cmdMuseSources(c *Client, out io.Writer) error {
 		if s.Project != nil {
 			dest = "-> " + s.Project.Display
 		}
+		if s.Target == "user" {
+			dest = "-> your USER memory (every project reads it); only with --into-user"
+		}
 		shared := ""
 		if s.Shared > 0 {
 			shared = fmt.Sprintf("  (%d tracked by git: may be shared with teammates)", s.Shared)
 		}
-		fmt.Fprintf(out, "%-60s %4d files  %s%s\n", s.Dir, s.Count, dest, shared)
+		name := s.Dir
+		if name == "" {
+			name = "(personal)"
+		}
+		fmt.Fprintf(out, "%-16s %-60s %4d files  %s%s\n", s.Scope, name, s.Count, dest, shared)
 	}
 	if len(res.Sources) == 0 {
-		fmt.Fprintln(out, "no muse project memory to import")
+		fmt.Fprintln(out, "no muse memory to import")
 	}
 	if res.Withheld > 0 {
 		fmt.Fprintf(out, "(%d working copy(ies) not listed: the name did not pass the secret scan)\n", res.Withheld)
@@ -278,6 +295,8 @@ type previewItem struct {
 	SourceModified string
 	AFUpdated      string
 	Shared         bool
+	Path           string
+	Derived        bool
 	Findings       []struct {
 		Path, Rule, Hint string
 		Line             int
@@ -285,6 +304,7 @@ type previewItem struct {
 }
 
 type preview struct {
+	Target   string
 	Project  *project
 	Reason   string
 	Items    []previewItem
@@ -302,17 +322,47 @@ func runImport(c *Client, args []string, out io.Writer, sp importSpec) error {
 	fs.SetOutput(io.Discard)
 	slug := fs.String(sp.flag, "", "")
 	dry := fs.Bool("dry-run", false, "")
-	if err := fs.Parse(args); err != nil || fs.NArg() != 0 || *slug == "" {
-		return &usageError{fmt.Sprintf("%s needs --%s <name> (see %s-sources) and optionally --dry-run", sp.cmd, sp.flag, sp.cmd)}
+	var scope string
+	var intoUser bool
+	if sp.cmd == "muse-import" {
+		fs.StringVar(&scope, "scope", "project", "")
+		fs.BoolVar(&intoUser, "into-user", false, "")
+	}
+	err := fs.Parse(args)
+	personal := scope == "personal"
+	if err != nil || fs.NArg() != 0 || (*slug == "") == !personal {
+		return &usageError{fmt.Sprintf("%s needs --%s <name> (see %s-sources) and optionally --dry-run; the muse personal scope takes --scope personal --into-user and no --%s", sp.cmd, sp.flag, sp.cmd, sp.flag)}
+	}
+	if sp.cmd == "muse-import" && scope != "project" && scope != "personal_project" && !personal {
+		return &usageError{"--scope must be project, personal_project or personal"}
+	}
+	if intoUser != personal && sp.cmd == "muse-import" {
+		if personal {
+			return &usageError{"the personal scope lands in your user memory, which every project reads: pass --into-user to say so"}
+		}
+		return &usageError{"--into-user belongs to --scope personal only"}
+	}
+	query := sp.query + "=" + queryEscape(*slug)
+	if sp.cmd == "muse-import" {
+		query += "&scope=" + queryEscape(scope)
+		if intoUser {
+			query += "&into=user"
+		}
 	}
 	var pv preview
-	if err := c.do("GET", sp.base+"/preview?"+sp.query+"="+queryEscape(*slug), nil, &pv); err != nil {
+	if err := c.do("GET", sp.base+"/preview?"+query, nil, &pv); err != nil {
 		return err
 	}
-	if pv.Project == nil {
+	dest := ""
+	switch {
+	case pv.Target == "user" && pv.Reason == "":
+		dest = "your USER memory (every project reads it)"
+	case pv.Project != nil:
+		dest = pv.Project.Display
+	default:
 		return fmt.Errorf("this %s cannot be imported (%s)", sp.what, pv.Reason)
 	}
-	fmt.Fprintf(out, "%s -> %s\n", sp.what, pv.Project.Display)
+	fmt.Fprintf(out, "%s -> %s\n", sp.what, dest)
 	var todo []previewItem
 	for _, st := range []string{"new", "update", "unchanged", "diverged", "forgotten", "secret", "invalid"} {
 		if pv.Counts[st] == 0 {
@@ -334,6 +384,9 @@ func runImport(c *Client, args []string, out io.Writer, sp importSpec) error {
 					note = "  (AF copy was imported with a cut description; refreshed from claude's file)"
 				} else if st == "update" {
 					note += fmt.Sprintf("  (%s file %s is newer than AF %s)", strings.Fields(sp.what)[0], it.SourceModified, it.AFUpdated)
+				}
+				if it.Derived {
+					note += "  (no frontmatter: name from the file name, description from its first line, no type)"
 				}
 				fmt.Fprintf(out, "  %s%s\n", it.Name, note)
 			case "secret":
@@ -362,7 +415,16 @@ func runImport(c *Client, args []string, out io.Writer, sp importSpec) error {
 	imported, skipped := 0, 0
 	for start := 0; start < len(todo); start += importBatch {
 		batch := todo[start:min(start+importBatch, len(todo))]
-		req := map[string]any{"project": pv.Project.ID, sp.reqKey: *slug}
+		req := map[string]any{"project": "", sp.reqKey: *slug}
+		if pv.Project != nil {
+			req["project"] = pv.Project.ID
+		}
+		if sp.cmd == "muse-import" {
+			req["scope"] = scope
+			if intoUser {
+				req["into"] = "user"
+			}
+		}
 		items := []map[string]string{}
 		for _, it := range batch {
 			items = append(items, map[string]string{"name": it.Name, "sourceHash": it.SourceHash})
@@ -371,7 +433,7 @@ func runImport(c *Client, args []string, out io.Writer, sp importSpec) error {
 		var res struct {
 			Results []struct{ Name, Result, Reason string }
 		}
-		if err := c.do("POST", sp.base+"?project="+queryEscape(pv.Project.ID), req, &res); err != nil {
+		if err := c.do("POST", sp.base+"?project="+queryEscape(req["project"].(string)), req, &res); err != nil {
 			fmt.Fprintf(out, "imported %d, skipped %d before the failure\n", imported, skipped)
 			return err
 		}
