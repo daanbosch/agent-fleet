@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/claude"
 )
 
 type museImportEnv struct {
@@ -314,5 +316,105 @@ func TestMuseImportHandlers(t *testing.T) {
 	AgentMemoryEnabled = func() bool { return true }
 	if w := do("POST", "/agents/memory/muse-import", post); w.Code != 200 || !strings.Contains(w.Body.String(), `"imported"`) {
 		t.Errorf("apply on: %d %s", w.Code, w.Body)
+	}
+}
+
+// A repository's own config must not run a command on preview: core.fsmonitor would, for ls-files.
+func TestMuseImportPreviewDoesNotRunFsmonitor(t *testing.T) {
+	e := newMuseImportEnv(t)
+	e.note("team", "shared note", "project", "b")
+	e.git("add", ".agents/memory/team.md")
+	marker := filepath.Join(e.home, "fsmonitor-ran")
+	script := filepath.Join(e.home, "fsm.sh")
+	memoryWrite(t, script, "#!/bin/sh\ntouch "+marker+"\n")
+	if err := os.Chmod(script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.git("config", "core.fsmonitor", script)
+	pv := e.preview()
+	agentMemMuseList()
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("core.fsmonitor ran during preview/list")
+	}
+	if !e.item(pv, "team").Shared {
+		t.Errorf("a tracked file must still be shared")
+	}
+}
+
+// A symlink under ~/repos must not carry the import to a directory outside it.
+func TestMuseImportRefusesSymlinkedWorkingCopy(t *testing.T) {
+	e := newMuseImportEnv(t)
+	outside := filepath.Join(e.home, "outside")
+	memoryWrite(t, filepath.Join(outside, ".agents", "memory", "note.md"), "---\nname: note\ndescription: d\ntype: user\n---\nb\n")
+	if err := os.Symlink(outside, filepath.Join(e.home, "repos", "linked")); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range agentMemMuseList().Sources {
+		if s.Dir == "linked" {
+			t.Errorf("a symlinked working copy was listed: %+v", s)
+		}
+	}
+	if _, err := agentMemMusePreviewFor("linked"); agentMemCode(err) != errCodeMemoryNotFound {
+		t.Errorf("preview: %v", err)
+	}
+	if _, err := agentMemMuseApply(agentMemMuseReq{Project: e.pid, Dir: "linked",
+		Items: []agentMemImportReqItem{{Name: "note"}}}, time.Now()); agentMemCode(err) != errCodeMemoryNotFound {
+		t.Errorf("apply: %v", err)
+	}
+	// A normal "@" worktree still maps to the main project.
+	e.raw(e.wt, "wt.md", "---\nname: wt\ndescription: d\ntype: user\n---\nb\n")
+	pv, err := agentMemMusePreviewFor(filepath.Base(e.wt))
+	if err != nil || pv.Project == nil || pv.Project.ID != e.pid {
+		t.Errorf("worktree preview = %+v, %v", pv, err)
+	}
+}
+
+// The same bytes under another file name are still the memory the member forgot.
+func TestMuseImportForgottenSurvivesRename(t *testing.T) {
+	e := newMuseImportEnv(t)
+	now := time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
+	p := e.note("gone", "d", "user", "b")
+	e.apply(now, "gone")
+	if _, err := agentMemForget(agentMemCallerT(t, "claude-main"), agentMemForgetReq{Name: "gone", Revision: 1}, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(p, filepath.Join(filepath.Dir(p), "renamed.md")); err != nil {
+		t.Fatal(err)
+	}
+	pv := e.preview()
+	if it := e.item(pv, "renamed"); it.Status != claudeImportForgotten {
+		t.Fatalf("renamed = %+v", it)
+	}
+	out := e.apply(now.Add(time.Hour), "renamed")
+	if r := out.Results[0]; r.Result != "skipped" || r.Reason != "status_forgotten" {
+		t.Errorf("renamed result = %+v", r)
+	}
+}
+
+// An AF memory that the claude import wrote is not replaced by a newer muse file of that name.
+func TestMuseImportDoesNotOverwriteClaudeImport(t *testing.T) {
+	e := newMuseImportEnv(t)
+	t0 := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	cp := filepath.Join(claude.ConfigDir(), "projects", claude.ProjectKey(e.clone), "memory", "shared-name.md")
+	memoryWrite(t, cp, "---\nname: shared-name\ndescription: d\nmetadata:\n  type: user\n---\n\nfrom claude\n")
+	_ = os.Chtimes(cp, t0, t0)
+	pv, err := agentMemImportPreviewFor(claude.ProjectKey(e.clone))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := agentMemImportApply(agentMemImportReq{Project: e.pid, Slug: claude.ProjectKey(e.clone),
+		Items: []agentMemImportReqItem{{Name: "shared-name", SourceHash: pv.byName["shared-name"].SourceHash}}}, t0.Add(time.Hour))
+	if err != nil || out.Results[0].Result != "imported" {
+		t.Fatalf("claude import = %+v, %v", out, err)
+	}
+	later := t0.Add(5 * time.Hour)
+	_ = os.Chtimes(e.note("shared-name", "d", "user", "from muse"), later, later)
+	it := e.item(e.preview(), "shared-name")
+	if it.Status != museImportDiverged || it.Reason != "other_source" {
+		t.Fatalf("shared-name = %+v", it)
+	}
+	e.apply(later.Add(time.Hour), "shared-name")
+	if got, _ := agentMemRead(agentMemCallerT(t, "claude-main"), "", "shared-name"); got.Body != "from claude" {
+		t.Errorf("the claude import was overwritten: %+v", got)
 	}
 }

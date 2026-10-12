@@ -346,6 +346,9 @@ type agentMemImportSrc struct {
 	Source string // the AF memory's `source` field
 	Muse   bool   // muse rules: an update only replaces a copy that is still the muse import's own
 	Shared bool   // the file is tracked by git in its working copy
+	// ForgottenHashes (muse): source hashes of memories that no longer exist, so the same bytes
+	// under a new file name are still the forgotten memory.
+	ForgottenHashes map[string]bool
 }
 
 // agentMemImportEvaluate reads one claude file and decides its status. withheld=true: the file
@@ -511,7 +514,7 @@ func agentMemImportEvaluateSrc(mem *os.File, file string, src agentMemImportSrc,
 		default:
 			it.Status = claudeImportUnchanged
 		}
-	case history[stem]:
+	case history[stem] || src.Muse && src.ForgottenHashes[it.SourceHash]:
 		it.Status = claudeImportForgotten
 	default:
 		it.Status = claudeImportNew
