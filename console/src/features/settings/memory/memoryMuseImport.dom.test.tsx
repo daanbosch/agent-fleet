@@ -22,10 +22,21 @@ let host: HTMLDivElement | null = null;
 
 const project = { id: "app-0123456789ab", root: "/r/app", vcs: "git", display: "app" };
 const sources = [
-  { dir: "app", count: 4, shared: 1, project },
-  { dir: "orphan", count: 1, shared: 0, reason: "no_project" },
+  { scope: "project", dir: "app", count: 4, shared: 1, project },
+  { scope: "project", dir: "orphan", count: 1, shared: 0, reason: "no_project" },
+  { scope: "personal_project", dir: "home-app-0123456789abcdef", count: 1, shared: 0, project },
+  { scope: "personal", dir: "", count: 2, shared: 0, target: "user" },
 ];
+const userPreview = {
+  scope: "personal",
+  dir: "",
+  target: "user",
+  counts: { new: 1 },
+  items: [{ name: "likes-go", status: "new", sourceHash: "h9", derived: true }],
+};
 const previewBody = {
+  scope: "project",
+  target: "project",
   dir: "app",
   project,
   counts: { new: 2, diverged: 1, secret: 1 },
@@ -56,10 +67,10 @@ async function mount() {
   await flush();
 }
 
-async function pickSource() {
+async function pickSource(value = "project|app") {
   const sel = host!.querySelector<HTMLSelectElement>("select")!;
   await act(async () => {
-    sel.value = "app";
+    sel.value = value;
     sel.dispatchEvent(new Event("change", { bubbles: true }));
   });
   await flush();
@@ -71,7 +82,11 @@ beforeEach(() => {
   setSetting("locale", "en");
   setSetting("agentMemory", true);
   api.mockImplementation((path: string) =>
-    Promise.resolve(path.startsWith("api/agents/memory/muse-import/preview") ? previewBody : { sources }),
+    Promise.resolve(
+      path.startsWith("api/agents/memory/muse-import/preview")
+        ? path.includes("scope=personal&") ? userPreview : previewBody
+        : { sources },
+    ),
   );
   apiJSON.mockImplementation((_p: string, _m: string, body: { items: { name: string }[] }) =>
     Promise.resolve({ results: body.items.map((i) => ({ name: i.name, result: "imported" })) }),
@@ -92,8 +107,9 @@ describe("MuseImportPanel", () => {
   it("leaves a working copy with no project unselectable", async () => {
     await mount();
     const opts = Array.from(host!.querySelectorAll<HTMLOptionElement>("option"));
-    expect(opts.find((o) => o.value === "app")?.disabled).toBe(false);
-    expect(opts.find((o) => o.value === "orphan")?.disabled).toBe(true);
+    expect(opts.find((o) => o.value === "project|app")?.disabled).toBe(false);
+    expect(opts.find((o) => o.value === "project|orphan")?.disabled).toBe(true);
+    expect(opts.find((o) => o.value === "personal|")?.disabled).toBe(false);
   });
 
   it("warns about files shared through git and marks them", async () => {
@@ -117,7 +133,8 @@ describe("MuseImportPanel", () => {
     const [path, method, body] = apiJSON.mock.calls[0];
     expect(path).toBe("api/agents/memory/muse-import?project=app-0123456789ab");
     expect(method).toBe("POST");
-    expect(body).toMatchObject({ project: "app-0123456789ab", dir: "app" });
+    expect(body).toMatchObject({ scope: "project", project: "app-0123456789ab", dir: "app" });
+    expect(body).not.toHaveProperty("into");
     expect(body.items.map((i: { name: string }) => i.name)).toEqual(["team-note", "my-note"]);
   });
 
@@ -127,5 +144,32 @@ describe("MuseImportPanel", () => {
     await pickSource();
     expect(applyButton().disabled).toBe(true);
     expect(host!.textContent).toContain("Turn on the Agent Fleet memory switch");
+  });
+
+  it("reads and sends the personal scope only after the user-scope box is ticked", async () => {
+    await mount();
+    await pickSource("personal|");
+    // Nothing was requested for the personal scope yet.
+    expect(api.mock.calls.some(([p]) => String(p).includes("preview"))).toBe(false);
+    expect(host!.querySelector(".mem-ci-actions")).toBeNull();
+    const box = host!.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(box.checked).toBe(false);
+    await act(async () => box.click());
+    await flush();
+    expect(api.mock.calls.some(([p]) => p === "api/agents/memory/muse-import/preview?scope=personal&dir=&into=user")).toBe(true);
+    expect(host!.textContent).toContain("no frontmatter");
+    await act(async () => applyButton().click());
+    await flush();
+    const [path, , body] = apiJSON.mock.calls[0];
+    expect(path).toBe("api/agents/memory/muse-import?project=");
+    expect(body).toMatchObject({ scope: "personal", project: "", dir: "", into: "user" });
+  });
+
+  it("sends the scope for a personal project directory", async () => {
+    await mount();
+    await pickSource("personal_project|home-app-0123456789abcdef");
+    expect(
+      api.mock.calls.some(([p]) => p === "api/agents/memory/muse-import/preview?scope=personal_project&dir=home-app-0123456789abcdef"),
+    ).toBe(true);
   });
 });
