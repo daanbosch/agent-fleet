@@ -230,3 +230,20 @@ func TestAgentMemoryMemberLatestFindsChangeOutsideTheWindow(t *testing.T) {
 		}
 	}
 }
+
+// A memory whose file now fails the scan is withheld from member-latest too: the trailers of its
+// commit are clean, but answering would name a memory the list and the search hide.
+func TestAgentMemoryMemberLatestWithholdsSecretFile(t *testing.T) {
+	_, _, _ = agentMemTestEnv(t)
+	c := agentMemCallerT(t, "claude-main")
+	agentMemSaveN(t, c, "leaky-latest", "project", time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC))
+	f := filepath.Join(agentMemDir(), "projects", c.Project.ID, "leaky-latest.md")
+	raw, _ := os.ReadFile(f)
+	if err := os.WriteFile(f, []byte(strings.Replace(string(raw), "\nb\n", "\n"+agentMemFakeAWS()+"\n", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, b := memberDo(t, http.MethodGet, "/agents/memory/entries/member-latest?scope=project&project="+c.Project.ID+"&name=leaky-latest", nil)
+	if code != http.StatusUnprocessableEntity || strings.Contains(string(b), "leaky-latest") || strings.Contains(string(b), c.Project.ID) || strings.Contains(string(b), agentMemFakeAWS()) {
+		t.Fatalf("latest of a leaky memory: %d %s", code, b)
+	}
+}

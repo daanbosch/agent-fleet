@@ -200,10 +200,31 @@ func agentMemMemberLatest(scope, project, name string) (agentMemChangeView, erro
 	if err != nil {
 		return agentMemChangeView{}, err
 	}
-	v, _, pid, ok := agentMemChangeFrom(commit, strings.TrimSpace(at), body)
+	v, rel2, pid, ok := agentMemChangeFrom(commit, strings.TrimSpace(at), body)
 	if !ok {
 		return agentMemChangeView{}, memoryErrf(http.StatusUnprocessableEntity, errCodeMemorySecretDetected,
 			"the newest change of this memory is withheld: a value in it failed the scan or the expected form")
+	}
+	// The trailers say nothing about the text. A live file that fails the scan (or cannot be read)
+	// is withheld like the list does, and so is a forgotten memory whose earlier text would: the
+	// answer then names nothing.
+	withheld := memoryErrf(http.StatusUnprocessableEntity, errCodeMemorySecretDetected,
+		"this memory is withheld: its text looks like it contains a secret or cannot be checked")
+	exists := false
+	if dir, derr := agentMemCheckDir(filepath.ToSlash(filepath.Dir(rel2)), false); derr == nil {
+		l, ok, lerr := agentMemLoadFile(filepath.Join(dir, name+".md"), scope, name)
+		if lerr != nil || l.Withheld {
+			return agentMemChangeView{}, withheld
+		}
+		exists = ok
+	} else if !os.IsNotExist(derr) {
+		return agentMemChangeView{}, withheld
+	}
+	if !exists {
+		before, beforeOK, _, _, serr := agentMemSides(commit, rel2)
+		if serr == nil && beforeOK && len(agentMemScanText("memory", string(before))) > 0 {
+			return agentMemChangeView{}, withheld
+		}
 	}
 	if pid != "" {
 		v.Project = agentMemProjectInfo(pid)

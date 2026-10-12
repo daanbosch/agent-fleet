@@ -114,7 +114,17 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
   const inScope = (rows ?? []).filter((m) => scopeKey(m) === scope);
   const byField = (m: MemoryListed) =>
     `${m.name}\n${m.description}\n${m.type ?? ""}\n${m.authorKind}\n${m.authorSession}`.toLowerCase().includes(q);
-  const shown = q ? inScope.filter((m) => byField(m) || snippets.has(scopeKey(m) + "/" + m.name)) : inScope;
+  const keyOf = (m: { scope: string; project?: { id: string }; name: string }) => scopeKey(m) + "/" + m.name;
+  const fieldRows = inScope.filter(byField);
+  const seen = new Set(fieldRows.map(keyOf));
+  const byKey = new Map(inScope.map((m) => [keyOf(m), m]));
+  const bodyRows = hits.flatMap((h) => {
+    const m = byKey.get(keyOf(h));
+    if (!m || seen.has(keyOf(h))) return [];
+    seen.add(keyOf(h));
+    return [m];
+  });
+  const shown = q ? [...fieldRows, ...bodyRows] : inScope;
   const gone = forgotten.filter((c) => scopeKey(c) === scope);
   const who = (m: { authorKind: string; authorSession: string }) =>
     m.authorKind === "member" ? tr("mem.af_by_member") : `${m.authorKind} · ${m.authorSession}`;

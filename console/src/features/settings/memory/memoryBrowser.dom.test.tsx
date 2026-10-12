@@ -194,6 +194,41 @@ describe("MemoryBrowserPanel", () => {
     expect(document.body.querySelectorAll(".mem-br-row")[0].textContent).not.toContain("the zebra rule");
   });
 
+  it("orders body-only hits by the server's rank, after the instant field matches", async () => {
+    const more = [
+      ...entries,
+      { ...entries[0], name: "second", description: "other", authorKind: "codex", authorSession: "c1" },
+      { ...entries[0], name: "third", description: "other", authorKind: "codex", authorSession: "c2" },
+    ];
+    const base = api.getMockImplementation()!;
+    api.mockImplementation(async (url: string) => {
+      if (url.startsWith("api/agents/memory/entries/list")) return { entries: more };
+      if (url.startsWith("api/agents/memory/entries/member-search"))
+        return { hits: [{ ...more[3], snippets: ["zebra 3"] }, { ...more[2], snippets: ["zebra 2"] }, { ...more[0], snippets: ["zebra 1"] }] };
+      return base(url);
+    });
+    await act(async () => root!.unmount());
+    root = createRoot(host!);
+    await act(async () => {
+      root!.render(
+        <ToastProvider>
+          <ConfirmProvider>
+            <MemoryBrowserPanel reload={0} onChanged={() => {}} />
+          </ConfirmProvider>
+        </ToastProvider>,
+      );
+    });
+    await flush();
+    await setValue(document.body.querySelector<HTMLInputElement>('input[type="search"]')!, "zebra");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 400));
+    });
+    await flush();
+    const names = Array.from(document.body.querySelectorAll(".mem-br-row .mem-af-name")).map((e) => e.textContent);
+    // listed order is rules, second, third; the server ranked third, second, rules
+    expect(names).toEqual(["third", "second", "rules"]);
+  });
+
   it("scopes the body search to the selected project", async () => {
     await setValue(select(), "project:" + project.id);
     await setValue(document.body.querySelector<HTMLInputElement>('input[type="search"]')!, "zebra");
