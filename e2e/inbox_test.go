@@ -189,9 +189,9 @@ func noInboxFleet(t *testing.T) *memberFleet {
 func TestInboxAccess(t *testing.T) {
 	t.Parallel()
 	f := noInboxFleet(t)
-	t2 := f.addTenant("t2")
+	t2 := f.addTenant()
 	a, b, c, gone := f.addMember("alice"), f.addMember("bob"), f.addMember("carol"), f.addMember("erin")
-	dave := f.addMemberTo(t2, "dave")
+	dave := f.addMemberIn(t2, "dave")
 	gone.remove()
 	const secret = "A-10 body text that must never reach the audit log"
 	it := a.send("request", secret, b)
@@ -305,9 +305,9 @@ func TestInboxAccess(t *testing.T) {
 func TestInboxTenants(t *testing.T) {
 	t.Parallel()
 	f := noInboxFleet(t)
-	t2 := f.addTenant("t2")
+	t2 := f.addTenant()
 	a, b := f.addMember("alice"), f.addMember("bob")
-	a2, b2 := f.addMemberTo(t2, "alice"), f.addMemberTo(t2, "bob")
+	a2, b2 := a.joinTenant(t2), b.joinTenant(t2)
 	noWorkspace := func(m *member, when string) {
 		t.Helper()
 		if n := f.count(`SELECT count(*) FROM workspace WHERE membership_id=?`, m.membershipID()); n != 0 {
@@ -406,16 +406,16 @@ func TestInboxReceiveControlsAndLimits(t *testing.T) {
 			t.Fatalf("A-6 (%s): carol got %d items from a refused send", why, n)
 		}
 	}
-	b.call(http.MethodPut, "/api/inbox/settings", map[string]any{"acceptFrom": "chosen", "allowed": []string{c.key}}, 200)
+	b.putJSON("/api/inbox/settings", map[string]any{"acceptFrom": "chosen", "allowed": []string{c.key}}, 200)
 	refused("chosen members")
-	b.call(http.MethodPut, "/api/inbox/settings", map[string]any{"acceptFrom": "tenant"}, 200)
-	b.call(http.MethodPut, "/api/inbox/blocks/"+a.key, nil, 200)
+	b.putJSON("/api/inbox/settings", map[string]any{"acceptFrom": "tenant"}, 200)
+	b.putJSON("/api/inbox/blocks/"+a.key, nil, 200)
 	refused("block")
 	b.call(http.MethodDelete, "/api/inbox/blocks/"+a.key, nil, 200)
 	a.send("request", "A-6 after unblock", b, c) // the positive control: the same send goes through
 
 	// A-7: carol turns on do-not-disturb. Delivery is unchanged, nothing is declined.
-	c.call(http.MethodPut, "/api/inbox/settings", map[string]any{"acceptFrom": "tenant", "dnd": true}, 200)
+	c.putJSON("/api/inbox/settings", map[string]any{"acceptFrom": "tenant", "dnd": true}, 200)
 	dm, rq := a.send("dm", "A-7 dm", c), a.send("request", "A-7 request", c)
 	l := c.inbox()
 	if !l.Mailbox.DND {
@@ -670,7 +670,7 @@ func TestInboxMemberRemoval(t *testing.T) {
 	b.mustAct(m4a.ID, "claim", 200)
 	m4b := a.send("request", "M-4 (b)", b)
 	b.mustAct(m4b.ID, "claim", 200)
-	b.call(http.MethodPut, "/api/inbox/blocks/"+a.key, nil, 200)
+	b.putJSON("/api/inbox/blocks/"+a.key, nil, 200)
 	requireState(m4a.ID, "open", "M-4 (a)")
 	if got, ok := b.inboxFind(m4a.ID); ok && (got.CanClaim || got.AssignedToMe) {
 		t.Fatalf("M-4 (a): bob still has it waiting: %+v", got)

@@ -13,6 +13,9 @@
 //
 //	f := startMemberFleet(t)              // CP + tenant; the image check runs here
 //	a, b := f.addMember("alice"), f.addMember("bob")
+//	other := f.addTenant()                // a second tenant on the same CP
+//	b2 := b.joinTenant(other)             // bob's membership there: same identity, own client
+//	c := f.addMemberIn(other, "carol")    // a member of that tenant only
 //	a.startWorkspace()                    // each member's container is its own
 //	got := a.getJSON("/api/...")          // or a.postJSON / a.do for any status
 //	a.shell(session, "git ...")           // run a command in a shell session, read its output
@@ -60,21 +63,21 @@ type memberFleet struct {
 	members []*member
 }
 
-// member is one identity's client: every request carries its email header and the
-// fleet's tenant.
+// member is one membership's client: every request carries the identity's email header
+// and the membership's tenant.
 type member struct {
 	f      *memberFleet
 	t      *testing.T
 	name   string
 	email  string
 	key    string // the user key the CP derived from the email (also the home dir name)
-	tenant string // the X-AF-Tenant every request carries; "" for the admin
+	tenant string // the slug sent as X-AF-Tenant; "" for the admin
 	cmds   int    // shell() call counter, for unique output file names
 }
 
 // startMemberFleet starts the CP with AUTH=proxy and creates this test's tenant. Docker and
 // the workspace image are required (a skip without them, a failure under E2E_REQUIRE=1).
-// env adds KEY=VAL entries to the CP environment (cpReachableEnv, for one).
+// env adds KEY=VAL entries to the CP environment (a short reaper sweep, or cpReachableEnv).
 func startMemberFleet(t *testing.T, env ...string) *memberFleet {
 	t.Helper()
 	image := envOr("WS_IMAGE", "agent-fleet/workspace:dev")
@@ -103,7 +106,6 @@ func bootMemberFleet(t *testing.T, image string, env ...string) *memberFleet {
 	return f
 }
 
-// createTenant creates a tenant as the super_admin.
 func (f *memberFleet) createTenant(slug string) {
 	f.t.Helper()
 	created := f.admin.postJSON("/api/admin/tenants", map[string]any{"slug": slug, "name": "e2e " + slug}, 200)
@@ -112,15 +114,16 @@ func (f *memberFleet) createTenant(slug string) {
 	}
 }
 
-// addTenant creates one more tenant, named after the fleet's, and returns its slug.
-func (f *memberFleet) addTenant(suffix string) string {
+// addTenant creates another tenant on the same CP and returns its slug. The slug extends the
+// fleet's, so teardown's per-slug names stay unique to this test.
+func (f *memberFleet) addTenant() string {
 	f.t.Helper()
-	slug := f.slug + "-" + suffix
+	slug := f.slug + "x" + randHex(f.t, 2)
 	f.createTenant(slug)
 	return slug
 }
 
-// workspaceNames lists the af-ws-/af-net- suffixes of every member, for teardown.
+// workspaceNames lists the af-ws-/af-net- suffixes of every membership, for teardown.
 func (f *memberFleet) workspaceNames() []string {
 	out := make([]string, 0, len(f.members))
 	for _, m := range f.members {
@@ -133,34 +136,40 @@ func (f *memberFleet) workspaceNames() []string {
 // the directories its workspace will mount. The workspace itself is not started.
 func (f *memberFleet) addMember(name string) *member {
 	f.t.Helper()
-	return f.addMemberTo(f.slug, name)
+	return f.addMemberIn(f.slug, name)
 }
 
-// addMemberTo is addMember into another tenant (addTenant). The same name in two tenants
-// is one person with two memberships: two clients, one email, each sending its own
-// X-AF-Tenant.
-func (f *memberFleet) addMemberTo(slug, name string) *member {
+// addMemberIn is addMember for another tenant of the fleet (addTenant).
+func (f *memberFleet) addMemberIn(slug, name string) *member {
 	f.t.Helper()
-	m := &member{f: f, t: f.t, name: name, email: name + "@" + emailDomain, tenant: slug}
-	if slug != f.slug {
-		m.name = name + "@" + slug
-	}
-	m.key = f.invite(slug, m.email)
+	return f.invite(&member{f: f, t: f.t, name: name, email: name + "@" + emailDomain, tenant: slug})
+}
+
+// joinTenant invites m's identity into the tenant slug as a plain member too, and returns
+// the client for that membership. Its workspace is a separate one, not started.
+func (m *member) joinTenant(slug string) *member {
+	m.t.Helper()
+	return m.f.invite(&member{f: m.f, t: m.t, name: m.name + "@" + slug, email: m.email, tenant: slug})
+}
+
+func (f *memberFleet) invite(m *member) *member {
+	f.t.Helper()
+	m.key = f.inviteKey(m.tenant, m.email)
 	// manager.workspaceNames: a non-default tenant's workspace lives at <WS_DATA>/<slug>/<key>.
-	prepareWorkspaceDirs(f.t, filepath.Join(f.dataDir, slug, m.key))
+	prepareWorkspaceDirs(f.t, filepath.Join(f.dataDir, m.tenant, m.key))
 	f.members = append(f.members, m)
 	return m
 }
 
-// invite adds (or restores) the membership of email in slug and returns its user key.
-func (f *memberFleet) invite(slug, email string) string {
+// inviteKey adds (or restores) the membership of email in slug and returns its user key.
+func (f *memberFleet) inviteKey(slug, email string) string {
 	f.t.Helper()
 	got := f.admin.postJSON("/api/admin/memberships", map[string]any{
 		"email": email, "tenant_slug": slug, "role": "member",
 	}, 200)
 	key, _ := got["user_key"].(string)
 	if key == "" {
-		f.t.Fatalf("add membership %s: no user_key in %v", email, got)
+		f.t.Fatalf("add membership %s to %s: no user_key in %v", email, slug, got)
 	}
 	return key
 }
@@ -176,7 +185,7 @@ func (m *member) remove() {
 // reinvite restores a removed membership the way the admin does, by inviting again.
 func (m *member) reinvite() {
 	m.t.Helper()
-	if key := m.f.invite(m.tenant, m.email); key != m.key {
+	if key := m.f.inviteKey(m.tenant, m.email); key != m.key {
 		m.t.Fatalf("%s: re-invite returned user key %q, want %q", m.name, key, m.key)
 	}
 }
@@ -269,6 +278,11 @@ func (m *member) getJSON(path string) map[string]any {
 func (m *member) postJSON(path string, body any, want int) map[string]any {
 	m.t.Helper()
 	return m.call(http.MethodPost, path, body, want)
+}
+
+func (m *member) putJSON(path string, body any, want int) map[string]any {
+	m.t.Helper()
+	return m.call(http.MethodPut, path, body, want)
 }
 
 // apiErr returns the error code of an {"error":{"code":…}} body, or "".
