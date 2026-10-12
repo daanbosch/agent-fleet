@@ -6,7 +6,7 @@
   （`control-plane/member_origin.go`）、Agent が検証して（`workspace/agent/internal/memberorigin`）、
   メンバー専用のメモリ書き込みに印を必須とした。**エンドツーエンドでは未検証**：実装した Workspace では
   実際の CP↔Agent を動かせなかった。両側は共通のワイヤーベクタでテストしている。
-- Tracking: #1997。関連：[0108](0108-af-owned-agent-memory.ja.md) 決定 4・8（スイッチと、承認手順が境界に
+- Tracking: #1997。Follow-ups: #2014。関連：[0108](0108-af-owned-agent-memory.ja.md) 決定 4・8（スイッチと、承認手順が境界に
   ならない理由）／[0102](0102-aws-login-through-the-console.ja.md)（ルートが呼び手を区別できないときに結果を
   人の操作に結び付ける）／[07-security §7.2・§7.5](../build/07-security.ja.md)。
 

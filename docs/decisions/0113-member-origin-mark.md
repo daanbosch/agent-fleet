@@ -6,7 +6,7 @@ English | [日本語](0113-member-origin-mark.ja.md)
   (`control-plane/member_origin.go`), the Agent verifies (`workspace/agent/internal/memberorigin`) and
   requires the mark on the member-only memory writes. **Not verified end to end**: no real CP↔Agent run
   was possible in the workspace this was built in; both halves are tested against a shared wire vector.
-- Tracking: #1997. Related: [0108](0108-af-owned-agent-memory.md) decisions 4 and 8 (the switch, and why an
+- Tracking: #1997. Follow-ups: #2014. Related: [0108](0108-af-owned-agent-memory.md) decisions 4 and 8 (the switch, and why an
   approval step is not a boundary) / [0102](0102-aws-login-through-the-console.md) (binding a result to a
   person's press when a route cannot tell who called it) / [07-security §7.2, §7.5](../build/07-security.md#75-cp--agent-authentication).
 
