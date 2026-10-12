@@ -89,7 +89,7 @@ func relayLogPath(p string) string {
 // query (a slug or working copy name the Agent has not scanned yet).
 func relayLogErr(path string, err error) error {
 	var ue *url.Error
-	if (strings.HasPrefix(path, "/api/gcp-login/")) && errors.As(err, &ue) {
+	if (strings.HasPrefix(path, "/api/gcp-login/") || strings.HasPrefix(path, "/api/agents/memory/")) && errors.As(err, &ue) {
 		return fmt.Errorf("%s: %w", ue.Op, ue.Err)
 	}
 	return err
