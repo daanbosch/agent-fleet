@@ -255,18 +255,27 @@ func TestHandoffTakeConfirmFencesAStaleTake(t *testing.T) {
 			ok, err = st.AcceptSessionHandoffOffer(ctx, held.ID, f.recipient.ID, "slow", NowTS(), "late-but-fine")
 			must(true, ok, err, "the slow launch accepts")
 
-			// The way out of a take whose Console died after its create: the recipient declines.
-			stuck := f.offer(t, "")
-			if _, err := st.CreateSessionHandoffOffer(ctx, stuck); err != nil {
+			// Another tab of the recipient declining does not prove the confirmed create
+			// stopped: a decline would let the sender launch without withdrawing.
+			slow := f.offer(t, "")
+			if _, err := st.CreateSessionHandoffOffer(ctx, slow); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := st.TakeSessionHandoffOffer(ctx, stuck.ID, f.recipient.ID, "dead", old); err != nil {
+			if _, err := st.TakeSessionHandoffOffer(ctx, slow.ID, f.recipient.ID, "tab-1", old); err != nil {
 				t.Fatal(err)
 			}
-			ok, err = st.ConfirmSessionHandoffTake(ctx, stuck.ID, f.recipient.ID, "dead", old)
+			ok, err = st.ConfirmSessionHandoffTake(ctx, slow.ID, f.recipient.ID, "tab-1", old)
 			must(true, ok, err, "confirm")
-			ok, err = st.TransitionSessionHandoffOffer(ctx, stuck.ID, "pending", "declined", NowTS(), "")
-			must(true, ok, err, "the recipient declines past their own stale take")
+			ok, err = st.TransitionSessionHandoffOffer(ctx, slow.ID, "pending", "declined", NowTS(), "")
+			must(false, ok, err, "tab 2 declines a confirmed take past the window")
+			// An unconfirmed stale take does yield to a decline.
+			ok, err = st.ReleaseSessionHandoffOffer(ctx, slow.ID, f.recipient.ID, "tab-1")
+			must(true, ok, err, "release")
+			if _, err := st.TakeSessionHandoffOffer(ctx, slow.ID, f.recipient.ID, "tab-3", old); err != nil {
+				t.Fatal(err)
+			}
+			ok, err = st.TransitionSessionHandoffOffer(ctx, slow.ID, "pending", "declined", NowTS(), "")
+			must(true, ok, err, "decline past an unconfirmed stale take")
 		})
 	}
 }
@@ -293,6 +302,70 @@ func TestHandoffTokenlessAcceptNeverSettlesATake(t *testing.T) {
 			if ok, err := st.AcceptSessionHandoffOffer(ctx, o.ID, f.recipient.ID, "new-tab", NowTS(), "new-tab-session"); err != nil || !ok {
 				t.Fatalf("the take's own accept: ok=%v err=%v", ok, err)
 			}
+		})
+	}
+}
+
+// Unsharing revokes at once: the body is erased and the offer leaves the inbox. An offer whose
+// take is confirmed keeps its status and take, though: expiring it would let the sender's own
+// launch skip the withdraw while the recipient's session starts. A fence that has not been
+// passed yet loses to the unshare, as before.
+func TestHandoffUnshareKeepsAConfirmedLaunchFenced(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range inboxStores(t) {
+		t.Run(name, func(t *testing.T) {
+			f := newHandoffFixtureOn(t, st)
+			must := func(want, ok bool, err error, what string) {
+				t.Helper()
+				if err != nil || ok != want {
+					t.Fatalf("%s: ok=%v err=%v, want %v", what, ok, err, want)
+				}
+			}
+			o := f.offer(t, "")
+			if _, err := st.CreateSessionHandoffOffer(ctx, o); err != nil {
+				t.Fatal(err)
+			}
+			ok, err := st.TakeSessionHandoffOffer(ctx, o.ID, f.recipient.ID, "tok", NowTS())
+			must(true, ok, err, "take")
+			ok, err = st.ConfirmSessionHandoffTake(ctx, o.ID, f.recipient.ID, "tok", NowTS())
+			must(true, ok, err, "confirm")
+			if err := st.DeleteSessionShare(ctx, f.sessionShareRow.ID, f.owner.ID); err != nil {
+				t.Fatal(err)
+			}
+			got, _, _ := st.GetSessionHandoffOffer(ctx, o.ID)
+			if got.Status != "pending" || got.TakeConfirmedAt == "" || got.Ciphertext != "" {
+				t.Fatalf("after the unshare during a confirmed launch: %+v, want pending, still taken, body erased", got)
+			}
+			if inbox, err := st.ListSessionHandoffOffersByRecipient(ctx, f.recipient.ID); err != nil || len(inbox) != 0 {
+				t.Fatalf("inbox=%v err=%v, want empty after the unshare", inbox, err)
+			}
+			ok, err = st.TransitionSessionHandoffOffer(ctx, o.ID, "pending", "withdrawn", NowTS(), "")
+			must(false, ok, err, "the sender withdraws the unshared, confirmed launch")
+			// The launch failed after all: giving it back expires it, since the share is gone.
+			ok, err = st.ReleaseSessionHandoffOffer(ctx, o.ID, f.recipient.ID, "tok")
+			must(true, ok, err, "release")
+			if got, _, _ := st.GetSessionHandoffOffer(ctx, o.ID); got.Status != "expired" || got.DecidedAt == "" {
+				t.Fatalf("after release: %+v, want expired", got)
+			}
+
+			// Re-share, then unshare before the fence: the offer expires and the create is refused.
+			if err := st.PutSessionShare(ctx, f.sessionShareRow); err != nil {
+				t.Fatal(err)
+			}
+			early := f.offer(t, "")
+			if _, err := st.CreateSessionHandoffOffer(ctx, early); err != nil {
+				t.Fatal(err)
+			}
+			ok, err = st.TakeSessionHandoffOffer(ctx, early.ID, f.recipient.ID, "early", NowTS())
+			must(true, ok, err, "take")
+			if err := st.DeleteSessionShare(ctx, f.sessionShareRow.ID, f.owner.ID); err != nil {
+				t.Fatal(err)
+			}
+			if got, _, _ := st.GetSessionHandoffOffer(ctx, early.ID); got.Status != "expired" {
+				t.Fatalf("an unconfirmed take kept the offer through the unshare: %+v", got)
+			}
+			ok, err = st.ConfirmSessionHandoffTake(ctx, early.ID, f.recipient.ID, "early", NowTS())
+			must(false, ok, err, "the create after the unshare")
 		})
 	}
 }

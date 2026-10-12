@@ -102,7 +102,7 @@ func (s *SQL) ListSessionHandoffOffersByOwner(ctx context.Context, membershipID 
 // declined one may simply disappear.
 func (s *SQL) ListSessionHandoffOffersByRecipient(ctx context.Context, membershipID string) ([]SessionHandoffOffer, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+handoffOfferCols+` FROM session_handoff_offer
-		WHERE recipient_membership_id=? AND status='pending'
+		WHERE recipient_membership_id=? AND status='pending' AND ciphertext<>''
 		  AND EXISTS (SELECT 1 FROM shared_session_catalog c
 		              WHERE c.id=session_handoff_offer.catalog_id AND c.archived=0)
 		ORDER BY created_at DESC`, membershipID)
@@ -151,10 +151,11 @@ const handoffNotHeld = ` AND (take_token='' OR (take_confirmed_at='' AND taken_a
 // From pending, what a take blocks depends on who decides:
 //   - accepted without a token (a Console from before the take) lands only on an offer
 //     nobody has taken, so it can never settle or erase another launch's take;
-//   - declined is the recipient's own call and passes their own stale take, confirmed or
-//     not — the way out of a take whose Console died after its create;
-//   - withdrawn and expired wait for any take that holds (handoffNotHeld): a confirmed take
-//     never yields to them, because its session may already exist (ADR 0057 decision 6).
+//   - withdrawn, declined and expired wait for any take that holds (handoffNotHeld): a
+//     confirmed take never yields to them, because its session may already exist and the
+//     sender reads any decided status as "launch without withdrawing" (ADR 0057 decision 6).
+//     Being the recipient proves nothing about the earlier create, so the recipient's own
+//     decline does not pass it either.
 func (s *SQL) TransitionSessionHandoffOffer(ctx context.Context, id, from, to, decidedAt, acceptedSessionName string) (bool, error) {
 	body := `''`
 	if to == "accepted" {
@@ -168,9 +169,6 @@ func (s *SQL) TransitionSessionHandoffOffer(ctx context.Context, id, from, to, d
 		switch to {
 		case "accepted":
 			q += ` AND take_token=''`
-		case "declined":
-			q += ` AND (take_token='' OR taken_at<=?)`
-			args = append(args, handoffTakeStale())
 		default:
 			q += handoffNotHeld
 			args = append(args, handoffTakeStale())
@@ -223,14 +221,20 @@ func (s *SQL) ConfirmSessionHandoffTake(ctx context.Context, id, recipientMember
 }
 
 // ReleaseSessionHandoffOffer gives a take back after a launch that failed or was abandoned,
-// so the offer is pending and decidable again. Only the take's own token releases it.
+// so the offer is pending and decidable again. Only the take's own token releases it. An
+// offer whose share was revoked while its take was confirmed (body already erased by
+// invalidateUnauthorizedShareDerivatives) expires instead: nobody may take it any more.
 func (s *SQL) ReleaseSessionHandoffOffer(ctx context.Context, id, recipientMembershipID, token string) (bool, error) {
 	if token == "" {
 		return false, nil
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE session_handoff_offer SET take_token='',taken_at='',take_confirmed_at=''
+	now := NowTS()
+	res, err := s.db.ExecContext(ctx, `UPDATE session_handoff_offer
+		SET take_token='',taken_at='',take_confirmed_at='',
+		    status=CASE WHEN ciphertext='' THEN 'expired' ELSE status END,
+		    decided_at=CASE WHEN ciphertext='' THEN ? ELSE decided_at END
 		WHERE id=? AND recipient_membership_id=? AND status='pending' AND take_token=?`,
-		id, recipientMembershipID, token)
+		now, id, recipientMembershipID, token)
 	if err != nil {
 		return false, err
 	}

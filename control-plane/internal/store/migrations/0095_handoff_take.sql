@@ -11,7 +11,9 @@
 -- Agent: the commit point. A confirmed take holds until its holder accepts or releases it. An
 -- unconfirmed take older than the take window (store.HandoffTakeWindow) no longer holds the
 -- offer against the sender: it covers a Console that closed before launching, and if that
--- Console wakes up later its create fails the confirm instead of starting the work.
+-- Console wakes up later its create fails the confirm instead of starting the work. A
+-- confirmed take is never decided under: withdraw, decline and expiry wait for it, and an
+-- unshare erases the body but keeps the take.
 --
 -- Forward compatible: the columns default to '', which every existing row reads as untaken.
 ALTER TABLE session_handoff_offer ADD COLUMN take_token TEXT NOT NULL DEFAULT '';
