@@ -5,6 +5,7 @@
 - 状態: **採用・未実装**（2026-08-24）。設計と実装段階は [docs/77](../log/77-member-handoff.md)。
   状態の更新（2026-09-24）: P0 は実装済み——差し出し・撤回・受諾・辞退、push ゲート、受信箱（PR #175・2026-08-24、修正 #176。`control-plane/session_handoff.go`・`control-plane/internal/store/store_handoff.go`・`console/src/features/sharing/HandoffInboxModal.tsx`）。P1〜P3（docs/77 §77.14）は作っていない。実フリートで 2 アカウントを使った通し確認は docs/77 に記録が無い。
   状態の更新（2026-09-25）: P1〜P3 はきっかけを待つ——実フリートで 2 アカウントを使った最初の通し確認。P1〜P3 はその通しで分かったことから決める。
+  追記（2026-10-13・#2020）: 受け手は起動の後に受諾を報告するのではなく、セッションを作る前に申し出を確保（take）する。確保は条件付き更新（`POST /api/session-handoff-offers/{id}/take`）で、保持中は送り手の撤回（決定 6 の、送り手自身の起動に伴う自動撤回も）を通さず、撤回が先に着地していれば失敗する。セッション作成は確保を携え、CP は Agent へ依頼する直前にそれを確定する。起動に失敗したら返し（`…/release`）、成功したら確保のトークンで受諾する。未確定の確保は `store.HandoffTakeWindow`（10 分）を過ぎると効力を失うので、起動前に閉じた Console が申し出を握り続けることはなく、後で再開してもその作成は拒否される（`handoff_take_lost`）。確定した確保は受諾か返却まで保持する——撤回・辞退・期限切れはそれを待ち、共有解除は本文を消すが確保は残す（Console が戻らなかった確定済みの確保の照合は #2040）。決定 3 は変わらない——セッションは受け手自身の Console が通常の起動経路で作り、CP は確保を記録するだけ。
 - 関連: [59-session-sharing.md](../log/59-session-sharing.md)（土台の ACL・本文凍結・失効の規律。ADR は無く
   設計ドキュメントが正） /
   [0041-cross-session-messaging.md](0041-cross-session-messaging.ja.md)（同一 Workspace 内のメッセージ。

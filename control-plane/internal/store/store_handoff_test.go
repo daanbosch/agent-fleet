@@ -29,6 +29,14 @@ func newHandoffFixture(t *testing.T) handoffFixture {
 	if err := st.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
+	return newHandoffFixtureOn(t, st)
+}
+
+// newHandoffFixtureOn builds the fixture on an already migrated store, so a test can run it
+// on SQLite and Postgres alike (inboxStores).
+func newHandoffFixtureOn(t *testing.T, st *SQL) handoffFixture {
+	t.Helper()
+	ctx := context.Background()
 	tn, _ := st.EnsureDefaultTenant(ctx)
 	oid, _ := st.UpsertIdentity(ctx, "owner@example.com", "owner", "")
 	rid, _ := st.UpsertIdentity(ctx, "recipient@example.com", "recipient", "")

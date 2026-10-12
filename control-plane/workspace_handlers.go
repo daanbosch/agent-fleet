@@ -1003,7 +1003,18 @@ func (a workspaceAPI) sessionsList(w http.ResponseWriter, r *http.Request, res *
 // sessionCreate enforces the per-user session quota (docs/16 P3-4) then
 // proxies POST /api/sessions to the Agent.
 func (a workspaceAPI) sessionCreate(w http.ResponseWriter, r *http.Request, res *resolved) {
-	a.sessionCreateThen(w, r, res, nil)
+	take, aerr := takeHandoffFence(r)
+	if aerr != nil {
+		writeAPIErr(w, aerr)
+		return
+	}
+	if take == nil {
+		a.sessionCreateThen(w, r, res, nil)
+		return
+	}
+	a.sessionCreateThen(w, r, res, func(ctx context.Context) *apiError {
+		return confirmHandoffTake(ctx, a.mgr.store, res.mv, *take)
+	})
 }
 
 // sessionCreateThen is sessionCreate with one last check, run once the workspace is ready and

@@ -1,0 +1,200 @@
+// Launching from a handoff another member offered (issue #2020, ADR 0057 decision 6).
+//
+// The offer is taken before the session is created, so an offer the sender withdrew while the
+// recipient's launch dialog was open is never launched, and the recipient is told why. A launch
+// that fails gives the take back. These replace run-sheet step H-14 on #1960.
+//
+// StartHost, useStartWork and the API client are the real ones: only fetch is stubbed, so the
+// answers go through the same parsing the Console applies to the CP's (the client stamps every
+// error's `status` with the HTTP status, which is why the CP names the offer's in offerStatus).
+// The dialog is a stub that presses launch.
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import type { LaunchOpts } from "./LaunchModal.tsx";
+
+vi.mock("../sessions/open.ts", () => ({ openSessionChat: vi.fn(), openSessionTerminal: vi.fn() }));
+vi.mock("./useRepoRail.ts", () => ({ useRepoRailContext: () => ({ launchKinds: ["claude"], connsSettling: false }) }));
+vi.mock("./StartModal.tsx", () => ({ StartModal: () => null }));
+vi.mock("../mirror/HandoffProposal.tsx", () => ({ markHandoffLaunched: vi.fn() }));
+vi.mock("./LaunchModal.tsx", () => ({
+  LaunchModal: (p: { onLaunch: (o: LaunchOpts) => Promise<{ ok: boolean }> }) => (
+    <button
+      type="button"
+      data-testid="launch"
+      onClick={() =>
+        void p
+          .onLaunch({
+            kind: "claude", driver: "", model: "", effort: "", startMode: "normal", prompt: "carry on",
+            title: "Carry on", images: [], subdir: "", base: "feature/x", newBranch: "take/x", worktree: true,
+          } as LaunchOpts)
+          .catch(() => undefined) // a thrown launch is the dialog's to show; here only the offer matters
+      }
+    >
+      launch
+    </button>
+  ),
+}));
+
+const { StartHost } = await import("./StartHost.tsx");
+const { useLaunchSeed, useLaunchTarget } = await import("./store.ts");
+const { ToastProvider } = await import("../../ui/ToastProvider.tsx");
+const { t } = await import("../../lib/i18n/index.ts");
+
+let root: Root | null = null;
+let host: HTMLDivElement;
+const fetchMock = vi.fn();
+
+type Answer = { status: number; body: unknown } | "network-error";
+
+/** Answers fetch per path suffix (POSTs only; the handoff store's GETs get empty lists). */
+function routes(answers: Record<string, Answer>) {
+  fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+    const path = new URL(url, "http://console.test/").pathname;
+    if ((init?.method ?? "GET") === "GET") return new Response(JSON.stringify({ offers: [] }), { status: 200 });
+    for (const [suffix, a] of Object.entries(answers)) {
+      if (!path.endsWith(suffix)) continue;
+      if (a === "network-error") throw new TypeError("Failed to fetch");
+      return new Response(JSON.stringify(a.body), { status: a.status, headers: { "Content-Type": "application/json" } });
+    }
+    throw new Error("unexpected call " + path);
+  });
+}
+
+/** The POSTs made to paths ending in suffix, with their parsed bodies. */
+const posts = (suffix: string) =>
+  fetchMock.mock.calls
+    .filter(([url, init]) => (init?.method ?? "GET") === "POST" && new URL(url, "http://console.test/").pathname.endsWith(suffix))
+    .map(([, init]) => JSON.parse(String(init?.body ?? "null")) as Record<string, unknown>);
+const postPaths = () =>
+  fetchMock.mock.calls
+    .filter(([, init]) => (init?.method ?? "GET") === "POST")
+    .map(([url]) => new URL(url, "http://console.test/").pathname);
+
+async function pressLaunch() {
+  await act(async () => {
+    host.querySelector<HTMLButtonElement>("[data-testid=launch]")!.click();
+  });
+  // Let the take → create → accept/release chain settle.
+  for (let i = 0; i < 10; i++) await act(async () => await new Promise((r) => setTimeout(r, 0)));
+}
+
+beforeEach(async () => {
+  fetchMock.mockReset();
+  vi.stubGlobal("fetch", fetchMock);
+  useLaunchSeed.getState().set("carry on", "Carry on", "", "", "offer-1");
+  useLaunchTarget.getState().open({ name: "private", path: "/home/dev/repos/private", branch: "feature/x" } as never);
+  host = document.createElement("div");
+  document.body.appendChild(host);
+  root = createRoot(host);
+  await act(async () => {
+    root!.render(
+      <ToastProvider>
+        <StartHost />
+      </ToastProvider>,
+    );
+  });
+});
+
+afterEach(async () => {
+  await act(async () => root?.unmount());
+  host.remove();
+  root = null;
+  useLaunchSeed.getState().clear();
+  useLaunchTarget.getState().clear();
+  vi.unstubAllGlobals();
+});
+
+const decided = (offerStatus: string): Answer => ({
+  status: 409,
+  body: { error: { code: "handoff_already_decided", message: "the handoff was already decided", status: offerStatus, offerStatus } },
+});
+
+describe("launching from a received handoff", () => {
+  it("refuses the launch of an offer withdrawn while the dialog was open, creates nothing, and says why", async () => {
+    routes({ "/offer-1/take": decided("withdrawn") });
+    await pressLaunch();
+    expect(posts("/api/sessions")).toHaveLength(0);
+    expect(posts("/accept")).toHaveLength(0);
+    expect(document.body.textContent).toContain(t("handoff.take_withdrawn"));
+    // The dialog stays up (no launch happened), so the user can read why and close it.
+    expect(host.querySelector("[data-testid=launch]")).not.toBeNull();
+  });
+
+  it.each([
+    ["declined", "handoff.take_declined"],
+    ["accepted", "handoff.take_accepted"],
+    ["expired", "handoff.take_expired"],
+  ] as const)("names a %s offer as such", async (status, key) => {
+    routes({ "/offer-1/take": decided(status) });
+    await pressLaunch();
+    expect(posts("/api/sessions")).toHaveLength(0);
+    expect(document.body.textContent).toContain(t(key));
+  });
+
+  it("takes the offer before the session is created, carries the take, and accepts with its token", async () => {
+    routes({
+      "/offer-1/take": { status: 200, body: { status: "pending", token: "tok-1" } },
+      "/api/sessions": { status: 201, body: { name: "s-taken" } },
+      "/offer-1/accept": { status: 200, body: { status: "accepted" } },
+    });
+    await pressLaunch();
+    const order = postPaths();
+    expect(order.findIndex((p) => p.endsWith("/offer-1/take"))).toBeLessThan(order.findIndex((p) => p.endsWith("/api/sessions")));
+    expect(posts("/api/sessions")[0].handoff_take).toEqual({ offerId: "offer-1", token: "tok-1" });
+    expect(posts("/offer-1/accept")[0]).toEqual({ sessionName: "s-taken", token: "tok-1" });
+    expect(posts("/release")).toHaveLength(0);
+  });
+
+  it("gives the offer back when the launch fails, and does not accept it", async () => {
+    routes({
+      "/offer-1/take": { status: 200, body: { status: "pending", token: "tok-2" } },
+      "/api/sessions": { status: 502, body: { error: { code: "worktree_failed", message: "worktree add: invalid reference" } } },
+      "/offer-1/release": { status: 200, body: { status: "pending" } },
+    });
+    await pressLaunch();
+    expect(posts("/offer-1/release")[0]).toEqual({ token: "tok-2" });
+    expect(posts("/accept")).toHaveLength(0);
+  });
+
+  it("creates nothing and says why when the CP fences the create (the take was lost meanwhile)", async () => {
+    routes({
+      "/offer-1/take": { status: 200, body: { status: "pending", token: "tok-5" } },
+      "/api/sessions": { status: 409, body: { error: { code: "handoff_take_lost", message: "lost" } } },
+      "/offer-1/release": { status: 409, body: { error: { code: "handoff_not_taken", status: "withdrawn", offerStatus: "withdrawn" } } },
+    });
+    await pressLaunch();
+    expect(posts("/accept")).toHaveLength(0);
+    expect(document.body.textContent).toContain(t("err.handoff_take_lost"));
+  });
+
+  it("gives the offer back when the launch request itself throws", async () => {
+    routes({
+      "/offer-1/take": { status: 200, body: { status: "pending", token: "tok-3" } },
+      "/api/sessions": "network-error",
+      "/offer-1/release": { status: 200, body: { status: "pending" } },
+    });
+    await pressLaunch();
+    expect(posts("/offer-1/release")[0]).toEqual({ token: "tok-3" });
+    expect(posts("/accept")).toHaveLength(0);
+  });
+
+  it("tells the user when the session started but the acceptance could not be recorded", async () => {
+    routes({
+      "/offer-1/take": { status: 200, body: { status: "pending", token: "tok-4" } },
+      "/api/sessions": { status: 201, body: { name: "s-late" } },
+      "/offer-1/accept": { status: 409, body: { error: { code: "handoff_not_taken", message: "x", status: "expired", offerStatus: "expired" } } },
+    });
+    await pressLaunch();
+    expect(document.body.textContent).toContain(t("handoff.accept_unrecorded", { err: "expired" }));
+  });
+
+  it("does not take anything for a launch that is not from an offer", async () => {
+    await act(async () => useLaunchSeed.getState().clear());
+    routes({ "/api/sessions": { status: 201, body: { name: "s-plain" } } });
+    await pressLaunch();
+    expect(posts("/take")).toHaveLength(0);
+    expect(posts("/api/sessions")).toHaveLength(1);
+    expect(posts("/api/sessions")[0].handoff_take).toBeUndefined();
+  });
+});

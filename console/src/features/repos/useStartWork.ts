@@ -27,12 +27,18 @@ export interface StartTarget {
   repo: string;
 }
 
-export function useStartWork(): (target: StartTarget, opts: LaunchOpts) => Promise<LaunchResult> {
+/** The handoff take a launch from another member's offer carries (acceptHandoff.ts). */
+export interface HandoffTake {
+  offerId: string;
+  token: string;
+}
+
+export function useStartWork(): (target: StartTarget, opts: LaunchOpts, take?: HandoffTake) => Promise<LaunchResult> {
   const toast = useToast();
   const refreshRepos = useReposStore((s) => s.refresh);
   const refreshSessions = useSessionsStore((s) => s.refresh);
 
-  return async ({ dir, repo }, { kind, driver, model, effort, startMode, skipPermissions, prompt, title, images, worktree, subdir, base, newBranch, useExisting, spendCapUsd }) => {
+  return async ({ dir, repo }, { kind, driver, model, effort, startMode, skipPermissions, prompt, title, images, worktree, subdir, base, newBranch, useExisting, spendCapUsd }, take) => {
     const hasModel = agentOf(kind).caps.model;
     // With attachments the first prompt's text cannot be fixed until the session exists,
     // because the saved paths have to be woven into it and the upload target IS that
@@ -84,6 +90,10 @@ export function useStartWork(): (target: StartTarget, opts: LaunchOpts) => Promi
     if (workItem) {
       body.work_item = { provider: workItem.provider, key: workItem.key, title: workItem.title, type: workItem.type, labels: workItem.labels };
     }
+    // A launch from another member's offer carries its take (#2020). The CP confirms it
+    // immediately before the Agent is asked and strips it from the body, so a take that was
+    // lost meanwhile (handoff_take_lost) creates nothing.
+    if (take) body.handoff_take = { offerId: take.offerId, token: take.token };
     if (worktree) {
       body.worktree = true;
       body.branch = base;

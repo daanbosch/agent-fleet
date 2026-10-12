@@ -11,8 +11,9 @@
 // recipient's own Workspace and is billed to them, so that confirmation cannot be skipped.
 //
 // The launch itself rides entirely on the existing path (useLaunchTarget → LaunchModal →
-// useStartWork). The CP never operates someone else's Workspace (ADR 0057 decision 3), so
-// acceptance is reported after the fact by StartHost, once the launch succeeded.
+// useStartWork). The CP never operates someone else's Workspace (ADR 0057 decision 3);
+// StartHost takes the offer on the launch press and accepts or gives it back around the
+// launch (acceptHandoff.ts).
 import { useMemo, useState } from "react";
 import { Button } from "../../ui/Button.tsx";
 import { Icon } from "../../ui/Icon.tsx";
@@ -47,8 +48,8 @@ export function HandoffOfferRow({ offer, onDone }: { offer: HandoffOffer; onDone
       toast(tr("handoff.accept_no_repo"));
       return;
     }
-    // Carry which offer this is into the launch path. StartHost sends the accept once the
-    // launch succeeds: a cancelled launch must not mark the offer accepted.
+    // Carry which offer this is into the launch path. Nothing is taken here: StartHost takes
+    // the offer only when the launch is pressed, so a cancelled dialog leaves it pending.
     useLaunchSeed.getState().set(offer.prompt || "", offer.title, "", "", offer.id);
     // The whole row, not a hand-picked subset: the dialog gates the worktree choice on
     // `vcs`/`unborn`, and a copy of the row that drops them offers git actions on an SVN

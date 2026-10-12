@@ -219,8 +219,17 @@ type sqlExecQuery interface {
 // the conversation to be readable, so ro is enough. They share one function because there
 // are four call sites and adding only one of them breaks silently — the share is revoked
 // yet the handoff still sits in the other person's inbox. A third kind goes here too.
+//
+// A handoff whose take is confirmed (its session create has reached the recipient's Agent,
+// issue #2020) loses its body at once but keeps its status and take: expiring it would let
+// the sender's own launch skip the withdraw while the recipient's session starts, the same
+// work twice (ADR 0057 decision 6). The holder's accept settles it; its release expires it
+// (ReleaseSessionHandoffOffer), and the inbox no longer lists it.
 func invalidateUnauthorizedShareDerivatives(ctx context.Context, q sqlExecQuery, owner, now string) error {
-	if _, err := q.ExecContext(ctx, `UPDATE session_handoff_offer SET status='expired',ciphertext='',decided_at=?
+	if _, err := q.ExecContext(ctx, `UPDATE session_handoff_offer
+		SET status=CASE WHEN take_confirmed_at='' THEN 'expired' ELSE status END,
+		    decided_at=CASE WHEN take_confirmed_at='' THEN ? ELSE decided_at END,
+		    ciphertext=''
 		WHERE owner_membership_id=? AND status='pending' AND NOT EXISTS (
 			SELECT 1 FROM shared_session_catalog c JOIN session_share s
 			  ON s.owner_membership_id=c.owner_membership_id
