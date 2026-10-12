@@ -155,3 +155,43 @@ func TestAFMemoryMuseImport(t *testing.T) {
 		t.Errorf("missing --dir: %d", code)
 	}
 }
+
+// The personal scope lands in the user scope and is never sent without --into-user.
+func TestAFMemoryMusePersonalNeedsIntoUser(t *testing.T) {
+	var posted []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /agents/memory/muse-import/preview":
+			q := r.URL.Query()
+			if q.Get("scope") != "personal" || q.Get("into") != "user" {
+				w.WriteHeader(400)
+				return
+			}
+			io.WriteString(w, `{"scope":"personal","target":"user","counts":{"new":1},"items":[{"name":"likes-go","status":"new","sourceHash":"h","derived":true}]}`)
+		case "POST /agents/memory/muse-import":
+			var req map[string]any
+			json.NewDecoder(r.Body).Decode(&req)
+			posted = append(posted, req)
+			io.WriteString(w, `{"results":[{"name":"likes-go","result":"imported"}]}`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	c := &Client{Base: srv.URL, Token: "tok", HTTP: srv.Client()}
+
+	if code, _, e := run(c, "muse-import", "--scope", "personal"); code != 2 || !strings.Contains(e, "--into-user") || len(posted) != 0 {
+		t.Errorf("without --into-user: %d %q", code, e)
+	}
+	if code, _, _ := run(c, "muse-import", "--dir", "demo", "--into-user"); code != 2 {
+		t.Errorf("--into-user on the project scope: %d", code)
+	}
+	code, out, _ := run(c, "muse-import", "--scope", "personal", "--into-user", "--dry-run")
+	if code != 0 || len(posted) != 0 || !strings.Contains(out, "USER memory") || !strings.Contains(out, "no frontmatter") {
+		t.Errorf("dry run: %d\n%s", code, out)
+	}
+	if code, out, _ = run(c, "muse-import", "--scope", "personal", "--into-user"); code != 0 || len(posted) != 1 ||
+		posted[0]["into"] != "user" || posted[0]["scope"] != "personal" || posted[0]["project"] != "" {
+		t.Errorf("apply: %d posted=%v\n%s", code, posted, out)
+	}
+}
