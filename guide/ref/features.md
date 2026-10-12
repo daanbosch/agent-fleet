@@ -100,6 +100,7 @@ explains them.
 | Integration servers and tokens | member | MCP servers / MCP tokens |
 | Issue-tracker connections | member | Issue tracker |
 | Usage | member | Agent usage |
+| Limit board: publish where you stand on usage limits, and see what teammates publish to you | member | Limit board |
 | Cloud cost | member | Cloud cost |
 | AI assistance (per-feature on/off, agent, model) | member | AI assistance |
 | Display, language and keys | member | Display / Keyboard |
@@ -120,6 +121,7 @@ Every row is under **Tenant settings**. [admin/](../admin/README.md) is the shel
 | Deleting a member's home backups (where the deployment keeps them) | tenant admin | Members → the member | [admin 01](../admin/01-members.md) |
 | Sessions across the tenant | tenant admin | Sessions | [admin 02](../admin/02-limits.md) |
 | Limits and idle auto-stop | tenant admin (read) | Limits & idle | [admin 02](../admin/02-limits.md) |
+| Limit board on / off for the tenant | tenant admin | Limit board | [admin 02](../admin/02-limits.md) |
 | Whether this tenant may use the llm / image engines | deployment admin (super_admin) | Tenant settings → Limits | [admin 02](../admin/02-limits.md) |
 | Workspace sizing | deployment admin | — | [deploy-targets.md](deploy-targets.md) |
 | Sign-in methods and login rules | tenant admin | Sign-in methods / Login rules | [operator 05](../operate/05-signin.md) |

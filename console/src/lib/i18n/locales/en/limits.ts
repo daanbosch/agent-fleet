@@ -1,0 +1,81 @@
+// English カタログ / ドメイン: limits
+// キー接頭辞: limits
+//
+// ⚠️ 追記は**自分のドメインのファイルだけ**に行う（ADR 0067 決定 4）。分割前は 4,700 行の
+// 1 ファイルで、フロントの並列セッションが全員ここへ追記＝毎回確実に衝突していた。
+// ja が正本。Record<keyof typeof ja...> で ja に無いキー / 足りないキーを tsc が落とす。
+import type { limits as jaLimits } from "../ja/limits.ts";
+
+export const limits: Record<keyof typeof jaLimits, string> = {
+  "limits.tab": "Limit board",
+  "limits.tenant_tab": "Limit board",
+  "limits.intro":
+    "Choose who in this tenant may see where you stand against your usage limits, and how much. Hidden by default. A value is a lower bound from when it was observed, not a promise about what is left now.",
+  "limits.tenant_off": "A tenant administrator has turned the limit board off for this tenant. Nobody's values are collected or shown.",
+  "limits.publish_title": "What you publish (this tenant)",
+  "limits.publish_note":
+    "The setting is per tenant. Another tenant has its own, and nothing chosen here reaches it. Provider e-mail addresses, plans and error text are never shown to anyone.",
+  "limits.audience": "Who sees it",
+  "limits.audience.none": "Hidden",
+  "limits.audience.tenant": "Everyone in the tenant",
+  "limits.audience.members": "Chosen members",
+  "limits.level": "How much",
+  "limits.level.state": "State only",
+  "limits.level.band": "Band",
+  "limits.level.exact": "Exact",
+  "limits.level.state_note": "Shows only whether a session has hit a limit, a spend limit, a block or a sign-in problem. No quota.",
+  "limits.level.band_note": "Shows each quota unit as under 50% / under 80% / under 95% / 95% or more. Units are never combined.",
+  "limits.level.exact_note": "Shows the used percentage and the reset time as they are.",
+  "limits.no_members": "No other members.",
+  "limits.publishes_none": "You publish to no tenant.",
+  "limits.publishes": "You publish to: {tenants}",
+  "limits.own_title": "Your values (only you see this)",
+  "limits.team_title": "Members",
+  "limits.more": "Show more",
+  "limits.coverage_title": "What is collected",
+  "limits.cov.kind": "Agent",
+  "limits.cov.quota": "Account quota",
+  "limits.cov.sessions": "Session limit state",
+  "limits.cov.windows": "5-hour / weekly",
+  "limits.cov.windows_len": "Windows (with their length)",
+  "limits.cov.pools": "Credit pools",
+  "limits.cov.not_collected": "Not collected",
+  "limits.cov.yes": "Yes",
+  "limits.cov.managed_only": "Managed only",
+  "limits.cov.unknown": "Unknown",
+  "limits.coverage_note":
+    "Any agent not in this table is unknown. Values are collected periodically while the workspace runs, and also from an open browser. While neither reaches it, a value stays old or unknown.",
+  "limits.unknown": "Unknown",
+  "limits.saved": "Saved",
+  "limits.load_failed": "The limit board could not be loaded.",
+  "limits.ago.now": "just now",
+  "limits.ago.min": "{n} min ago",
+  "limits.ago.hour": "{n} h ago",
+  "limits.unit.5h": "5-hour",
+  "limits.unit.weekly": "Weekly",
+  "limits.unit.window": "Window",
+  "limits.unit.window_h": "{h}-hour window",
+  "limits.pool.premium": "Premium requests",
+  "limits.pool.chat": "Chat",
+  "limits.pool.completions": "Completions",
+  "limits.band.lt50": "under 50% ({ago})",
+  "limits.band.lt80": "50–80% ({ago})",
+  "limits.band.lt95": "80–95% ({ago})",
+  "limits.band.ge95": "95% or more, near the limit ({ago})",
+  "limits.reset_not_observed": "reset not yet observed",
+  "limits.at_least": "at least {pct}% ({ago})",
+  "limits.stale": "stale",
+  "limits.session.limited": "hit a limit",
+  "limits.session.limited_until": "hit a limit, resumes at {time}",
+  "limits.session.spend_limit": "spend limit (waiting does not clear it)",
+  "limits.session.blocked": "blocked",
+  "limits.session.auth": "needs sign-in",
+  "limits.tenant_title": "Limit board",
+  "limits.tenant_on": "On",
+  "limits.tenant_off_short": "Off",
+  "limits.tenant_toggle": "Use the limit board in this tenant",
+  "limits.tenant_hint":
+    "Even when it is on, each member stays hidden until they choose to publish. Turning it off stops collection and empties the board. This screen does not show an administrator any member's values.",
+  "limits.tenant_pooling":
+    "Agent Fleet never pools limits: it moves no credentials, never runs one member's work on another member's account, never routes work by remaining quota and never ranks members by it. What members' subscription terms allow is the tenant's call.",
+};

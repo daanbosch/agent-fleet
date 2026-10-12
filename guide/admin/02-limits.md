@@ -62,6 +62,18 @@ person can use each role right now (either place edits the same setting).
 - Switching back to **Every member** keeps the ticks, so restricting again restores the same list.
   Tick first and restrict afterwards, and nobody loses access in between.
 
+### The limit board (you can set this)
+
+**Tenant settings → Limit board** decides whether the tenant's members may publish their
+usage-limit state to each other (ADR 0111). It is **on by default**, and even then every member
+is hidden until they choose to publish ([09 Working with others](../member/09-collaboration.md)).
+Turn it off if your organisation does not want remaining quota shown at all: collection stops
+and the board is empty for everyone. The switch is recorded in the audit log.
+
+This screen never shows you a member's values, and no admin view is widened by the board.
+Agent Fleet does not ask which subscriptions your members hold, and never pools them; whether
+those terms allow members to divide work this way is the tenant's judgement.
+
 ### Per-member session limits (you can set these)
 
 What you can adjust is the per-member **session limit**. In the member detail, the

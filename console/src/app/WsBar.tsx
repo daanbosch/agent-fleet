@@ -82,13 +82,19 @@ interface UsageWindow {
   resetsAt: string;
   // The window rolled over after the capture, so the % is an estimate assuming zero use
   // since. It is not an observation, so chip and row show "—" rather than asserting 0%,
-  // which would be indistinguishable from a dead capture. Only claude returns this.
+  // which would be indistinguishable from a dead capture. claude and codex return this.
   stale?: boolean;
+  // derived: codex's flag for the same rolled window (ADR 0111 decision 6).
+  derived?: boolean;
 }
 interface UsageReading {
   ok?: boolean;
   authed?: boolean;
   ageSec?: number;
+  // The provider's own observation time and the opaque login epoch, for the limit board's
+  // browser fallback (usageResetNotify.ts). claude and codex only.
+  observedAt?: string;
+  limitEpoch?: string;
   user?: string;
   plan?: string;
   planType?: string;

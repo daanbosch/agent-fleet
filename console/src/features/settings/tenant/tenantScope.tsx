@@ -21,6 +21,7 @@ import { TenantLoginRules, TenantLoginRulesView } from "./tenantLoginRules.tsx";
 import { TenantSignInMethods } from "./tenantSignInMethods.tsx";
 import { PoolBudgetHint, type PoolBudget } from "./ec2Pool.tsx";
 import { TenantNetworkView } from "./tenantNetwork.tsx";
+import { TenantLimitBoardView } from "../../limits/TenantLimitBoardView.tsx";
 import { TenantBranchRulesView } from "./tenantBranchRules.tsx";
 import { TenantGitOAuthView } from "./tenantGitOAuth.tsx";
 import { TenantMachineView } from "./tenantMachine.tsx";
@@ -74,7 +75,12 @@ export function tenantScopeGroups(opts: { cost: boolean; engines?: boolean }): S
       label: "tenant.group_tenant",
       // Limits are about the tenant itself, so they belong to neither login nor manage. The
       // deployment admin decides them, but a tenant admin can read them in the same place.
-      items: [["limits", "tenant.tab_limits"]],
+      // The limit board switch (ADR 0111 addendum item 4) is the tenant admin's, like the
+      // machine class: it decides whether the tenant's members can publish at all.
+      items: [
+        ["limits", "tenant.tab_limits"],
+        ["limit-board", "limits.tenant_tab"],
+      ],
     },
     {
       key: "login",
@@ -495,6 +501,7 @@ export function TenantScopeBody({
     );
   }
   if (section === "network") return <TenantNetworkView key={slug} slug={slug} />;
+  if (section === "limit-board") return <TenantLimitBoardView key={slug} slug={slug} />;
   if (section === "engine-access") return <TenantEngineAccessView key={slug} slug={slug} />;
   // The reduced engine panel, which since the panel was split in two is the MODELS screen and
   // only that — the other half buys and stops a GPU, which a tenant admin may never do. Still

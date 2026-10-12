@@ -487,3 +487,27 @@ Follow-up issues:
 - P0: #1960 — the inbox acceptance conditions, and ADR 0057's two-account handover run.
 - P1-A: #1961 — the inbox, DMs, requests and recipes.
 - P1-B: #1962 — the limit board.
+
+## Note (2026-10-12) — P1-B as built (#1962)
+
+Decisions 6 and 7 and addendum items 3–6 are built as written; this records the choices the text
+left open.
+
+- **Snapshot.** The Agent adds `limits` (version 1) to `GET /sessions` only when asked with
+  `?limits=1`, which only the reaper's sweep does, and caches it for 20 s. The CP keeps it as raw
+  JSON in the envelope and parses it after the sweep's decisions, per kind.
+- **Login epoch.** An HMAC of the provider account id under a key that never leaves the home.
+  Collectors do not record which account a reading came from, so the rule is by time: a reading
+  observed before the Agent first saw the current account is dropped. It is conservative in one
+  direction only (a new account's first reading can be dropped once).
+- **Observed time.** claude's statusLine capture moves `observedAt` only when the captured
+  values change, because claude re-renders from what it already holds; codex's account cache
+  keeps the last success apart from the last attempt; a window rolled past its reset is flagged
+  `derived` and never stored.
+- **Levels.** *State* shows only session limit states; *band* adds per-unit bands and the
+  observation time; *exact* adds the percentage and the reset time. A unit past its reset carries
+  neither band nor value at any level.
+- **Session states** come from the reaper's read only; the browser path carries quota windows
+  (claude, codex) only.
+- **Tenant switch off** also stops collection. Nothing SSE- or export-shaped carries board data in
+  P1; any such path has to go through the same reduction (`boardEntry`).

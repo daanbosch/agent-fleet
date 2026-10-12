@@ -25,6 +25,47 @@ interface Win {
   pct: number;
   resetsAt: string;
   stale?: boolean;
+  derived?: boolean;
+}
+
+// The chip reading as far as this hook reads it. observedAt and limitEpoch are what the Agent
+// stamps for the limit board (ADR 0111 decision 6): the provider's own observation time and the
+// opaque login epoch. The Agent leaves both out when the reading predates the account now
+// signed in.
+export interface UsageForNotify {
+  fiveHour?: Win;
+  sevenDay?: Win;
+  observedAt?: string;
+  limitEpoch?: string;
+}
+
+// usageObservationBody is the POST /api/notifications/usage-observations body, or null when
+// there is nothing to send.
+//
+// A stale window is not an observation: its 0% and its reset instant are both extrapolated
+// from a reading that predates the window (the agent flags this when the capture went quiet).
+// Submitting it would let a DEAD capture look like a reset and fire "the limit has cleared"
+// while the user is still blocked.
+//
+// observedAt is passed through as the Agent reported it and never filled in here: the time
+// this tab sends is not the time the provider observed anything, and the CP keeps a window
+// without one off the limit board.
+export function usageObservationBody(kind: string, usage: UsageForNotify | null) {
+  if (!usage) return null;
+  const windows = [
+    { key: "5h", w: usage.fiveHour },
+    { key: "7d", w: usage.sevenDay },
+  ]
+    .filter((x) => x.w?.resetsAt && !x.w.stale)
+    .map(({ key, w }) => ({
+      windowKey: key,
+      percent: w!.pct,
+      resetsAt: w!.resetsAt,
+      ...(usage.observedAt ? { observedAt: usage.observedAt } : {}),
+      ...(w!.derived ? { derived: true } : {}),
+    }));
+  if (!windows.length) return null;
+  return { source: kind, windows, ...(usage.limitEpoch ? { limitEpoch: usage.limitEpoch } : {}) };
 }
 
 // useUsageResetNotify tracks one agent's two windows and fires once each time a
@@ -33,7 +74,7 @@ interface Win {
 // closed-tab resets are caught on the next reading by the resetsAt-moved compare.
 export function useUsageResetNotify(
   src: Src,
-  usage: { fiveHour?: Win; sevenDay?: Win } | null,
+  usage: UsageForNotify | null,
   refresh: () => void,
 ) {
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
@@ -53,18 +94,8 @@ export function useUsageResetNotify(
       { key: "7d", w: usage.sevenDay },
     ];
 
-    // A stale window is not an observation: its 0% and its reset instant are both
-    // extrapolated from a reading that predates the window (the agent flags this when
-    // the capture went quiet). Submitting it would let a DEAD capture look like a reset
-    // and fire "the limit has cleared" while the user is still blocked.
-    const observations = windows.filter((x) => x.w?.resetsAt && !x.w.stale).map(({ key, w }) => ({
-      windowKey: key, percent: w!.pct, resetsAt: w!.resetsAt,
-    }));
-    if (observations.length) {
-      void apiJSON("api/notifications/usage-observations", "POST", {
-        source: src.kind, windows: observations,
-      });
-    }
+    const body = usageObservationBody(src.kind, usage);
+    if (body) void apiJSON("api/notifications/usage-observations", "POST", body);
 
     for (const { w } of windows) {
       if (!w || !w.resetsAt) continue;

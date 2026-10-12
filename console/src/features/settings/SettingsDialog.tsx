@@ -52,6 +52,7 @@ import { DangerTab } from "./workspace/DangerTab.tsx";
 import { InternalReposTab } from "./workspace/InternalReposTab.tsx";
 import { BackupTab } from "./workspace/BackupTab.tsx";
 import { NotificationsTab } from "./personal/NotificationsTab.tsx";
+import { LimitBoardView } from "../limits/LimitBoardView.tsx";
 import { MemoryTab } from "./memory/MemoryTab.tsx";
 // The usage tab is a thin wrapper around the features/usage view, kept independent of the modal
 // so the same view can be promoted to a pane unchanged (docs/log/46 §5).
@@ -76,6 +77,9 @@ export const GROUPS: { key: string; label: string; items: [string, string][] }[]
       ["keys", "set.tab_keys"],
       ["tts", "set.tab_tts"],
       ["notifications", "set.tab_notifications"],
+      // The limit board (ADR 0111 decision 6): what the member publishes is a personal choice,
+      // made per tenant, so it sits with the personal settings rather than under the workspace.
+      ["limits", "limits.tab"],
       ["assistant", "set.tab_assistant"],
       // AI assist (docs/log/84). Next to the assistant because both are "settings that call an
       // LLM", but a different thing: one-shot generation in the session, mirror and File panes
@@ -237,6 +241,7 @@ export function SettingsDialog() {
             {section === "instructions" && <InstructionsTab />}
             {section === "tts" && <TtsTab />}
             {section === "notifications" && <NotificationsTab />}
+            {section === "limits" && <LimitBoardView />}
             {section === "git" && <GitTab />}
             {section === "usage" && <UsageView />}
             {section === "cost" && costProfile?.available && <MyCloudCostView />}

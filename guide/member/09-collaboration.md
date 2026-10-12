@@ -66,6 +66,38 @@ A shared session appears in the other person's **Shared sessions** section and c
 **Shared** badge on yours, so you can always see what is visible to someone else.
 Sharing does not give access to your workspace, only to the conversation.
 
+## Showing teammates where you stand on usage limits
+
+**Settings → Limit board** lets you tell the members of this tenant how close you are to your
+agents' usage limits, so someone choosing who to ask for help can see who has room. It is
+**hidden until you choose otherwise**, and the choice is per tenant: if you belong to several
+tenants, each has its own setting, and the tab lists every tenant you currently publish to.
+
+- **Who sees it:** hidden, everyone in the tenant, or members you pick.
+- **How much:** *state only* (whether a session has hit a limit, a spend limit, a block or a
+  sign-in problem), *band* (each quota as under 50% / under 80% / under 95% / 95% or more), or
+  *exact* (the percentage and the reset time).
+
+What you see of a teammate is only what they publish to you. Someone who publishes nothing to
+you looks exactly like someone nobody has observed yet: **Unknown**. Your provider e-mail,
+plan and error text are never shown, and an administrator gets no wider view.
+
+How to read a value:
+
+- "at least 42% (10 min ago)": what the provider last reported. Use only grows within a window,
+  so it is a lower bound, and after 60 minutes it is marked **stale**.
+- "reset not yet observed": the window has reset since. The old value no longer means anything,
+  and it is **not** shown as 0% or available.
+- **Unknown**: nothing was observed, the agent is not covered (the table is in
+  [ref/limits.md](../ref/limits.md)), or the member does not publish to you.
+
+Values arrive while your workspace runs, and from an open Console tab. When neither is the case
+they go stale. Signing in to a different provider account hides the previous account's values.
+
+The board never pools limits: nothing moves credentials, runs your work on someone else's
+account, or ranks members by what they have left. Whether your subscription terms allow sharing
+work this way is your organisation's call.
+
 ## Keeping a session awake
 
 Idle workspaces stop on their own. If you have something long running that must not be
