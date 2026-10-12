@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/k-k1/agent-fleet/control-plane/internal/store"
 )
@@ -572,8 +573,15 @@ func (a workspaceAPI) recordInboxOrigin(ctx context.Context, res *resolved, o *i
 	if json.Unmarshal(t.buf, &s) != nil || s.Name == "" {
 		return
 	}
-	if err := a.mgr.store.RecordInboxSessionOrigin(context.WithoutCancel(ctx), res.mv.MembershipID, s.Name, o.Item, o.Sender); err != nil {
-		log.Printf("inbox: recording the provenance of session %s: %v", s.Name, err)
+	// A memo-seeded create has no idempotency key to recover it by, so this is the one chance
+	// to write its badge: tried a few times, then logged. The session itself is unaffected.
+	for i := 0; i < inboxLaunchRecordTries; i++ {
+		err := a.mgr.store.RecordInboxSessionOrigin(context.WithoutCancel(ctx), res.mv.MembershipID, s.Name, o.Item, o.Sender)
+		if err == nil {
+			return
+		}
+		log.Printf("inbox: recording the provenance of session %s failed (try %d): %v", s.Name, i+1, err)
+		time.Sleep(time.Duration(100*(i+1)) * time.Millisecond)
 	}
 }
 

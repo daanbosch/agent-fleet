@@ -533,3 +533,39 @@ func TestInboxRecoveredLaunchKeepsProvenance(t *testing.T) {
 		t.Fatalf("the recovered session has no provenance badge: %+v", got)
 	}
 }
+
+// TestInboxReleaseAfterConfirmKeepsProvenance: the assignee hands the request back after the
+// launch was confirmed and before the Agent answers. The release wins the card, which
+// decision 2 allows, but the session was still started from the request: it keeps the
+// provenance the CP decided at the confirm.
+func TestInboxReleaseAfterConfirmKeepsProvenance(t *testing.T) {
+	e := newInboxEnv(t)
+	id := e.send("a", "request", "b")
+	_ = e.do("b", "POST", "/api/inbox/items/"+id+"/claim", nil)
+	agent := newCapturingAgent(t)
+	agent.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/sessions":
+			if rel := e.do("b", "POST", "/api/inbox/items/"+id+"/release", nil); rel.Code != http.StatusOK {
+				t.Errorf("release while the Agent creates: %d %s", rel.Code, rel.Body.String())
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"name":"s-after-release","dir":"/d"}`)
+		case r.Method == "GET" && r.URL.Path == "/sessions":
+			_, _ = io.WriteString(w, `{"sessions":[{"name":"s-after-release","kind":"claude"}]}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	e.workspaceFor("b", agent)
+	if r := e.do("b", "POST", "/api/inbox/items/"+id+"/launch", map[string]any{"dir": "/d", "kind": "claude"}); r.Code != http.StatusCreated {
+		t.Fatalf("launch: %d %s", r.Code, r.Body.String())
+	}
+	it, _, _ := e.st.GetInboxItem(context.Background(), id)
+	if it.State != "open" || it.LaunchToken != "" || it.SessionName != "" {
+		t.Fatalf("the release did not win the card: %+v", it)
+	}
+	if got := e.badges("b"); got["s-after-release"] != (inboxOriginRef{Sender: key("a"), Item: id}) {
+		t.Fatalf("the session lost its provenance: %+v", got)
+	}
+}

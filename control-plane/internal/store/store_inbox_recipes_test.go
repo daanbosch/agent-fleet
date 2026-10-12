@@ -210,3 +210,27 @@ func TestInboxTakeInSeesRemoval(t *testing.T) {
 		})
 	}
 }
+
+// TestInboxSessionOriginRecord: the CP's provenance record per (member, session name), kept
+// per member and replaced by a later create under the same name.
+func TestInboxSessionOriginRecord(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range inboxStores(t) {
+		t.Run(name, func(t *testing.T) {
+			f := newInboxFix(t, st, "a", "b")
+			if err := st.RecordInboxSessionOrigin(ctx, f.members["b"], "s1", "i1", "a-key"); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.RecordInboxSessionOrigin(ctx, f.members["b"], "s1", "i2", "a-key"); err != nil {
+				t.Fatal(err)
+			}
+			got, err := st.ListInboxSessionOrigins(ctx, f.members["b"])
+			if err != nil || len(got) != 1 || got["s1"].ItemID != "i2" {
+				t.Fatalf("b: %+v %v", got, err)
+			}
+			if other, _ := st.ListInboxSessionOrigins(ctx, f.members["a"]); len(other) != 0 {
+				t.Fatalf("a sees b's record: %+v", other)
+			}
+		})
+	}
+}

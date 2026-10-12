@@ -177,7 +177,7 @@ func (a inboxAPI) launch(w http.ResponseWriter, r *http.Request, ident store.Ide
 		if nb, _ := body["new_branch"].(string); s.Branch == "" && strings.TrimSpace(nb) != "" {
 			s.Branch = strings.TrimSpace(nb)
 		}
-		recorded := a.recordLaunch(ctx, id, mv.MembershipID, token, s)
+		recorded := a.recordLaunch(ctx, id, mv.MembershipID, token, s, origin)
 		detail := "session=" + s.Name
 		if !recorded {
 			// The session exists, so the answer stays the Agent's 201. The launch stays
@@ -199,8 +199,12 @@ func (a inboxAPI) launch(w http.ResponseWriter, r *http.Request, ident store.Ide
 }
 
 // recordLaunch writes the created session onto the request, trying a few times: a session
-// that exists but is not on the card would let the assignee start a second one.
-func (a inboxAPI) recordLaunch(ctx context.Context, id, mid, token string, s inboxCreatedSession) bool {
+// that exists but is not on the card would let the assignee start a second one. The card and
+// the session's provenance are written together (FinishInboxLaunch). When the request was
+// handed back after the launch was confirmed, the card no longer belongs to this launch, but
+// the session was still started from the request: its provenance, decided by the CP at the
+// confirm, is recorded on its own.
+func (a inboxAPI) recordLaunch(ctx context.Context, id, mid, token string, s inboxCreatedSession, origin inboxOriginRef) bool {
 	ctx = context.WithoutCancel(ctx)
 	if s.Name == "" {
 		log.Printf("inbox: launch %s: the Agent answered without a session name", id)
@@ -210,7 +214,10 @@ func (a inboxAPI) recordLaunch(ctx context.Context, id, mid, token string, s inb
 		ok, err := a.mgr.store.FinishInboxLaunch(ctx, id, mid, token, s.Name, s.Dir, s.Branch, store.NowTS())
 		if err == nil {
 			if !ok {
-				log.Printf("inbox: launch %s created %s after the request was handed back; not recorded", id, s.Name)
+				log.Printf("inbox: launch %s created %s after the request was handed back; the card is not updated", id, s.Name)
+				if err := a.mgr.store.RecordInboxSessionOrigin(ctx, mid, s.Name, origin.Item, origin.Sender); err != nil {
+					log.Printf("inbox: recording the provenance of session %s: %v", s.Name, err)
+				}
 			}
 			return ok
 		}
@@ -255,7 +262,11 @@ func (a inboxAPI) reconcileLaunch(w http.ResponseWriter, r *http.Request, mv sto
 	case http.StatusOK:
 		var s inboxCreatedSession
 		_ = json.Unmarshal(b, &s)
-		if !a.recordLaunch(ctx, cur.ID, mv.MembershipID, cur.LaunchToken, s) {
+		origin := inboxOriginRef{Item: cur.ID}
+		if v, _, err := a.view(ctx, mv); err == nil {
+			origin.Sender = v.person(cur.SenderMembershipID).UserKey
+		}
+		if !a.recordLaunch(ctx, cur.ID, mv.MembershipID, cur.LaunchToken, s, origin) {
 			unknown()
 			return
 		}
