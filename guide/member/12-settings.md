@@ -263,7 +263,7 @@ Version control over the memory an agent accumulates by itself (claude's auto-me
     then a match in the name before the description before the body, then pins, reads and recency; if no
     memory holds every word it returns the ones that hold some and says so. A pin is recorded as a change by you ("pin changed") and can be
     reverted; an agent's later update of a pinned memory keeps the pin, and the af memory tools offer agents no way to pin or unpin. (Like every Agent route, the pin route is not a security boundary against a shell in the same workspace; the change is always recorded as made by you from the Console.)
-  - **Browse memories**: below the pins, the memories of one scope (all projects, or one project) with their
+  - **Browse memories**: below the pins, the memories of **All scopes** (the default: the user-wide scope and every project together, each row tagged with where it lives) or of one scope (**User-wide**, which every project receives, or one project), with their
     author, last update, how often agents read them and whether they are pinned. Search matches the name,
     description, type and author at once and, after a short pause, the body, ranked like the agents' `memory_search`;
     searching is not a use and does not change how often a memory is read. **View** shows a memory's text. **Forget** removes it from

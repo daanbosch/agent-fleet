@@ -1,5 +1,5 @@
-// MemoryBrowserPanel — the member's browser of AF-owned agent memory (#1985): the memories of one
-// scope with their author, use count and pin, a search, the body of one, forget, and the
+// MemoryBrowserPanel — the member's browser of AF-owned agent memory (#1985): the memories of all
+// scopes at once (the default) or of one scope with their author, use count and pin, a search, the body of one, forget, and the
 // forgotten ones with a way back. It adds no write route: forget and restore are the changes
 // list's own revert route, on the newest change of the memory, which a forget resolves on demand
 // (member-latest) so it does not depend on how many recent changes were loaded. Writing a memory
@@ -23,6 +23,9 @@ import type { MemoryBody, MemoryChange, MemoryListed, MemorySearchHit } from "./
 /** Pause after the last keystroke before the body search is asked. */
 const SEARCH_DELAY_MS = 300;
 
+// The default selection: every scope at once (list, field filter and body search).
+const ALL = "all";
+
 // "user" or "project:<id>": one browsable scope.
 const scopeKey = (m: { scope: string; project?: { id: string } }) =>
   m.scope === "user" ? "user" : "project:" + (m.project?.id ?? "");
@@ -35,7 +38,7 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
   const [withheld, setWithheld] = useState(0);
   const [forgotten, setForgotten] = useState<MemoryChange[]>([]);
   const [loadErr, setLoadErr] = useState("");
-  const [scope, setScope] = useState("user");
+  const [scope, setScope] = useState(ALL);
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState<MemoryBody | null>(null);
   const [openErr, setOpenErr] = useState("");
@@ -63,21 +66,27 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
   }, []);
   useRetryLoad(load, [reload, mine]);
 
-  // The scopes there is something to browse in. User scope is always offered: a new memory can
-  // start there. A project is offered once it holds a memory (the Console cannot start one).
+  // The scopes there is something to browse in. "All scopes" comes first and is the default: a
+  // query is expected to cover everything, and the user scope alone is often empty. User scope is
+  // always offered: a new memory can start there. A project is offered once it holds a memory
+  // (the Console cannot start one).
   const scopes = useMemo(() => {
-    const out = new Map<string, string>([["user", tr("mem.af_scope_user")]]);
+    const out = new Map<string, string>([
+      [ALL, tr("mem.br_scope_all")],
+      ["user", tr("mem.af_scope_user")],
+    ]);
     for (const m of [...(rows ?? []), ...forgotten]) {
       if (m.scope === "project" && m.project) out.set(scopeKey(m), m.project.display);
     }
     return [...out.entries()];
   }, [rows, forgotten, tr]);
   useEffect(() => {
-    if (!scopes.some(([k]) => k === scope)) setScope("user");
+    if (!scopes.some(([k]) => k === scope)) setScope(ALL);
   }, [scopes, scope]);
 
   const q = query.trim().toLowerCase();
-  // Body search: asked after a pause, for the scope on screen. A newer question or a scope change
+  // Body search: asked after a pause, for the scope on screen. "All" sends no scope param, which makes the
+  // Agent search the user scope and every project. A newer question or a scope change
   // drops the answer of an older one.
   const searchSeq = useRef(0);
   useEffect(() => {
@@ -91,8 +100,9 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
     setSearching(true);
     const [kind, projectId = ""] = scope.split(":");
     const timer = setTimeout(() => {
-      const scopeQ = kind === "user" ? "scope=user" : `scope=project&project=${encodeURIComponent(projectId)}`;
-      api(`api/agents/memory/entries/member-search?${scopeQ}&limit=50&q=${encodeURIComponent(q)}`)
+      const scopeQ =
+        kind === ALL ? "" : kind === "user" ? "scope=user&" : `scope=project&project=${encodeURIComponent(projectId)}&`;
+      api(`api/agents/memory/entries/member-search?${scopeQ}limit=50&q=${encodeURIComponent(q)}`)
         .then((res) => {
           if (seq !== searchSeq.current) return;
           if (res?.error) setSearchErr(true);
@@ -111,7 +121,7 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
   // The rows of the scope that match by a listed field (instant) or by a body hit; a body hit
   // brings its matching lines. Order: listed matches as listed, then body-only hits in rank order.
   const snippets = new Map(hits.map((h) => [scopeKey(h) + "/" + h.name, h.snippets ?? []]));
-  const inScope = (rows ?? []).filter((m) => scopeKey(m) === scope);
+  const inScope = (rows ?? []).filter((m) => scope === ALL || scopeKey(m) === scope);
   const byField = (m: MemoryListed) =>
     `${m.name}\n${m.description}\n${m.type ?? ""}\n${m.authorKind}\n${m.authorSession}`.toLowerCase().includes(q);
   const keyOf = (m: { scope: string; project?: { id: string }; name: string }) => scopeKey(m) + "/" + m.name;
@@ -125,7 +135,9 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
     return [m];
   });
   const shown = q ? [...fieldRows, ...bodyRows] : inScope;
-  const gone = forgotten.filter((c) => scopeKey(c) === scope);
+  const gone = forgotten.filter((c) => scope === ALL || scopeKey(c) === scope);
+  const whereOf = (m: { scope: string; project?: { display: string } }) =>
+    m.scope === "user" ? tr("mem.af_scope_user") : (m.project?.display ?? "");
   const who = (m: { authorKind: string; authorSession: string }) =>
     m.authorKind === "member" ? tr("mem.af_by_member") : `${m.authorKind} · ${m.authorSession}`;
 
@@ -166,7 +178,7 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
     if (!c) return;
     const ok = await askConfirm({
       title: tr("mem.af_forget_title"),
-      body: <p>{tr("mem.af_forget_body", { name: m.name, where: m.scope === "user" ? tr("mem.af_scope_user") : (m.project?.display ?? "") })}</p>,
+      body: <p>{tr("mem.af_forget_body", { name: m.name, where: whereOf(m) })}</p>,
       confirmLabel: tr("mem.af_forget"),
       danger: true,
     });
@@ -248,6 +260,7 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
           shown.map((m) => (
             <li key={scopeKey(m) + "/" + m.name} className="mem-br-row">
               <span className="mem-af-name">{m.name}</span>
+              {scope === ALL && <span className="mem-badge mem-br-where">{whereOf(m)}</span>}
               {m.pinned && <span className="mem-badge">{tr("mem.br_pinned")}</span>}
               {m.type && <span className="mem-badge">{m.type}</span>}
               <span className="mem-snap-what muted" title={m.description}>
@@ -296,6 +309,7 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
             {gone.map((c) => (
               <li key={c.commit} className="mem-br-row">
                 <span className="mem-af-name">{c.name}</span>
+                {scope === ALL && <span className="mem-badge mem-br-where">{whereOf(c)}</span>}
                 <span className="mem-snap-what muted">
                   {fmtDateTime(c.at, DATETIME_FULL)}
                   {" · "}

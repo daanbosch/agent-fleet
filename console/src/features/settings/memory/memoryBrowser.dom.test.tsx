@@ -100,6 +100,8 @@ const click = async (b: Element | null | undefined) => {
 };
 const text = (label: string) =>
   Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent === label);
+// The memory list proper; the forgotten list below it reuses the row class.
+const listRows = () => Array.from(document.body.querySelectorAll(".mem-br-list")[0].querySelectorAll(".mem-br-row"));
 const select = () => document.body.querySelector<HTMLSelectElement>(".mem-br-bar select")!;
 async function setValue(el: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement, v: string) {
   const proto = Object.getPrototypeOf(el);
@@ -151,9 +153,19 @@ afterEach(() => {
 });
 
 describe("MemoryBrowserPanel", () => {
-  it("lists the selected scope with author, uses and pin, and only a count for withheld ones", () => {
-    const rows = Array.from(document.body.querySelectorAll(".mem-br-row"));
+  it("opens on all scopes, tagging each row with its scope or project", () => {
+    expect(select().value).toBe("all");
+    const rows = listRows();
+    expect(rows.map((r) => r.querySelector(".mem-af-name")!.textContent)).toEqual(["rules", "build-cmd"]);
+    expect(rows[0].querySelector(".mem-br-where")!.textContent).toMatch(/User-wide|ユーザー共通/);
+    expect(rows[1].querySelector(".mem-br-where")!.textContent).toBe("app");
+  });
+
+  it("lists the selected scope with author, uses and pin, and only a count for withheld ones", async () => {
+    await setValue(select(), "user");
+    const rows = listRows();
     expect(rows).toHaveLength(1);
+    expect(rows[0].querySelector(".mem-br-where")).toBeNull();
     expect(rows[0].textContent).toContain("rules");
     expect(rows[0].textContent).toContain("claude · claude-main");
     expect(rows[0].textContent).toContain("7");
@@ -164,11 +176,14 @@ describe("MemoryBrowserPanel", () => {
   it("searches name, description, type and author", async () => {
     const input = document.body.querySelector<HTMLInputElement>('input[type="search"]')!;
     await setValue(input, "no-such");
-    expect(document.body.querySelectorAll(".mem-br-row")).toHaveLength(0);
+    expect(listRows()).toHaveLength(0);
     await setValue(input, "HOUSE");
-    expect(document.body.querySelectorAll(".mem-br-row")).toHaveLength(1);
+    expect(listRows()).toHaveLength(1);
+    // The filter runs over every scope: a project-scoped memory matches too.
+    await setValue(input, "how to build");
+    expect(listRows()[0].querySelector(".mem-af-name")!.textContent).toBe("build-cmd");
     await setValue(input, "claude-main");
-    expect(document.body.querySelectorAll(".mem-br-row")).toHaveLength(1);
+    expect(listRows()).toHaveLength(1);
   });
 
   it("asks the body search after a pause and shows the matching lines of a memory the list fields miss", async () => {
@@ -178,20 +193,20 @@ describe("MemoryBrowserPanel", () => {
     await setValue(input, "zebra");
     // Nothing is asked while the user is still typing, and the list fields match nothing yet.
     expect(searchCalls()).toHaveLength(0);
-    expect(document.body.querySelectorAll(".mem-br-row")).toHaveLength(0);
+    expect(listRows()).toHaveLength(0);
     await act(async () => {
       await new Promise((r) => setTimeout(r, 400));
     });
     await flush();
     expect(searchCalls()).toHaveLength(1);
-    expect(searchCalls()[0][0]).toBe("api/agents/memory/entries/member-search?scope=user&limit=50&q=zebra");
-    const rows = document.body.querySelectorAll(".mem-br-row");
+    expect(searchCalls()[0][0]).toBe("api/agents/memory/entries/member-search?limit=50&q=zebra");
+    const rows = listRows();
     expect(rows).toHaveLength(1);
     expect(rows[0].textContent).toContain("rules");
     expect(rows[0].textContent).toContain("the zebra rule");
     // Clearing the box brings the plain list back and drops the snippets.
     await setValue(input, "");
-    expect(document.body.querySelectorAll(".mem-br-row")[0].textContent).not.toContain("the zebra rule");
+    expect(listRows()[0].textContent).not.toContain("the zebra rule");
   });
 
   it("orders body-only hits by the server's rank, after the instant field matches", async () => {
@@ -224,9 +239,40 @@ describe("MemoryBrowserPanel", () => {
       await new Promise((r) => setTimeout(r, 400));
     });
     await flush();
-    const names = Array.from(document.body.querySelectorAll(".mem-br-row .mem-af-name")).map((e) => e.textContent);
+    const names = listRows().map((r) => r.querySelector(".mem-af-name")!.textContent);
     // listed order is rules, second, third; the server ranked third, second, rules
     expect(names).toEqual(["third", "second", "rules"]);
+  });
+
+  it("returns project-scoped body hits for a query under the default selection, without a scope param", async () => {
+    const base = api.getMockImplementation()!;
+    api.mockImplementation(async (url: string) => {
+      if (url.startsWith("api/agents/memory/entries/member-search"))
+        return { hits: [{ ...entries[1], snippets: ["compile with zebra"] }] };
+      return base(url);
+    });
+    await setValue(document.body.querySelector<HTMLInputElement>('input[type="search"]')!, "zebra");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 400));
+    });
+    await flush();
+    const calls = api.mock.calls.filter((c) => String(c[0]).startsWith("api/agents/memory/entries/member-search"));
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).not.toContain("scope=");
+    const rows = listRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].textContent).toContain("build-cmd");
+    expect(rows[0].textContent).toContain("compile with zebra");
+    expect(rows[0].querySelector(".mem-br-where")!.textContent).toBe("app");
+  });
+
+  it("scopes the body search to the user scope when it is chosen", async () => {
+    await setValue(select(), "user");
+    await setValue(document.body.querySelector<HTMLInputElement>('input[type="search"]')!, "zebra");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 400));
+    });
+    expect(api).toHaveBeenCalledWith("api/agents/memory/entries/member-search?scope=user&limit=50&q=zebra");
   });
 
   it("scopes the body search to the selected project", async () => {
@@ -250,8 +296,8 @@ describe("MemoryBrowserPanel", () => {
 
   it("forgets from the list through the revert route on the memory's newest change", async () => {
     await setValue(select(), "project:" + project.id);
-    expect(document.body.querySelectorAll(".mem-br-row")[0].textContent).toContain("build-cmd");
-    await click(document.body.querySelectorAll(".mem-br-row")[0].querySelectorAll("button")[1]);
+    expect(listRows()[0].textContent).toContain("build-cmd");
+    await click(listRows()[0].querySelectorAll("button")[1]);
     await click(confirmButton());
     expect(apiJSON).toHaveBeenCalledWith("api/agents/memory/entries/revert?commit=livecommit1", "POST", {
       commit: "livecommit1",
@@ -281,7 +327,7 @@ describe("MemoryBrowserPanel", () => {
       );
     });
     await flush();
-    const forgetBtn = document.body.querySelectorAll(".mem-br-row")[0].querySelectorAll("button")[1];
+    const forgetBtn = listRows()[0].querySelectorAll("button")[1];
     expect(forgetBtn.disabled).toBe(false);
     await click(forgetBtn);
     expect(api).toHaveBeenCalledWith("api/agents/memory/entries/member-latest?scope=user&project=&name=rules");
@@ -314,7 +360,7 @@ describe("MemoryBrowserPanel", () => {
       );
     });
     await flush();
-    await click(document.body.querySelectorAll(".mem-br-row")[0].querySelectorAll("button")[1]);
+    await click(listRows()[0].querySelectorAll("button")[1]);
     expect(confirmButton()).toBeNull();
     expect(apiJSON).not.toHaveBeenCalled();
   });
