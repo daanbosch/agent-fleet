@@ -157,6 +157,14 @@ Reads out replies from sessions and assistants.
   you have not read puts a red dot on its session; **"Mark all as read"** clears them all at once
   ([02](02-sessions.md#reading-state-badges-and-notifications)).
 
+### Limit board
+
+Who in this tenant may see where you stand on your agents' usage limits, and how much: hidden (the
+default), everyone in the tenant, or members you pick; state only, band or exact. The setting is per
+tenant, and the tab lists every tenant you publish to. Below it are what teammates publish to you,
+and the table of what is collected. How to read the values is in
+[09](09-collaboration.md#showing-teammates-where-you-stand-on-usage-limits).
+
 ### Assistant
 
 The behaviour of assistant chat and the fleet operator ([07](07-chat-memo.md), [08](08-organising.md)).

@@ -44,6 +44,7 @@ value you set is not the value in force, look one layer out.
 | MCP servers | integration servers available to your agents |
 | MCP tokens | tokens for driving your sessions from outside |
 | Notifications | what you are told about, and how |
+| Limit board | who in this tenant may see where you stand on usage limits, and how much (hidden by default); what teammates publish to you |
 | Read aloud | speech engine and voice |
 | Machine | the instance your workspace runs on (kind, architecture, vCPU, memory, disk) |
 | Toolchains | JDK and other per-workspace toolchains |
@@ -62,6 +63,7 @@ value you set is not the value in force, look one layer out.
 | Engine access | per role (chat `llm`, image generation `image`) of the deployment's self-hosted engines: every member, or only the members you tick, within what the deployment administrator allows the tenant |
 | Sessions | everything running in the tenant right now |
 | Limits & idle | the limits in force (read-only; a deployment administrator sets them) |
+| Limit board | whether the tenant's members can publish their usage-limit state at all (on by default; each member is still hidden until they opt in) |
 | Sign-in methods | your own IdP or GitHub organisation as a way in (needs approval) |
 | Login rules | join mode and domains in force (read-only) |
 | Allowed networks | where members may connect from |

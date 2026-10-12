@@ -552,12 +552,16 @@ func (rp *reaper) sweepWorkspace(ctx context.Context, ws store.Workspace, cl tie
 	}
 	now := time.Now()
 
-	// Ask the Agent for the live session list once; drives both tiers.
-	env, err := rp.mgr.agentSessionsEnv(ctx, rt)
+	// Ask the Agent for the live session list once; drives both tiers, and carries the limit
+	// snapshot for the limit board (ADR 0111 decision 6), which is recorded only at the end.
+	env, err := rp.mgr.agentSessionsEnvWithLimits(ctx, rt)
 	if err != nil {
 		// Agent unreachable (starting/unhealthy) — leave it be this pass.
 		return
 	}
+	// Deferred so that every decision below is taken before the board touches the envelope,
+	// and so that nothing the board does can return early out of this sweep.
+	defer rp.mgr.recordLimitsFromEnvelope(ctx, ws, env, now)
 	sessions := env.Sessions
 	// busy = is there a reason to keep this workspace awake. Which state counts as
 	// which lives in sessionActivity (session_activity.go) and nowhere else;

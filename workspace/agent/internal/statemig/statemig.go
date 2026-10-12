@@ -115,6 +115,9 @@ var Entries = []string{
 	// The past-session search index (sessionsearch, ADR 0110), a rebuildable cache. Introduced
 	// directly under AgentStateDir; it never existed under .config.
 	"session-search",
+	// The limit board's login-epoch ledger and its HMAC key (internal/limitepoch, ADR 0111
+	// decision 6). Introduced directly under AgentStateDir; it never existed under .config.
+	"limit-epochs.json",
 	// Chat bridge: the outbound queue and the per-provider binding ledgers.
 	"bridge-queue",
 	"bridge-sent",

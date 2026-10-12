@@ -223,10 +223,16 @@ func (m *manager) agentSessions(ctx context.Context, rt runtime.Runtime) ([]sess
 // with the container and leaves a half-written working copy). ImageJobs is the same for the
 // image queue (running, or queued and not paused): a cold engine can take ~16 minutes, and the
 // queue lives in the Agent process, so a stop loses it.
+//
+// Limits is the Agent's limit snapshot (ADR 0111 decision 6), present only when asked for
+// with ?limits=1 and only from an Agent new enough to build one. It stays raw here on purpose:
+// nothing in it may fail this decode or reach an idle, busy or presence decision. The board
+// parses it on its own (parseLimitSnapshot), after the sweep has decided everything else.
 type agentSessionsEnvelope struct {
-	Sessions  []sessionWire `json:"sessions"`
-	RepoJobs  int           `json:"repoJobs"`
-	ImageJobs int           `json:"imageJobs"`
+	Sessions  []sessionWire   `json:"sessions"`
+	RepoJobs  int             `json:"repoJobs"`
+	ImageJobs int             `json:"imageJobs"`
+	Limits    json.RawMessage `json:"limits,omitempty"`
 }
 
 // jobsRunning reports whether session-less work is in flight in the workspace.
@@ -249,8 +255,19 @@ func (e agentSessionsEnvelope) holdsWorkspace() bool {
 // agentSessionsEnv is agentSessions plus the workspace-level busy signals that ride
 // the same response, so the reaper needs no extra request per sweep.
 func (m *manager) agentSessionsEnv(ctx context.Context, rt runtime.Runtime) (agentSessionsEnvelope, error) {
+	return m.agentSessionsEnvQuery(ctx, rt, "")
+}
+
+// agentSessionsEnvWithLimits also asks for the limit snapshot. Only the reaper's sweep does:
+// building it costs the Agent file reads, and no other caller has a use for it. An Agent too
+// old to know the parameter ignores it and answers the plain envelope.
+func (m *manager) agentSessionsEnvWithLimits(ctx context.Context, rt runtime.Runtime) (agentSessionsEnvelope, error) {
+	return m.agentSessionsEnvQuery(ctx, rt, "?limits=1")
+}
+
+func (m *manager) agentSessionsEnvQuery(ctx context.Context, rt runtime.Runtime, query string) (agentSessionsEnvelope, error) {
 	var body agentSessionsEnvelope
-	req, _ := http.NewRequestWithContext(ctx, "GET", rt.Endpoint()+"/sessions", nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", rt.Endpoint()+"/sessions"+query, nil)
 	if rt.Token() != "" {
 		req.Header.Set("Authorization", "Bearer "+rt.Token())
 	}

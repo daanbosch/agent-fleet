@@ -981,6 +981,7 @@ type Store interface {
 	TenantBranchRulesStore
 	HomeOperationStore
 	CPLeaseStore
+	LimitBoardStore
 	InboxStore
 
 	// Ping backs GET /readyz. Not in a sub-interface: "is the database reachable"
@@ -1740,6 +1741,10 @@ type NotificationStore interface {
 	SweepNotifications(ctx context.Context, retainBefore string) error
 	GetUsageNotificationState(ctx context.Context, membershipID, source, windowKey string) (UsageNotificationState, bool, error)
 	PutUsageNotificationState(ctx context.Context, state UsageNotificationState) error
+	// ApplyUsageObservation is the reset notification's whole read-decide-write for one post,
+	// in one transaction fenced by the source's login generation (store_limit_board.go).
+	ApplyUsageObservation(ctx context.Context, membershipID, source, epoch, epochSince string, windowKeys []string,
+		decide func(windowKey string, prev UsageNotificationState, found bool) (UsageNotificationState, *Notification)) (accepted bool, err error)
 }
 
 // ScheduleStore is the scheduled-execution definition store (docs/log/38 + ADR0021).

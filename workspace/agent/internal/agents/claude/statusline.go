@@ -34,6 +34,52 @@ type capturedUsage struct {
 	FiveHour   *capturedWindow `json:"fiveHour,omitempty"`
 	SevenDay   *capturedWindow `json:"sevenDay,omitempty"`
 	CapturedAt int64           `json:"capturedAt"` // unix epoch seconds of the capture
+	// ObservedAt is when the captured values last changed (unix seconds). claude re-renders
+	// its statusLine from the rate_limits it already holds, so CapturedAt moves on every
+	// render while the reading itself can be hours old. A render that restates the same
+	// numbers is a cache read and must not make the reading look fresh (ADR 0111 decision 6).
+	// The cost is the other direction: an unchanged reading that claude did re-fetch looks
+	// older than it is, which only ever under-states freshness. 0 in a capture written
+	// before this field existed.
+	ObservedAt int64 `json:"observedAt,omitempty"`
+	// FiveHourObservedAt / SevenDayObservedAt are the same, per window: a render where only the
+	// 5-hour percentage moved must not make an hours-old weekly reading look fresh. ObservedAt
+	// is then the older of the two, for a reader that takes one time for the whole capture.
+	FiveHourObservedAt int64 `json:"fiveHourObservedAt,omitempty"`
+	SevenDayObservedAt int64 `json:"sevenDayObservedAt,omitempty"`
+}
+
+// windowObservedAt is one window's observation time, falling back to the capture's for a
+// capture written before the per-window fields existed. Zero when unknown.
+func (c *capturedUsage) windowObservedAt(fiveHour bool) time.Time {
+	at := c.SevenDayObservedAt
+	if fiveHour {
+		at = c.FiveHourObservedAt
+	}
+	if at > 0 {
+		return time.Unix(at, 0)
+	}
+	return c.observedAt()
+}
+
+// observedAt is the capture's observation time, falling back to CapturedAt for a capture
+// written before ObservedAt existed. Zero when neither is known.
+func (c *capturedUsage) observedAt() time.Time {
+	switch {
+	case c.ObservedAt > 0:
+		return time.Unix(c.ObservedAt, 0)
+	case c.CapturedAt > 0:
+		return time.Unix(c.CapturedAt, 0)
+	}
+	return time.Time{}
+}
+
+// sameWindow reports whether two captures carry the same reading for one window.
+func sameWindow(a, b *capturedWindow) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 // readCapturedUsage loads the last captured rate_limits and the instant it was written.
@@ -90,12 +136,36 @@ func captureFromStatusLine(b []byte) bool {
 	if rl.FiveHour == nil && rl.SevenDay == nil {
 		return false
 	}
-	c := capturedUsage{CapturedAt: time.Now().Unix()}
+	now := time.Now().Unix()
+	c := capturedUsage{CapturedAt: now, ObservedAt: now}
 	if rl.FiveHour != nil {
 		c.FiveHour = &capturedWindow{UsedPercent: rl.FiveHour.UsedPercent, ResetsAt: rl.FiveHour.ResetsAt}
 	}
 	if rl.SevenDay != nil {
 		c.SevenDay = &capturedWindow{UsedPercent: rl.SevenDay.UsedPercent, ResetsAt: rl.SevenDay.ResetsAt}
+	}
+	prev, _ := readCapturedUsage()
+	keep := func(fiveHour bool, was, is *capturedWindow) int64 {
+		if is == nil {
+			return 0
+		}
+		if prev != nil && was != nil && sameWindow(was, is) {
+			if at := prev.windowObservedAt(fiveHour); !at.IsZero() {
+				return at.Unix()
+			}
+		}
+		return now
+	}
+	var prevFH, prevSD *capturedWindow
+	if prev != nil {
+		prevFH, prevSD = prev.FiveHour, prev.SevenDay
+	}
+	c.FiveHourObservedAt = keep(true, prevFH, c.FiveHour)
+	c.SevenDayObservedAt = keep(false, prevSD, c.SevenDay)
+	for _, at := range []int64{c.FiveHourObservedAt, c.SevenDayObservedAt} {
+		if at > 0 && at < c.ObservedAt {
+			c.ObservedAt = at
+		}
 	}
 	writeCapturedUsage(c)
 	return true

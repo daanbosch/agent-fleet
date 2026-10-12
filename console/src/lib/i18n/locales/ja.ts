@@ -20,6 +20,7 @@ import { errors } from "./ja/errors.ts";
 import { fleetgraph } from "./ja/fleetgraph.ts";
 import { gallery } from "./ja/gallery.ts";
 import { imggen } from "./ja/imggen.ts";
+import { limits } from "./ja/limits.ts";
 import { inbox } from "./ja/inbox.ts";
 import { memo } from "./ja/memo.ts";
 import { mirror } from "./ja/mirror.ts";
@@ -52,6 +53,7 @@ export const ja = {
   ...usage,
   ...notifications,
   ...workitems,
+  ...limits,
   ...sharing,
   ...schedules,
   ...memo,

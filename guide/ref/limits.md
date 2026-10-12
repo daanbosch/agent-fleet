@@ -73,6 +73,43 @@ Read the screen rather than this page.
   the tenant may use the self-hosted engines at all, per role (llm / image): allowed unless
   switched off
 
+## The limit board: what it collects and how it reads
+
+The limit board (**Settings → Limit board**, [09 Working with others](../member/09-collaboration.md))
+shows where members stand on their agents' usage limits. This is its full coverage; anything not
+in the table is **unknown**, never "available".
+
+| Agent | Account quota | Session limit state |
+|---|---|---|
+| Claude | 5-hour and weekly windows | yes |
+| Codex | 5-hour and weekly windows | Managed sessions only |
+| Muse | its windows, with their length | yes |
+| Copilot | credit pools | unknown |
+| Antigravity (agy) | not collected: reading it means scraping the agent's screen | unknown |
+| every other agent | unknown | unknown |
+
+Session limit states are: hit a limit (with the automatic resume time when one was scheduled),
+spend limit (never with a resume time: waiting does not clear it), blocked, and sign-in needed.
+A session that hit a limit says nothing about other models or agents.
+
+| Rule | Value |
+|---|---|
+| A value is | the provider's last real observation, a lower bound: "at least X% (N min ago)" |
+| Marked stale after | 60 minutes |
+| Past the reset time | "reset not yet observed", never 0% |
+| Bands | under 50% / under 80% / under 95% / 95% or more, per unit, never combined |
+| Roster page | 50 members (at most 100) |
+| Members named in one audience | 100 |
+| Default | hidden, per tenant membership; the tenant switch is on |
+
+Where values come from: while a workspace runs, the idle-stop sweep reads what the agents have
+already captured, at its own interval (one minute by default); an open Console tab also sends
+what its usage chips read. **Neither is promised**: a workspace the sweep does not reach (it is
+stopped, the deployment runs no sweep, or the tenant has none of the idle-stop, hibernate or
+backup features on) with no browser open is not updated, and its values turn stale or stay unknown.
+A failed refresh never makes an old value look new, and signing in to another provider account
+drops the previous account's values.
+
 ## Status
 
 Two rules for anyone extending this page. A limit enforced in more than one layer must

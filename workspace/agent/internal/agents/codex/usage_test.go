@@ -334,11 +334,11 @@ func primeAccountUsage(t *testing.T, u usage) {
 	}
 	c := &accountUsageCache
 	c.Lock()
-	c.val, c.ok, c.fetched = u, true, time.Now()
+	c.val, c.ok, c.fetched, c.observed, c.account = u, true, time.Now(), time.Now().Add(-time.Duration(u.AgeSec)*time.Second), "a"
 	c.Unlock()
 	t.Cleanup(func() {
 		c.Lock()
-		c.val, c.ok, c.fetched = usage{}, false, time.Time{}
+		c.val, c.ok, c.fetched, c.observed, c.account = usage{}, false, time.Time{}, time.Time{}, ""
 		c.Unlock()
 	})
 }
