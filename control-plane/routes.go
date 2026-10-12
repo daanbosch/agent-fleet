@@ -42,6 +42,7 @@ func buildMux(cfg config) *http.ServeMux {
 	registerScheduleRoutes(mux, cfg)
 	registerMCPServerRoutes(mux, cfg)
 	registerNotificationRoutes(mux, cfg)
+	registerLimitBoardRoutes(mux, cfg)
 	registerUpdateRoutes(mux, cfg)
 	registerRepoFSRoutes(mux, cfg)
 	registerAgentEnvRoutes(mux, cfg)

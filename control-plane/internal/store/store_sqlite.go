@@ -1307,6 +1307,13 @@ func membershipCascade(membershipID string) []struct {
 		{`DELETE FROM work_item_session WHERE membership_id=?`, id},
 		{`DELETE FROM notification WHERE membership_id=?`, id},
 		{`DELETE FROM notification_usage_state WHERE membership_id=?`, id},
+		// The limit board (ADR 0111 decision 6). An audience names other memberships, so a
+		// member leaving must also leave every audience they were named in.
+		{`DELETE FROM limit_publication_member WHERE membership_id=? OR viewer_membership_id=?`, both},
+		{`DELETE FROM limit_publication WHERE membership_id=?`, id},
+		{`DELETE FROM limit_observation WHERE membership_id=?`, id},
+		{`DELETE FROM limit_epoch WHERE membership_id=?`, id},
+		{`DELETE FROM limit_session_state WHERE membership_id=?`, id},
 		// A share has two ends: one of them going away ends the share, however alive
 		// the other one is.
 		{`DELETE FROM session_share_proposal WHERE owner_membership_id=? OR proposer_membership_id=?`, both},
@@ -1399,6 +1406,7 @@ func (s *SQL) DeleteTenant(ctx context.Context, tenantID string) error {
 		// has no membership left to cascade from; the tenant id still reaches it.
 		`DELETE FROM engine_access_grant WHERE tenant_id=?`,
 		`DELETE FROM tenant_branch_rules WHERE tenant_id=?`,
+		`DELETE FROM limit_board_tenant WHERE tenant_id=?`,
 		// The login rules and allowed_cidrs are columns on tenant, so this one
 		// statement takes them with it.
 		`DELETE FROM tenant WHERE id=?`,

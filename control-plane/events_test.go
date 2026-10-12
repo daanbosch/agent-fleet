@@ -101,7 +101,7 @@ func eventsTestEnv(t *testing.T, stub *eventsStub) (eventsAPI, *resolved) {
 	t.Cleanup(func() { waitWorkItemFetchIdle(t, m.ID) })
 
 	mgr := &manager{store: st}
-	a := eventsAPI{memberAuth{mgr}, newWorkspaceAPI(mgr, false), notificationAPI{memberAuth{mgr}, st},
+	a := eventsAPI{memberAuth{mgr}, newWorkspaceAPI(mgr, false), notificationAPI{memberAuth: memberAuth{mgr}, store: st},
 		workItemsAPI{memberAuth{mgr}, st},
 		5 * time.Millisecond, time.Hour, /* ping effectively off; only the ping test overrides it */
 		nil /* no engines on this deployment; see the engine_member_test.go tests for that stream */}

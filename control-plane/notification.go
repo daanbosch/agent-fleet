@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -35,10 +36,17 @@ type notificationDTO struct {
 type notificationAPI struct {
 	memberAuth
 	store store.NotificationStore
+	// limits receives the browser's observations for the limit board (ADR 0111 decision 6).
+	// nil leaves the board out, which is what the notification-only tests construct.
+	limits interface {
+		store.LimitBoardStore
+		GetMembershipByID(ctx context.Context, membershipID string) (store.MembershipView, bool, error)
+	}
+	now func() time.Time
 }
 
 func newNotificationAPI(m *manager) notificationAPI {
-	return notificationAPI{memberAuth: memberAuth{m}, store: m.store}
+	return notificationAPI{memberAuth: memberAuth{m}, store: m.store, limits: m.store, now: time.Now}
 }
 
 func notificationCutoff() string {
@@ -198,16 +206,29 @@ func (a notificationAPI) seen(w http.ResponseWriter, r *http.Request, _ store.Id
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// usageObservation is one window the Console's usage chip read. ObservedAt, Derived and Stale
+// carry the observation contract of ADR 0111 decision 6: ObservedAt is the provider's own
+// observation time as the Agent reported it (never the time the browser sends), and a window
+// without it, or derived, or stale, never reaches the limit board. An older Console sends none
+// of them, and its windows then only drive the reset notification, as before.
 type usageObservation struct {
-	WindowKey string  `json:"windowKey"`
-	Percent   float64 `json:"percent"`
-	ResetsAt  string  `json:"resetsAt"`
+	WindowKey  string  `json:"windowKey"`
+	Percent    float64 `json:"percent"`
+	ResetsAt   string  `json:"resetsAt"`
+	ObservedAt string  `json:"observedAt,omitempty"`
+	Derived    bool    `json:"derived,omitempty"`
+	Stale      bool    `json:"stale,omitempty"`
 }
+
+// usageWindowMins is the length of the two windows the chip posts.
+var usageWindowMins = map[string]int{"5h": 5 * 60, "7d": 7 * 24 * 60}
 
 func (a notificationAPI) observeUsage(w http.ResponseWriter, r *http.Request, _ store.Identity, mv store.MembershipView) {
 	var in struct {
 		Source  string             `json:"source"`
 		Windows []usageObservation `json:"windows"`
+		// LimitEpoch is the opaque login epoch the Agent stamped on the reading.
+		LimitEpoch string `json:"limitEpoch,omitempty"`
 	}
 	if json.NewDecoder(r.Body).Decode(&in) != nil {
 		writeAPIErr(w, &apiError{http.StatusBadRequest, "bad_request", "invalid JSON body"})
@@ -226,6 +247,24 @@ func (a notificationAPI) observeUsage(w http.ResponseWriter, r *http.Request, _ 
 		if _, err := time.Parse(time.RFC3339, obs.ResetsAt); err != nil {
 			writeAPIErr(w, &apiError{http.StatusBadRequest, "bad_resets_at", "resetsAt must be RFC3339"})
 			return
+		}
+	}
+	now := time.Now()
+	if a.now != nil {
+		now = a.now()
+	}
+	a.recordBoardObservations(r.Context(), mv, in.Source, in.LimitEpoch, in.Windows, now)
+	for _, obs := range in.Windows {
+		// The reset notification's armed state is never set from a derived or stale value: a
+		// window rolled past its reset is the Agent's guess, and an old reading is no evidence
+		// that the limit is still (or no longer) hit.
+		if obs.Derived || obs.Stale {
+			continue
+		}
+		if obs.ObservedAt != "" {
+			if t, err := time.Parse(time.RFC3339, obs.ObservedAt); err != nil || now.Sub(t) > limitStaleAfter {
+				continue
+			}
 		}
 		st, found, err := a.store.GetUsageNotificationState(r.Context(), mv.MembershipID, in.Source, obs.WindowKey)
 		if err != nil {
@@ -257,4 +296,38 @@ func (a notificationAPI) observeUsage(w http.ResponseWriter, r *http.Request, _ 
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// recordBoardObservations is the browser fallback of the limit board. The board is fed only
+// when the Agent stamped both an observation time and a login epoch; the time this post was
+// sent is never used in their place.
+func (a notificationAPI) recordBoardObservations(ctx context.Context, mv store.MembershipView, kind, epoch string,
+	windows []usageObservation, now time.Time) {
+	if a.limits == nil || epoch == "" || len(epoch) > 64 {
+		return
+	}
+	tenantID := mv.TenantID
+	if tenantID == "" {
+		if m, ok, err := a.limits.GetMembershipByID(ctx, mv.MembershipID); err == nil && ok {
+			tenantID = m.TenantID
+		}
+	}
+	if on, err := a.limits.LimitBoardEnabled(ctx, tenantID); err != nil || !on {
+		return
+	}
+	units := make([]limitUnitWire, 0, len(windows))
+	for _, w := range windows {
+		if w.Stale || w.ObservedAt == "" {
+			continue
+		}
+		units = append(units, limitUnitWire{Unit: w.WindowKey, UsedPct: w.Percent, ResetsAt: w.ResetsAt,
+			WindowMins: usageWindowMins[w.WindowKey], ObservedAt: w.ObservedAt, Derived: w.Derived})
+	}
+	obs := validLimitUnits(kind, units, now, "browser")
+	if len(obs) == 0 {
+		return
+	}
+	if err := a.limits.RecordLimitObservations(ctx, mv.MembershipID, kind, epoch, now.UTC().Format(time.RFC3339), obs); err != nil {
+		log.Printf("limit board: browser observation %s/%s: %v", mv.MembershipID, kind, err)
+	}
 }
