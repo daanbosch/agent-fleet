@@ -6,9 +6,9 @@ import { it, expect, vi, beforeEach, describe } from "vitest";
 const x = vi.hoisted(() => ({ tenant: "t1", api: vi.fn(), apiJSON: vi.fn() }));
 vi.mock("../../core/api/client.ts", () => ({ api: x.api, apiJSON: x.apiJSON, getTenant: () => x.tenant, rel: (p: string) => p }));
 
-import { inboxBadge, mailboxNewer, setInboxScope, useInboxStore } from "./store.ts";
+import { inboxBadge, mailboxNewer, setInboxScope, startInboxChannel, useInboxStore } from "./store.ts";
 
-const mb = (seq: number, read = 0) => ({ lastSeq: seq, readSeq: read, unseen: seq - read, dnd: false, acceptFrom: "tenant" as const });
+const mb = (seq: number, read = 0, dnd = false) => ({ lastSeq: seq, readSeq: read, unseen: seq - read, dnd, acceptFrom: "tenant" as const });
 const reply = (state: string, seq: number) => ({ items: [{ id: "t1-item", state, body: "t1 body" }], mailbox: mb(seq) });
 const deferred = () => {
   let resolve: (v: unknown) => void = () => {};
@@ -79,5 +79,48 @@ describe("inbox store ordering", () => {
     expect(mailboxNewer(mb(3, 1), mb(2, 2))).toBe(false);
     expect(mailboxNewer(mb(3, 1), mb(3, 2))).toBe(true);
     expect(mailboxNewer(null, mb(0))).toBe(true);
+  });
+
+  // A settings change moves the server's counter (PutInboxSettings), so the stream's frame
+  // for it is newer than any list read before it, and a delayed list cannot undo it.
+  it("keeps the stream's newer do-not-disturb over a list that answers late", async () => {
+    const doc = new EventTarget();
+    Object.defineProperty(doc, "hidden", { value: false });
+    vi.stubGlobal("document", doc);
+    vi.stubGlobal("window", { setTimeout, clearTimeout, setInterval, clearInterval });
+    let out: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const stream = new ReadableStream<Uint8Array>({ start: (c) => void (out = c) });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_p: string, init: RequestInit) => {
+        init.signal?.addEventListener("abort", () => out?.close(), { once: true });
+        return new Response(stream, { headers: { "Content-Type": "text/event-stream" } });
+      }),
+    );
+    const late = deferred();
+    x.api
+      .mockResolvedValueOnce({ ...reply("claimed", 5), mailbox: mb(5) })
+      .mockImplementationOnce(() => late.p)
+      .mockResolvedValue({ ...reply("claimed", 6), mailbox: mb(6, 0, true) });
+    const stop = startInboxChannel();
+    const emit = (m: ReturnType<typeof mb>) =>
+      out!.enqueue(new TextEncoder().encode("data: " + JSON.stringify({ stream: "inbox", data: m }) + "\n\n"));
+    try {
+      await vi.waitFor(() => expect(useInboxStore.getState().loaded).toBe(true));
+      emit(mb(5));
+      await vi.waitFor(() => expect(x.api).toHaveBeenCalledTimes(2));
+      emit(mb(6, 0, true));
+      await vi.waitFor(() => expect(useInboxStore.getState().mailbox?.dnd).toBe(true));
+      late.resolve({ ...reply("claimed", 5), mailbox: mb(5, 0, false) });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(useInboxStore.getState().mailbox?.dnd).toBe(true);
+      // Turning it off again is a newer revision still, and wins.
+      emit(mb(7, 0, false));
+      await vi.waitFor(() => expect(useInboxStore.getState().mailbox?.dnd).toBe(false));
+    } finally {
+      stop();
+      await new Promise((r) => setTimeout(r, 0));
+      vi.unstubAllGlobals();
+    }
   });
 });

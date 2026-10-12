@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -994,6 +995,190 @@ func TestInboxReadAndClaimDoNotDeadlock(t *testing.T) {
 				t.Fatalf("%s: %v", other, err)
 			}
 			_, _ = st.db.ExecContext(ctx, `DROP TRIGGER IF EXISTS inbox_test_read_gate ON inbox_participant`)
+		})
+	}
+}
+
+// inboxPG is a Postgres store of its own for the lock-order tests below, which install a
+// trigger: SQLite runs one transaction at a time and has none of these races.
+func inboxPG(t *testing.T) (*SQL, context.Context) {
+	t.Helper()
+	dsn, ok := pgtest.Schema(t)
+	if !ok {
+		t.Skip("set AF_TEST_DATABASE_URL: the race needs Postgres row locks")
+	}
+	st, err := OpenPostgres(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	t.Cleanup(cancel)
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return st, ctx
+}
+
+// mailboxGate holds the first transaction that takes mid's mailbox lock (the no-op update of
+// lockMailboxes) inside that update, until the returned func is called.
+func mailboxGate(t *testing.T, st *SQL, ctx context.Context, mid string) func() {
+	t.Helper()
+	gate, err := st.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { gate.Close() })
+	if _, err := gate.ExecContext(ctx, `SELECT pg_advisory_lock(hashtext($1))`, mid); err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			_, _ = gate.ExecContext(context.Background(), `SELECT pg_advisory_unlock(hashtext($1))`, mid)
+		}
+	}
+	t.Cleanup(release)
+	for _, q := range []string{
+		fmt.Sprintf(`CREATE FUNCTION inbox_mailbox_gate() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN
+		 PERFORM pg_advisory_lock(hashtext('%s')); PERFORM pg_advisory_unlock(hashtext('%s')); RETURN NEW; END$$`, mid, mid),
+		fmt.Sprintf(`CREATE TRIGGER inbox_mailbox_gate AFTER UPDATE ON inbox_mailbox FOR EACH ROW
+		 WHEN (NEW.membership_id='%s' AND OLD.last_seq=NEW.last_seq) EXECUTE FUNCTION inbox_mailbox_gate()`, mid),
+	} {
+		if _, err := st.db.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return release
+}
+
+// waitPG waits until some other session waits on a lock of kind (advisory, transactionid)
+// in a statement containing needle.
+func waitPG(t *testing.T, st *SQL, ctx context.Context, kind, needle string) {
+	t.Helper()
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		var n int
+		if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid()
+			AND wait_event_type='Lock' AND wait_event=? AND query LIKE ?`, kind, "%"+needle+"%").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n > 0 {
+			return
+		}
+	}
+	t.Fatalf("no %s wait on %q: the interleaving was not reached, so the test proves nothing", kind, needle)
+}
+
+// TestInboxSendOrdersAgainstSenderRemoval: a send that already holds its mailbox locks when
+// the sender is removed either commits first, and then the removal withdraws its request, or
+// sees the removal. With the send reading the membership without a lock, both succeeded and
+// the request stayed open forever, a re-invite included.
+func TestInboxSendOrdersAgainstSenderRemoval(t *testing.T) {
+	st, ctx := inboxPG(t)
+	f := newInboxFix(t, st, "a", "b")
+	a := f.members["a"]
+	release := mailboxGate(t, st, ctx, a)
+	id := NewID()
+	sent, removed := make(chan error, 1), make(chan error, 1)
+	go func() {
+		r, err := st.CreateInboxItem(ctx, InboxItem{ID: id, TenantID: f.tenant, SenderMembershipID: a, Kind: "request",
+			State: "open", Ciphertext: "Ym9keQ==", CreatedAt: NowTS()}, []string{f.members["b"]}, inboxTestLimits)
+		if err == nil && !r.Created {
+			err = fmt.Errorf("not created: %+v", r)
+		}
+		sent <- err
+	}()
+	waitPG(t, st, ctx, "advisory", "UPDATE inbox_mailbox SET last_seq=last_seq")
+	go func() { removed <- st.SetMembershipStatus(ctx, a, "inactive") }()
+	waitPG(t, st, ctx, "transactionid", "")
+	release()
+	if err := <-sent; err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if err := <-removed; err != nil {
+		t.Fatalf("removal: %v", err)
+	}
+	if it := f.item(t, id); it.State != "withdrawn" {
+		t.Fatalf("the removal missed the request sent just before it: state=%s", it.State)
+	}
+	_ = st.SetMembershipStatus(ctx, a, "active")
+	f.reconcile(t)
+	if it := f.item(t, id); it.State != "withdrawn" {
+		t.Fatalf("after a re-invite: state=%s", it.State)
+	}
+}
+
+// TestInboxLastRemovalDoesNotDeadlockRead: removing the last active participant of a DM while
+// a read of that DM is in flight. The removal used to lock the mailbox before the DM's item,
+// the reverse of the read, and the read failed with 40P01.
+func TestInboxLastRemovalDoesNotDeadlockRead(t *testing.T) {
+	st, ctx := inboxPG(t)
+	f := newInboxFix(t, st, "a", "b")
+	id := f.send(t, "dm", "a", "b")
+	if err := st.SetMembershipStatus(ctx, f.members["a"], "inactive"); err != nil {
+		t.Fatal(err)
+	}
+	release := mailboxGate(t, st, ctx, f.members["b"])
+	removed, read := make(chan error, 1), make(chan error, 1)
+	go func() { removed <- st.SetMembershipStatus(ctx, f.members["b"], "inactive") }()
+	waitPG(t, st, ctx, "advisory", "UPDATE inbox_mailbox SET last_seq=last_seq")
+	go func() { _, err := st.MarkInboxRead(ctx, id, f.members["b"], NowTS()); read <- err }()
+	waitPG(t, st, ctx, "transactionid", "")
+	release()
+	if err := <-removed; err != nil {
+		t.Fatalf("removal: %v", err)
+	}
+	if err := <-read; err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if _, ok, _ := st.GetInboxItem(ctx, id); ok {
+		t.Fatal("the DM outlived its last participant")
+	}
+}
+
+// TestInboxConcurrentLastRemovals: the two participants of a DM removed at the same moment.
+// Each removal locks the item before deciding, so the second always sees the first and the
+// body ends.
+func TestInboxConcurrentLastRemovals(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range inboxStores(t) {
+		t.Run(name, func(t *testing.T) {
+			for round := 0; round < 10; round++ {
+				f := newInboxFix(t, st, "a", "b")
+				id := f.send(t, "dm", "a", "b")
+				var wg sync.WaitGroup
+				for _, m := range []string{"a", "b"} {
+					wg.Add(1)
+					go func(mid string) {
+						defer wg.Done()
+						if err := st.SetMembershipStatus(ctx, mid, "inactive"); err != nil {
+							t.Errorf("removal: %v", err)
+						}
+					}(f.members[m])
+				}
+				wg.Wait()
+				if _, ok, _ := st.GetInboxItem(ctx, id); ok {
+					t.Fatalf("round %d: the DM outlived both removals", round)
+				}
+			}
+		})
+	}
+}
+
+// TestInboxSettingsMoveTheCounter: a do-not-disturb or accept-from change advances the mailbox
+// counter, which is the revision the Console keeps the newer mailbox by.
+func TestInboxSettingsMoveTheCounter(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range inboxStores(t) {
+		t.Run(name, func(t *testing.T) {
+			f := newInboxFix(t, st, "a")
+			before, _ := st.GetInboxMailbox(ctx, f.members["a"])
+			_ = st.PutInboxSettings(ctx, f.members["a"], "tenant", true, nil)
+			after, _ := st.GetInboxMailbox(ctx, f.members["a"])
+			if after.LastSeq <= before.LastSeq || !after.DND {
+				t.Fatalf("before=%+v after=%+v", before, after)
+			}
 		})
 	}
 }

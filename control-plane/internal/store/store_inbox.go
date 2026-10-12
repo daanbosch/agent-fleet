@@ -9,12 +9,15 @@ package store
 // SQLite runs on one connection, so its transactions are serial anyway. Counting and then
 // updating would let two concurrent claims both pass (docs/log/130 §130.3).
 //
-// Lock order, which every transaction here keeps so that none can deadlock another: the
-// membership row (removal only), then item rows in id order, then mailbox rows in
-// membership-id order, then participant rows. A send has no item to lock yet and starts at the
-// mailboxes; block and settings changes lock the owner's mailbox, which is what orders them
-// against a send to that member (measured on Postgres: a read that took the participant row
-// before the mailbox deadlocked against a claim, SQLSTATE 40P01).
+// Lock order, which every transaction here keeps so that none can deadlock another:
+// membership rows in id order, then item rows in id order, then mailbox rows in
+// membership-id order, then participant rows. Only a send and a removal lock membership rows:
+// a send locks its sender's and recipients' before it checks they are active, so a removal of
+// any of them either commits first (and the send sees it) or waits for the send (and then
+// finds the new item). A send has no item to lock yet. Block and settings changes lock the
+// owner's mailbox, which orders them against a send to that member. Measured on Postgres: a
+// read that took the participant row before the mailbox deadlocked against a claim, and a
+// removal that took a mailbox before a DM's item row deadlocked against a read (40P01 both).
 
 import (
 	"context"
@@ -194,6 +197,22 @@ func lockMailboxes(ctx context.Context, tx *sqlTx, ids []string) error {
 	return nil
 }
 
+// lockMemberships locks membership rows in id order. Statements after it read the status
+// those rows have once the lock is held, including a removal that committed while waiting.
+func lockMemberships(ctx context.Context, tx *sqlTx, ids []string) error {
+	sorted := append([]string(nil), ids...)
+	sort.Strings(sorted)
+	for i, id := range sorted {
+		if i > 0 && sorted[i-1] == id {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE membership SET status=status WHERE id=?`, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // bumpInboxItem gives every participant of an item the next number in their own sequence,
 // which is what moves their stream and their badge.
 func bumpInboxItem(ctx context.Context, tx *sqlTx, itemID string) error {
@@ -253,6 +272,9 @@ func (s *SQL) inboxTx(ctx context.Context, f func(tx *sqlTx) (bool, error)) (boo
 func (s *SQL) CreateInboxItem(ctx context.Context, it InboxItem, recipients []string, lim InboxSendLimits) (InboxSendResult, error) {
 	var out InboxSendResult
 	_, err := s.inboxTx(ctx, func(tx *sqlTx) (bool, error) {
+		if err := lockMemberships(ctx, tx, append([]string{it.SenderMembershipID}, recipients...)); err != nil {
+			return false, err
+		}
 		if err := lockMailboxes(ctx, tx, append([]string{it.SenderMembershipID}, recipients...)); err != nil {
 			return false, err
 		}
@@ -652,7 +674,10 @@ func (s *SQL) PutInboxSettings(ctx context.Context, membershipID, acceptFrom str
 		if dnd {
 			d = 1
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE inbox_mailbox SET accept_from=?,dnd=? WHERE membership_id=?`,
+		// The counter moves too: the mailbox the Console holds carries dnd and acceptFrom, and
+		// it keeps the newer of two mailboxes by this counter, so a list read before the change
+		// can never put the old setting back over the stream's new one.
+		if _, err := tx.ExecContext(ctx, `UPDATE inbox_mailbox SET accept_from=?,dnd=?,last_seq=last_seq+1 WHERE membership_id=?`,
 			acceptFrom, d, membershipID); err != nil {
 			return false, err
 		}
@@ -827,15 +852,24 @@ func queryIDs(ctx context.Context, tx *sqlTx, q string, args ...any) ([]string, 
 // all. Done at the removal itself rather than by a later sweep, so a re-invite before that
 // sweep cannot undo it: the sweep would read the membership as active and see nothing to do.
 func inboxMembershipInactiveTx(ctx context.Context, tx *sqlTx, membershipID, now string) error {
+	// The caller has already written this membership's row, so a send to or from it is
+	// either committed (and its item is found here) or waiting behind this transaction.
+	// Every item the member takes part in is locked before any mailbox, DMs and finished
+	// requests too: any of them can reach the end of its life below, and a read holds the
+	// item while it waits for a mailbox.
+	all, err := queryIDs(ctx, tx, `SELECT item_id FROM inbox_participant WHERE membership_id=? ORDER BY item_id`, membershipID)
+	if err != nil {
+		return err
+	}
+	for _, id := range all {
+		if _, err := tx.ExecContext(ctx, `UPDATE inbox_item SET updated_at=updated_at WHERE id=?`, id); err != nil {
+			return err
+		}
+	}
 	reqs, err := queryIDs(ctx, tx, `SELECT DISTINCT p.item_id FROM inbox_participant p JOIN inbox_item i ON i.id=p.item_id
 		WHERE p.membership_id=? AND i.kind='request' AND i.state IN ('open','claimed') ORDER BY p.item_id`, membershipID)
 	if err != nil {
 		return err
-	}
-	for _, id := range reqs {
-		if _, err := tx.ExecContext(ctx, `UPDATE inbox_item SET updated_at=updated_at WHERE id=?`, id); err != nil {
-			return err
-		}
 	}
 	people := []string{membershipID}
 	for _, id := range reqs {
