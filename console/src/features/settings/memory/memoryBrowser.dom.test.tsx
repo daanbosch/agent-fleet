@@ -421,4 +421,35 @@ describe("MemoryBrowserPanel", () => {
     expect(warns.some((w) => w.includes("1"))).toBe(true);
     expect(document.body.textContent).toContain("old-note");
   });
+
+  it("keeps offering a project that holds only forgotten memories, even when its rows were cut or another scope is selected", async () => {
+    const userRow = { ...changes[2], scope: "user", project: undefined, name: "u-note", commit: "cu" };
+    api.mockImplementation(async (url: string) => {
+      if (url.startsWith("api/agents/memory/entries/list")) return { entries: [] };
+      if (url.startsWith("api/agents/memory/entries/member-forgotten")) {
+        // All scopes: the user row fills the answer, the project's row did not fit but is named.
+        if (!url.includes("?")) return { forgotten: [userRow], projects: [project], truncated: true };
+        return { forgotten: [userRow], projects: [] };
+      }
+      return {};
+    });
+    await act(async () => root!.unmount());
+    root = createRoot(host!);
+    await act(async () => {
+      root!.render(
+        <ToastProvider>
+          <ConfirmProvider>
+            <MemoryBrowserPanel reload={0} onChanged={() => {}} />
+          </ConfirmProvider>
+        </ToastProvider>,
+      );
+    });
+    await flush();
+    const options = () => Array.from(select().options).map((o) => o.value);
+    expect(options()).toEqual(["all", "user", "project:" + project.id]);
+    await setValue(select(), "user");
+    expect(options()).toEqual(["all", "user", "project:" + project.id]);
+    await setValue(select(), "project:" + project.id);
+    expect(select().value).toBe("project:" + project.id);
+  });
 });

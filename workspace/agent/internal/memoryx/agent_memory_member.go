@@ -202,6 +202,12 @@ func agentMemMemberLatestLocked(scope, name, rel string) (agentMemChangeView, er
 	if commit == "" {
 		return agentMemChangeView{}, notFound
 	}
+	return agentMemMemberChangeAt(scope, name, rel, commit)
+}
+
+// agentMemMemberChangeAt judges and marks the newest change `commit` of one memory (agentMemMu
+// held). The forgotten list finds the commits of many memories in one history pass and comes here.
+func agentMemMemberChangeAt(scope, name, rel, commit string) (agentMemChangeView, error) {
 	at, err := memoryGitRun("log", "-1", "--format=%aI", commit)
 	if err != nil {
 		return agentMemChangeView{}, err

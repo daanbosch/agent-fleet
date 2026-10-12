@@ -184,3 +184,111 @@ func TestAgentMemoryMemberForgottenWithholdsAndSkipsLive(t *testing.T) {
 		t.Fatalf("withheld and live: %d %s", code, body)
 	}
 }
+
+// forgeForgotten writes a create and a forget of rel/name with the given author time, and the
+// tombstone: a forgotten memory whose time the test controls. secret puts a token in the text
+// that the forget removed.
+func forgeForgotten(t *testing.T, rel, name, when string, secret bool) {
+	t.Helper()
+	t.Setenv("GIT_AUTHOR_DATE", when)
+	t.Setenv("GIT_COMMITTER_DATE", when)
+	desc := "d"
+	if secret {
+		desc = agentMemFakeAWS()
+	}
+	path := "af/" + rel + "/" + name + ".md"
+	tr := func(op string) string {
+		return "agent-memory: " + op + "\n\nAF-Trigger: agent-memory\nAF-Op: " + op + "\nAF-Memory: " + path + "\nAF-Author-Kind: claude\nAF-Author-Session: s\n"
+	}
+	agentMemCommitRaw(t, map[string]string{path: "---\nname: " + name + "\ndescription: " + desc + "\nrevision: 1\n---\nb\n"}, tr("create"))
+	if _, err := memoryGitRun("rm", "--quiet", "--", path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := memoryGitRun("commit", "--quiet", "--no-verify", "-m", tr("forget")); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := agentMemCheckDir(rel+"/"+agentMemTombDir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func setForgottenMax(t *testing.T, n int) {
+	old := agentMemForgottenMax
+	agentMemForgottenMax = n
+	t.Cleanup(func() { agentMemForgottenMax = old })
+}
+
+func namesOf(w agentMemForgottenWire) string {
+	var ns []string
+	for _, v := range w.Forgotten {
+		ns = append(ns, v.Name)
+	}
+	return strings.Join(ns, ",")
+}
+
+// The cut keeps the newest forgotten memories, whatever their names sort like: an old "a" must not
+// push out a newer "z". Chosen by scope and name first, the answer would hold a, b0, b1.
+func TestAgentMemoryMemberForgottenCutKeepsTheNewest(t *testing.T) {
+	_, _, _ = agentMemTestEnv(t)
+	setForgottenMax(t, 3)
+	forgeForgotten(t, "user", "a", "2026-01-01T00:00:00Z", false)
+	for i, n := range []string{"b0", "b1", "b2", "b3"} {
+		forgeForgotten(t, "user", n, "2026-02-0"+string(rune('1'+i))+"T00:00:00Z", false)
+	}
+	forgeForgotten(t, "user", "z", "2026-03-01T00:00:00Z", false)
+	code, w, body := forgottenGet(t, "")
+	if code != http.StatusOK || namesOf(w) != "z,b3,b2" || !w.Truncated {
+		t.Fatalf("cut: %d %s", code, body)
+	}
+}
+
+// Truncated says an eligible row was left out; candidates that are live, unpublished or withheld
+// do not make it true, and the withheld count covers the whole scan, not only the part before the cut.
+func TestAgentMemoryMemberForgottenTruncatedOnlyForEligibleRows(t *testing.T) {
+	_, _, _ = agentMemTestEnv(t)
+	c := agentMemCallerT(t, "claude-main")
+	setForgottenMax(t, 3)
+	forgeForgotten(t, "user", "a", "2026-02-01T00:00:00Z", false)
+	forgeForgotten(t, "user", "b", "2026-02-02T00:00:00Z", false)
+	forgeForgotten(t, "user", "c", "2026-02-03T00:00:00Z", false)
+	forgeForgotten(t, "user", "leaky", "2026-01-01T00:00:00Z", true) // oldest: after the cut
+	saveScoped(t, c, "live", "user", time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC))
+	tomb, _ := agentMemCheckDir("user/"+agentMemTombDir, true)
+	for _, n := range []string{"live", "unpublished"} {
+		if err := os.WriteFile(filepath.Join(tomb, n), []byte("1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, w, body := forgottenGet(t, "")
+	if code != http.StatusOK || namesOf(w) != "c,b,a" || w.Truncated || w.Withheld != 1 {
+		t.Fatalf("exact fit: %d %s", code, body)
+	}
+	forgeForgotten(t, "user", "d", "2026-02-04T00:00:00Z", false)
+	if _, w, body = forgottenGet(t, ""); namesOf(w) != "d,c,b" || !w.Truncated || w.Withheld != 1 {
+		t.Fatalf("one over: %s", body)
+	}
+}
+
+// A project whose forgotten rows did not fit is still named, so the Console can offer it.
+func TestAgentMemoryMemberForgottenNamesProjectsBeyondTheCut(t *testing.T) {
+	_, _, _ = agentMemTestEnv(t)
+	c := agentMemCallerT(t, "claude-main")
+	setForgottenMax(t, 1)
+	proj := "projects/" + c.Project.ID
+	if _, err := agentMemCheckDir(proj, true); err != nil {
+		t.Fatal(err)
+	}
+	forgeForgotten(t, "user", "u", "2026-03-01T00:00:00Z", false)
+	forgeForgotten(t, proj, "p", "2026-01-01T00:00:00Z", false)
+	code, w, body := forgottenGet(t, "")
+	if code != http.StatusOK || namesOf(w) != "u" || !w.Truncated || len(w.Projects) != 1 || w.Projects[0].ID != c.Project.ID {
+		t.Fatalf("projects beyond the cut: %d %s", code, body)
+	}
+	if _, w, body = forgottenGet(t, "?scope=project&project="+c.Project.ID); namesOf(w) != "p" || w.Truncated {
+		t.Fatalf("project scope: %s", body)
+	}
+}

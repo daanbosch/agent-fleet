@@ -41,6 +41,9 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
   const [goneWithheld, setGoneWithheld] = useState(0);
   const [goneTruncated, setGoneTruncated] = useState(false);
   const [goneErr, setGoneErr] = useState(false);
+  // The projects that hold a forgotten memory, as the Agent last named them (it names them even
+  // when their rows did not fit). Kept across scope changes so a project stays selectable.
+  const [goneProjects, setGoneProjects] = useState<Map<string, string>>(new Map());
   const [loadErr, setLoadErr] = useState("");
   const [scope, setScope] = useState(ALL);
   const [query, setQuery] = useState("");
@@ -75,6 +78,15 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
     if (isTransientErr(res)) return false;
     setGoneErr(!!res?.error);
     setForgotten(res?.error ? [] : (res?.forgotten ?? []));
+    if (!res?.error) {
+      const named: { id: string; display: string }[] = res?.projects ?? [];
+      // An answer for all scopes is the whole truth; one for a single scope only adds to it.
+      setGoneProjects((prev) => {
+        const next = new Map(kind === ALL ? [] : prev);
+        for (const p of named) next.set("project:" + p.id, p.display);
+        return next;
+      });
+    }
     setGoneWithheld(res?.error ? 0 : (res?.withheld ?? 0));
     setGoneTruncated(!res?.error && !!res?.truncated);
     return true;
@@ -90,11 +102,12 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
       [ALL, tr("mem.br_scope_all")],
       ["user", tr("mem.af_scope_user")],
     ]);
-    for (const m of [...(rows ?? []), ...forgotten]) {
+    for (const m of rows ?? []) {
       if (m.scope === "project" && m.project) out.set(scopeKey(m), m.project.display);
     }
+    for (const [k, display] of goneProjects) if (!out.has(k)) out.set(k, display);
     return [...out.entries()];
-  }, [rows, forgotten, tr]);
+  }, [rows, goneProjects, tr]);
   useEffect(() => {
     if (!scopes.some(([k]) => k === scope)) setScope(ALL);
   }, [scopes, scope]);

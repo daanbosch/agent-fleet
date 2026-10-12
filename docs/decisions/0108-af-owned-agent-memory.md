@@ -524,3 +524,10 @@ non-regular or oversized entry, or a name that is not a memory name is not a tom
 with no published change, or a memory that is live again, is not listed. One answer holds at most 300 rows
 (`truncated`; narrow the scope). The route is read-only, counts no use and is not gated by the switch;
 restore still goes through the revert route with its newest-change and `expectRevision` checks.
+
+The newest rows are chosen after every tombstone has been judged (by the newest change's time, found
+in one history pass), so the cut never drops a newer memory for an older one, and `truncated` is set
+only when a listable row was left out. `projects` names every project with a listable forgotten
+memory, cut or not, so the Console keeps offering a scope whose rows did not fit. One request judges
+at most 2000 tombstones (`truncated` past that) and takes the read lock per memory, not across the
+request.

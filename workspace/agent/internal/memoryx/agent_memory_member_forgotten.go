@@ -12,24 +12,32 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
 )
 
+// agentMemForgottenMax bounds the rows of one answer (a variable so a test can use a small one).
+var agentMemForgottenMax = 300
+
 const (
-	// agentMemForgottenMax bounds one answer (and the git work behind it): each row costs a few
-	// git calls.
-	agentMemForgottenMax = 300
+	// agentMemTombScanMax bounds how many tombstones one request judges, since each judged
+	// memory costs a few git calls. Past it the answer says truncated.
+	agentMemTombScanMax = 2000
 	// agentMemTombMaxSize: a tombstone holds a revision number. Anything bigger is not one.
 	agentMemTombMaxSize = 64
 )
 
-// agentMemForgottenWire is the forgotten list. Rows are the same view the changes list gives its
-// newest row, so Revertible says whether the commit can be restored. Withheld counts names left
-// out because the name failed the scan or the newest change of the memory did; they are never
-// listed. Truncated says more tombstones exist than one answer holds: narrow the scope.
+// agentMemForgottenWire is the forgotten list, newest forgotten first. Rows are the same view the
+// changes list gives its newest row, so Revertible says whether the commit can be restored.
+// Withheld counts names left out because the name failed the scan or the newest change of the
+// memory did; they are never listed. Truncated says memories that could be listed were left out
+// (more than one answer holds, or more tombstones than one request judges): narrow the scope.
+// Projects names every project that has a listable forgotten memory, cut or not, so the Console can
+// keep offering a scope whose rows did not fit.
 type agentMemForgottenWire struct {
 	Forgotten []agentMemChangeView `json:"forgotten"`
+	Projects  []*agentMemProject   `json:"projects"`
 	Withheld  int                  `json:"withheld,omitempty"`
 	Truncated bool                 `json:"truncated,omitempty"`
 }
@@ -62,12 +70,54 @@ func agentMemTombNames(scopeRel string) (names []string, bad int) {
 	return names, bad
 }
 
+// agentMemTombCand is one tombstone with the newest change of its memory, found in a single pass
+// over the history rather than one search per memory.
+type agentMemTombCand struct {
+	scope, project, name, rel string
+	commit                    string
+	at                        time.Time
+}
+
+// agentMemNewestCommits returns, for each wanted "af/..." path, the newest agent-memory commit
+// that names it with its author time, deciding "newest" by the trailer parsing of
+// agentMemLatestChange. A commit whose time does not parse sorts as the zero time.
+func agentMemNewestCommits(want map[string]bool) (map[string]agentMemTombCand, error) {
+	out := map[string]agentMemTombCand{}
+	if len(want) == 0 {
+		return out, nil
+	}
+	log, err := memoryGitRun("log", memoryBranch, "-F", "--grep=AF-Trigger: "+memoryTriggerAgentMemory,
+		"--format=%H"+memoryFldSep+"%aI"+memoryFldSep+"%B"+memoryRecSep)
+	if err != nil {
+		return nil, err
+	}
+	for _, rec := range strings.Split(log, memoryRecSep) {
+		f := strings.SplitN(strings.TrimSpace(rec), memoryFldSep, 3)
+		if len(f) < 3 {
+			continue
+		}
+		tr := agentMemTrailers(f[2])
+		path := tr["AF-Memory"]
+		if tr["AF-Trigger"] != memoryTriggerAgentMemory || !want[path] {
+			continue
+		}
+		if _, seen := out[path]; seen {
+			continue
+		}
+		at, _ := time.Parse(time.RFC3339, f[1])
+		out[path] = agentMemTombCand{commit: f[0], at: at}
+	}
+	return out, nil
+}
+
 // agentMemMemberForgotten lists the forgotten memories of the user scope and every project, or of
-// the one scope named. A tombstone counts only while the memory is absent and has a published
-// change; the newest change is judged by agentMemMemberLatest's scan, raw and decoded, so a name
-// or text that would be withheld there is counted here, never listed.
+// the one scope named, newest forgotten first. Every tombstone is judged before the newest rows
+// are chosen, so the cut never drops a newer memory for an older one. A tombstone counts only
+// while the memory is absent and has a published change; the newest change is judged by
+// agentMemMemberLatest's scan, raw and decoded, so a name or text that would be withheld there is
+// counted here, never listed. agentMemMu is taken per memory, not across the request.
 func agentMemMemberForgotten(scope, project string) (agentMemForgottenWire, error) {
-	out := agentMemForgottenWire{Forgotten: []agentMemChangeView{}}
+	out := agentMemForgottenWire{Forgotten: []agentMemChangeView{}, Projects: []*agentMemProject{}}
 	type src struct{ scope, project, rel string }
 	var srcs []src
 	switch scope {
@@ -92,40 +142,66 @@ func agentMemMemberForgotten(scope, project string) (agentMemForgottenWire, erro
 		srcs = append(srcs, src{scope, project, rel})
 	}
 
-	agentMemMu.RLock()
-	defer agentMemMu.RUnlock()
-	if !memoryHasCommits() {
-		return out, nil
-	}
+	var cands []agentMemTombCand
+	want := map[string]bool{}
 	for _, s := range srcs {
 		names, bad := agentMemTombNames(s.rel)
 		out.Withheld += bad
 		for _, name := range names {
-			if len(out.Forgotten) >= agentMemForgottenMax {
+			if len(cands) >= agentMemTombScanMax {
 				out.Truncated = true
 				break
 			}
-			v, err := agentMemMemberLatestLocked(s.scope, name, s.rel+"/"+name+".md")
-			var ue *memoryUserErr
-			switch {
-			case err == nil:
-			case errors.As(err, &ue) && ue.Status == http.StatusNotFound:
-				continue
-			case errors.As(err, &ue) && ue.Code == errCodeMemorySecretDetected:
-				out.Withheld++
-				continue
-			default:
-				return out, err
-			}
-			if v.Live {
-				continue
-			}
-			out.Forgotten = append(out.Forgotten, v)
+			cands = append(cands, agentMemTombCand{scope: s.scope, project: s.project, name: name, rel: s.rel + "/" + name + ".md"})
+			want[agentMemRepoPrefix+"/"+s.rel+"/"+name+".md"] = true
 		}
 	}
-	sort.SliceStable(out.Forgotten, func(i, j int) bool {
-		return strings.Compare(out.Forgotten[i].At, out.Forgotten[j].At) > 0
-	})
+	agentMemMu.RLock()
+	var newest map[string]agentMemTombCand
+	var err error
+	if memoryHasCommits() {
+		newest, err = agentMemNewestCommits(want)
+	}
+	agentMemMu.RUnlock()
+	if err != nil {
+		return out, err
+	}
+	found := cands[:0]
+	for _, c := range cands {
+		if n, ok := newest[agentMemRepoPrefix+"/"+c.rel]; ok {
+			c.commit, c.at = n.commit, n.at
+			found = append(found, c)
+		}
+	}
+	sort.SliceStable(found, func(i, j int) bool { return found[i].at.After(found[j].at) })
+
+	projects := map[string]bool{}
+	for _, c := range found {
+		agentMemMu.RLock()
+		v, err := agentMemMemberChangeAt(c.scope, c.name, c.rel, c.commit)
+		agentMemMu.RUnlock()
+		var ue *memoryUserErr
+		switch {
+		case err == nil:
+		case errors.As(err, &ue) && ue.Code == errCodeMemorySecretDetected:
+			out.Withheld++
+			continue
+		default:
+			return out, err
+		}
+		if v.Live {
+			continue
+		}
+		if c.project != "" && !projects[c.project] {
+			projects[c.project] = true
+			out.Projects = append(out.Projects, agentMemProjectInfo(c.project))
+		}
+		if len(out.Forgotten) >= agentMemForgottenMax {
+			out.Truncated = true
+			continue
+		}
+		out.Forgotten = append(out.Forgotten, v)
+	}
 	return out, nil
 }
 
