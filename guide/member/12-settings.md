@@ -317,7 +317,7 @@ Version control over the memory an agent accumulates by itself (claude's auto-me
     file name (it must be a valid Agent Fleet name, otherwise it is listed as *bad name*), its description is
     the first non-empty line (cut at 2,000 characters), and it has no type; such notes are marked *no
     frontmatter*. A note with frontmatter is read as before. Muse paths may contain folders: `a/b.md` becomes
-    the memory `a--b`, and two files that map to one name are both refused. `MEMORY.md`, Muse's
+    the memory `a--b`, and two files that map to one name are both refused (a folder with more than 2,000 notes is previewed only: the check cannot be completed, so it is not applied). A memory of the same name that came from a different muse file, folder or scope is never overwritten. `MEMORY.md`, Muse's
     `.muse-memory.lock` files and anything that is not `.md` are not notes, and a symlink is never followed.
     **New** notes are added, **newer in muse** notes update an Agent Fleet copy only while it is still exactly what
     this import wrote (a memory you saved, edited, pinned or reverted in Agent Fleet since is listed as **Agent Fleet has

@@ -114,7 +114,9 @@ func agentMemMuseDirOK(dir string) bool {
 
 // museDirOK says whether a name may be taken for a directory of muse's personal_project store.
 func museDirOK(dir string) bool {
-	return museDirRe.MatchString(dir) && !strings.Contains(dir, "..") && agentMemImportShowable(dir)
+	// The pattern already bounds the length (a slug of a deep path outgrows the 100 characters
+	// a file name may show) and allows no control character.
+	return museDirRe.MatchString(dir) && !strings.Contains(dir, "..") && agentMemCleanText(dir)
 }
 
 // museWalk opens segs below fd one component at a time with O_NOFOLLOW and consumes fd.
@@ -145,9 +147,20 @@ func museOpenUnder(base string, segs ...string) (*os.File, bool) {
 	return os.NewFile(uintptr(fd), "muse-memory"), true
 }
 
-// museStoreOpen opens a directory of muse's personal stores (memory/<segs>).
+// museDataBase is the directory that holds muse's own "muse" data directory: an absolute
+// $XDG_DATA_HOME, else ~/.local/share (muse 1.4.4's embedded help names both roots). It is the
+// member's own path, so a symlink in it (a persisted home) is followed; everything below it is not.
+func museDataBase() string {
+	if x := os.Getenv("XDG_DATA_HOME"); x != "" && filepath.IsAbs(x) {
+		return filepath.Clean(x)
+	}
+	return filepath.Dir(muse.DataHome())
+}
+
+// museStoreOpen opens a directory of muse's personal stores (muse/memory/<segs>), every component
+// from "muse" down without following a symlink.
 func museStoreOpen(segs ...string) (*os.File, bool) {
-	return museOpenUnder(filepath.Join(muse.DataHome(), "memory"), segs...)
+	return museOpenUnder(museDataBase(), append([]string{"muse", "memory"}, segs...)...)
 }
 
 // agentMemMuseOpenWC opens <repos>/<dir> without following a symlink, the working copy included:
@@ -424,7 +437,9 @@ func agentMemMuseList() agentMemMuseSources {
 			out.Sources = append(out.Sources, s)
 		}
 	}
-	if ents, err := os.ReadDir(filepath.Join(muse.DataHome(), "memory", "projects")); err == nil {
+	if pd, ok := museStoreOpen("projects"); ok {
+		ents, _ := pd.ReadDir(-1)
+		pd.Close()
 		for _, d := range ents {
 			mem, ok := museStoreOpen("projects", d.Name())
 			if !ok {
@@ -531,7 +546,9 @@ func agentMemMuseBuild(scope, dir, into string) (*agentMemMusePreview, error) {
 			}
 		} else {
 			src = func(f string) agentMemImportSrc {
-				return agentMemImportSrc{Source: agentMemMuseSourcePrefix + "personal_project/" + f, Muse: true}
+				// The directory is part of the origin: a worktree's folder and its parent's hold
+				// different notes of the same file name.
+				return agentMemImportSrc{Source: agentMemMuseSourcePrefix + "personal_project/" + dir + "/" + f, Muse: true}
 			}
 		}
 	}
@@ -609,6 +626,8 @@ type agentMemMuseReq struct {
 }
 
 // agentMemMuseApply imports the listed items, one commit each. The caller has checked the switch.
+// A directory cut at the file limit is refused: name uniqueness (a/b.md against a--b.md) cannot be
+// proven for files that were not listed.
 func agentMemMuseApply(req agentMemMuseReq, now time.Time) (agentMemImportApplied, error) {
 	if len(req.Items) == 0 || len(req.Items) > agentMemImportMaxItems {
 		return agentMemImportApplied{}, memoryErrf(http.StatusBadRequest, errCodeMemoryBadRequest,
@@ -630,6 +649,10 @@ func agentMemMuseApply(req agentMemMuseReq, now time.Time) (agentMemImportApplie
 	pv, err := agentMemMuseBuild(req.Scope, req.Dir, req.Into)
 	if err != nil {
 		return agentMemImportApplied{}, err
+	}
+	if pv.Truncate {
+		return agentMemImportApplied{}, memoryErrf(http.StatusConflict, errCodeMemoryConflict,
+			"this muse directory has more notes than one import examines; remove some and preview it again")
 	}
 	if pv.Scope == museScopePersonal {
 		if req.Project != "" {

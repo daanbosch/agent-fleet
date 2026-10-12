@@ -1,6 +1,7 @@
 package memoryx
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -167,7 +168,7 @@ func TestMusePersonalProjectMapping(t *testing.T) {
 		t.Fatalf("apply = %+v, %v", out, err)
 	}
 	got, err := agentMemRead(agentMemCallerT(t, "claude-main"), "", "af-pref")
-	if err != nil || got.Scope != agentMemScopeProject || got.Source != "muse:personal_project/af-pref.md" {
+	if err != nil || got.Scope != agentMemScopeProject || got.Source != "muse:personal_project/"+d+"/af-pref.md" {
 		t.Errorf("entry = %+v, %v", got, err)
 	}
 	// The worktree is the same project, so a directory for it maps to the same id.
@@ -281,23 +282,147 @@ func TestMusePersonalSecretSkipped(t *testing.T) {
 	}
 }
 
-func TestMusePersonalStoreSymlinkNotFollowed(t *testing.T) {
+// Every component from "muse" down is opened without following a symlink; only the path above it
+// (a persisted home) may be one.
+func TestMuseStoreSymlinksNotFollowed(t *testing.T) {
+	for _, tc := range []struct{ name, link string }{
+		{"muse", "muse"}, {"memory", "muse/memory"}, {"projects", "muse/memory/projects"},
+		{"personal", "muse/memory/personal"}, {"project dir", "muse/memory/projects/" + "PDIR"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newMuseImportEnv(t)
+			outside := filepath.Join(e.home, "outside")
+			memoryWrite(t, filepath.Join(outside, "n.md"), "outside")
+			memoryWrite(t, filepath.Join(outside, "personal", "n.md"), "outside")
+			memoryWrite(t, filepath.Join(outside, "memory", "personal", "n.md"), "outside")
+			memoryWrite(t, filepath.Join(outside, "memory", "projects", pdir(e.clone), "n.md"), "outside")
+			memoryWrite(t, filepath.Join(outside, "projects", pdir(e.clone), "n.md"), "outside")
+			link := filepath.Join(e.home, ".local", "share", strings.ReplaceAll(tc.link, "PDIR", pdir(e.clone)))
+			memoryMkdirAll(t, filepath.Dir(link))
+			if err := os.Symlink(outside, link); err != nil {
+				t.Fatal(err)
+			}
+			for _, s := range agentMemMuseList().Sources {
+				if s.Scope != museScopeProject {
+					t.Errorf("listed through a symlink: %+v", s)
+				}
+			}
+			if _, err := agentMemMusePreviewFor(museScopePersonal, "", museIntoUser); agentMemCode(err) != errCodeMemoryNotFound {
+				t.Errorf("personal through a symlink = %v", err)
+			}
+			if _, err := agentMemMusePreviewFor(museScopePersonalProject, pdir(e.clone), ""); agentMemCode(err) != errCodeMemoryNotFound {
+				t.Errorf("personal project through a symlink = %v", err)
+			}
+		})
+	}
+}
+
+// A symlink above muse (the home persisted elsewhere) is the member's own and is followed.
+func TestMuseStoreHomeSymlinkAllowed(t *testing.T) {
 	e := newMuseImportEnv(t)
-	outside := filepath.Join(e.home, "outside")
-	memoryWrite(t, filepath.Join(outside, "n.md"), "outside")
-	memoryMkdirAll(t, e.store("projects"))
-	if err := os.Symlink(outside, e.store("projects", pdir(e.clone))); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, e.store("personal")); err != nil {
-		t.Fatal(err)
-	}
-	for _, s := range agentMemMuseList().Sources {
-		if s.Scope != museScopeProject {
-			t.Errorf("listed through a symlink: %+v", s)
+	real := filepath.Join(e.home, "persist", "share")
+	memoryWrite(t, filepath.Join(real, "muse", "memory", "personal", "n.md"), "kept")
+	if err := os.Symlink(real, filepath.Join(e.home, ".local", "share")); err != nil {
+		if err := os.Remove(filepath.Join(e.home, ".local")); err != nil {
+			t.Skip(err)
+		}
+		memoryMkdirAll(t, filepath.Join(e.home, ".local"))
+		if err := os.Symlink(real, filepath.Join(e.home, ".local", "share")); err != nil {
+			t.Fatal(err)
 		}
 	}
+	if pv := e.previewOf(museScopePersonal, "", museIntoUser); pv.Counts[claudeImportNew] != 1 {
+		t.Errorf("preview = %+v", pv)
+	}
+}
+
+func TestMuseStoreHonoursXDGDataHome(t *testing.T) {
+	e := newMuseImportEnv(t)
+	xdg := filepath.Join(e.home, "xdg-data")
+	memoryWrite(t, filepath.Join(xdg, "muse", "memory", "personal", "n.md"), "from xdg")
+	t.Setenv("XDG_DATA_HOME", xdg)
+	if pv := e.previewOf(museScopePersonal, "", museIntoUser); pv.Counts[claudeImportNew] != 1 {
+		t.Errorf("absolute XDG_DATA_HOME: %+v", pv)
+	}
+	// Not absolute: ignored, the default root is used (and has no personal store here).
+	t.Setenv("XDG_DATA_HOME", "xdg-data")
 	if _, err := agentMemMusePreviewFor(museScopePersonal, "", museIntoUser); agentMemCode(err) != errCodeMemoryNotFound {
-		t.Errorf("personal through a symlink = %v", err)
+		t.Errorf("relative XDG_DATA_HOME = %v", err)
+	}
+	t.Setenv("XDG_DATA_HOME", "")
+	memoryWrite(t, e.store("personal", "d.md"), "default root")
+	if pv := e.previewOf(museScopePersonal, "", museIntoUser); pv.Counts[claudeImportNew] != 1 || e.item(pv, "d").Status != claudeImportNew {
+		t.Errorf("default root: %+v", pv)
+	}
+}
+
+// The same AF name from another muse scope, directory or path is not "the same import's update".
+func TestMuseImportOtherOriginSameNameNotOverwritten(t *testing.T) {
+	e := newMuseImportEnv(t)
+	t0 := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	_ = os.Chtimes(e.raw(e.clone, "a--b.md", "from project"), t0, t0)
+	e.apply(t0.Add(time.Hour), "a--b")
+	later := t0.Add(5 * time.Hour)
+	d := pdir(e.clone)
+	p := e.store("projects", d, "a", "b.md")
+	memoryWrite(t, p, "from personal project")
+	_ = os.Chtimes(p, later, later)
+	pv := e.previewOf(museScopePersonalProject, d, "")
+	if it := e.item(pv, "a--b"); it.Status != museImportDiverged || it.Reason != "other_source" {
+		t.Fatalf("a--b = %+v", it)
+	}
+	// Two personal_project folders (a worktree and its parent) with the same file name.
+	w := pdir(e.wt)
+	memoryWrite(t, e.store("projects", d, "same.md"), "parent")
+	t1 := later.Add(time.Hour)
+	_ = os.Chtimes(e.store("projects", d, "same.md"), t1, t1)
+	req := agentMemMuseReq{Scope: museScopePersonalProject, Project: e.pid, Dir: d, Items: []agentMemImportReqItem{
+		{Name: "same", SourceHash: e.previewOf(museScopePersonalProject, d, "").byName["same"].SourceHash}}}
+	if _, err := agentMemMuseApply(req, t1); err != nil {
+		t.Fatal(err)
+	}
+	memoryWrite(t, e.store("projects", w, "same.md"), "worktree")
+	t2 := t1.Add(time.Hour)
+	_ = os.Chtimes(e.store("projects", w, "same.md"), t2, t2)
+	if it := e.item(e.previewOf(museScopePersonalProject, w, ""), "same"); it.Status != museImportDiverged || it.Reason != "other_source" {
+		t.Errorf("worktree same = %+v", it)
+	}
+}
+
+// Name uniqueness cannot be proven past the file limit, so such a directory is not applied.
+func TestMuseImportTruncatedDirectoryRefusesApply(t *testing.T) {
+	e := newMuseImportEnv(t)
+	e.raw(e.clone, "a/b.md", "nested")
+	for i := 0; i < agentMemImportMaxFiles-1; i++ {
+		e.raw(e.clone, fmt.Sprintf("a/c%04d.md", i), "x")
+	}
+	e.raw(e.clone, "a--b.md", "flat twin")
+	pv := e.preview()
+	if !pv.Truncate {
+		t.Fatalf("not truncated: %d items", len(pv.Items))
+	}
+	it := e.item(pv, "a--b")
+	req := agentMemMuseReq{Project: e.pid, Dir: e.dir, Items: []agentMemImportReqItem{{Name: "a--b", SourceHash: it.SourceHash}}}
+	if _, err := agentMemMuseApply(req, time.Now()); agentMemCode(err) != errCodeMemoryConflict {
+		t.Fatalf("apply of a truncated directory = %v", err)
+	}
+	if _, err := agentMemRead(agentMemCallerT(t, "claude-main"), "", "a--b"); err == nil {
+		t.Error("a--b was written")
+	}
+}
+
+func TestMuseImportFrontmatterLookalikes(t *testing.T) {
+	e := newMuseImportEnv(t)
+	e.raw(e.clone, "dashes.md", "----\nplain note")
+	e.raw(e.clone, "dash-text.md", "--- explanation\nbody")
+	e.raw(e.clone, "crlf-open.md", "---\r\nname: x\r\nnever closed\r\n")
+	pv := e.preview()
+	for _, n := range []string{"dashes", "dash-text"} {
+		if it := e.item(pv, n); it.Status != claudeImportNew || !it.Derived {
+			t.Errorf("%s = %+v", n, it)
+		}
+	}
+	if it := e.item(pv, "crlf-open"); it.Reason != "no_frontmatter" {
+		t.Errorf("crlf-open = %+v", it)
 	}
 }

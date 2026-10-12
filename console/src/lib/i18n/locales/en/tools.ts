@@ -916,7 +916,7 @@ export const tools: Record<keyof typeof jaTools, string> = {
   "mem.mi_shared_badge": "shared",
   "mem.mi_shared_warn": "Files marked shared are tracked by git in this working copy, so teammates may have them. Importing copies the text into this project's Agent Fleet memory, which your sessions then read.",
   "mem.mi_apply_shared": "{n} of these are shared through git",
-  "mem.mi_reason_other_source": "an Agent Fleet memory with this name was not imported from muse",
+  "mem.mi_reason_other_source": "an Agent Fleet memory with this name came from somewhere else (another source, scope or folder), not from this muse file",
   "mem.mi_reason_af_changed": "the Agent Fleet copy was saved or changed here after the import",
   "mem.mi_scope_project": "project notes",
   "mem.mi_scope_personal_project": "personal project notes",

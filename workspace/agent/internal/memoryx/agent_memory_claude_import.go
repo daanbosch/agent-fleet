@@ -442,8 +442,10 @@ func agentMemImportEvaluateSrc(mem *os.File, file string, src agentMemImportSrc,
 	e, ok := agentMemParse(raw)
 	if !ok {
 		// muse writes a note's content as given, so frontmatter is the exception. A file that opens
-		// a frontmatter block it never closes is a broken one, not a plain note.
-		if !src.Muse || strings.HasPrefix(string(raw), "---") {
+		// a frontmatter block it never closes is a broken one, not a plain note; "----" or
+		// "--- text" on the first line is plain Markdown.
+		first, _, _ := strings.Cut(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
+		if !src.Muse || first == "---" {
 			return invalid("no_frontmatter")
 		}
 		e, it.Derived = agentMemMuseDerive(raw), true
@@ -525,9 +527,10 @@ func agentMemImportEvaluateSrc(mem *os.File, file string, src agentMemImportSrc,
 			// The forgotten text, renamed in muse onto a name that exists in AF: it must not
 			// replace that memory either.
 			it.Status = claudeImportForgotten
-		case src.Muse && !strings.HasPrefix(le.Source, agentMemMuseSourcePrefix):
-			// AF holds a memory of this name that is not muse's import (written in AF, or imported
-			// from claude); muse's file never replaces it.
+		case src.Muse && le.Source != src.Source:
+			// AF holds a memory of this name that is not this muse file's import (written in AF,
+			// imported from claude, or from another muse scope or directory that flattens to the
+			// same name); this file never replaces it.
 			it.Status, it.Reason = museImportDiverged, "other_source"
 		case src.Muse && perr != nil:
 			return invalid("store_unreadable")

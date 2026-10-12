@@ -549,7 +549,9 @@ credential touched) called `add_memory` once per scope with fake content; the fi
 
 **Not verified / not done.** The mapping of `personal_project` to a working copy was verified by unit tests and
 by a real directory name, but not by a real run inside `~/repos` (the probe ran under a scratch directory, which
-correctly maps to no project). Whether `XDG_DATA_HOME` moves muse's data directory is unknown; the import reads
-`~/.local/share/muse` like the rest of AF. Only the `personal_project` store was written nested. `type` passed to
+correctly maps to no project). Whether `XDG_DATA_HOME` moves muse's data directory was not run (the probe's environment had it unset); static evidence only: the
+muse 1.4.4 binary's embedded help names the config and data roots as `$XDG_DATA_HOME/muse` or `$HOME/.local/share/muse`, so the import
+uses an absolute `XDG_DATA_HOME` and otherwise `~/.local/share`. The store is opened without following a symlink from `muse` down; a
+symlink above it (a persisted home) is followed. Only the `personal_project` store was written nested. `type` passed to
 `add_memory` was not exercised, and `memory.destinations.*` still shows no value. Write-back to muse stays out of
 scope. Follow-ups: #1972 (phase-based switch).

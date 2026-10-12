@@ -917,7 +917,7 @@ export const tools = {
   "mem.mi_shared_badge": "共有",
   "mem.mi_shared_warn": "「共有」と付いたファイルはこの作業コピーで git が追跡しているため、チームメンバーも持っている可能性があります。取り込むと、その内容がこのプロジェクトの Agent Fleet メモリへ写され、あなたのセッションが読むようになります。",
   "mem.mi_apply_shared": "うち {n} 件は git で共有されています",
-  "mem.mi_reason_other_source": "同じ名前の Agent Fleet のメモリは muse から取り込んだものではありません",
+  "mem.mi_reason_other_source": "同じ名前の Agent Fleet のメモリは、この muse ファイルとは別の由来（別のソース・スコープ・フォルダ）のものです",
   "mem.mi_reason_af_changed": "取り込み後に、Agent Fleet 側の写しをここで保存または変更しています",
   "mem.mi_scope_project": "プロジェクトのメモ",
   "mem.mi_scope_personal_project": "personal project のメモ",
