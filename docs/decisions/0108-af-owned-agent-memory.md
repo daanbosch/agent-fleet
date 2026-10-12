@@ -578,3 +578,16 @@ history pass and those without a published change are dropped; the scan of the r
 memories per request, newest first. Past the budget the oldest are left unjudged, their project is still
 named (unless the memory is plainly live), `incomplete` (not `truncated`) is set and `withheld` is a lower bound; narrowing the scope may not complete it. The project id of an unjudged memory is scanned before it is named, as the judged path does.
 The read lock is taken per memory, not across the request.
+
+## Note (2026-10-12): member writes carry a mark the Agent verifies; the member can write memories (#1997)
+
+The limit stated in the #1985 note is lifted by [0113](0113-member-origin-mark.md). The CP signs the member's
+relayed `entries/pin`, `entries/revert` and the new `entries/member-save` with an Ed25519 key only it holds,
+bound to the method, path, query, body, workspace, member, a 60 s expiry and a nonce; the Agent verifies with
+the public keys it was started with and refuses these three routes without a valid mark, including a request
+carrying only `AGENT_TOKEN` and `X-AF-Relay: cp`. On these three routes the author `member` / `console` is
+therefore recorded only behind a verified mark; the claude and muse imports still record `member` unsigned
+until #2014. `entries/member-save` (create or edit, the tools' own revision check, secret scan and
+limits, not gated by the switch, no new project) is back in Settings > Agent memory, and the CP audits it as
+`memory.entry.save`. What the mark does not change: a session with a shell can still write the store's files
+directly (decision 8's reasoning stands); the mark governs the Agent's routes, not the files.

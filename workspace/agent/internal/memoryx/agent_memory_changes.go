@@ -31,9 +31,9 @@ const (
 	agentMemChangesMax     = 300
 )
 
-// agentMemMember is the author of a change made from the Console. The CP's relay header is
-// only a hint an agent could also send, so this records the route the change came by, not a
-// verified person.
+// agentMemMember is the author of a change made from the Console. pin, revert and member-save
+// write as it only behind the CP's member-origin mark (memberorigin, ADR 0113); the claude and
+// muse imports still write as it unsigned (#2014), so there it names the route, not a person.
 var agentMemMember = agentMemCaller{Session: "console", Kind: "member"}
 
 var (

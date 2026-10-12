@@ -122,6 +122,7 @@ GET /api/agents/memory/entries/list
 GET /api/agents/memory/entries/member-forgotten
 GET /api/agents/memory/entries/member-latest
 GET /api/agents/memory/entries/member-read
+POST /api/agents/memory/entries/member-save
 GET /api/agents/memory/entries/member-search
 POST /api/agents/memory/entries/pin
 POST /api/agents/memory/entries/revert

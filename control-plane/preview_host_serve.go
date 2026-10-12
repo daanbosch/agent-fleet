@@ -573,6 +573,8 @@ func relayPreview(w http.ResponseWriter, r *http.Request, rt runtime.Runtime, o 
 // caller's cookies still arrive here, and this is the one place both are cleaned.
 func stripConsoleCredentials(out *http.Request, in *http.Request, identityHeader string) {
 	out.Header.Del("Authorization")
+	// Only the CP makes this one (ADR 0113), and never for a preview.
+	out.Header.Del(memberOriginHeader)
 	for _, h := range []string{
 		"X-Forwarded-Email", "X-Forwarded-User", "X-Forwarded-Preferred-Username",
 		"X-Auth-Request-Email", "X-Auth-Request-User", "X-Auth-Request-Access-Token",
