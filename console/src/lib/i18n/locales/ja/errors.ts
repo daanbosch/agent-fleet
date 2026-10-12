@@ -364,4 +364,9 @@ export const errors = {
   "err.inbox_not_found": "項目が見つかりません。",
   "err.inbox_launch_in_progress": "この依頼からのセッションは、すでに起動中か起動済みです。",
   "err.inbox_launch_unknown": "この依頼からセッションが起動した可能性があります。自分のセッション一覧を確認してください。やり直すときは依頼を手放してから引き受け直してください。",
+  "err.inbox_attachment_invalid": "添付が正しくないか、そのセッションは添付できません。",
+  "err.inbox_repo_invalid": "リポジトリは github.com か bitbucket.org の owner/repo で指定してください。",
+  "err.inbox_share_not_owner": "セッションを共有できるのは、その持ち主だけです。",
+  "err.inbox_share_unconfirmed": "共有する前に、すべての宛先と共有の範囲を確認してください。",
+  "err.memo_origin_alone": "受信箱から取り込んだメモは、ほかのメモと一緒には送れません。1 件ずつ送ってください。",
 };

@@ -75,6 +75,8 @@ If a feature ships and does not appear here, it is not done
 | Scheduled (unattended) runs | member | Schedules | [08 Fleet operator](../member/08-organising.md) |
 | Notification centre | member | top bar | [12 Settings](../member/12-settings.md) |
 | Inbox — messages and requests between members, with claim, launch and PR links | member | top bar → inbox | [09 Working with others](../member/09-collaboration.md#asking-a-teammate-the-inbox) |
+| Inbox recipes — send a prompt with a suggested agent and repository, take it into your memos | member | inbox → New / a card | [09 Working with others](../member/09-collaboration.md#asking-a-teammate-the-inbox) |
+| Attach a session to an inbox message, sharing it with the recipients | member | inbox → New | [09 Working with others](../member/09-collaboration.md#asking-a-teammate-the-inbox) |
 | Red dot on a session with an unread notification | member | left pane, tabs | [02 Sessions](../member/02-sessions.md#reading-state-badges-and-notifications) |
 | Engine pills — is the chat / image engine up | member | top bar | [Icons, badges and menus](../member/badges-and-menus.md#the-engine-pills-in-the-top-bar) |
 | Assistant chat | member | Assistants | [07 Chat & memo](../member/07-chat-memo.md) |

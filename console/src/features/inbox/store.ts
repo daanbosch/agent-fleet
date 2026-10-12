@@ -47,7 +47,23 @@ export interface InboxItem {
   finalAt: string;
   session: { name: string; dir: string; branch: string; launchedAt: string; by: InboxPerson } | null;
   pr: { url: string; branch: string } | null;
+  /** As the server projected them for this reader (absent from an older CP). */
+  attachments?: InboxAttachment[];
 }
+
+/** One attachment as this reader sees it. A session the reader cannot see arrives with
+ *  available=false and nothing else (ADR 0111 decision 5). */
+export interface InboxAttachment {
+  type: "recipe" | "session";
+  available: boolean;
+  recipe?: { prompt: string; kind: string; model: string; effort: string; repo: string; canTakeIn: boolean; memoId: string };
+  session?: { catalogId: string; name: string; title: string; kind: string; repo: string; branch: string; owner: InboxPerson; mine: boolean };
+}
+
+/** An attachment as sent. */
+export type InboxAttachmentIn =
+  | { type: "recipe"; recipe: { prompt: string; kind: string; model: string; effort: string; repo: string } }
+  | { type: "session"; sessionName?: string; catalogId?: string; share?: { recipients: string[]; scope: "session" } };
 
 export interface InboxMailbox {
   lastSeq: number;
@@ -77,7 +93,8 @@ interface InboxStore {
   /** The tenant the items belong to; a reply for another tenant is dropped. */
   tenant: string;
   refresh(): Promise<void>;
-  send(kind: InboxKind, recipients: string[], body: string): Promise<InboxResult>;
+  send(kind: InboxKind, recipients: string[], body: string, attachments?: InboxAttachmentIn[]): Promise<InboxResult>;
+  takeIn(id: string): Promise<InboxResult>;
   act(id: string, op: InboxOp): Promise<InboxResult>;
   markRead(id: string): Promise<void>;
   markSeen(): Promise<void>;
@@ -138,10 +155,16 @@ export const useInboxStore = create<InboxStore>((set, get) => ({
     // A newer mailbox from the stream or a cursor reply stays: the list is re-read for it.
     if (mb && mailboxNewer(cur, mb)) set({ mailbox: mb });
   },
-  async send(kind, recipients, body) {
-    const d = await apiJSON("api/inbox/items", "POST", { kind, recipients, body }).catch(() => null);
+  async send(kind, recipients, body, attachments) {
+    const d = await apiJSON("api/inbox/items", "POST", { kind, recipients, body, attachments: attachments ?? [] }).catch(() => null);
     void get().refresh();
     return itemResult(d);
+  },
+  async takeIn(id) {
+    const d = await apiJSON(`api/inbox/items/${encodeURIComponent(id)}/take-in`, "POST", {}).catch(() => null);
+    void get().refresh();
+    if (!d || d.error) return { ok: false, error: d?.error ?? { code: "unknown", message: "" } };
+    return { ok: true };
   },
   async act(id, op) {
     const d = await apiJSON(`api/inbox/items/${encodeURIComponent(id)}/${op}`, "POST", {}).catch(() => null);

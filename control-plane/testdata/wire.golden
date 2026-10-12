@@ -1,7 +1,7 @@
 # JSON key sets of the DTOs the Console reads. Generated - do not edit by hand.
 # Update: cd control-plane && go test -run TestWireShapeGolden -update-wire-golden ./...
 # Format: <type>.<key path> <JSON type>[,omitempty] ([]=array / raw=passed-through JSON)
-# count: 294
+# count: 316
 adminSessionRow.alive bool
 adminSessionRow.dir string
 adminSessionRow.email string
@@ -79,6 +79,25 @@ inboxItemWire.assignedToMe bool
 inboxItemWire.assignee.email string
 inboxItemWire.assignee.removed bool
 inboxItemWire.assignee.userKey string
+inboxItemWire.attachments[].available bool
+inboxItemWire.attachments[].recipe.canTakeIn bool
+inboxItemWire.attachments[].recipe.effort string
+inboxItemWire.attachments[].recipe.kind string
+inboxItemWire.attachments[].recipe.memoId string
+inboxItemWire.attachments[].recipe.model string
+inboxItemWire.attachments[].recipe.prompt string
+inboxItemWire.attachments[].recipe.repo string
+inboxItemWire.attachments[].session.branch string
+inboxItemWire.attachments[].session.catalogId string
+inboxItemWire.attachments[].session.kind string
+inboxItemWire.attachments[].session.mine bool
+inboxItemWire.attachments[].session.name string
+inboxItemWire.attachments[].session.owner.email string
+inboxItemWire.attachments[].session.owner.removed bool
+inboxItemWire.attachments[].session.owner.userKey string
+inboxItemWire.attachments[].session.repo string
+inboxItemWire.attachments[].session.title string
+inboxItemWire.attachments[].type string
 inboxItemWire.body string
 inboxItemWire.canClaim bool
 inboxItemWire.createdAt string
@@ -118,6 +137,8 @@ memoDTO.category string
 memoDTO.createdAt string
 memoDTO.id string
 memoDTO.kind string
+memoDTO.origin.itemId string
+memoDTO.origin.sender string
 memoDTO.position number
 memoDTO.refPath string
 memoDTO.repo string
@@ -185,6 +206,7 @@ sessionWire.exitSignal number,omitempty
 sessionWire.generatedImages number,omitempty
 sessionWire.generatedImagesPath string,omitempty
 sessionWire.handoffPending bool,omitempty
+sessionWire.inboxOrigin raw,omitempty
 sessionWire.initialPromptState string,omitempty
 sessionWire.keepAwakeUntil string,omitempty
 sessionWire.kind string

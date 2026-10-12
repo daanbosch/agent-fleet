@@ -24,6 +24,9 @@ export interface Memo {
   position: number; // order within its group
   createdAt: string; // RFC3339
   sentAt: string; // "" = unsent; RFC3339 stamp = flushed, kept until retention sweep
+  /** Set by the Control Plane on a memo taken in from the member inbox (ADR 0111): the item
+   *  and its sender. Absent on every memo the member or their agent wrote. */
+  origin?: { itemId: string; sender: string };
 }
 
 // The user-editable subset sent to POST /api/memos.

@@ -915,6 +915,10 @@ type sessionWire struct {
 	// carries a lineage too). The Console's "don't notify when a child session is waiting for
 	// input" setting reads it; absent here that setting silently does nothing.
 	Origin string `json:"origin,omitempty"`
+	// InboxOrigin: the inbox item a session was launched from and its sender (ADR 0111
+	// decision 3). Filled from the CP's own record (applyInboxOrigins), never relayed from the
+	// workspace; the Console's provenance badge reads it.
+	InboxOrigin json.RawMessage `json:"inboxOrigin,omitempty"`
 	// GeneratedImages / GeneratedImagesPath: how many images this session has generated and
 	// the folder holding them, browse-root relative (ADR 0080 decision 8). They are what the
 	// Console's "Generated images (N)" entry turns on, so a gap here does not degrade the
@@ -966,7 +970,7 @@ func (a workspaceAPI) sessionsPayload(ctx context.Context, res *resolved) map[st
 				})
 			}
 			_ = a.mgr.store.ReplaceSessions(ctx, res.ws.ID, rows)
-			return map[string]any{"sessions": list}
+			return map[string]any{"sessions": a.applyInboxOrigins(ctx, res.mv, list)}
 		}
 		// Agent unreachable (e.g. mid-start): fall through to the DB mirror.
 	}
@@ -989,7 +993,7 @@ func (a workspaceAPI) sessionsPayload(ctx context.Context, res *resolved) map[st
 			Resumable: true,
 		})
 	}
-	return map[string]any{"sessions": out}
+	return map[string]any{"sessions": a.applyInboxOrigins(ctx, res.mv, out)}
 }
 
 func (a workspaceAPI) sessionsList(w http.ResponseWriter, r *http.Request, res *resolved) {
@@ -1015,6 +1019,11 @@ func (a workspaceAPI) sessionCreateThen(w http.ResponseWriter, r *http.Request, 
 		writeAPIErr(w, aerr)
 		return
 	}
+	origin, aerr := a.stampInboxOrigin(ctx, res, r)
+	if aerr != nil {
+		writeAPIErr(w, aerr)
+		return
+	}
 	// P3-9 auto-start: creating a session needs a running Agent, so bring a cold
 	// (idle-stopped or manually stopped) workspace back up on demand first.
 	if a.autostart {
@@ -1033,7 +1042,16 @@ func (a workspaceAPI) sessionCreateThen(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
-	a.proxy.rest(w, r, res)
+	// A request launch records its provenance with the request's session record
+	// (FinishInboxLaunch), on the normal answer and on a recovered one alike; here only a
+	// launch seeded from a taken-in memo is recorded.
+	if _, fromRequest := ctx.Value(inboxOriginKey{}).(inboxOriginRef); origin == nil || fromRequest {
+		a.proxy.rest(w, r, res)
+		return
+	}
+	tw := &teeWriter{ResponseWriter: w}
+	a.proxy.rest(tw, r, res)
+	a.recordInboxOrigin(ctx, res, origin, tw)
 }
 
 // sessionFork forks a session's conversation into a new one (POST

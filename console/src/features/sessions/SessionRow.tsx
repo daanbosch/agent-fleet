@@ -178,6 +178,10 @@ export function SessionRow({ s, selected, opens, multi, running, actions, readOn
             is unavailable. */}
         {/* Bound to an image studio (ADR 0100 decision 10): the row opens the studio pane. */}
         {s.studio && <Icon name="wand" className="sess-studio" title={tr("srow.studio_badge")} />}
+        {/* Launched from the member inbox (ADR 0111 decision 3): whose request this work is. */}
+        {s.inboxOrigin && (
+          <Icon name="inbox" className="sess-inbox-origin" title={tr("inbox.session_origin_badge", { who: s.inboxOrigin.sender })} />
+        )}
         {s.locked && <Icon name="lock" className="sess-lock" title={tr("srow.locked_badge")} />}
         {/* Keep-awake pin (docs/log/75): shown only while the deadline is still live. An
             expired pin left on the badge would let the user believe they are still

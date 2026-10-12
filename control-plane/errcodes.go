@@ -211,4 +211,14 @@ const (
 	// of it. It is never asked again under a new key (that could make a second session):
 	// the assignee checks their sessions, and handing the request back clears it.
 	errCodeInboxLaunchUnknown = "inbox_launch_unknown"
+	// Attachments (ADR 0111 decisions 4 and 5). A repository that does not reduce to a
+	// canonical host/owner/repo is refused rather than passed through; only a session's owner
+	// can share it by attaching, and only with every recipient and the scope confirmed.
+	errCodeInboxAttachmentInvalid = "inbox_attachment_invalid"
+	errCodeInboxRepoInvalid       = "inbox_repo_invalid"
+	errCodeInboxShareNotOwner     = "inbox_share_not_owner"
+	errCodeInboxShareUnconfirmed  = "inbox_share_unconfirmed"
+	// A memo taken in from the inbox is flushed on its own, never in one message with other
+	// memos (ADR 0111 decision 3).
+	errCodeMemoOriginAlone = "memo_origin_alone"
 )

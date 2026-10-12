@@ -27,6 +27,7 @@ import {
   type InboxPerson,
   type InboxSettings,
 } from "./store.ts";
+import { AttachmentView, buildAttachments, emptyRecipe, RecipeEditor, SessionAttachEditor, type RecipeDraft, type SessionChoice } from "./Attachments.tsx";
 import "./inbox.css";
 
 /** The CP's caps (inbox.go), repeated so the form can say so before sending. */
@@ -232,6 +233,9 @@ export function ItemCard({ item }: { item: InboxItem }) {
               </a>
             </p>
           )}
+          {(item.attachments ?? []).map((att, i) => (
+            <AttachmentView key={i} item={item} att={att} />
+          ))}
           {isRequest && item.assignedToMe && (item.state === "claimed" || item.state === "done") && <PRLink item={item} />}
           {isRequest && item.assignedToMe && item.state === "claimed" && !item.session && <LaunchRow item={item} />}
           <div className="inbox-actions">
@@ -394,6 +398,9 @@ function Compose({ onSent }: { onSent: () => void }) {
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [recipe, setRecipe] = useState<RecipeDraft | null>(null);
+  const [session, setSession] = useState<SessionChoice | null>(null);
+  const [share, setShare] = useState(false);
   const bytes = byteLength(body);
   const send = async () => {
     if (to.length === 0) {
@@ -405,6 +412,7 @@ function Compose({ onSent }: { onSent: () => void }) {
       kind,
       to.map((p) => p.userKey),
       body,
+      buildAttachments(recipe, session, share, to),
     );
     setBusy(false);
     if (!r.ok) {
@@ -415,6 +423,9 @@ function Compose({ onSent }: { onSent: () => void }) {
     setBody("");
     setTo([]);
     setErr("");
+    setRecipe(null);
+    setSession(null);
+    setShare(false);
     onSent();
   };
   return (
@@ -440,6 +451,12 @@ function Compose({ onSent }: { onSent: () => void }) {
           {tr("inbox.compose_bytes", { n: String(bytes), max: String(INBOX_BODY_MAX_BYTES) })}
         </span>
       </label>
+      <label className="inbox-check">
+        <input type="checkbox" checked={!!recipe} onChange={(e) => setRecipe(e.target.checked ? emptyRecipe() : null)} />
+        <span>{tr("inbox.attach_recipe")}</span>
+      </label>
+      {recipe && <RecipeEditor value={recipe} onChange={setRecipe} />}
+      <SessionAttachEditor value={session} share={share} recipients={to} onChange={setSession} onShare={setShare} />
       <p className="ui-field-hint">{tr("inbox.compose_agents_note")}</p>
       {err && (
         <p className="ui-field-hint inbox-warn" role="alert">

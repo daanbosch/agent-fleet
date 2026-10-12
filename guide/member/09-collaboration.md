@@ -91,8 +91,25 @@ appear in the notification centre, and an open request never expires there.
 - **Receiving** (inbox → **Receiving**): accept from everyone in the tenant or from chosen
   members only, block a sender, or turn on *do not disturb*, which mutes the badge and
   toasts but still delivers.
-- **Agents never see the inbox.** Nothing in it reaches your agents, and agents cannot send.
-  To have an agent write a request, let it draft a memo and paste it into **New**.
+- **Recipes**: tick *Attach a recipe* in **New** to send a prompt with a suggested agent,
+  model and effort, and optionally a repository (`owner/repo` on github.com or
+  bitbucket.org; a pasted URL keeps no credentials or query). The recipient sees the
+  repository apart from the prompt, and nothing is fetched or cloned on their side.
+- **Taking a recipe in**: **Take into my memos** copies it into your memo queue as your own
+  memo, marked with where it came from. For a request only the person who took it can do
+  this; a message's recipe any recipient can. Pressing it again gives the same memo. That
+  memo is always sent to a session on its own, never joined to your other memos, and a
+  session started from it, or from a request, shows an inbox mark in the left pane.
+- **Attaching a session**: pick one of your sessions, or one shared with you. Attaching
+  your own session can share it read-only with every recipient (the whole conversation,
+  including what is added later) — you confirm the session, the recipients and the scope,
+  and the share and the message are created together or not at all. A recipient who cannot
+  see an attached session gets an empty placeholder, decided again on every read: if the
+  share is removed later, the card turns into the placeholder. Withdrawing the message
+  removes no share.
+- **Agents never see the inbox.** Nothing in it reaches your agents before you take it in,
+  and agents cannot send. To have an agent write a request, let it draft a memo and paste
+  it into **New**.
 
 Limits: 20 recipients per item, 30 items per hour per sender, 10 pending items from one
 sender to one recipient. Messages are kept 90 days from sending, requests 90 days after they

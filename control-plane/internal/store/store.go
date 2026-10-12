@@ -609,6 +609,10 @@ type Memo struct {
 	Attachments       string
 	Position          int
 	CreatedAt, SentAt string
+	// The inbox item this memo was taken in from and its sender (ADR 0111 decision 3), set
+	// by the CP at take-in and by nothing else: CreateMemo from a client leaves them empty,
+	// and UpdateMemo never writes them, so an edit cannot remove or forge an origin.
+	OriginItemID, OriginSenderMembershipID, OriginSenderKey string
 }
 
 // WorkItemQuery is one saved search that feeds the work item inbox (docs/log/80). af holds

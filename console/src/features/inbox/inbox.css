@@ -29,3 +29,11 @@
 .inbox-hits button { font-size: 12px; padding: 2px 8px; border-radius: 10px; border: 1px dashed var(--border2, var(--border)); }
 .inbox-hits button:disabled { opacity: .5; cursor: default; }
 .inbox-check { display: flex; align-items: flex-start; gap: 6px; font-size: 13px; }
+.inbox-attachment { border: 1px dashed var(--border2, var(--border)); border-radius: 6px; padding: 6px 8px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.inbox-attachment.inbox-session { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.inbox-attachment.inbox-placeholder { color: var(--muted); flex-direction: row; align-items: center; gap: 6px; }
+.inbox-attachment-head { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+.inbox-recipe-repo code { font-size: 12px; }
+.inbox-recipe-editor, .inbox-session-editor { display: flex; flex-direction: column; gap: 8px; }
+.inbox-recipe-hints { display: flex; flex-wrap: wrap; gap: 8px; }
+.inbox-recipe-hints .ui-field { flex: 1 1 120px; }

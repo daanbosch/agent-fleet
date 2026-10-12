@@ -367,4 +367,9 @@ export const errors: Record<keyof typeof jaErrors, string> = {
   "err.inbox_not_found": "Item not found.",
   "err.inbox_launch_in_progress": "A session from this request is already starting or has started.",
   "err.inbox_launch_unknown": "A session may already have started from this request. Check your sessions; to start over, hand the request back and take it again.",
+  "err.inbox_attachment_invalid": "The attachment is not valid, or that session cannot be attached.",
+  "err.inbox_repo_invalid": "Name the repository as owner/repo on github.com or bitbucket.org.",
+  "err.inbox_share_not_owner": "Only a session's owner can share it.",
+  "err.inbox_share_unconfirmed": "Confirm every recipient and the scope before sharing.",
+  "err.memo_origin_alone": "A memo taken in from the inbox cannot be sent together with other memos. Send it on its own.",
 };

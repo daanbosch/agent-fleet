@@ -256,6 +256,8 @@
   color: var(--muted);
   font-size: 11px;
 }
+/* Launched from the member inbox (ADR 0111). */
+.sess-inbox-origin { flex: none; font-size: 12px; color: var(--muted); }
 
 /* Keep-awake pin (docs/log/75): marks a row as exempt from the idle auto-stop. Accent
    rather than muted because it means the container is being kept up and is costing money;

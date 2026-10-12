@@ -1140,6 +1140,11 @@ function MemoRow(props: MemoRowProps) {
           else props.onEdit();
         }}
       >
+        {m.origin && (
+          <span className="memo-origin" title={tr("inbox.memo_origin_title")}>
+            <Icon name="inbox" /> {tr("inbox.memo_origin", { who: m.origin.sender })}
+          </span>
+        )}
         {m.kind === "file" ? (
           <>
             <code className="memo-ref">{m.refPath}</code>

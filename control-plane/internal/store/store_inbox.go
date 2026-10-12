@@ -91,6 +91,12 @@ type InboxRetention struct {
 // InboxStore is the inbox's narrow view of the store.
 type InboxStore interface {
 	CreateInboxItem(ctx context.Context, it InboxItem, recipients []string, lim InboxSendLimits) (InboxSendResult, error)
+	CreateInboxItemWith(ctx context.Context, it InboxItem, recipients []string, lim InboxSendLimits, extras InboxSendExtras) (InboxSendResult, error)
+	ListInboxAttachments(ctx context.Context, itemID string) ([]InboxAttachment, error)
+	TakeInInboxRecipe(ctx context.Context, itemID, membershipID string, m Memo) (Memo, InboxTakeIn, error)
+	FindMemoByOrigin(ctx context.Context, itemID, membershipID string) (Memo, bool, error)
+	RecordInboxSessionOrigin(ctx context.Context, membershipID, sessionName, itemID, senderKey string) error
+	ListInboxSessionOrigins(ctx context.Context, membershipID string) (map[string]InboxSessionOrigin, error)
 	GetInboxItem(ctx context.Context, id string) (InboxItem, bool, error)
 	ListInboxParticipants(ctx context.Context, itemID string) ([]InboxParticipant, error)
 	ListInboxEntries(ctx context.Context, membershipID string, ret InboxRetention) ([]InboxEntry, error)
@@ -270,6 +276,13 @@ func (s *SQL) inboxTx(ctx context.Context, f func(tx *sqlTx) (bool, error)) (boo
 // sender's limits in the same transaction. Every mailbox involved is locked first, so two
 // sends by the same sender queue behind each other and cannot both pass a count.
 func (s *SQL) CreateInboxItem(ctx context.Context, it InboxItem, recipients []string, lim InboxSendLimits) (InboxSendResult, error) {
+	return s.CreateInboxItemWith(ctx, it, recipients, lim, InboxSendExtras{})
+}
+
+// CreateInboxItemWith is CreateInboxItem with the item's attachments and the shares a
+// session attachment grants, all in the one transaction: if any part fails, nothing of the
+// item, its attachments or its shares is kept (decision 5).
+func (s *SQL) CreateInboxItemWith(ctx context.Context, it InboxItem, recipients []string, lim InboxSendLimits, extras InboxSendExtras) (InboxSendResult, error) {
 	var out InboxSendResult
 	_, err := s.inboxTx(ctx, func(tx *sqlTx) (bool, error) {
 		if err := lockMemberships(ctx, tx, append([]string{it.SenderMembershipID}, recipients...)); err != nil {
@@ -358,6 +371,9 @@ func (s *SQL) CreateInboxItem(ctx context.Context, it InboxItem, recipients []st
 				VALUES(?,?,'recipient','unread')`, it.ID, rid); err != nil {
 				return false, err
 			}
+		}
+		if err := insertInboxExtras(ctx, tx, it, extras); err != nil {
+			return false, err
 		}
 		if err := bumpInboxItem(ctx, tx, it.ID); err != nil {
 			return false, err
@@ -598,6 +614,10 @@ func (s *SQL) ConfirmInboxLaunch(ctx context.Context, id, membershipID, token st
 // FinishInboxLaunch records the session the confirmed launch created. It is recorded even
 // when the request was withdrawn or done in the meantime: the session exists, and the card
 // should say so. recorded=false means the launch is no longer this one (a release dropped it).
+//
+// The session's provenance badge (inbox_session_origin) is written in the same transaction,
+// so the card and the badge are recorded together or not at all, whether the session's name
+// came from the create's answer or from the idempotency lookup that recovers a lost one.
 func (s *SQL) FinishInboxLaunch(ctx context.Context, id, membershipID, token, name, dir, branch, now string) (bool, error) {
 	return s.inboxTx(ctx, func(tx *sqlTx) (bool, error) {
 		ok, err := affected(tx.ExecContext(ctx, `UPDATE inbox_item SET session_membership_id=?,session_name=?,
@@ -605,6 +625,14 @@ func (s *SQL) FinishInboxLaunch(ctx context.Context, id, membershipID, token, na
 			WHERE id=? AND launch_token=? AND launch_by=? AND launch_state='creating'`,
 			membershipID, name, dir, branch, now, now, membershipID, id, token, membershipID))
 		if err != nil || !ok {
+			return false, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO inbox_session_origin(membership_id,session_name,item_id,sender_key,created_at)
+			SELECT ?, ?, i.id, COALESCE((SELECT d.user_key FROM membership m JOIN identity d ON d.id=m.identity_id
+			                             WHERE m.id=i.sender_membership_id),''), ?
+			FROM inbox_item i WHERE i.id=?
+			ON CONFLICT(membership_id,session_name) DO UPDATE SET item_id=excluded.item_id,
+			  sender_key=excluded.sender_key,created_at=excluded.created_at`, membershipID, name, now, id); err != nil {
 			return false, err
 		}
 		return true, bumpInboxItem(ctx, tx, id)
@@ -899,6 +927,9 @@ func inboxMembershipInactiveTx(ctx context.Context, tx *sqlTx, membershipID, now
 		if _, err := tx.ExecContext(ctx, `DELETE FROM inbox_participant WHERE item_id=?`, id); err != nil {
 			return err
 		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM inbox_attachment WHERE item_id=?`, id); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM inbox_item WHERE id=?`, id); err != nil {
 			return err
 		}
@@ -945,11 +976,15 @@ func (s *SQL) PurgeInbox(ctx context.Context, ret InboxRetention) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	// The participant rows of the items just deleted go with them. ON DELETE CASCADE does
-	// that only where foreign keys are enforced, so it is spelled out.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM inbox_participant
-		WHERE NOT EXISTS (SELECT 1 FROM inbox_item i WHERE i.id=inbox_participant.item_id)`); err != nil {
-		return 0, err
+	// The participant rows and attachments of the items just deleted go with them. ON
+	// DELETE CASCADE does that only where foreign keys are enforced, so it is spelled out.
+	for _, q := range []string{
+		`DELETE FROM inbox_participant WHERE NOT EXISTS (SELECT 1 FROM inbox_item i WHERE i.id=inbox_participant.item_id)`,
+		`DELETE FROM inbox_attachment WHERE NOT EXISTS (SELECT 1 FROM inbox_item i WHERE i.id=inbox_attachment.item_id)`,
+	} {
+		if _, err := tx.ExecContext(ctx, q); err != nil {
+			return 0, err
+		}
 	}
 	return int(n), tx.Commit()
 }

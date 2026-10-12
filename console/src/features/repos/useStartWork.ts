@@ -92,7 +92,11 @@ export function useStartWork(): (target: StartTarget, opts: LaunchOpts) => Promi
     }
     // A launch from an inbox request goes through the CP's request launch: the same create
     // body, but the CP checks the claim first and records the session on the request.
-    const { inboxItemId } = useLaunchSeed.getState();
+    const { inboxItemId, inboxMemoId } = useLaunchSeed.getState();
+    // The memo a launch was seeded from: the Control Plane turns it into the session's
+    // provenance badge when the memo was taken in from the inbox. It names the memo, never
+    // the origin itself, which the server alone sets.
+    if (inboxMemoId) body.inbox_memo_id = inboxMemoId;
     const createPath = inboxItemId ? `api/inbox/items/${encodeURIComponent(inboxItemId)}/launch` : "api/sessions";
     let res = await apiJSON(createPath, "POST", body);
     // Fleet rebuild lag: a P1.5-generation Agent rejects an explicit driver:"managed"
