@@ -319,8 +319,8 @@ func TestInboxWorkspace(t *testing.T) {
 			}
 			created, _ = outs[i]["name"].(string)
 		case http.StatusConflict:
-			if c, _ := apiErr(outs[i]); c != "inbox_launch_busy" {
-				t.Fatalf("R-8: the second launch answered %v, want inbox_launch_busy", outs[i])
+			if c, _ := apiErr(outs[i]); c != "inbox_launch_in_progress" {
+				t.Fatalf("R-8: the second launch answered %v, want inbox_launch_in_progress", outs[i])
 			}
 		default:
 			t.Fatalf("R-8: launch answered %d %v", code, outs[i])
