@@ -66,3 +66,45 @@ func TestMemberFleetSetup(t *testing.T) {
 		t.Fatalf("uninvited address: error %q, want not_provisioned", code)
 	}
 }
+
+// TestCPEnvironIsolated checks the test CP cannot inherit a deployment from the shell: a
+// database, a runtime or a custodian setting exported there is dropped, docker access is
+// kept. bootMemberFleet then runs with those set: a CP that inherited the Postgres URL
+// would fail to boot, and one that inherited AF_DB would create the file outside dataDir.
+func TestCPEnvironIsolated(t *testing.T) {
+	got := cpEnviron([]string{
+		"PATH=/bin", "HOME=/h", "DOCKER_HOST=unix:///d.sock", "LC_ALL=C",
+		"AF_DB=/x.db", "AF_DATABASE_URL=postgres://u@db.invalid/x", "AF_DB_HOST=db.invalid",
+		"AF_RUNTIME=ecs", "AUTH=oauth", "AF_KEY_CUSTODIAN=kms", "AF_CP_INTERNAL_LISTEN=:1", "WS_ENV=A=B",
+	})
+	want := []string{"PATH=/bin", "HOME=/h", "DOCKER_HOST=unix:///d.sock", "LC_ALL=C"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("cpEnviron kept %q, want %q", got, want)
+	}
+
+	outside := filepath.Join(t.TempDir(), "outside.db")
+	t.Setenv("AF_DB", outside)
+	t.Setenv("AF_DATABASE_URL", "postgres://e2e@db.invalid:1/none?sslmode=disable")
+	t.Setenv("AF_DB_HOST", "db.invalid")
+	t.Setenv("AF_RUNTIME", "ecs")
+	f := bootMemberFleet(t, envOr("WS_IMAGE", "agent-fleet/workspace:dev"))
+	f.addMember("alice")
+	if _, err := os.Stat(outside); !os.IsNotExist(err) {
+		t.Fatalf("the CP wrote the database named by the shell's AF_DB (%s): %v", outside, err)
+	}
+	if _, err := os.Stat(filepath.Join(f.dataDir, "e2e-cp.db")); err != nil {
+		t.Fatalf("the CP's database is not inside its data dir: %v", err)
+	}
+}
+
+// TestCheckStopped is requireStopped's negative control: only "stopped" passes.
+func TestCheckStopped(t *testing.T) {
+	if err := checkStopped("stopped"); err != nil {
+		t.Fatalf("stopped rejected: %v", err)
+	}
+	for _, s := range []string{"starting", "running", "", "none", "<nil>"} {
+		if checkStopped(s) == nil {
+			t.Fatalf("state %q accepted as stopped", s)
+		}
+	}
+}

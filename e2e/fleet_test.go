@@ -192,7 +192,9 @@ func launchCP(t *testing.T, image, dataDir string, workspaces func() []string, e
 	cp.Dir = tmp
 	cp.Stdout = logFile
 	cp.Stderr = logFile
-	cp.Env = append(append(os.Environ(),
+	cp.Env = append(append(cpEnviron(os.Environ()),
+		"AF_RUNTIME=local",
+		"AF_DB="+filepath.Join(dataDir, "e2e-cp.db"),
 		"CP_ADDR="+cpAddr,
 		"WS_IMAGE="+image,
 		"WS_DATA="+dataDir,
@@ -384,6 +386,37 @@ func truncate(b []byte) []byte {
 		return append(b[:400:400], []byte("...")...)
 	}
 	return b
+}
+
+// cpEnvAllow is what the test CP may inherit from the shell that runs the tests: what it
+// needs to find and reach docker, and locale. Everything else is dropped, because the CP
+// reads its deployment from the environment — a developer shell with AF_DATABASE_URL,
+// AF_DB_HOST or AF_DB exported would otherwise have the test migrate that database and
+// write its tenants and super_admin into it, and AF_RUNTIME, the key custodian or the
+// internal listener would point the test at real infrastructure.
+var cpEnvAllow = []string{"PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TZ", "LANG", "XDG_RUNTIME_DIR",
+	"SSL_CERT_FILE", "SSL_CERT_DIR"}
+
+// cpEnvAllowPrefix extends cpEnvAllow by prefix (DOCKER_HOST, DOCKER_CONTEXT, LC_ALL, …).
+var cpEnvAllowPrefix = []string{"DOCKER_", "LC_"}
+
+// cpEnviron filters an environment (os.Environ's KEY=VAL form) down to cpEnvAllow.
+func cpEnviron(parent []string) []string {
+	var out []string
+	for _, kv := range parent {
+		k, _, _ := strings.Cut(kv, "=")
+		ok := false
+		for _, a := range cpEnvAllow {
+			ok = ok || k == a
+		}
+		for _, p := range cpEnvAllowPrefix {
+			ok = ok || strings.HasPrefix(k, p)
+		}
+		if ok {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // teardown reclaims the containers, the networks and the CP process, and dumps the tail of

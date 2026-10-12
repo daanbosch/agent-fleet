@@ -228,13 +228,23 @@ func (m *member) stopWorkspace() {
 	}
 }
 
-// requireStopped fails unless the workspace is still not running — used after reads that
-// must not wake it.
+// requireStopped fails unless the workspace reads exactly "stopped" — used after reads
+// that must not wake it, on a workspace that has been started and stopped before.
 func (m *member) requireStopped(why string) {
 	m.t.Helper()
-	if s := m.workspaceState(); s == "running" {
-		m.t.Fatalf("%s: workspace is running %s; it must have stayed stopped", m.name, why)
+	if err := checkStopped(m.workspaceState()); err != nil {
+		m.t.Fatalf("%s: %v %s", m.name, err, why)
 	}
+}
+
+// checkStopped accepts "stopped" alone. Rejecting only "running" is not enough: a read that
+// woke the workspace reads "starting" while the container is up and the Agent is not ready
+// yet (runtime_docker.go State), and that is exactly the regression being looked for.
+func checkStopped(state string) error {
+	if state != "stopped" {
+		return fmt.Errorf("workspace state is %q, want stopped", state)
+	}
+	return nil
 }
 
 // createSession creates a session (POST /api/sessions) and returns its name.
