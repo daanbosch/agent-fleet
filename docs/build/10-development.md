@@ -334,7 +334,7 @@ module, standard library only). **L3** is `console-e2e/` (Playwright). **L4**
   trigger.**
 
 ```bash
-cd e2e && WS_IMAGE=agent-fleet/workspace:dev go test -v -tags e2e -timeout 25m ./...
+cd e2e && WS_IMAGE=agent-fleet/workspace:dev go test -v -tags e2e -timeout 15m ./...
 cd console-e2e && npm ci && npx playwright test
 ```
 
