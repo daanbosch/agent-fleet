@@ -576,6 +576,10 @@ func (m *manager) workspaceExtraEnv(ctx context.Context, ws store.Workspace) []s
 				"AF_INTERNAL_GIT_EPOCH="+strconv.FormatInt(epoch, 10))
 		}
 	}
+	// Member-origin mark (ADR 0113): the public keys the Agent verifies a relayed member write
+	// with, and the workspace and membership it must be signed for. Not tied to the public base:
+	// the relay reaches the Agent without it.
+	env = append(env, memberOriginEnv(m.tokenSignMaster(), memberOriginKeyVersion(), ws.ID, ws.MembershipID)...)
 	// Memo bridge: inject the CP public base + this membership's memo token so the
 	// in-container fleet operator can read/write the memo queue over the public
 	// hairpin (memo_bridge.go). Deterministic token → idempotent re-injection. Requires

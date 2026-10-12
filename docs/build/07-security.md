@@ -130,6 +130,8 @@ invisible to that user's own sessions. That is not solvable in principle. Keepin
 out of the browser, encrypting them at rest and injecting them as environment variables
 is judged good enough; what it means for code running in a session is stated in
 [SECURITY.md](../../SECURITY.md).
+For the same reason a route that must tell the member's Console from a session cannot rely on
+anything the agent holds; it relies on a mark only the CP can make (§7.5.1).
 
 ### 7.2.1 Engines: reachability is the access control
 
@@ -411,6 +413,39 @@ returns the result without storing the token.
   running in a session. A feature that must start only on a person's press therefore
   binds the result to that press instead of relying on route authentication
   ([decisions/0102](../decisions/0102-aws-login-through-the-console.md)).
+
+### 7.5.1 The member-origin mark
+
+Where a route must accept only the member's own Console request, the CP marks it
+([decisions/0113](../decisions/0113-member-origin-mark.md)). Today that is the member-only memory writes:
+`entries/pin`, `entries/revert` (which also forgets) and `entries/member-save`.
+
+- **Asymmetric, because the Agent cannot keep a secret from its sessions** (same uid, §7.2). The CP signs
+  with an Ed25519 key derived from the token-signing master; the Agent is started with the public keys only
+  (`AF_MEMBER_ORIGIN_KEYS`, plus `AF_WORKSPACE_ID` / `AF_MEMBERSHIP_ID`). A session reading them can verify,
+  not sign.
+- **Signed fields**: method, Agent-side path, raw query, body SHA-256, workspace, membership, CP identity,
+  `iat`, `exp` (60 s) and a nonce. The Agent refuses any mismatch, an expired or over-long mark, and a nonce
+  it has seen (kept until `exp`, at most 4,096; full means refuse, never accept unrecorded). The cache is
+  per process, so the Agent also refuses every mark issued before its start + 31 s (the accepted 30 s skew
+  plus rounding): no replay across a restart whatever the CP's clock, at the price of member writes
+  answering 503 for the first ~31 s after the Agent starts.
+- **The CP drops any `X-AF-Member-Origin` the browser sent** on every relay (REST, SSE and the preview
+  relay), signs only the listed routes, and only for the caller's own workspace. REST and SSE also drop every
+  cookie and the gateway identity headers, so the member's login cookie never reaches the workspace.
+- **No signing for another page.** Before signing, the CP requires `application/json`, `Sec-Fetch-Site:
+  same-origin` when sent, and an `Origin` of the Console's own host when sent, so a same-site preview app
+  cannot have the browser make a signed member write. An app in the path-form preview runs on the
+  Console's origin and is not covered (decisions/0062 decision 7).
+- **Fails closed**: a workspace started without the keys (an older start, or `AF_MEMBER_ORIGIN_KEY_VERSION=0`)
+  answers 503 on these routes; no mark, or only `AGENT_TOKEN` / `X-AF-Relay`, is 403.
+- **Rotation**: a workspace starts with the current and the next key, so raising
+  `AF_MEMBER_ORIGIN_KEY_VERSION` by one keeps workspaces started under the previous version working; a
+  second raise before they restart does not.
+- **Limits**: only these three routes are signed; the claude and muse imports still record the member as
+  author unsigned (#2014). The mark governs the Agent's routes, not the store's files, which a session can still write
+  directly; it is as strong as the CP's member authentication (nothing under `AUTH=dev`); a compromised CP
+  is out of scope.
 
 ## 7.6 Secrets and envelope encryption
 

@@ -1,7 +1,7 @@
 # Every (method, path) buildMux() registers. Generated - do not edit by hand.
 # Update: cd control-plane && go test -run TestRouteTableGolden -update-routes-golden ./...
 # ANY = registered without a method. Taken with every routeSwitch on (routes_golden_test.go).
-# count: 630
+# count: 648
 ANY /
 ANY /agent-fleet
 ANY /agent-fleet/
@@ -124,6 +124,7 @@ GET /api/agents/memory/entries/list
 GET /api/agents/memory/entries/member-forgotten
 GET /api/agents/memory/entries/member-latest
 GET /api/agents/memory/entries/member-read
+POST /api/agents/memory/entries/member-save
 GET /api/agents/memory/entries/member-search
 POST /api/agents/memory/entries/pin
 POST /api/agents/memory/entries/revert
@@ -351,6 +352,23 @@ GET /api/imagegen/studios/{id}/draft-log
 GET /api/imagegen/studios/{id}/persona
 POST /api/imagegen/studios/{id}/press
 POST /api/imagegen/studios/{id}/rewind
+GET /api/inbox
+DELETE /api/inbox/blocks/{userKey}
+PUT /api/inbox/blocks/{userKey}
+POST /api/inbox/cursor
+POST /api/inbox/items
+GET /api/inbox/items/{id}
+POST /api/inbox/items/{id}/claim
+POST /api/inbox/items/{id}/decline
+POST /api/inbox/items/{id}/done
+POST /api/inbox/items/{id}/launch
+PUT /api/inbox/items/{id}/pr
+POST /api/inbox/items/{id}/read
+POST /api/inbox/items/{id}/release
+POST /api/inbox/items/{id}/withdraw
+GET /api/inbox/settings
+PUT /api/inbox/settings
+GET /api/inbox/stream
 GET /api/internal-git/repos
 POST /api/internal-git/repos
 DELETE /api/internal-git/repos/{name}

@@ -978,6 +978,7 @@ type Store interface {
 	HomeOperationStore
 	CPLeaseStore
 	LimitBoardStore
+	InboxStore
 
 	// Ping backs GET /readyz. Not in a sub-interface: "is the database reachable"
 	// belongs to the store as a whole, not to a feature.

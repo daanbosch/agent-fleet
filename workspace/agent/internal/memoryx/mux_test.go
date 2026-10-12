@@ -28,6 +28,9 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin/memberorigintest"
 )
 
 // memoryTestRoutes is the same (method, path) -> handler mapping as the memory section of
@@ -55,6 +58,7 @@ var memoryTestRoutes = map[string]http.HandlerFunc{
 	"POST /agents/memory/entries/pin":    HandleAgentMemoryPin,
 
 	"GET /agents/memory/entries/member-read":      HandleAgentMemoryMemberRead,
+	"POST /agents/memory/entries/member-save":     HandleAgentMemoryMemberSave,
 	"GET /agents/memory/entries/member-search":    HandleAgentMemoryMemberSearch,
 	"GET /agents/memory/entries/member-latest":    HandleAgentMemoryMemberLatest,
 	"GET /agents/memory/entries/member-forgotten": HandleAgentMemoryMemberForgotten,
@@ -71,9 +75,20 @@ var memoryTestRoutes = map[string]http.HandlerFunc{
 	"POST /agents/memory/claude-export":        HandleAgentMemoryClaudeExportApply,
 }
 
+// memberOnlyTestRoutes are wrapped in memberorigin.Require, as routes.go wraps them.
+var memberOnlyTestRoutes = map[string]bool{
+	"POST /agents/memory/entries/pin":         true,
+	"POST /agents/memory/entries/revert":      true,
+	"POST /agents/memory/entries/member-save": true,
+}
+
 func buildMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	for pattern, h := range memoryTestRoutes {
+		if memberOnlyTestRoutes[pattern] {
+			mux.Handle(pattern, memberorigin.Require(MemberWriteMaxRequest, h))
+			continue
+		}
 		mux.HandleFunc(pattern, h)
 	}
 	return mux
@@ -86,6 +101,17 @@ func smokeDo(t *testing.T, h http.Handler, method, path, token, body string) *ht
 	if token != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
 	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+
+// signedDo is smokeDo for a member write: the request carries the mark the CP would put on it.
+func signedDo(t *testing.T, s *memberorigintest.Signer, h http.Handler, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	r := httptest.NewRequest(method, path, strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	s.Sign(r, []byte(body))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	return w

@@ -364,6 +364,9 @@ func main() {
 	// still be running, and the step after it is owed. Not behind any switch either: an
 	// unfinished record keeps the workspace from starting until it is finished.
 	go mgr.runHomeOpReconciler(context.Background(), homeOpReconcileEvery)
+	// The member inbox's state-table system rows and purge (ADR 0111 decision 9). Not
+	// behind any switch: expired and orphaned bodies must go whether or not anyone reads them.
+	go mgr.runInboxUpkeep(context.Background())
 
 	// Golden snapshot auto-bake (ecs-ec2 only — ADR 0045 decision 9 / docs/log/64 §64.28).
 	// The CP already refuses a golden stamped with another image; this is the CP acting

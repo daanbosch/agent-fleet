@@ -6,6 +6,14 @@ English | [日本語](0111-member-collaboration.ja.md)
   review by a second model. The open questions are settled in the addendum at the end.
   Status update (2026-10-11): the P0 inbox acceptance conditions that P1-A must pass are in
   [docs/log/130](../log/130-member-inbox-acceptance.md).
+  Status update (2026-10-12): the first half of P1-A is built (issue #1961): the CP tables
+  `inbox_item` / `inbox_participant` / `inbox_mailbox` / `inbox_sender_rule`, the
+  `withMembership` routes under `/api/inbox` with their own stream `GET /api/inbox/stream`,
+  and the Console's inbox button. Choices the text left open: a repeated claim by the assignee
+  answers 200; the limits answer 400 (recipients), 413 (body, 16 KiB) and 429 (hourly, pair);
+  a DM counts as pending for its pair while unread; launching from a request is the CP route
+  `POST /api/inbox/items/{id}/launch`, which checks the claim before it resolves the
+  workspace. Recipes and session attachments (the second half) are not built yet.
 - Tracking: #1840
 - Follow-ups: #1960, #1961, #1962
 - Related: [0057](0057-member-handoff.md) (handover between members: execution never crosses) /

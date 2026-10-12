@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin"
 )
 
 // agentMemSecretWire is the refusal of a write whose text matched the secret scan.
@@ -207,8 +208,12 @@ func HandleAgentMemoryChangeDiff(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
-// HandleAgentMemoryRevert undoes one change, or forgets the memory as that change left it.
+// HandleAgentMemoryRevert undoes one change, or forgets the memory as that change left it. The
+// author is the member, so it answers only a request the CP marked as theirs (ADR 0113).
 func HandleAgentMemoryRevert(w http.ResponseWriter, r *http.Request) {
+	if !memberorigin.RefuseUnverified(w, r) {
+		return
+	}
 	var req agentMemRevertReq
 	if !httpx.DecodeJSON(w, r, &req) {
 		return
@@ -339,8 +344,12 @@ func HandleAgentMemoryList(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
-// HandleAgentMemoryPin sets or clears the member's pin on one memory.
+// HandleAgentMemoryPin sets or clears the member's pin on one memory; like revert, only for a
+// marked member request.
 func HandleAgentMemoryPin(w http.ResponseWriter, r *http.Request) {
+	if !memberorigin.RefuseUnverified(w, r) {
+		return
+	}
 	var req agentMemPinReq
 	if !httpx.DecodeJSON(w, r, &req) {
 		return

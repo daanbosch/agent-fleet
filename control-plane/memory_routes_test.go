@@ -31,6 +31,7 @@ func TestMemoryRoutesProxiedByCP(t *testing.T) {
 		{"POST", "/api/agents/memory/entries/revert", "POST /api/agents/memory/entries/revert"},
 		{"GET", "/api/agents/memory/entries/list", "GET /api/agents/memory/entries/list"},
 		{"POST", "/api/agents/memory/entries/pin", "POST /api/agents/memory/entries/pin"},
+		{"POST", "/api/agents/memory/entries/member-save", "POST /api/agents/memory/entries/member-save"},
 		{"GET", "/api/agents/memory/entries/member-read", "GET /api/agents/memory/entries/member-read"},
 		{"GET", "/api/agents/memory/claude-import", "GET /api/agents/memory/claude-import"},
 		{"GET", "/api/agents/memory/claude-import/preview", "GET /api/agents/memory/claude-import/preview"},
@@ -105,6 +106,15 @@ func TestMemorySnapshotIsAudited(t *testing.T) {
 	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/entries/pin", nil)
 	if action, target, ok = auditActionTarget(req); !ok || action != "memory.entry.pin" || target != "" {
 		t.Fatalf("auditActionTarget = (%q, %q, ok=%v), want memory.entry.pin with an empty target", action, target, ok)
+	}
+	// A member save is audited by project id only; the memory name never reaches the ledger.
+	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/entries/member-save?project=agent-fleet-0123456789ab&name=ghp_secretlooking", nil)
+	if action, target, ok = auditActionTarget(req); !ok || action != "memory.entry.save" || target != "agent-fleet-0123456789ab" {
+		t.Fatalf("auditActionTarget(member-save) = (%q, %q, ok=%v), want memory.entry.save/agent-fleet-0123456789ab", action, target, ok)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/entries/member-save?project=%2Fhome%2Fdev", nil)
+	if action, target, ok = auditActionTarget(req); !ok || action != "memory.entry.save" || target != "" {
+		t.Fatalf("auditActionTarget(member-save, bad hint) = (%q, %q, ok=%v), want memory.entry.save with an empty target", action, target, ok)
 	}
 	// The claude-memory import is audited; only an id-shaped project hint reaches the ledger.
 	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/claude-import?project=agent-fleet-0123456789ab", nil)

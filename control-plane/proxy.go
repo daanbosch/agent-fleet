@@ -90,6 +90,10 @@ func auditActionTarget(r *http.Request) (action, target string, ok bool) {
 			// #1703: the member pins or unpins a memory. The Console repeats the project id in the query;
 			// only an id-shaped value is recorded, never the free-text memory name.
 			return "memory.entry.pin", auditProjectHint(q.Get("project")), true
+		case p == "/api/agents/memory/entries/member-save":
+			// #1997: the member writes a memory by hand. Same id-shaped project hint as the pin;
+			// the memory name is free text and never copied into the ledger.
+			return "memory.entry.save", auditProjectHint(q.Get("project")), true
 		case p == "/api/agents/memory/claude-import":
 			// ADR 0108 decision 6: the one-time import of claude's memory writes the store. The
 			// Console repeats the project id in the query; only an id-shaped value is recorded.
@@ -223,18 +227,27 @@ func (a agentProxyAPI) rest(w http.ResponseWriter, r *http.Request, res *resolve
 		target += "?" + r.URL.RawQuery
 	}
 
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
+	body, mark, aerr := a.mgr.relayBody(r, res)
+	if aerr != nil {
+		writeAPIErr(w, aerr)
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, body)
 	if err != nil {
 		http.Error(w, "bad proxy request", http.StatusBadGateway)
 		return
 	}
 	req.Header = r.Header.Clone()
+	stripAgentRelayCredentials(req, r, a.mgr.emailHeader)
 	if rt.Token() != "" {
 		req.Header.Set("Authorization", "Bearer "+rt.Token()) // CP↔Agent auth
 	}
 	// A hint for the Agent's own log (ADR 0102 decision 4): an agent calling the Agent
 	// directly can set it too, so the Agent never decides anything on it.
 	req.Header.Set("X-AF-Relay", "cp")
+	if mark != "" {
+		req.Header.Set(memberOriginHeader, mark)
+	}
 
 	resp, err := agentRelayClient.Do(req)
 	if err != nil {
@@ -345,6 +358,7 @@ func (a agentProxyAPI) stream(w http.ResponseWriter, r *http.Request, res *resol
 		return
 	}
 	req.Header = r.Header.Clone()
+	stripAgentRelayCredentials(req, r, a.mgr.emailHeader) // as rest; no stream route is signed
 	if rt.Token() != "" {
 		req.Header.Set("Authorization", "Bearer "+rt.Token())
 	}

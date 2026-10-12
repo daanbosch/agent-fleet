@@ -1238,10 +1238,24 @@ func (s *SQL) SetMembershipRole(ctx context.Context, membershipID, role string) 
 	return err
 }
 
+// SetMembershipStatus sets a membership's status. Deactivating also applies, in the same
+// transaction, what leaving does to the member inbox (inboxMembershipInactiveTx), so the two
+// can neither be separated by a crash nor undone by a re-invite.
 func (s *SQL) SetMembershipStatus(ctx context.Context, membershipID, status string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE membership SET status=? WHERE id=?`, status, membershipID)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE membership SET status=? WHERE id=?`, status, membershipID); err != nil {
+		return err
+	}
+	if status != "active" {
+		if err := inboxMembershipInactiveTx(ctx, tx, membershipID, NowTS()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // membershipCascade is every row keyed to one membership, in the order they must be
@@ -1327,6 +1341,16 @@ func membershipCascade(membershipID string) []struct {
 		{`DELETE FROM session_share_owner_lease WHERE owner_membership_id=?`, id},
 		{`DELETE FROM workspace_stop_intent WHERE owner_membership_id=?`, id},
 		{`DELETE FROM home_operation WHERE membership_id=?`, id},
+		// The member inbox (ADR 0111 decision 9): the member's deliveries, read cursor and
+		// receive rules go, and so do rules other members hold about them. An item stays
+		// while anybody else still takes part in it, and the last statement removes the
+		// items nobody is left in, body and all. The item has no foreign key to membership,
+		// so the remaining participants keep their copy.
+		// Mailbox before participant rows: the lock order of store_inbox.go.
+		{`DELETE FROM inbox_mailbox WHERE membership_id=?`, id},
+		{`DELETE FROM inbox_participant WHERE membership_id=?`, id},
+		{`DELETE FROM inbox_sender_rule WHERE membership_id=? OR sender_membership_id=?`, both},
+		{`DELETE FROM inbox_item WHERE NOT EXISTS (SELECT 1 FROM inbox_participant p WHERE p.item_id=inbox_item.id)`, nil},
 		// The parent goes last: with foreign keys on, deleting it before its children
 		// fails.
 		{`DELETE FROM membership WHERE id=?`, id},
@@ -1351,6 +1375,23 @@ func (s *SQL) DeleteMembership(ctx context.Context, membershipID string) error {
 // deleteMembershipTx is the body above, inside somebody else's transaction — the tenant
 // delete runs it once per remaining membership so the whole tenant goes in one commit.
 func (s *SQL) deleteMembershipTx(ctx context.Context, tx *sqlTx, membershipID string) error {
+	// The membership row and then the member's inbox items are locked before the cascade
+	// touches any inbox mailbox or participant row: the lock order of store_inbox.go, which a
+	// send in flight to this member holds from its membership lock on (measured on Postgres:
+	// deleting the mailbox first deadlocked against such a send, 40P01). The row itself is
+	// deleted last, for the foreign keys.
+	if err := lockMemberships(ctx, tx, []string{membershipID}); err != nil {
+		return err
+	}
+	items, err := queryIDs(ctx, tx, `SELECT item_id FROM inbox_participant WHERE membership_id=? ORDER BY item_id`, membershipID)
+	if err != nil {
+		return err
+	}
+	for _, id := range items {
+		if _, err := tx.ExecContext(ctx, `UPDATE inbox_item SET updated_at=updated_at WHERE id=?`, id); err != nil {
+			return err
+		}
+	}
 	for _, stmt := range membershipCascade(membershipID) {
 		if _, err := tx.ExecContext(ctx, stmt.sql, stmt.args...); err != nil {
 			return fmt.Errorf("%s: %w", stmt.sql, err)

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin/memberorigintest"
 )
 
 func agentMemChangesT(t *testing.T) []agentMemChangeView {
@@ -198,7 +200,7 @@ func TestAgentMemoryChangesHandlers(t *testing.T) {
 	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &got) != nil || len(got.Changes) != 1 {
 		t.Fatalf("changes %d: %s", w.Code, w.Body)
 	}
-	w = smokeDo(t, mux, http.MethodPost, "/agents/memory/entries/revert", "", `{"commit":"`+got.Changes[0].Commit+`"}`)
+	w = signedDo(t, memberorigintest.Install(t), mux, http.MethodPost, "/agents/memory/entries/revert", `{"commit":"`+got.Changes[0].Commit+`"}`)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"deleted":true`) {
 		t.Fatalf("revert %d: %s", w.Code, w.Body)
 	}

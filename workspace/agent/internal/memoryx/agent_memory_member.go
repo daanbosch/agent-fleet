@@ -1,11 +1,11 @@
 package memoryx
 
-// The member's read of one memory body (#1985). The tools' read needs a calling session and the
-// agentMemory switch; the Console has neither, so this names the scope and the project id
-// directly and is not gated by the switch, like the changes list. It writes nothing and counts no
-// use. There is deliberately no member save or forget route here: the Agent cannot tell the
-// Console from a session holding AGENT_TOKEN, so a route that writes free text as "member" would
-// let a session bypass the switch (#1997).
+// The member's own routes into AF-owned agent memory: read one body (#1985) and save one by hand
+// (#1997). The tools' routes need a calling session and the agentMemory switch; the Console has
+// neither, so these name the scope and the project id directly and are not gated by the switch,
+// like the changes list. The read writes nothing and counts no use. The save writes free text as
+// the member, so it answers only a request carrying the CP's member-origin mark (ADR 0113): with
+// AGENT_TOKEN alone a session could otherwise write as the member while the switch is off.
 
 import (
 	"net/http"
@@ -13,9 +13,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin"
 )
+
+// MemberWriteMaxRequest bounds the body memberorigin.Require buffers on the member write routes:
+// the largest of them is a save.
+const MemberWriteMaxRequest = agentMemSaveMaxRequest
 
 // agentMemMemberCaller is the Console as a caller for one scope. A project must already hold
 // memory: the Console cannot start a project, because it has no working copy to take the
@@ -279,4 +285,36 @@ func HandleAgentMemoryMemberLatest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, v)
+}
+
+// agentMemMemberSaveReq is agentMemSaveReq plus the project id the Console has no session to
+// resolve. The session field is ignored: the author is the member.
+type agentMemMemberSaveReq struct {
+	agentMemSaveReq
+	Project string `json:"project"`
+}
+
+// HandleAgentMemoryMemberSave creates or updates a memory as the member, through the tools' own
+// save: the same revision check, secret scan and limits.
+func HandleAgentMemoryMemberSave(w http.ResponseWriter, r *http.Request) {
+	if !memberorigin.RefuseUnverified(w, r) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, agentMemSaveMaxRequest)
+	var req agentMemMemberSaveReq
+	if !httpx.DecodeJSON(w, r, &req) {
+		return
+	}
+	c, err := agentMemMemberCaller(req.Scope, req.Project)
+	if err != nil {
+		agentMemWriteErr(w, err)
+		return
+	}
+	req.Session = ""
+	res, err := agentMemSave(c, req.agentMemSaveReq, time.Now())
+	if err != nil {
+		agentMemWriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, res)
 }

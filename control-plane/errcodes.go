@@ -192,4 +192,23 @@ const (
 	// tenant_admin, because deleting takes the bare and its LFS objects with it.
 	errCodeGitRepoCreateForbidden = "git_repo_create_forbidden"
 	errCodeGitRepoManageForbidden = "git_repo_manage_forbidden"
+
+	// The member inbox (ADR 0111, inbox.go). An unknown, removed or other-tenant recipient
+	// is one code with one message, so the answer tells nobody who exists. A recipient who
+	// does not accept from the sender has its own code and is named, because the roster
+	// already shows who is a member (docs/log/130 §130.8 item 1).
+	errCodeInboxInvalidRecipient  = "inbox_invalid_recipient"
+	errCodeInboxNotAccepting      = "inbox_recipient_not_accepting"
+	errCodeInboxTooManyRecipients = "inbox_too_many_recipients"
+	errCodeInboxBodyTooLarge      = "inbox_body_too_large"
+	errCodeInboxRateLimited       = "inbox_rate_limited"
+	errCodeInboxPendingLimit      = "inbox_pending_limit"
+	errCodeInboxBadRequest        = "inbox_bad_request"
+	errCodeInboxStateConflict     = "inbox_state_conflict"
+	errCodeInboxNotFound          = "inbox_not_found"
+	errCodeInboxLaunchBusy        = "inbox_launch_in_progress"
+	// A launch from a request asked the Agent and the CP cannot tell whether a session came
+	// of it. It is never asked again under a new key (that could make a second session):
+	// the assignee checks their sessions, and handing the request back clears it.
+	errCodeInboxLaunchUnknown = "inbox_launch_unknown"
 )

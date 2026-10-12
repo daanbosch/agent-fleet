@@ -38,6 +38,7 @@ func buildMux(cfg config) *http.ServeMux {
 	registerSSMRoutes(mux, cfg)
 	registerGCPRoutes(mux, cfg)
 	registerMemoRoutes(mux, cfg)
+	registerInboxRoutes(mux, cfg)
 	registerWorkItemRoutes(mux, cfg)
 	registerScheduleRoutes(mux, cfg)
 	registerMCPServerRoutes(mux, cfg)
@@ -916,6 +917,8 @@ func registerAgentEnvRoutes(mux *http.ServeMux, cfg config) {
 	mux.HandleFunc("POST /api/agents/memory/entries/revert", rest)
 	mux.HandleFunc("GET /api/agents/memory/entries/list", rest)
 	mux.HandleFunc("POST /api/agents/memory/entries/pin", rest)
+	// The member's create/edit (#1997). The CP signs it, pin and revert (member_origin.go).
+	mux.HandleFunc("POST /api/agents/memory/entries/member-save", rest)
 	mux.HandleFunc("GET /api/agents/memory/entries/member-read", rest)
 	mux.HandleFunc("GET /api/agents/memory/entries/member-search", rest)
 	mux.HandleFunc("GET /api/agents/memory/entries/member-latest", rest)

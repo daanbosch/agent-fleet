@@ -373,11 +373,19 @@
   overflow-wrap: anywhere;
 }
 
-.mem-br-detail {
+.mem-br-detail,
+.mem-br-form {
   margin-top: 8px;
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.mem-br-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
 }
 
 .mem-br-body {
@@ -391,3 +399,7 @@
   border-radius: 5px;
 }
 
+.mem-br-actions {
+  display: flex;
+  gap: 8px;
+}
