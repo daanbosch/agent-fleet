@@ -92,7 +92,9 @@ jobs:
         working-directory: e2e
         env:
           E2E_REQUIRE: "1"
-        run: go test -v -tags e2e -timeout 15m ./...
+        # TestMemberHandoff starts and stops two members' workspaces several times, which
+        # is most of this step's run time.
+        run: go test -v -tags e2e -timeout 25m ./...
 
   ui-e2e:
     runs-on: ubuntu-latest

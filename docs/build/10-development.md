@@ -313,6 +313,16 @@ module, standard library only). **L3** is `console-e2e/` (Playwright). **L4**
   creates a **shell session**, types into it, reads the effect back through the
   filesystem API, and stops — against a real container. Being a shell session, it needs
   **no LLM credentials**.
+- **L2, multi-member** (`e2e/members_test.go`) runs the CP with `AUTH=proxy`, so a test
+  acts as any member by setting `X-Forwarded-Email`; a super_admin identity creates a
+  tenant of the test's own and invites the members, and every request carries
+  `X-AF-Tenant`. Each member gets a real workspace container, and a git remote both of
+  them can reach is served by the test process (`git http-backend`, no credentials) on
+  the docker bridge gateway. `TestMemberHandoff` drives ADR 0057's handover on it: the
+  push gate, share, offer, the recipient's inbox and notification while both workspaces
+  are stopped, the launch from the offer (its HEAD is the offer's `head_sha`), accept,
+  decline and unshare → expired. The file's doc comment says how to add another
+  scenario; `TestGitRemote` and `TestMemberFleetSetup` cover the harness without docker.
 - **L3** opens the Console in a real browser, opens a session, types into xterm, and
   observes the effect through the filesystem API — because xterm draws to a canvas and
   the characters cannot be read from the DOM. It needs a built `console/dist`, and uses
@@ -324,7 +334,7 @@ module, standard library only). **L3** is `console-e2e/` (Playwright). **L4**
   trigger.**
 
 ```bash
-cd e2e && WS_IMAGE=agent-fleet/workspace:dev go test -v -tags e2e -timeout 15m ./...
+cd e2e && WS_IMAGE=agent-fleet/workspace:dev go test -v -tags e2e -timeout 25m ./...
 cd console-e2e && npm ci && npx playwright test
 ```
 
@@ -337,7 +347,8 @@ cd console-e2e && npm ci && npx playwright test
 - Missing prerequisites (docker, a built image, and for L3 `console/dist`) cause a
   skip; CI sets `E2E_REQUIRE=1`, which turns that into a failure.
 - Safe to run on a development host with a live fleet: each layer uses a separate
-  development user (`e2e`, `e2e-ui`, `e2e-live`), ports are allocated dynamically, and
+  development user (`e2e`, `e2e-ui`, `e2e-live`; the multi-member tests a random tenant
+  slug that scopes every container and network), ports are allocated dynamically, and
   teardown is built in. **One at a time** on a memory-constrained host.
 
 ### Detecting upstream CLI breakage
