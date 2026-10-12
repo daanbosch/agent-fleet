@@ -14,6 +14,14 @@ English | [日本語](0111-member-collaboration.ja.md)
   a DM counts as pending for its pair while unread; launching from a request is the CP route
   `POST /api/inbox/items/{id}/launch`, which checks the claim before it resolves the
   workspace. Recipes and session attachments (the second half) are not built yet.
+  Status update (2026-10-12, second half): recipes, take-in and session attachments are built
+  (issue #1961). Choices the text left open: a recipe's repository is `host/owner/repo` on
+  github.com or bitbucket.org only, anything else is refused; a request's recipe can be taken
+  in by its assignee while it is claimed or done; a taken-in memo is flushed alone, headed by
+  a line the CP writes, and a flush that mixes it with other memos is refused (409
+  `memo_origin_alone`); the session's provenance badge is stamped by the CP on the create and
+  checked again when the CP relays the session list; the share an owner's attachment creates is
+  a read-only `session`-scope rule for every recipient, and an existing rule is left as it is.
 - Tracking: #1840
 - Follow-ups: #1960, #1961, #1962
 - Related: [0057](0057-member-handoff.md) (handover between members: execution never crosses) /
