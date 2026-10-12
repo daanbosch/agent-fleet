@@ -363,4 +363,5 @@ export const errors = {
   "err.inbox_state_conflict": "この項目は、すでに別の状態になっています。",
   "err.inbox_not_found": "項目が見つかりません。",
   "err.inbox_launch_in_progress": "この依頼からのセッションは、すでに起動中か起動済みです。",
+  "err.inbox_launch_unknown": "この依頼からセッションが起動した可能性があります。自分のセッション一覧を確認してください。やり直すときは依頼を手放してから引き受け直してください。",
 };

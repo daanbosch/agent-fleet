@@ -85,6 +85,9 @@ appear in the notification centre, and an open request never expires there.
 - **Starting a session from a request** is for the assignee only and runs in your own
   workspace on your own account. The Control Plane checks that you still hold the request
   before the session is created, and records which session it was.
+  If it cannot tell whether a session was started (the connection dropped mid-launch), it
+  does not start another: check your sessions, and hand the request back and take it again
+  to start over.
 - **Receiving** (inbox → **Receiving**): accept from everyone in the tenant or from chosen
   members only, block a sender, or turn on *do not disturb*, which mutes the badge and
   toasts but still delivers.

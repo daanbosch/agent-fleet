@@ -1238,10 +1238,24 @@ func (s *SQL) SetMembershipRole(ctx context.Context, membershipID, role string) 
 	return err
 }
 
+// SetMembershipStatus sets a membership's status. Deactivating also applies, in the same
+// transaction, what leaving does to the member inbox (inboxMembershipInactiveTx), so the two
+// can neither be separated by a crash nor undone by a re-invite.
 func (s *SQL) SetMembershipStatus(ctx context.Context, membershipID, status string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE membership SET status=? WHERE id=?`, status, membershipID)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE membership SET status=? WHERE id=?`, status, membershipID); err != nil {
+		return err
+	}
+	if status != "active" {
+		if err := inboxMembershipInactiveTx(ctx, tx, membershipID, NowTS()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // membershipCascade is every row keyed to one membership, in the order they must be

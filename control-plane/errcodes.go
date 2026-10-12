@@ -207,4 +207,8 @@ const (
 	errCodeInboxStateConflict     = "inbox_state_conflict"
 	errCodeInboxNotFound          = "inbox_not_found"
 	errCodeInboxLaunchBusy        = "inbox_launch_in_progress"
+	// A launch from a request asked the Agent and the CP cannot tell whether a session came
+	// of it. It is never asked again under a new key (that could make a second session):
+	// the assignee checks their sessions, and handing the request back clears it.
+	errCodeInboxLaunchUnknown = "inbox_launch_unknown"
 )

@@ -11,6 +11,11 @@
 -- does not know about would make that delete fail. Rows left behind that way are orphans,
 -- and the CP-side purge deletes them (decision 9).
 --
+-- A launch from a request is recorded in two steps: reserved (the assignee pressed launch,
+-- nothing has been asked of the Agent yet) and creating (the CP confirmed the claim and is
+-- asking the Agent, so a session may exist). launch_token is the Agent idempotency key of
+-- that one create, and a create that may have happened is never issued again under a new one.
+--
 -- The body is sealed by the tenant key custodian when one exists (ciphertext, key_ref).
 -- Without one it is stored base64-encoded, which is not encryption.
 CREATE TABLE inbox_item (
@@ -33,6 +38,9 @@ CREATE TABLE inbox_item (
     session_branch         TEXT NOT NULL DEFAULT '',
     launched_at            TEXT NOT NULL DEFAULT '',
     launch_pending_until   TEXT NOT NULL DEFAULT '',
+    launch_token           TEXT NOT NULL DEFAULT '',
+    launch_by              TEXT NOT NULL DEFAULT '',
+    launch_state           TEXT NOT NULL DEFAULT '' CHECK (launch_state IN ('','reserved','creating')),
     pr_url                 TEXT NOT NULL DEFAULT '',
     pr_branch              TEXT NOT NULL DEFAULT '',
     CHECK ((kind = 'dm' AND state = '') OR (kind = 'request' AND state <> ''))

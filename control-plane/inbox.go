@@ -579,6 +579,18 @@ func (a inboxAPI) send(w http.ResponseWriter, r *http.Request, ident store.Ident
 		return
 	}
 	switch {
+	case res.Invalid:
+		// A recipient left between the check above and the transaction: the same answer.
+		writeAPIErr(w, &apiError{http.StatusBadRequest, errCodeInboxInvalidRecipient, "one or more recipients are not valid"})
+		return
+	case len(res.NotAccepting) > 0:
+		var names []string
+		for _, id := range res.NotAccepting {
+			names = append(names, v.byID[id].UserKey)
+		}
+		writeInboxErr(w, http.StatusForbidden, errCodeInboxNotAccepting, "some recipients do not accept items from you",
+			inboxErrWire{Recipients: names})
+		return
 	case res.RateLimited:
 		writeInboxErr(w, http.StatusTooManyRequests, errCodeInboxRateLimited, "too many items sent in the last hour",
 			inboxErrWire{PerHour: inboxSendsPerHour})
@@ -603,6 +615,8 @@ func (a inboxAPI) send(w http.ResponseWriter, r *http.Request, ident store.Ident
 func (a inboxAPI) read(w http.ResponseWriter, r *http.Request, _ store.Identity, mv store.MembershipView) {
 	ctx := r.Context()
 	id := r.PathValue("id")
+	// It answers with the item, so it reconciles first like every other read.
+	a.reconcile(ctx, mv.TenantID)
 	if _, _, ok := a.participant(w, ctx, mv, id); !ok {
 		return
 	}

@@ -85,6 +85,28 @@ interface InboxStore {
   reset(): void;
 }
 
+// The scope is the (user, tenant) the inbox shows. Every answer is tied to the generation it
+// was asked under, and one asked under an earlier scope is dropped: a reply that comes back
+// after a tenant switch would otherwise put the previous tenant's bodies and badge on screen.
+let generation = 0;
+let scopeKey = "";
+// Requests within one scope are numbered, and an answer older than the one already applied
+// is dropped, so a slow GET cannot roll a withdrawn request back to claimed.
+let issued = 0;
+let applied = 0;
+
+/** Whether b is at least as new as a: the counter only grows, and the cursor only moves on. */
+export function mailboxNewer(a: InboxMailbox | null, b: InboxMailbox): boolean {
+  if (!a) return true;
+  return b.lastSeq > a.lastSeq || (b.lastSeq === a.lastSeq && b.readSeq >= a.readSeq);
+}
+
+function applyMailbox(mb: InboxMailbox, gen: number, tenant: string): void {
+  if (gen !== generation || tenant !== getTenant() || useInboxStore.getState().tenant !== tenant) return;
+  const cur = useInboxStore.getState().mailbox;
+  if (mailboxNewer(cur, mb)) useInboxStore.setState({ mailbox: mb });
+}
+
 function itemResult(d: { item?: InboxItem; error?: ApiError } | null | undefined): InboxResult {
   if (!d || d.error) return { ok: false, error: d?.error ?? { code: "unknown", message: "" } };
   return { ok: true, item: d.item };
@@ -97,14 +119,24 @@ export const useInboxStore = create<InboxStore>((set, get) => ({
   loaded: false,
   tenant: "",
   async refresh() {
+    const gen = generation;
     const tenant = getTenant();
+    const n = ++issued;
     const d = await api("api/inbox").catch(() => null);
-    if (tenant !== getTenant()) return;
+    if (gen !== generation || tenant !== getTenant() || n < applied) return;
+    applied = n;
     if (!d || d.error || !Array.isArray(d.items)) {
+      // Keep what this scope already showed, marked as failed; never another scope's data.
+      if (get().tenant !== tenant) set({ items: [], mailbox: null, loaded: false, tenant });
       set({ loadError: true, tenant });
       return;
     }
-    set({ items: d.items, mailbox: d.mailbox ?? null, loadError: false, loaded: true, tenant });
+    const mb: InboxMailbox | null = d.mailbox ?? null;
+    // Another tenant's counters say nothing about this one's.
+    const cur = get().tenant === tenant ? get().mailbox : null;
+    set({ items: d.items, loadError: false, loaded: true, tenant, mailbox: cur });
+    // A newer mailbox from the stream or a cursor reply stays: the list is re-read for it.
+    if (mb && mailboxNewer(cur, mb)) set({ mailbox: mb });
   },
   async send(kind, recipients, body) {
     const d = await apiJSON("api/inbox/items", "POST", { kind, recipients, body }).catch(() => null);
@@ -123,8 +155,10 @@ export const useInboxStore = create<InboxStore>((set, get) => ({
   async markSeen() {
     const mb = get().mailbox;
     if (!mb || mb.readSeq >= mb.lastSeq) return;
+    const gen = generation;
+    const tenant = get().tenant;
     const d = await apiJSON("api/inbox/cursor", "POST", { seq: mb.lastSeq }).catch(() => null);
-    if (d && !d.error && d.mailbox) set({ mailbox: d.mailbox });
+    if (d && !d.error && d.mailbox) applyMailbox(d.mailbox, gen, tenant);
   },
   async setPR(id, url, branch) {
     const d = await apiJSON(`api/inbox/items/${encodeURIComponent(id)}/pr`, "PUT", { url, branch }).catch(() => null);
@@ -132,6 +166,8 @@ export const useInboxStore = create<InboxStore>((set, get) => ({
     return itemResult(d);
   },
   reset() {
+    generation++;
+    issued = applied = 0;
     set({ items: [], mailbox: null, loadError: false, loaded: false, tenant: "" });
   },
 }));
@@ -179,7 +215,8 @@ let lastSeq = -1;
 /** True while the inbox stream is connected. */
 export const inboxStreaming = (): boolean => streaming;
 
-function applyFrame(line: string): void {
+function applyFrame(line: string, gen: number, tenant: string): void {
+  if (gen !== generation) return;
   let obj: { stream?: string; data?: InboxMailbox };
   try {
     obj = JSON.parse(line);
@@ -190,7 +227,7 @@ function applyFrame(line: string): void {
   const mb = obj.data;
   const st = useInboxStore.getState();
   // The counters alone are enough for the badge. Anything else re-reads the list.
-  useInboxStore.setState({ mailbox: { ...(st.mailbox ?? mb), ...mb } });
+  applyMailbox(mb, gen, tenant);
   if (mb.lastSeq !== lastSeq) {
     lastSeq = mb.lastSeq;
     void st.refresh();
@@ -201,7 +238,9 @@ async function connect(): Promise<void> {
   if (users === 0 || ctrl || document.hidden) return;
   const my = new AbortController();
   ctrl = my;
+  const gen = generation;
   streamTenant = getTenant();
+  const myTenant = streamTenant;
   let watchdog = 0;
   const arm = () => {
     window.clearTimeout(watchdog);
@@ -232,7 +271,7 @@ async function connect(): Promise<void> {
         const frame = buf.slice(0, idx);
         buf = buf.slice(idx + 2);
         if (my.signal.aborted) return;
-        if (frame.startsWith("data:")) applyFrame(frame.slice(5).trim());
+        if (frame.startsWith("data:")) applyFrame(frame.slice(5).trim(), gen, myTenant);
       }
     }
   } catch {
@@ -253,15 +292,37 @@ async function connect(): Promise<void> {
 
 function pollTick(): void {
   if (document.hidden) return;
-  // A tenant switch: drop what belongs to the old tenant and start over.
+  // A tenant switch nobody announced (a pinned tab, say): the same as setInboxScope.
   if (streamTenant && streamTenant !== getTenant()) {
-    useInboxStore.getState().reset();
-    lastSeq = -1;
-    ctrl?.abort();
-    void useInboxStore.getState().refresh();
+    setInboxScope(scopeKey.split("|")[0] + "|" + getTenant());
     return;
   }
   void useInboxStore.getState().refresh();
+}
+
+/** Point the inbox at another (user, tenant). Everything the previous one showed goes at once:
+ *  the list, the badge, the stream (its frames are dropped by generation), and a launch seeded
+ *  from one of its requests. Called by InboxButton when the tenant store moves. */
+export function setInboxScope(key: string): void {
+  if (key === scopeKey) return;
+  const first = scopeKey === "";
+  scopeKey = key;
+  if (first) return;
+  useInboxStore.getState().reset();
+  lastSeq = -1;
+  onScopeChange?.();
+  if (ctrl) ctrl.abort();
+  if (users > 0) {
+    void useInboxStore.getState().refresh();
+    window.clearTimeout(retryTimer);
+    retryTimer = window.setTimeout(() => void connect(), 0);
+  }
+}
+
+let onScopeChange: (() => void) | null = null;
+/** Registers what else belongs to the previous scope (InboxButton clears an inbox launch seed). */
+export function onInboxScopeChange(f: (() => void) | null): void {
+  onScopeChange = f;
 }
 
 let lastPoll = 0;

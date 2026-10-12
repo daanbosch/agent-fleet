@@ -6,7 +6,9 @@ import { Button } from "../../ui/Button.tsx";
 import { Icon } from "../../ui/Icon.tsx";
 import { useToast } from "../../ui/ToastProvider.tsx";
 import { useT } from "../../lib/i18n/index.ts";
-import { inboxBadge, startInboxChannel, useInboxStore } from "./store.ts";
+import { useTenantStore } from "../../core/store/tenant.ts";
+import { useLaunchSeed, useLaunchTarget } from "../repos/store.ts";
+import { inboxBadge, onInboxScopeChange, setInboxScope, startInboxChannel, useInboxStore } from "./store.ts";
 import { InboxModal } from "./InboxModal.tsx";
 import "./inbox.css";
 
@@ -17,10 +19,29 @@ export function InboxButton() {
   const mailbox = useInboxStore((s) => s.mailbox);
   const loaded = useInboxStore((s) => s.loaded);
   const badge = inboxBadge(mailbox);
-  useEffect(() => startInboxChannel(), []);
   // A toast when the count rises while the inbox is closed. Do-not-disturb mutes it along
-  // with the badge (inboxBadge is 0 then), and the first load after boot is not news.
+  // with the badge (inboxBadge is 0 then), and the first load of a scope is not news.
   const prev = useRef<number | null>(null);
+  const tenant = useTenantStore((s) => s.tenant);
+  const user = useTenantStore((s) => s.whoami?.user ?? "");
+  const scope = user + "|" + tenant;
+  // A tenant or account switch drops the previous scope's inbox at once: list, badge, stream,
+  // the open dialog with its drafts, and a launch seeded from one of its requests.
+  useEffect(() => {
+    onInboxScopeChange(() => {
+      if (useLaunchSeed.getState().inboxItemId) {
+        useLaunchSeed.getState().clear();
+        useLaunchTarget.getState().clear();
+      }
+    });
+    return () => onInboxScopeChange(null);
+  }, []);
+  useEffect(() => {
+    setInboxScope(scope);
+    setOpen(false);
+    prev.current = null;
+  }, [scope]);
+  useEffect(() => startInboxChannel(), []);
   useEffect(() => {
     if (!loaded) return;
     if (prev.current !== null && badge > prev.current && !open) toast(tr("inbox.toast_new"), { kind: "info" });
@@ -38,7 +59,7 @@ export function InboxButton() {
         <Icon name="inbox" />
         {badge > 0 && <span className="notification-badge inbox-badge">{badge > 9 ? "9+" : badge}</span>}
       </Button>
-      {open && <InboxModal onClose={() => setOpen(false)} />}
+      {open && <InboxModal key={scope} onClose={() => setOpen(false)} />}
     </div>
   );
 }

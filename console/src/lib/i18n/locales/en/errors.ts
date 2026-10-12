@@ -366,4 +366,5 @@ export const errors: Record<keyof typeof jaErrors, string> = {
   "err.inbox_state_conflict": "This item is already in a different state.",
   "err.inbox_not_found": "Item not found.",
   "err.inbox_launch_in_progress": "A session from this request is already starting or has started.",
+  "err.inbox_launch_unknown": "A session may already have started from this request. Check your sessions; to start over, hand the request back and take it again.",
 };

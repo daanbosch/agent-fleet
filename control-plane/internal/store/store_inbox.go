@@ -9,9 +9,12 @@ package store
 // SQLite runs on one connection, so its transactions are serial anyway. Counting and then
 // updating would let two concurrent claims both pass (docs/log/130 §130.3).
 //
-// Mailbox rows (the per-member counter) are locked in membership-id order within a
-// transaction, which keeps two transactions that touch overlapping participants from
-// deadlocking on each other.
+// Lock order, which every transaction here keeps so that none can deadlock another: the
+// membership row (removal only), then item rows in id order, then mailbox rows in
+// membership-id order, then participant rows. A send has no item to lock yet and starts at the
+// mailboxes; block and settings changes lock the owner's mailbox, which is what orders them
+// against a send to that member (measured on Postgres: a read that took the participant row
+// before the mailbox deadlocked against a claim, SQLSTATE 40P01).
 
 import (
 	"context"
@@ -29,10 +32,12 @@ type InboxItem struct {
 	// The session the assignee launched from the request, recorded by the CP once the
 	// launch succeeded. SessionMembershipID is who launched it.
 	SessionMembershipID, SessionName, SessionDir, SessionBranch, LaunchedAt string
-	// LaunchPendingUntil is set while a launch is in flight, so a second launch by the same
-	// assignee is refused instead of creating a second session.
-	LaunchPendingUntil string
-	PRURL, PRBranch    string
+	// The launch in flight, if any. LaunchState is "" (none), "reserved" (the assignee pressed
+	// launch; the Agent has not been asked) or "creating" (the CP confirmed the claim and asked
+	// the Agent, so a session may exist). LaunchToken is that create's Agent idempotency key,
+	// LaunchBy who launched, and LaunchPendingUntil when a reservation lapses.
+	LaunchPendingUntil, LaunchToken, LaunchBy, LaunchState string
+	PRURL, PRBranch                                        string
 }
 
 // InboxParticipant is one person's side of an item: the sender's row, or one recipient's.
@@ -67,6 +72,11 @@ type InboxSendResult struct {
 	Created     bool
 	RateLimited bool
 	PendingFull []string // recipient membership ids whose pair limit is reached
+	// Invalid: a recipient (or the sender) is not an active member of the item's tenant.
+	Invalid bool
+	// NotAccepting: recipient membership ids that block the sender or accept from chosen
+	// members only, without the sender among them.
+	NotAccepting []string
 }
 
 // InboxRetention is the cut-off for reads and the purge: a DM created before DMBefore and a
@@ -91,9 +101,10 @@ type InboxStore interface {
 	WithdrawInboxItem(ctx context.Context, id, membershipID, now string) (bool, error)
 	MarkInboxRead(ctx context.Context, id, membershipID, now string) (bool, error)
 
-	BeginInboxLaunch(ctx context.Context, id, membershipID, now, until string) (bool, error)
-	FinishInboxLaunch(ctx context.Context, id, membershipID, name, dir, branch, now string) error
-	AbortInboxLaunch(ctx context.Context, id, membershipID string) error
+	BeginInboxLaunch(ctx context.Context, id, membershipID, token, now, until string) (bool, error)
+	ConfirmInboxLaunch(ctx context.Context, id, membershipID, token string) (bool, error)
+	FinishInboxLaunch(ctx context.Context, id, membershipID, token, name, dir, branch, now string) (bool, error)
+	AbortInboxLaunch(ctx context.Context, id, token string) error
 	SetInboxPRLink(ctx context.Context, id, membershipID, url, branch, now string) (bool, error)
 
 	GetInboxMailbox(ctx context.Context, membershipID string) (InboxMailbox, error)
@@ -108,7 +119,7 @@ type InboxStore interface {
 
 const inboxItemCols = `id,tenant_id,sender_membership_id,kind,state,assignee_membership_id,ciphertext,key_ref,
 	created_at,updated_at,updated_by,final_at,session_membership_id,session_name,session_dir,session_branch,
-	launched_at,launch_pending_until,pr_url,pr_branch`
+	launched_at,launch_pending_until,launch_token,launch_by,launch_state,pr_url,pr_branch`
 
 func inboxItemColsAs(alias string) string {
 	cols := strings.Split(strings.Join(strings.Fields(inboxItemCols), ""), ",")
@@ -123,7 +134,7 @@ func scanInboxItem(row interface{ Scan(...any) error }, extra ...any) (InboxItem
 	dst := []any{&it.ID, &it.TenantID, &it.SenderMembershipID, &it.Kind, &it.State, &it.AssigneeMembershipID,
 		&it.Ciphertext, &it.KeyRef, &it.CreatedAt, &it.UpdatedAt, &it.UpdatedBy, &it.FinalAt,
 		&it.SessionMembershipID, &it.SessionName, &it.SessionDir, &it.SessionBranch,
-		&it.LaunchedAt, &it.LaunchPendingUntil, &it.PRURL, &it.PRBranch}
+		&it.LaunchedAt, &it.LaunchPendingUntil, &it.LaunchToken, &it.LaunchBy, &it.LaunchState, &it.PRURL, &it.PRBranch}
 	return it, row.Scan(append(dst, extra...)...)
 }
 
@@ -146,6 +157,18 @@ const inboxEligible = `p.role='recipient' AND p.delivery<>'declined'
 // is still open, and every waiting claim would then win (measured: with the guard moved into
 // the subquery, TestInboxClaimRaceHasOneWinner fails on Postgres and passes on SQLite).
 var inboxClaimGuard = `AND state='open'`
+
+// inboxDropReservation clears a launch that has not asked the Agent yet. A withdraw or a
+// done keeps a launch that is already creating, so the session it makes is still recorded
+// on the card.
+const inboxDropReservation = `launch_token=CASE WHEN launch_state='reserved' THEN '' ELSE launch_token END,
+	launch_by=CASE WHEN launch_state='reserved' THEN '' ELSE launch_by END,
+	launch_state=CASE WHEN launch_state='reserved' THEN '' ELSE launch_state END`
+
+// inboxDropLaunch clears any launch record. A release hands the request back, so a launch
+// the assignee had in flight, finished or not, is no longer this request's: that is also the
+// way out of a launch whose outcome is unknown.
+const inboxDropLaunch = `launch_token='',launch_by='',launch_state='',launch_pending_until=''`
 
 // inboxNotExpired filters expired rows before anything is decrypted (decision 9).
 const inboxNotExpired = `((i.kind='dm' AND i.created_at>=?) OR (i.kind='request' AND (i.final_at='' OR i.final_at>=?)))`
@@ -233,6 +256,38 @@ func (s *SQL) CreateInboxItem(ctx context.Context, it InboxItem, recipients []st
 		if err := lockMailboxes(ctx, tx, append([]string{it.SenderMembershipID}, recipients...)); err != nil {
 			return false, err
 		}
+		// Who may receive is decided again here, under the mailbox locks a block, a settings
+		// change and a removal also take: checked only before the custodian sealed the body,
+		// a block saved in between would not stop the item.
+		if contains(recipients, it.SenderMembershipID) {
+			out.Invalid = true
+			return false, nil
+		}
+		for _, mid := range append([]string{it.SenderMembershipID}, recipients...) {
+			var n int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM membership WHERE id=? AND tenant_id=? AND status='active'`,
+				mid, it.TenantID).Scan(&n); err != nil {
+				return false, err
+			}
+			if n == 0 {
+				out.Invalid = true
+				return false, nil
+			}
+		}
+		for _, rid := range recipients {
+			var acceptFrom, rule string
+			if err := tx.QueryRowContext(ctx, `SELECT b.accept_from, COALESCE((SELECT r.rule FROM inbox_sender_rule r
+				WHERE r.membership_id=b.membership_id AND r.sender_membership_id=?),'')
+				FROM inbox_mailbox b WHERE b.membership_id=?`, it.SenderMembershipID, rid).Scan(&acceptFrom, &rule); err != nil {
+				return false, err
+			}
+			if rule == "block" || (acceptFrom == "chosen" && rule != "allow") {
+				out.NotAccepting = append(out.NotAccepting, rid)
+			}
+		}
+		if len(out.NotAccepting) > 0 {
+			return false, nil
+		}
 		var sent int
 		if err := tx.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM inbox_item WHERE sender_membership_id=? AND created_at>=?`,
@@ -287,6 +342,15 @@ func (s *SQL) CreateInboxItem(ctx context.Context, it InboxItem, recipients []st
 		return true, nil
 	})
 	return out, err
+}
+
+func contains(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *SQL) GetInboxItem(ctx context.Context, id string) (InboxItem, bool, error) {
@@ -422,7 +486,7 @@ func (s *SQL) DeclineInboxItem(ctx context.Context, id, membershipID, now string
 func (s *SQL) ReleaseInboxItem(ctx context.Context, id, membershipID, now string) (bool, error) {
 	return s.inboxTx(ctx, func(tx *sqlTx) (bool, error) {
 		ok, err := affected(tx.ExecContext(ctx, `UPDATE inbox_item SET state='open',assignee_membership_id='',
-			launch_pending_until='',updated_at=?,updated_by=?
+			`+inboxDropLaunch+`,updated_at=?,updated_by=?
 			WHERE id=? AND state='claimed' AND assignee_membership_id=?`, now, membershipID, id, membershipID))
 		if err != nil || !ok {
 			return false, err
@@ -438,7 +502,7 @@ func (s *SQL) ReleaseInboxItem(ctx context.Context, id, membershipID, now string
 // CompleteInboxItem marks a claimed request done: the assignee only. The assignee is kept.
 func (s *SQL) CompleteInboxItem(ctx context.Context, id, membershipID, now string) (bool, error) {
 	return s.inboxTx(ctx, func(tx *sqlTx) (bool, error) {
-		ok, err := affected(tx.ExecContext(ctx, `UPDATE inbox_item SET state='done',final_at=?,launch_pending_until='',
+		ok, err := affected(tx.ExecContext(ctx, `UPDATE inbox_item SET state='done',final_at=?,`+inboxDropReservation+`,
 			updated_at=?,updated_by=?
 			WHERE id=? AND state='claimed' AND assignee_membership_id=?`, now, now, membershipID, id, membershipID))
 		if err != nil || !ok {
@@ -452,7 +516,7 @@ func (s *SQL) CompleteInboxItem(ctx context.Context, id, membershipID, now strin
 // stays on record so they can see that what they took was withdrawn.
 func (s *SQL) WithdrawInboxItem(ctx context.Context, id, membershipID, now string) (bool, error) {
 	return s.inboxTx(ctx, func(tx *sqlTx) (bool, error) {
-		ok, err := affected(tx.ExecContext(ctx, `UPDATE inbox_item SET state='withdrawn',final_at=?,launch_pending_until='',
+		ok, err := affected(tx.ExecContext(ctx, `UPDATE inbox_item SET state='withdrawn',final_at=?,`+inboxDropReservation+`,
 			updated_at=?,updated_by=?
 			WHERE id=? AND state IN ('open','claimed') AND sender_membership_id=?`, now, now, membershipID, id, membershipID))
 		if err != nil || !ok {
@@ -467,12 +531,16 @@ func (s *SQL) WithdrawInboxItem(ctx context.Context, id, membershipID, now strin
 // one would count the item as unseen again, the opposite of having read it.
 func (s *SQL) MarkInboxRead(ctx context.Context, id, membershipID, now string) (bool, error) {
 	return s.inboxTx(ctx, func(tx *sqlTx) (bool, error) {
-		ok, err := affected(tx.ExecContext(ctx, `UPDATE inbox_participant SET delivery='read'
-			WHERE item_id=? AND membership_id=? AND delivery='unread'`, id, membershipID))
-		if err != nil || !ok {
+		// Item, then mailbox, then participant: the order of every other transaction here.
+		if _, err := tx.ExecContext(ctx, `UPDATE inbox_item SET updated_at=updated_at WHERE id=?`, id); err != nil {
 			return false, err
 		}
 		if err := lockMailboxes(ctx, tx, []string{membershipID}); err != nil {
+			return false, err
+		}
+		ok, err := affected(tx.ExecContext(ctx, `UPDATE inbox_participant SET delivery='read'
+			WHERE item_id=? AND membership_id=? AND delivery='unread'`, id, membershipID))
+		if err != nil || !ok {
 			return false, err
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE inbox_mailbox SET last_seq=last_seq+1 WHERE membership_id=?`, membershipID)
@@ -480,35 +548,51 @@ func (s *SQL) MarkInboxRead(ctx context.Context, id, membershipID, now string) (
 	})
 }
 
-// BeginInboxLaunch marks a launch in flight for the current assignee. It refuses while
-// another launch is in flight and once this assignee has a session recorded, so a double
-// click or a retry creates one session (docs/log/130 R-8).
-func (s *SQL) BeginInboxLaunch(ctx context.Context, id, membershipID, now, until string) (bool, error) {
-	return affected(s.db.ExecContext(ctx, `UPDATE inbox_item SET launch_pending_until=?
+// BeginInboxLaunch reserves a launch for the current assignee under token. It refuses while
+// another launch is reserved or creating, and once this assignee has a session recorded, so
+// a double click or a retry creates one session (docs/log/130 R-8). A reservation that
+// outlived until (a CP that stopped between reserving and confirming) can be taken over.
+func (s *SQL) BeginInboxLaunch(ctx context.Context, id, membershipID, token, now, until string) (bool, error) {
+	return affected(s.db.ExecContext(ctx, `UPDATE inbox_item SET launch_token=?,launch_by=?,launch_state='reserved',
+		launch_pending_until=?
 		WHERE id=? AND kind='request' AND state='claimed' AND assignee_membership_id=?
-		  AND launch_pending_until<?
-		  AND NOT (session_membership_id=? AND session_name<>'')`, until, id, membershipID, now, membershipID))
+		  AND NOT (session_membership_id=? AND session_name<>'')
+		  AND (launch_state='' OR (launch_state='reserved' AND launch_pending_until<?))`,
+		token, membershipID, until, id, membershipID, membershipID, now))
 }
 
-// FinishInboxLaunch records the session a launch created. It is recorded even when the
-// request was withdrawn in the meantime: the session exists, and the card should say so.
-func (s *SQL) FinishInboxLaunch(ctx context.Context, id, membershipID, name, dir, branch, now string) error {
-	_, err := s.inboxTx(ctx, func(tx *sqlTx) (bool, error) {
+// ConfirmInboxLaunch is the commit point of a launch, run immediately before the Agent is
+// asked: the reservation is still this one, the request still claimed, the caller still its
+// assignee. A release or a withdraw that lands before it wins and the Agent is never asked;
+// one that lands after it orders after the launch, which decision 2 lets run.
+func (s *SQL) ConfirmInboxLaunch(ctx context.Context, id, membershipID, token string) (bool, error) {
+	return affected(s.db.ExecContext(ctx, `UPDATE inbox_item SET launch_state='creating'
+		WHERE id=? AND launch_token=? AND launch_state='reserved' AND state='claimed' AND assignee_membership_id=?`,
+		id, token, membershipID))
+}
+
+// FinishInboxLaunch records the session the confirmed launch created. It is recorded even
+// when the request was withdrawn or done in the meantime: the session exists, and the card
+// should say so. recorded=false means the launch is no longer this one (a release dropped it).
+func (s *SQL) FinishInboxLaunch(ctx context.Context, id, membershipID, token, name, dir, branch, now string) (bool, error) {
+	return s.inboxTx(ctx, func(tx *sqlTx) (bool, error) {
 		ok, err := affected(tx.ExecContext(ctx, `UPDATE inbox_item SET session_membership_id=?,session_name=?,
-			session_dir=?,session_branch=?,launched_at=?,launch_pending_until='',updated_at=?,updated_by=?
-			WHERE id=?`, membershipID, name, dir, branch, now, now, membershipID, id))
+			session_dir=?,session_branch=?,launched_at=?,`+inboxDropLaunch+`,updated_at=?,updated_by=?
+			WHERE id=? AND launch_token=? AND launch_by=? AND launch_state='creating'`,
+			membershipID, name, dir, branch, now, now, membershipID, id, token, membershipID))
 		if err != nil || !ok {
 			return false, err
 		}
 		return true, bumpInboxItem(ctx, tx, id)
 	})
-	return err
 }
 
-// AbortInboxLaunch clears the in-flight mark after a launch that did not create a session.
-func (s *SQL) AbortInboxLaunch(ctx context.Context, id, membershipID string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE inbox_item SET launch_pending_until=''
-		WHERE id=? AND assignee_membership_id=?`, id, membershipID)
+// AbortInboxLaunch clears a launch that is known to have created nothing: refused before the
+// Agent was asked, or refused by the Agent itself. A launch whose outcome is unknown is never
+// aborted, because a later launch under a new key could create a second session.
+func (s *SQL) AbortInboxLaunch(ctx context.Context, id, token string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE inbox_item SET `+inboxDropLaunch+`
+		WHERE id=? AND launch_token=?`, id, token)
 	return err
 }
 
@@ -606,16 +690,21 @@ func (s *SQL) ListInboxSenderRules(ctx context.Context, membershipID string) (ma
 }
 
 // SetInboxBlock blocks or unblocks a sender. Unblocking drops the rule, so a sender who was
-// on the chosen list before the block has to be chosen again.
+// on the chosen list before the block has to be chosen again. The blocker's mailbox is locked
+// first, so a send to them either commits before the block or sees it.
 func (s *SQL) SetInboxBlock(ctx context.Context, membershipID, senderMembershipID string, blocked bool) error {
-	if !blocked {
-		_, err := s.db.ExecContext(ctx, `DELETE FROM inbox_sender_rule
-			WHERE membership_id=? AND sender_membership_id=? AND rule='block'`, membershipID, senderMembershipID)
-		return err
-	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO inbox_sender_rule(membership_id,sender_membership_id,rule)
-		VALUES(?,?,'block') ON CONFLICT(membership_id,sender_membership_id) DO UPDATE SET rule='block'`,
-		membershipID, senderMembershipID)
+	_, err := s.inboxTx(ctx, func(tx *sqlTx) (bool, error) {
+		if err := lockMailboxes(ctx, tx, []string{membershipID}); err != nil {
+			return false, err
+		}
+		q := `DELETE FROM inbox_sender_rule WHERE membership_id=? AND sender_membership_id=? AND rule='block'`
+		if blocked {
+			q = `INSERT INTO inbox_sender_rule(membership_id,sender_membership_id,rule)
+				VALUES(?,?,'block') ON CONFLICT(membership_id,sender_membership_id) DO UPDATE SET rule='block'`
+		}
+		_, err := tx.ExecContext(ctx, q, membershipID, senderMembershipID)
+		return err == nil, err
+	})
 	return err
 }
 
@@ -657,49 +746,7 @@ func (s *SQL) ReconcileInbox(ctx context.Context, tenantID, now string) ([]strin
 	}
 	var changed []string
 	for _, id := range ids {
-		ok, err := s.inboxTx(ctx, func(tx *sqlTx) (bool, error) {
-			withdrawn, err := affected(tx.ExecContext(ctx, `UPDATE inbox_item SET state='withdrawn',final_at=?,
-				launch_pending_until='',updated_at=?,updated_by=''
-				WHERE id=? AND state IN ('open','claimed') AND NOT EXISTS (SELECT 1 FROM membership m
-				  WHERE m.id=inbox_item.sender_membership_id AND m.status='active')`, now, now, id))
-			if err != nil {
-				return false, err
-			}
-			if withdrawn {
-				return true, bumpInboxItem(ctx, tx, id)
-			}
-			released, err := affected(tx.ExecContext(ctx, `UPDATE inbox_item SET state='open',assignee_membership_id='',
-				launch_pending_until='',updated_at=?,updated_by=''
-				WHERE id=? AND state='claimed' AND (
-				  NOT EXISTS (SELECT 1 FROM membership m WHERE m.id=inbox_item.assignee_membership_id AND m.status='active')
-				  OR EXISTS (SELECT 1 FROM inbox_sender_rule r WHERE r.membership_id=inbox_item.assignee_membership_id
-				             AND r.sender_membership_id=inbox_item.sender_membership_id AND r.rule='block'))`, now, id))
-			if err != nil {
-				return false, err
-			}
-			// Lock the row even when nothing was released, so the check below sees every
-			// decline committed before it.
-			open, err := affected(tx.ExecContext(ctx, `UPDATE inbox_item SET updated_at=updated_at
-				WHERE id=? AND state='open'`, id))
-			if err != nil {
-				return false, err
-			}
-			declined := false
-			if open {
-				declined, err = affected(tx.ExecContext(ctx, `UPDATE inbox_item SET state='declined',final_at=?,
-					updated_at=?,updated_by=''
-					WHERE id=? AND state='open' AND NOT EXISTS (SELECT 1 FROM inbox_participant p
-					  JOIN inbox_item i ON i.id=p.item_id WHERE p.item_id=inbox_item.id AND `+inboxEligible+`)`,
-					now, now, id))
-				if err != nil {
-					return false, err
-				}
-			}
-			if !released && !declined {
-				return false, nil
-			}
-			return true, bumpInboxItem(ctx, tx, id)
-		})
+		ok, err := s.inboxTx(ctx, func(tx *sqlTx) (bool, error) { return reconcileInboxItemTx(ctx, tx, id, now) })
 		if err != nil {
 			return changed, err
 		}
@@ -708,6 +755,119 @@ func (s *SQL) ReconcileInbox(ctx context.Context, tenantID, now string) ([]strin
 		}
 	}
 	return changed, nil
+}
+
+// reconcileInboxItemTx applies the system rows to one request inside tx and reports whether
+// it changed. Each statement is conditional on the item row, so it is safe to run again.
+func reconcileInboxItemTx(ctx context.Context, tx *sqlTx, id, now string) (bool, error) {
+	withdrawn, err := affected(tx.ExecContext(ctx, `UPDATE inbox_item SET state='withdrawn',final_at=?,
+		`+inboxDropReservation+`,updated_at=?,updated_by=''
+		WHERE id=? AND state IN ('open','claimed') AND NOT EXISTS (SELECT 1 FROM membership m
+		  WHERE m.id=inbox_item.sender_membership_id AND m.status='active')`, now, now, id))
+	if err != nil {
+		return false, err
+	}
+	if withdrawn {
+		return true, bumpInboxItem(ctx, tx, id)
+	}
+	released, err := affected(tx.ExecContext(ctx, `UPDATE inbox_item SET state='open',assignee_membership_id='',
+		`+inboxDropLaunch+`,updated_at=?,updated_by=''
+		WHERE id=? AND state='claimed' AND (
+		  NOT EXISTS (SELECT 1 FROM membership m WHERE m.id=inbox_item.assignee_membership_id AND m.status='active')
+		  OR EXISTS (SELECT 1 FROM inbox_sender_rule r WHERE r.membership_id=inbox_item.assignee_membership_id
+		             AND r.sender_membership_id=inbox_item.sender_membership_id AND r.rule='block'))`, now, id))
+	if err != nil {
+		return false, err
+	}
+	// Lock the row even when nothing was released, so the check below sees every decline
+	// committed before it.
+	open, err := affected(tx.ExecContext(ctx, `UPDATE inbox_item SET updated_at=updated_at
+		WHERE id=? AND state='open'`, id))
+	if err != nil {
+		return false, err
+	}
+	declined := false
+	if open {
+		declined, err = affected(tx.ExecContext(ctx, `UPDATE inbox_item SET state='declined',final_at=?,
+			updated_at=?,updated_by=''
+			WHERE id=? AND state='open' AND NOT EXISTS (SELECT 1 FROM inbox_participant p
+			  JOIN inbox_item i ON i.id=p.item_id WHERE p.item_id=inbox_item.id AND `+inboxEligible+`)`,
+			now, now, id))
+		if err != nil {
+			return false, err
+		}
+	}
+	if !released && !declined {
+		return false, nil
+	}
+	return true, bumpInboxItem(ctx, tx, id)
+}
+
+func queryIDs(ctx context.Context, tx *sqlTx, q string, args ...any) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// inboxMembershipInactiveTx is what a membership leaving does to the inbox, inside the same
+// transaction that makes it inactive (decision 9 and the state table's system rows): the
+// requests it sent are withdrawn, its claims go back to open, a request nobody can take any
+// more is declined, and an item no active member takes part in any more is deleted, body and
+// all. Done at the removal itself rather than by a later sweep, so a re-invite before that
+// sweep cannot undo it: the sweep would read the membership as active and see nothing to do.
+func inboxMembershipInactiveTx(ctx context.Context, tx *sqlTx, membershipID, now string) error {
+	reqs, err := queryIDs(ctx, tx, `SELECT DISTINCT p.item_id FROM inbox_participant p JOIN inbox_item i ON i.id=p.item_id
+		WHERE p.membership_id=? AND i.kind='request' AND i.state IN ('open','claimed') ORDER BY p.item_id`, membershipID)
+	if err != nil {
+		return err
+	}
+	for _, id := range reqs {
+		if _, err := tx.ExecContext(ctx, `UPDATE inbox_item SET updated_at=updated_at WHERE id=?`, id); err != nil {
+			return err
+		}
+	}
+	people := []string{membershipID}
+	for _, id := range reqs {
+		ps, err := queryIDs(ctx, tx, `SELECT membership_id FROM inbox_participant WHERE item_id=?`, id)
+		if err != nil {
+			return err
+		}
+		people = append(people, ps...)
+	}
+	if err := lockMailboxes(ctx, tx, people); err != nil {
+		return err
+	}
+	for _, id := range reqs {
+		if _, err := reconcileInboxItemTx(ctx, tx, id, now); err != nil {
+			return err
+		}
+	}
+	ended, err := queryIDs(ctx, tx, `SELECT p.item_id FROM inbox_participant p WHERE p.membership_id=?
+		AND NOT EXISTS (SELECT 1 FROM inbox_participant q JOIN membership m ON m.id=q.membership_id
+		                WHERE q.item_id=p.item_id AND m.status='active')`, membershipID)
+	if err != nil {
+		return err
+	}
+	for _, id := range ended {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM inbox_participant WHERE item_id=?`, id); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM inbox_item WHERE id=?`, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // PurgeInbox deletes what has reached the end of its life (decision 9), whether or not

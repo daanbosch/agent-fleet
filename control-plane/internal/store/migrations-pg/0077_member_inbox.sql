@@ -21,6 +21,9 @@ CREATE TABLE inbox_item (
     session_branch         TEXT NOT NULL DEFAULT '',
     launched_at            TEXT NOT NULL DEFAULT '',
     launch_pending_until   TEXT NOT NULL DEFAULT '',
+    launch_token           TEXT NOT NULL DEFAULT '',
+    launch_by              TEXT NOT NULL DEFAULT '',
+    launch_state           TEXT NOT NULL DEFAULT '' CHECK (launch_state IN ('','reserved','creating')),
     pr_url                 TEXT NOT NULL DEFAULT '',
     pr_branch              TEXT NOT NULL DEFAULT '',
     CHECK ((kind = 'dm' AND state = '') OR (kind = 'request' AND state <> ''))

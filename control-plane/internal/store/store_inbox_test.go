@@ -496,16 +496,15 @@ func TestInboxHardDeleteAndPurge(t *testing.T) {
 			}
 			_ = st.SetInboxBlock(ctx, f.members["c"], f.members["b"], true)
 
-			// M-9: A and B removed logically only. The purge ends the A-B item's body, and the
-			// item C still takes part in stays.
+			// M-9: A and B removed logically only. The A-B item's body ends with the second
+			// removal itself, before any purge, and the item C still takes part in stays.
 			f.remove(t, "a")
 			f.remove(t, "b")
-			n, err := st.PurgeInbox(ctx, noRetention)
-			if err != nil || n != 1 {
-				t.Fatalf("M-9 purge: n=%d err=%v, want 1", n, err)
-			}
 			if _, ok, _ := st.GetInboxItem(ctx, ab); ok {
-				t.Fatal("M-9: the item of two removed members survived the purge")
+				t.Fatal("M-9: the item of two removed members survived their removal")
+			}
+			if n, err := st.PurgeInbox(ctx, noRetention); err != nil || n != 0 {
+				t.Fatalf("M-9 purge after the removals: n=%d err=%v, want 0", n, err)
 			}
 			if _, ok, _ := st.GetInboxItem(ctx, abc); !ok {
 				t.Fatal("M-9: an item with an active participant was purged")
@@ -741,37 +740,48 @@ func TestInboxSequenceAndCursor(t *testing.T) {
 	}
 }
 
-// TestInboxLaunchOnce: one session per assignee, refused for anyone else (docs/log/130
-// R-6, R-7, R-8 at the store).
+// TestInboxLaunchOnce: one session per assignee, refused for anyone else, and a reservation
+// that loses its claim before it is confirmed never reaches the Agent (docs/log/130 R-6,
+// R-7, R-8 at the store).
 func TestInboxLaunchOnce(t *testing.T) {
 	ctx := context.Background()
 	for name, st := range inboxStores(t) {
 		t.Run(name, func(t *testing.T) {
 			f := newInboxFix(t, st, "a", "b", "c")
-			b, c := f.members["b"], f.members["c"]
+			a, b, c := f.members["a"], f.members["b"], f.members["c"]
 			id := f.send(t, "request", "a", "b", "c")
 			until := time.Now().UTC().Add(time.Minute).Format(time.RFC3339)
-			if ok, _ := st.BeginInboxLaunch(ctx, id, b, NowTS(), until); ok {
+			if ok, _ := st.BeginInboxLaunch(ctx, id, b, "t0", NowTS(), until); ok {
 				t.Fatal("launch of an open request")
 			}
 			_, _ = st.ClaimInboxItem(ctx, id, b, NowTS())
-			if ok, _ := st.BeginInboxLaunch(ctx, id, c, NowTS(), until); ok {
+			if ok, _ := st.BeginInboxLaunch(ctx, id, c, "tc", NowTS(), until); ok {
 				t.Fatal("R-7: a non-assignee launched")
 			}
-			if ok, _ := st.BeginInboxLaunch(ctx, id, b, NowTS(), until); !ok {
+			if ok, _ := st.BeginInboxLaunch(ctx, id, b, "t1", NowTS(), until); !ok {
 				t.Fatal("assignee launch refused")
 			}
-			if ok, _ := st.BeginInboxLaunch(ctx, id, b, NowTS(), until); ok {
-				t.Fatal("R-8: a second launch while the first is in flight")
+			if ok, _ := st.BeginInboxLaunch(ctx, id, b, "t2", NowTS(), until); ok {
+				t.Fatal("R-8: a second launch while the first is reserved")
 			}
-			if err := st.FinishInboxLaunch(ctx, id, b, "s1", "/repos/x", "feat", NowTS()); err != nil {
-				t.Fatal(err)
+			if ok, _ := st.ConfirmInboxLaunch(ctx, id, b, "t2"); ok {
+				t.Fatal("confirmed under a token that holds no reservation")
 			}
-			if ok, _ := st.BeginInboxLaunch(ctx, id, b, NowTS(), until); ok {
+			if ok, _ := st.ConfirmInboxLaunch(ctx, id, b, "t1"); !ok {
+				t.Fatal("confirm refused")
+			}
+			// Creating: the outcome may be a session, so nothing aborts it but a known refusal.
+			if ok, _ := st.BeginInboxLaunch(ctx, id, b, "t3", NowTS(), "9999"); ok {
+				t.Fatal("R-8: a second launch while the first is creating")
+			}
+			if ok, err := st.FinishInboxLaunch(ctx, id, b, "t1", "s1", "/repos/x", "feat", NowTS()); err != nil || !ok {
+				t.Fatalf("finish: %v %v", ok, err)
+			}
+			if ok, _ := st.BeginInboxLaunch(ctx, id, b, "t4", NowTS(), until); ok {
 				t.Fatal("R-8: a second launch after the session was recorded")
 			}
 			it := f.item(t, id)
-			if it.SessionName != "s1" || it.SessionMembershipID != b || it.LaunchPendingUntil != "" {
+			if it.SessionName != "s1" || it.SessionMembershipID != b || it.LaunchState != "" || it.LaunchToken != "" {
 				t.Fatalf("launch record: %+v", it)
 			}
 			if ok, _ := st.SetInboxPRLink(ctx, id, c, "https://example.com/pr/1", "", NowTS()); ok {
@@ -780,13 +790,210 @@ func TestInboxLaunchOnce(t *testing.T) {
 			if ok, _ := st.SetInboxPRLink(ctx, id, b, "https://example.com/pr/1", "feat", NowTS()); !ok {
 				t.Fatal("assignee PR link refused")
 			}
-			// R-6: withdrawn before the launch is pressed -> refused.
-			id2 := f.send(t, "request", "a", "b")
-			_, _ = st.ClaimInboxItem(ctx, id2, b, NowTS())
-			_, _ = st.WithdrawInboxItem(ctx, id2, f.members["a"], NowTS())
-			if ok, _ := st.BeginInboxLaunch(ctx, id2, b, NowTS(), until); ok {
-				t.Fatal("R-6: launch of a withdrawn request")
+
+			// R-6: a withdraw or a release between reserving and confirming wins.
+			for _, op := range []string{"withdraw", "release"} {
+				id := f.send(t, "request", "a", "b")
+				_, _ = st.ClaimInboxItem(ctx, id, b, NowTS())
+				if ok, _ := st.BeginInboxLaunch(ctx, id, b, "r-"+op, NowTS(), until); !ok {
+					t.Fatal("reserve")
+				}
+				if op == "withdraw" {
+					_, _ = st.WithdrawInboxItem(ctx, id, a, NowTS())
+				} else {
+					_, _ = st.ReleaseInboxItem(ctx, id, b, NowTS())
+					// Even a re-claim by the same member does not revive the old reservation.
+					_, _ = st.ClaimInboxItem(ctx, id, b, NowTS())
+				}
+				if ok, _ := st.ConfirmInboxLaunch(ctx, id, b, "r-"+op); ok {
+					t.Fatalf("R-6: confirmed after a %s", op)
+				}
 			}
+			// A withdraw after the confirm leaves the creating launch, so its session is still
+			// recorded on the card.
+			id3 := f.send(t, "request", "a", "b")
+			_, _ = st.ClaimInboxItem(ctx, id3, b, NowTS())
+			_, _ = st.BeginInboxLaunch(ctx, id3, b, "late", NowTS(), until)
+			_, _ = st.ConfirmInboxLaunch(ctx, id3, b, "late")
+			_, _ = st.WithdrawInboxItem(ctx, id3, a, NowTS())
+			if ok, _ := st.FinishInboxLaunch(ctx, id3, b, "late", "s3", "/d", "", NowTS()); !ok {
+				t.Fatal("a session confirmed before the withdraw was not recorded")
+			}
+			// Abort clears only its own launch.
+			id4 := f.send(t, "request", "a", "b")
+			_, _ = st.ClaimInboxItem(ctx, id4, b, NowTS())
+			_, _ = st.BeginInboxLaunch(ctx, id4, b, "mine", NowTS(), until)
+			_ = st.AbortInboxLaunch(ctx, id4, "other")
+			if it := f.item(t, id4); it.LaunchState != "reserved" {
+				t.Fatalf("another token's abort cleared the reservation: %+v", it)
+			}
+			_ = st.AbortInboxLaunch(ctx, id4, "mine")
+			if ok, _ := st.BeginInboxLaunch(ctx, id4, b, "again", NowTS(), until); !ok {
+				t.Fatal("no launch possible after an abort")
+			}
+		})
+	}
+}
+
+// TestInboxRemovalSurvivesReinvite is decision 9 and the state table's system rows when a
+// member is removed and re-invited before any sweep or read: the removal's effects happen in
+// the removal itself, so the re-invite cannot erase them.
+func TestInboxRemovalSurvivesReinvite(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range inboxStores(t) {
+		t.Run(name, func(t *testing.T) {
+			f := newInboxFix(t, st, "a", "b", "c")
+			claimed := f.send(t, "request", "a", "b", "c")
+			_, _ = st.ClaimInboxItem(ctx, claimed, f.members["b"], NowTS())
+			f.remove(t, "b")
+			_ = st.SetMembershipStatus(ctx, f.members["b"], "active")
+			f.reconcile(t)
+			if it := f.item(t, claimed); it.State != "open" || it.AssigneeMembershipID != "" {
+				t.Fatalf("the removed assignee's claim survived a re-invite: %+v", it)
+			}
+
+			sent := f.send(t, "request", "a", "b")
+			f.remove(t, "a")
+			_ = st.SetMembershipStatus(ctx, f.members["a"], "active")
+			f.reconcile(t)
+			if it := f.item(t, sent); it.State != "withdrawn" {
+				t.Fatalf("the removed sender's request survived a re-invite: %+v", it)
+			}
+
+			g := newInboxFix(t, st, "p", "q")
+			dm := g.send(t, "dm", "p", "q")
+			g.remove(t, "p")
+			g.remove(t, "q")
+			_ = st.SetMembershipStatus(ctx, g.members["q"], "active")
+			if _, err := st.PurgeInbox(ctx, noRetention); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok, _ := st.GetInboxItem(ctx, dm); ok {
+				t.Fatal("a body whose last participant was removed came back with a re-invite")
+			}
+		})
+	}
+}
+
+// TestInboxSendRechecksUnderLock: CreateInboxItem decides who may receive inside its own
+// transaction, so a block, a chosen-members setting or a removal saved after the handler's
+// check still stops the item.
+func TestInboxSendRechecksUnderLock(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range inboxStores(t) {
+		t.Run(name, func(t *testing.T) {
+			f := newInboxFix(t, st, "a", "b", "c")
+			send := func() InboxSendResult {
+				res, err := st.CreateInboxItem(ctx, InboxItem{ID: NewID(), TenantID: f.tenant, SenderMembershipID: f.members["a"],
+					Kind: "dm", CreatedAt: NowTS()}, []string{f.members["c"], f.members["b"]}, inboxTestLimits)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return res
+			}
+			_ = st.SetInboxBlock(ctx, f.members["b"], f.members["a"], true)
+			if r := send(); r.Created || len(r.NotAccepting) != 1 || r.NotAccepting[0] != f.members["b"] {
+				t.Fatalf("block: %+v", r)
+			}
+			_ = st.SetInboxBlock(ctx, f.members["b"], f.members["a"], false)
+			_ = st.PutInboxSettings(ctx, f.members["b"], "chosen", false, nil)
+			if r := send(); r.Created || len(r.NotAccepting) != 1 {
+				t.Fatalf("chosen: %+v", r)
+			}
+			_ = st.PutInboxSettings(ctx, f.members["b"], "tenant", false, nil)
+			f.remove(t, "b")
+			if r := send(); r.Created || !r.Invalid {
+				t.Fatalf("inactive: %+v", r)
+			}
+			if got := countRows(t, st, "inbox_item"); got != 0 {
+				t.Fatalf("%d item(s) created by refused sends", got)
+			}
+		})
+	}
+}
+
+// TestInboxReadAndClaimDoNotDeadlock holds a read inside its participant update with an
+// advisory-lock trigger and lets a claim of the same item start meanwhile. With the read
+// locking the participant before the mailbox this deadlocked on Postgres (SQLSTATE 40P01);
+// both have to finish now. Postgres only: SQLite runs one transaction at a time.
+func TestInboxReadAndClaimDoNotDeadlock(t *testing.T) {
+	dsn, ok := pgtest.Schema(t)
+	if !ok {
+		t.Skip("set AF_TEST_DATABASE_URL: the deadlock needs Postgres row locks")
+	}
+	st, err := OpenPostgres(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, other := range []string{"claim", "withdraw"} {
+		t.Run(other, func(t *testing.T) {
+			f := newInboxFix(t, st, "a", "b")
+			id := f.send(t, "request", "a", "b")
+			gate, err := st.db.Conn(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer gate.Close()
+			if _, err := gate.ExecContext(ctx, "SELECT pg_advisory_lock(hashtext($1))", id); err != nil {
+				t.Fatal(err)
+			}
+			for _, q := range []string{
+				`CREATE OR REPLACE FUNCTION inbox_test_gate() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN
+				 PERFORM pg_advisory_lock(hashtext(NEW.item_id)); PERFORM pg_advisory_unlock(hashtext(NEW.item_id));
+				 RETURN NEW; END$$`,
+				`DROP TRIGGER IF EXISTS inbox_test_read_gate ON inbox_participant`,
+				`CREATE TRIGGER inbox_test_read_gate AFTER UPDATE OF delivery ON inbox_participant
+				 FOR EACH ROW WHEN (OLD.delivery='unread' AND NEW.delivery='read') EXECUTE FUNCTION inbox_test_gate()`,
+			} {
+				if _, err := st.db.ExecContext(ctx, q); err != nil {
+					t.Fatal(err)
+				}
+			}
+			readDone, otherDone := make(chan error, 1), make(chan error, 1)
+			go func() { _, err := st.MarkInboxRead(ctx, id, f.members["b"], NowTS()); readDone <- err }()
+			waitLock := func(kind, needle string) bool {
+				for end := time.Now().Add(3 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+					var n int
+					_ = st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid()
+						AND wait_event_type=? AND wait_event=? AND query LIKE ?`, "Lock", kind, "%"+needle+"%").Scan(&n)
+					if n > 0 {
+						return true
+					}
+				}
+				return false
+			}
+			if !waitLock("advisory", "UPDATE inbox_participant SET delivery") {
+				t.Fatal("the read never reached the gate: the test proves nothing")
+			}
+			go func() {
+				var err error
+				if other == "claim" {
+					_, err = st.ClaimInboxItem(ctx, id, f.members["b"], NowTS())
+				} else {
+					_, err = st.WithdrawInboxItem(ctx, id, f.members["a"], NowTS())
+				}
+				otherDone <- err
+			}()
+			// The second transaction now waits on a row the read holds, whichever row that is.
+			if !waitLock("transactionid", "") && !waitLock("tuple", "") {
+				t.Fatalf("the %s never waited on the read: the test proves nothing", other)
+			}
+			if _, err := gate.ExecContext(ctx, "SELECT pg_advisory_unlock(hashtext($1))", id); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-readDone; err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			if err := <-otherDone; err != nil {
+				t.Fatalf("%s: %v", other, err)
+			}
+			_, _ = st.db.ExecContext(ctx, `DROP TRIGGER IF EXISTS inbox_test_read_gate ON inbox_participant`)
 		})
 	}
 }
