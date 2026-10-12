@@ -161,8 +161,7 @@ func TestAgentMemorySearchLatency(t *testing.T) {
 	for i := 0; i < 500; i++ {
 		memSearchSave(t, c, fmt.Sprintf("mem-%03d", i), fmt.Sprintf("memory %d about builds", i), body+fmt.Sprintf("unique%d", i), now.Add(time.Duration(i)*time.Minute))
 	}
-	// The first read after 500 writes is slow whatever it does (measured: the index, which
-	// search does not touch, takes the same ~2 s), so it goes first and is not charged to search.
+	// A save primes the scan cache, so the first read after the writes does not rescan.
 	t0 := time.Now()
 	if _, err := agentMemListIndex(c, 0); err != nil {
 		t.Fatal(err)
@@ -176,5 +175,81 @@ func TestAgentMemorySearchLatency(t *testing.T) {
 			t.Fatalf("%q: %d hits, err=%v", q, len(hits), err)
 		}
 		t.Logf("500 memories, %q: %v (fallback=%q)", q, d, fb)
+	}
+}
+
+func agentMemDropScanCache() {
+	agentMemScanCache.Range(func(k, _ any) bool { agentMemScanCache.Delete(k); return true })
+}
+
+// The first read after N saves finds every verdict cached: counted in scans, not seconds.
+func TestAgentMemoryFirstReadAfterSavesDoesNotRescan(t *testing.T) {
+	agentMemTestEnv(t)
+	c := agentMemCallerT(t, "claude-main")
+	now := time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC)
+	for i := 0; i < 20; i++ {
+		memSearchSave(t, c, fmt.Sprintf("mem-%02d", i), "about builds", "body", now.Add(time.Duration(i)*time.Minute))
+	}
+	before := agentMemScanRuns.Load()
+	if _, err := agentMemListIndex(c, 0); err != nil {
+		t.Fatal(err)
+	}
+	if hits, _, err := agentMemSearchRanked(c, "builds", 0); err != nil || len(hits) != 20 {
+		t.Fatalf("%d hits, err=%v", len(hits), err)
+	}
+	if n := agentMemScanRuns.Load() - before; n != 0 {
+		t.Fatalf("%d files rescanned on the first read after saving them", n)
+	}
+}
+
+// A cold cache (a new process) is filled before the read lock is taken: with a writer holding
+// agentMemMu the search scans every file and only then waits, and finishes without scanning again.
+func TestAgentMemoryColdScanRunsOutsideReadLock(t *testing.T) {
+	agentMemTestEnv(t)
+	c := agentMemCallerT(t, "claude-main")
+	now := time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC)
+	const n = 12
+	for i := 0; i < n; i++ {
+		memSearchSave(t, c, fmt.Sprintf("mem-%02d", i), "about builds", "body", now.Add(time.Duration(i)*time.Minute))
+	}
+	agentMemDropScanCache()
+	before := agentMemScanRuns.Load()
+
+	agentMemMu.Lock() // stands in for a write in progress
+	locked := true
+	defer func() {
+		if locked {
+			agentMemMu.Unlock()
+		}
+	}()
+	done := make(chan []agentMemHit, 1)
+	go func() {
+		hits, _, _ := agentMemSearchRanked(c, "builds", 0)
+		done <- hits
+	}()
+	deadline := time.Now().Add(60 * time.Second)
+	for agentMemScanRuns.Load()-before < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of %d files scanned while the write lock was held", agentMemScanRuns.Load()-before, n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case <-done:
+		t.Fatal("search returned while the write lock was held")
+	default:
+	}
+	agentMemMu.Unlock()
+	locked = false
+	select {
+	case hits := <-done:
+		if len(hits) != n {
+			t.Fatalf("%d hits, want %d", len(hits), n)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("search did not finish after the lock was released")
+	}
+	if got := agentMemScanRuns.Load() - before; got != n {
+		t.Fatalf("%d scans for %d files", got, n)
 	}
 }
