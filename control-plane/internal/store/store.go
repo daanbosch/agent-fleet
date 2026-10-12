@@ -928,8 +928,9 @@ type SessionHandoffOffer struct {
 	SourceSessionName, SourceSessionKind                              string
 	Status, CreatedAt, ExpiresAt, DecidedAt, AcceptedSessionName      string
 	// TakenAt is set while the recipient holds the offer for a launch in progress
-	// (TakeSessionHandoffOffer); the take's token is never read back out of the store.
-	TakenAt string
+	// (TakeSessionHandoffOffer), TakeConfirmedAt once that launch's create reached the Agent
+	// (ConfirmSessionHandoffTake). The take's token is never read back out of the store.
+	TakenAt, TakeConfirmedAt string
 }
 
 // GitRepo is one internal bare repository owned by a tenant (docs/reference/
@@ -1021,6 +1022,7 @@ type SessionShareStore interface {
 	ListSessionHandoffOffersByRecipient(ctx context.Context, membershipID string) ([]SessionHandoffOffer, error)
 	TransitionSessionHandoffOffer(ctx context.Context, id, from, to, decidedAt, acceptedSessionName string) (bool, error)
 	TakeSessionHandoffOffer(ctx context.Context, id, recipientMembershipID, token, now string) (bool, error)
+	ConfirmSessionHandoffTake(ctx context.Context, id, recipientMembershipID, token, now string) (bool, error)
 	ReleaseSessionHandoffOffer(ctx context.Context, id, recipientMembershipID, token string) (bool, error)
 	AcceptSessionHandoffOffer(ctx context.Context, id, recipientMembershipID, token, decidedAt, acceptedSessionName string) (bool, error)
 	ExpireSessionHandoffOffers(ctx context.Context, now string) ([]SessionHandoffOffer, error)

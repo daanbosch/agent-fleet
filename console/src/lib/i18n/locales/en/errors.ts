@@ -356,6 +356,7 @@ export const errors: Record<keyof typeof jaErrors, string> = {
   "err.audit_unavailable": "Nothing was done: the audit log could not record who asked for it. Try again once the database is back.",
   "err.git_repo_create_forbidden": "Your role in this tenant cannot create repositories.",
   "err.git_repo_manage_forbidden": "Only the person who created a repository, or a tenant administrator, can rename or delete it.",
+  "err.handoff_take_lost": "The handoff was withdrawn or taken from another window before the launch. No session was created.",
   "err.inbox_invalid_recipient": "Some recipients cannot receive items in this tenant.",
   "err.inbox_recipient_not_accepting": "Some recipients do not accept items from you.",
   "err.inbox_too_many_recipients": "Too many recipients (20 at most).",

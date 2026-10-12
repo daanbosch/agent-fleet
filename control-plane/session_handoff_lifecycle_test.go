@@ -190,7 +190,7 @@ func (f *handoffLife) requireConflict(rec *httptest.ResponseRecorder, code, stat
 		f.t.Fatalf("answer = %d %s, want 409 %s", rec.Code, rec.Body.String(), code)
 	}
 	e := errorOf(f.t, rec)
-	if e["code"] != code || (status != "" && e["status"] != status) {
+	if e["code"] != code || (status != "" && (e["status"] != status || e["offerStatus"] != status)) {
 		f.t.Fatalf("409 = %v, want code %s status %q", e, code, status)
 	}
 }
@@ -461,5 +461,99 @@ func TestHandoffOutsidersGet404(t *testing.T) {
 	}
 	if row := f.row(o.ID); row.Status != "pending" || row.TakenAt != "" {
 		t.Fatalf("an outsider changed the offer: %+v", row)
+	}
+}
+
+// recipientCreate is the recipient's POST /api/sessions through the CP, to an Agent stub of
+// their own that records what reached it.
+type recipientCreate struct {
+	api    workspaceAPI
+	res    *resolved
+	bodies []map[string]any
+}
+
+func (f *handoffLife) recipientWorkspace() *recipientCreate {
+	f.t.Helper()
+	rc := &recipientCreate{}
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/sessions" {
+			var b map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&b)
+			f.mu.Lock()
+			rc.bodies = append(rc.bodies, b)
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "taken-over"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	f.t.Cleanup(agent.Close)
+	ws := store.Workspace{ID: "ws-recipient", TenantID: f.recipient.mv.TenantID, MembershipID: f.recipient.mv.MembershipID,
+		ContainerName: "recipient", Network: "test", DataDir: "/data/recipient", AgentPort: "1", AgentToken: "tok",
+		State: "running", CreatedAt: store.NowTS()}
+	if err := f.st.CreateWorkspace(context.Background(), ws); err != nil {
+		f.t.Fatal(err)
+	}
+	rt := stubRuntime{endpoint: agent.URL, token: "tok"}
+	rc.api = newWorkspaceAPI(f.api.mgr, false)
+	rc.res = &resolved{ident: f.recipient.ident, mv: f.recipient.mv, ws: ws, rt: rt}
+	return rc
+}
+
+func (rc *recipientCreate) create(t *testing.T, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	rc.api.sessionCreate(rec, httptest.NewRequest(http.MethodPost, "/api/sessions", jsonBody(body)), rc.res)
+	return rec
+}
+
+// TestHandoffCreateIsFencedByTheTake is the commit point of #2020's take: the create that
+// carries it confirms it immediately before the Agent is asked. A Console that took the
+// offer and went quiet past the take window has lost it to the sender's withdraw, and when
+// it resumes its create is refused without reaching the Agent. A confirmed take, however
+// slow the create, is never withdrawn under it.
+func TestHandoffCreateIsFencedByTheTake(t *testing.T) {
+	f := newHandoffLife(t)
+	rc := f.recipientWorkspace()
+	backdate := func(id string) {
+		if _, err := f.st.DB().Exec(`UPDATE session_handoff_offer SET taken_at='2000-01-01T00:00:00Z' WHERE id=?`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	slept := f.mustOffer(nil)
+	token := f.take(slept.ID)
+	backdate(slept.ID) // the machine slept past the take window
+	if rec := f.as(f.owner, f.api.withdraw, http.MethodDelete, slept.ID, nil); rec.Code != http.StatusOK {
+		t.Fatalf("withdraw past an unconfirmed take's window = %d %s", rec.Code, rec.Body.String())
+	}
+	rec := rc.create(t, map[string]any{"kind": "claude", "dir": "/r/private", "handoff_take": map[string]any{"offerId": slept.ID, "token": token}})
+	f.requireConflict(rec, "handoff_take_lost", "")
+	if len(rc.bodies) != 0 {
+		t.Fatalf("a fenced create reached the Agent: %v", rc.bodies)
+	}
+
+	o := f.mustOffer(nil)
+	token = f.take(o.ID)
+	rec = rc.create(t, map[string]any{"kind": "claude", "dir": "/r/private", "handoff_take": map[string]any{"offerId": o.ID, "token": token}})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create with a live take = %d %s", rec.Code, rec.Body.String())
+	}
+	if len(rc.bodies) != 1 || rc.bodies[0]["handoff_take"] != nil || rc.bodies[0]["kind"] != "claude" {
+		t.Fatalf("the Agent received %v, want the create without handoff_take", rc.bodies)
+	}
+	if row := f.row(o.ID); row.TakeConfirmedAt == "" {
+		t.Fatalf("the create did not confirm the take: %+v", row)
+	}
+	backdate(o.ID) // the create was slow; the session exists
+	f.requireConflict(f.as(f.owner, f.api.withdraw, http.MethodDelete, o.ID, nil), "handoff_being_taken", "pending")
+	if rec := f.as(f.recipient, f.api.accept, http.MethodPost, o.ID, map[string]any{"sessionName": "taken-over", "token": token}); rec.Code != http.StatusOK {
+		t.Fatalf("accept after a slow create = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// A create without a take is passed through untouched.
+	if rec := rc.create(t, map[string]any{"kind": "shell"}); rec.Code != http.StatusCreated || len(rc.bodies) != 2 {
+		t.Fatalf("plain create = %d (%d bodies)", rec.Code, len(rc.bodies))
 	}
 }

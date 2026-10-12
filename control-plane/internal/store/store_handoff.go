@@ -18,14 +18,14 @@ import (
 
 const handoffOfferCols = `id,tenant_id,catalog_id,owner_membership_id,recipient_membership_id,title,
 	ciphertext,key_ref,repo_remote,branch,head_sha,source_session_name,source_session_kind,
-	status,created_at,expires_at,decided_at,accepted_session_name,taken_at`
+	status,created_at,expires_at,decided_at,accepted_session_name,taken_at,take_confirmed_at`
 
 func scanHandoffOffer(row interface{ Scan(...any) error }) (SessionHandoffOffer, bool, error) {
 	var r SessionHandoffOffer
 	err := row.Scan(&r.ID, &r.TenantID, &r.CatalogID, &r.OwnerMembershipID, &r.RecipientMembershipID,
 		&r.Title, &r.Ciphertext, &r.KeyRef, &r.RepoRemote, &r.Branch, &r.HeadSha,
 		&r.SourceSessionName, &r.SourceSessionKind, &r.Status, &r.CreatedAt, &r.ExpiresAt,
-		&r.DecidedAt, &r.AcceptedSessionName, &r.TakenAt)
+		&r.DecidedAt, &r.AcceptedSessionName, &r.TakenAt, &r.TakeConfirmedAt)
 	if err == sql.ErrNoRows {
 		return SessionHandoffOffer{}, false, nil
 	}
@@ -121,39 +121,60 @@ func (s *SQL) ListSessionHandoffOffersByRecipient(ctx context.Context, membershi
 	return out, rows.Err()
 }
 
-// HandoffTakeWindow is how long a recipient's take holds a pending offer against the
-// sender's withdraw, a decline and expiry. It covers a launch that has to start a cold
-// workspace first, the same allowance as the inbox's launch window; past it, a take whose
-// Console closed mid-launch no longer pins the offer.
+// HandoffTakeWindow is how long an UNCONFIRMED take holds a pending offer against the
+// sender's withdraw and expiry, and against another take. It covers the time between the
+// launch press and the create reaching the Agent, which can include a cold workspace start
+// (the same allowance as the inbox's launch window). Past it, a Console that closed before
+// launching no longer pins the offer, and if it wakes up its create fails the confirm.
+// A confirmed take does not go stale: its session may exist.
 const HandoffTakeWindow = 10 * time.Minute
 
-// handoffUntakenGuard is what makes a decision on a pending offer wait for an outstanding
-// take to settle. It is a variable only so the race test's positive control can drop it and
-// show the race is real; nothing else assigns it.
-var handoffUntakenGuard = ` AND (take_token='' OR taken_at<=?)`
+// handoffTakeGuards is what makes a decision on a pending offer wait for an outstanding
+// take. It is a variable only so the race test's positive control can turn it off and show
+// the race is real; nothing else assigns it.
+var handoffTakeGuards = true
 
-// handoffTakeStale is the taken_at at or before which a take no longer holds the offer.
+// handoffTakeStale is the taken_at at or before which an unconfirmed take no longer holds.
 func handoffTakeStale() string {
 	return time.Now().UTC().Add(-HandoffTakeWindow).Format(time.RFC3339)
 }
 
+// handoffNotHeld is the condition "no take holds this offer": none, or an unconfirmed one
+// past the take window. It takes handoffTakeStale() as its one argument.
+const handoffNotHeld = ` AND (take_token='' OR (take_confirmed_at='' AND taken_at<=?))`
+
 // TransitionSessionHandoffOffer is the conditional from → to update. changed=false means
-// somebody decided it first, or, from pending, that the recipient has taken it and is
-// launching (TakeSessionHandoffOffer). Anything but accepted clears the body: there is no
-// reason to keep a decided handoff's body in the CP (accepted keeps it so the recipient can
-// start the session again).
+// somebody decided it first, or, from pending, that a take holds it (TakeSessionHandoffOffer).
+// Anything but accepted clears the body: there is no reason to keep a decided handoff's body
+// in the CP (accepted keeps it so the recipient can start the session again).
+//
+// From pending, what a take blocks depends on who decides:
+//   - accepted without a token (a Console from before the take) lands only on an offer
+//     nobody has taken, so it can never settle or erase another launch's take;
+//   - declined is the recipient's own call and passes their own stale take, confirmed or
+//     not — the way out of a take whose Console died after its create;
+//   - withdrawn and expired wait for any take that holds (handoffNotHeld): a confirmed take
+//     never yields to them, because its session may already exist (ADR 0057 decision 6).
 func (s *SQL) TransitionSessionHandoffOffer(ctx context.Context, id, from, to, decidedAt, acceptedSessionName string) (bool, error) {
 	body := `''`
 	if to == "accepted" {
 		body = `ciphertext`
 	}
 	q := `UPDATE session_handoff_offer
-		SET status=?,decided_at=?,accepted_session_name=?,ciphertext=` + body + `,take_token='',taken_at=''
+		SET status=?,decided_at=?,accepted_session_name=?,ciphertext=` + body + `,take_token='',taken_at='',take_confirmed_at=''
 		WHERE id=? AND status=?`
 	args := []any{to, decidedAt, acceptedSessionName, id, from}
-	if from == "pending" && handoffUntakenGuard != "" {
-		q += handoffUntakenGuard
-		args = append(args, handoffTakeStale())
+	if from == "pending" && handoffTakeGuards {
+		switch to {
+		case "accepted":
+			q += ` AND take_token=''`
+		case "declined":
+			q += ` AND (take_token='' OR taken_at<=?)`
+			args = append(args, handoffTakeStale())
+		default:
+			q += handoffNotHeld
+			args = append(args, handoffTakeStale())
+		}
 	}
 	res, err := s.db.ExecContext(ctx, q, args...)
 	if err != nil {
@@ -165,17 +186,35 @@ func (s *SQL) TransitionSessionHandoffOffer(ctx context.Context, id, from, to, d
 
 // TakeSessionHandoffOffer reserves a pending offer for its recipient before the launch
 // (issue #2020). taken=false means it is no longer pending, has run past its deadline, or
-// is already held by a take that has not gone stale. Together with the guard on
-// TransitionSessionHandoffOffer this makes the sender's withdraw and the recipient's take
-// exclusive: whichever lands first wins, the other changes nothing (ADR 0057 decision 6).
+// a take still holds it. Together with the guard on TransitionSessionHandoffOffer this makes
+// the sender's withdraw and the recipient's take exclusive: whichever lands first wins, the
+// other changes nothing (ADR 0057 decision 6).
 func (s *SQL) TakeSessionHandoffOffer(ctx context.Context, id, recipientMembershipID, token, now string) (bool, error) {
 	if token == "" {
 		return false, nil
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE session_handoff_offer SET take_token=?,taken_at=?
-		WHERE id=? AND recipient_membership_id=? AND status='pending' AND expires_at>?
-		  AND (take_token='' OR taken_at<=?)`,
+	res, err := s.db.ExecContext(ctx, `UPDATE session_handoff_offer SET take_token=?,taken_at=?,take_confirmed_at=''
+		WHERE id=? AND recipient_membership_id=? AND status='pending' AND expires_at>?`+handoffNotHeld,
 		token, now, id, recipientMembershipID, now, handoffTakeStale())
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// ConfirmSessionHandoffTake is the commit point of a launch from an offer: the CP runs it
+// immediately before the session create reaches the Agent. It holds only while the offer is
+// still pending under this very token, so a Console that took the offer, went quiet past
+// the take window and lost it — to the sender's withdraw or to another take — cannot start
+// the work when it resumes. Once confirmed, the take holds until it is accepted or released.
+func (s *SQL) ConfirmSessionHandoffTake(ctx context.Context, id, recipientMembershipID, token, now string) (bool, error) {
+	if token == "" {
+		return false, nil
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE session_handoff_offer SET take_confirmed_at=?
+		WHERE id=? AND recipient_membership_id=? AND status='pending' AND take_token=?`,
+		now, id, recipientMembershipID, token)
 	if err != nil {
 		return false, err
 	}
@@ -189,7 +228,7 @@ func (s *SQL) ReleaseSessionHandoffOffer(ctx context.Context, id, recipientMembe
 	if token == "" {
 		return false, nil
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE session_handoff_offer SET take_token='',taken_at=''
+	res, err := s.db.ExecContext(ctx, `UPDATE session_handoff_offer SET take_token='',taken_at='',take_confirmed_at=''
 		WHERE id=? AND recipient_membership_id=? AND status='pending' AND take_token=?`,
 		id, recipientMembershipID, token)
 	if err != nil {
@@ -207,7 +246,7 @@ func (s *SQL) AcceptSessionHandoffOffer(ctx context.Context, id, recipientMember
 		return false, nil
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE session_handoff_offer
-		SET status='accepted',decided_at=?,accepted_session_name=?,take_token='',taken_at=''
+		SET status='accepted',decided_at=?,accepted_session_name=?,take_token='',taken_at='',take_confirmed_at=''
 		WHERE id=? AND recipient_membership_id=? AND status='pending' AND take_token=?`,
 		decidedAt, acceptedSessionName, id, recipientMembershipID, token)
 	if err != nil {

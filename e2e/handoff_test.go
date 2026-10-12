@@ -112,6 +112,7 @@ func TestMemberHandoff(t *testing.T) {
 	launched := b.createSession(map[string]any{
 		"kind": "shell", "title": in[0].Title, "dir": repoDir,
 		"worktree": true, "use_existing": true, "branch": in[0].Branch,
+		"handoff_take": map[string]any{"offerId": offer.ID, "token": token}, // the CP confirms it before the Agent is asked
 	})
 	if got := b.shell(launched, "git rev-parse HEAD"); got != in[0].HeadSha {
 		t.Fatalf("launched session HEAD = %s, want the offer's head_sha %s", got, in[0].HeadSha)

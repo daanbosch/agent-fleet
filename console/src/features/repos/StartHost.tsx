@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { agentOf } from "../../agents/registry.ts";
 import { useSessionsStore } from "../sessions/store.ts";
 import { useRepoRailContext } from "./useRepoRail.ts";
-import { useStartWork } from "./useStartWork.ts";
+import { useStartWork, type HandoffTake } from "./useStartWork.ts";
 import { StartModal } from "./StartModal.tsx";
 import { branchItemOf } from "./branchRule.ts";
 import { LaunchModal } from "./LaunchModal.tsx";
@@ -96,7 +96,7 @@ export function StartHost() {
           }}
           onBack={show ? clearLaunch : undefined}
           onLaunch={async (o) => {
-            const run = () => startWork({ dir: launch.path || "", repo: launch.name }, o);
+            const run = (take?: HandoffTake) => startWork({ dir: launch.path || "", repo: launch.name }, o, take);
             // A handoff received from another member (docs/log/77) is taken BEFORE the session
             // is created and given back if the launch fails, so a just-withdrawn offer is never
             // launched (#2020).

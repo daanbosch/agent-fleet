@@ -75,9 +75,8 @@ func TestHandoffTakeRaceHasOneWinner(t *testing.T) {
 // shape before #2020 — and shows the race test then sees rounds where both sides won.
 // Without it, a race test that never raced would pass just the same.
 func TestHandoffTakeRacePositiveControl(t *testing.T) {
-	saved := handoffUntakenGuard
-	handoffUntakenGuard = ""
-	t.Cleanup(func() { handoffUntakenGuard = saved })
+	handoffTakeGuards = false
+	t.Cleanup(func() { handoffTakeGuards = true })
 	for name, st := range inboxStores(t) {
 		t.Run(name, func(t *testing.T) {
 			if bad := handoffTakeRace(t, st, 60); bad == 0 {
@@ -197,6 +196,102 @@ func TestHandoffTakeGoesStaleAndRespectsDeadline(t *testing.T) {
 			}
 			if expired, err := st.ExpireSessionHandoffOffers(ctx, NowTS()); err != nil || len(expired) != 1 {
 				t.Fatalf("expired=%v err=%v, want the released offer", expired, err)
+			}
+		})
+	}
+}
+
+// A take whose Console went quiet past the take window loses the offer to the sender, and
+// when that Console wakes up its create is fenced: the confirm fails, so it starts nothing.
+// A confirmed take — its create has reached the Agent — never goes stale for the sender or
+// for another take; only its holder settles it, or the recipient declines.
+func TestHandoffTakeConfirmFencesAStaleTake(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range inboxStores(t) {
+		t.Run(name, func(t *testing.T) {
+			f := newHandoffFixtureOn(t, st)
+			old := time.Now().UTC().Add(-HandoffTakeWindow - time.Minute).Format(time.RFC3339)
+			must := func(want, ok bool, err error, what string) {
+				t.Helper()
+				if err != nil || ok != want {
+					t.Fatalf("%s: ok=%v err=%v, want %v", what, ok, err, want)
+				}
+			}
+
+			slept := f.offer(t, "")
+			if _, err := st.CreateSessionHandoffOffer(ctx, slept); err != nil {
+				t.Fatal(err)
+			}
+			ok, err := st.TakeSessionHandoffOffer(ctx, slept.ID, f.recipient.ID, "slept", old)
+			must(true, ok, err, "take, then the machine sleeps")
+			ok, err = st.TransitionSessionHandoffOffer(ctx, slept.ID, "pending", "withdrawn", NowTS(), "")
+			must(true, ok, err, "the sender withdraws past the window")
+			ok, err = st.ConfirmSessionHandoffTake(ctx, slept.ID, f.recipient.ID, "slept", NowTS())
+			must(false, ok, err, "the woken Console's create")
+
+			held := f.offer(t, "")
+			if _, err := st.CreateSessionHandoffOffer(ctx, held); err != nil {
+				t.Fatal(err)
+			}
+			ok, err = st.TakeSessionHandoffOffer(ctx, held.ID, f.recipient.ID, "slow", NowTS())
+			must(true, ok, err, "take")
+			ok, err = st.ConfirmSessionHandoffTake(ctx, held.ID, f.recipient.ID, "other", NowTS())
+			must(false, ok, err, "confirm with another token")
+			ok, err = st.ConfirmSessionHandoffTake(ctx, held.ID, f.recipient.ID, "slow", NowTS())
+			must(true, ok, err, "the create reaches the Agent")
+			// The create is slow: far past the window, and past the offer's own deadline.
+			if _, err := st.DB().ExecContext(ctx, `UPDATE session_handoff_offer SET taken_at=?, expires_at=? WHERE id=?`, old, old, held.ID); err != nil {
+				t.Fatal(err)
+			}
+			ok, err = st.TransitionSessionHandoffOffer(ctx, held.ID, "pending", "withdrawn", NowTS(), "")
+			must(false, ok, err, "the sender withdraws a confirmed take")
+			if expired, err := st.ExpireSessionHandoffOffers(ctx, NowTS()); err != nil || len(expired) != 0 {
+				t.Fatalf("expiry overrode a confirmed take: %v err=%v", expired, err)
+			}
+			ok, err = st.TakeSessionHandoffOffer(ctx, held.ID, f.recipient.ID, "second-tab", NowTS())
+			must(false, ok, err, "a second tab takes a confirmed take")
+			ok, err = st.TransitionSessionHandoffOffer(ctx, held.ID, "pending", "accepted", NowTS(), "s")
+			must(false, ok, err, "a token-less accept of a confirmed take")
+			ok, err = st.AcceptSessionHandoffOffer(ctx, held.ID, f.recipient.ID, "slow", NowTS(), "late-but-fine")
+			must(true, ok, err, "the slow launch accepts")
+
+			// The way out of a take whose Console died after its create: the recipient declines.
+			stuck := f.offer(t, "")
+			if _, err := st.CreateSessionHandoffOffer(ctx, stuck); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.TakeSessionHandoffOffer(ctx, stuck.ID, f.recipient.ID, "dead", old); err != nil {
+				t.Fatal(err)
+			}
+			ok, err = st.ConfirmSessionHandoffTake(ctx, stuck.ID, f.recipient.ID, "dead", old)
+			must(true, ok, err, "confirm")
+			ok, err = st.TransitionSessionHandoffOffer(ctx, stuck.ID, "pending", "declined", NowTS(), "")
+			must(true, ok, err, "the recipient declines past their own stale take")
+		})
+	}
+}
+
+// A Console from before the take reports its launch with a token-less accept. It must land
+// only on an offer nobody has taken: a stale take still belongs to a newer tab, whose accept
+// would otherwise be refused after its own launch.
+func TestHandoffTokenlessAcceptNeverSettlesATake(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range inboxStores(t) {
+		t.Run(name, func(t *testing.T) {
+			f := newHandoffFixtureOn(t, st)
+			o := f.offer(t, "")
+			if _, err := st.CreateSessionHandoffOffer(ctx, o); err != nil {
+				t.Fatal(err)
+			}
+			old := time.Now().UTC().Add(-HandoffTakeWindow - time.Minute).Format(time.RFC3339)
+			if ok, err := st.TakeSessionHandoffOffer(ctx, o.ID, f.recipient.ID, "new-tab", old); err != nil || !ok {
+				t.Fatal("take", ok, err)
+			}
+			if ok, err := st.TransitionSessionHandoffOffer(ctx, o.ID, "pending", "accepted", NowTS(), "old-tab"); err != nil || ok {
+				t.Fatalf("a token-less accept settled a stale take: ok=%v err=%v", ok, err)
+			}
+			if ok, err := st.AcceptSessionHandoffOffer(ctx, o.ID, f.recipient.ID, "new-tab", NowTS(), "new-tab-session"); err != nil || !ok {
+				t.Fatalf("the take's own accept: ok=%v err=%v", ok, err)
 			}
 		})
 	}

@@ -514,10 +514,67 @@ func (a sessionHandoffAPI) statusOf(ctx context.Context, id string) string {
 func (a sessionHandoffAPI) writeUndecidable(w http.ResponseWriter, ctx context.Context, id string) {
 	status := a.statusOf(ctx, id)
 	if status == "pending" {
-		writeHandoffErr(w, http.StatusConflict, "handoff_being_taken", "the recipient is starting a session from this handoff", map[string]any{"status": status})
+		writeHandoffErr(w, http.StatusConflict, "handoff_being_taken", "the recipient is starting a session from this handoff", offerStatusDetail(status))
 		return
 	}
-	writeHandoffErr(w, http.StatusConflict, "handoff_already_decided", "the handoff was already decided", map[string]any{"status": status})
+	writeHandoffErr(w, http.StatusConflict, "handoff_already_decided", "the handoff was already decided", offerStatusDetail(status))
+}
+
+// offerStatusDetail names the offer's status in an error. The Console reads offerStatus:
+// its API client stamps every error's `status` with the HTTP status, so the string under
+// `status` never reaches it. `status` stays for other callers that read it.
+func offerStatusDetail(status string) map[string]any {
+	return map[string]any{"status": status, "offerStatus": status}
+}
+
+// handoffTakeRef is the take a session create carries when it launches from an offer
+// (handoff_take in the POST /api/sessions body).
+type handoffTakeRef struct {
+	OfferID string `json:"offerId"`
+	Token   string `json:"token"`
+}
+
+// takeHandoffFence reads the handoff_take of a session-create body and removes it, so the
+// Agent receives the body it always did. nil means the create is not from an offer.
+func takeHandoffFence(r *http.Request) (*handoffTakeRef, *apiError) {
+	body, err := readAllBody(r)
+	if err != nil {
+		return nil, &apiError{http.StatusBadRequest, "bad_request", "cannot read the request body"}
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(body, &fields) != nil || fields["handoff_take"] == nil {
+		restoreBody(r, body)
+		return nil, nil
+	}
+	var take handoffTakeRef
+	if json.Unmarshal(fields["handoff_take"], &take) != nil || strings.TrimSpace(take.OfferID) == "" || strings.TrimSpace(take.Token) == "" {
+		restoreBody(r, body)
+		return nil, &apiError{http.StatusBadRequest, "bad_handoff_take", "handoff_take needs an offer id and a token"}
+	}
+	delete(fields, "handoff_take")
+	stripped, err := json.Marshal(fields)
+	if err != nil {
+		restoreBody(r, body)
+		return nil, internalErr(err)
+	}
+	restoreBody(r, stripped)
+	return &take, nil
+}
+
+// confirmHandoffTake is the commit point of a launch from an offer, run by sessionCreateThen
+// immediately before the Agent is asked (issue #2020). Until here the sender may still have
+// won: a take that went quiet past the take window loses the offer to their withdraw, and a
+// Console that resumes after that must not start the work. After here the take holds until
+// it is accepted or released (store.ConfirmSessionHandoffTake), whatever the time.
+func confirmHandoffTake(ctx context.Context, st store.Store, mv store.MembershipView, take handoffTakeRef) *apiError {
+	ok, err := st.ConfirmSessionHandoffTake(ctx, take.OfferID, mv.MembershipID, take.Token, store.NowTS())
+	if err != nil {
+		return internalErr(err)
+	}
+	if !ok {
+		return &apiError{http.StatusConflict, "handoff_take_lost", "the handoff was withdrawn or taken elsewhere before the session was created"}
+	}
+	return nil
 }
 
 // recipientOffer loads an offer for its recipient, answering 404 for anyone else: as with
@@ -553,9 +610,11 @@ func readHandoffTakeBody(r *http.Request) handoffTakeBody {
 // by the sender, expired, revoked with the share — is refused with its status, so the
 // Console makes no session and says why.
 //
-// The take is the commit point between the two sides (ADR 0057 decision 6): the sender's
-// withdraw, which their own launch performs first, is a conditional update that a live take
-// refuses, and a take is refused once the withdraw landed. Nothing here touches anyone's
+// The take decides between the two sides (ADR 0057 decision 6): the sender's withdraw,
+// which their own launch performs first, is a conditional update that a holding take
+// refuses, and a take is refused once the withdraw landed. The commit point is the create
+// that carries the take (confirmHandoffTake): only from there on does the take hold without
+// a time limit. Nothing here touches anyone's
 // Workspace (decision 3); the recipient's Console still creates the session itself.
 func (a sessionHandoffAPI) take(w http.ResponseWriter, r *http.Request, ident store.Identity, mv store.MembershipView) {
 	a.expireDue(r.Context()) // an overdue offer answers "expired", not "pending"
@@ -595,7 +654,7 @@ func (a sessionHandoffAPI) release(w http.ResponseWriter, r *http.Request, _ sto
 		return
 	}
 	if !released {
-		writeHandoffErr(w, http.StatusConflict, "handoff_not_taken", "this launch does not hold the handoff", map[string]any{"status": a.statusOf(r.Context(), o.ID)})
+		writeHandoffErr(w, http.StatusConflict, "handoff_not_taken", "this launch does not hold the handoff", offerStatusDetail(a.statusOf(r.Context(), o.ID)))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "pending"})
@@ -627,7 +686,7 @@ func (a sessionHandoffAPI) accept(w http.ResponseWriter, r *http.Request, ident 
 		return
 	}
 	if !accepted {
-		writeHandoffErr(w, http.StatusConflict, "handoff_not_taken", "this launch does not hold the handoff", map[string]any{"status": a.statusOf(r.Context(), o.ID)})
+		writeHandoffErr(w, http.StatusConflict, "handoff_not_taken", "this launch does not hold the handoff", offerStatusDetail(a.statusOf(r.Context(), o.ID)))
 		return
 	}
 	a.recordDecision(ident, mv, o, "accepted", in.SessionName)
