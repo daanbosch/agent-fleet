@@ -8,6 +8,7 @@ import { useSettings } from "../../lib/settings.ts";
 import { useToast } from "../../ui/ToastProvider.tsx";
 import { openSessionChat, openSessionChatSplit } from "../sessions/open.ts";
 import { useSessionLinkMenu } from "../sessions/SessionLinkMenu.tsx";
+import { usePathLinkMenu } from "./PathLinkMenu.tsx";
 import { useChatStore, ensureConvs } from "../chat/store.ts";
 import { openChat, openChatSplit } from "../chat/open.ts";
 import { useFilesStore } from "../files/store.ts";
@@ -110,6 +111,12 @@ export function MarkdownView({
   const openSessionMenuRef = useRef(openSessionMenu);
   openSessionMenuRef.current = openSessionMenu;
   const hasSessionMenu = openSessionMenu !== null;
+  // File / folder links likewise (PathLinkMenuHost); wired only with an onOpenFile as well.
+  const openPathMenu = usePathLinkMenu();
+  const openPathMenuRef = useRef(openPathMenu);
+  openPathMenuRef.current = openPathMenu;
+  // The shared view passes no onOpenFile: no menu and no suppressed native menu there.
+  const hasPathMenu = openPathMenu !== null && !!onOpenFile;
 
   // What a ticket link's classification depends on besides the text (#1659). The repository list
   // and the inbox can both land after the message rendered (a deep link, a push adding a Jira
@@ -171,6 +178,7 @@ export function MarkdownView({
       (p, line, column, openInNew) => onOpenFileRef.current?.(p, line, column, openInNew),
       (p) => onOpenDirRef.current?.(p),
       (message) => toast(message),
+      hasPathMenu ? (target, x, y) => openPathMenuRef.current?.(target, x, y) : undefined,
     );
     wireImages(el, basePath);
 
@@ -244,6 +252,7 @@ export function MarkdownView({
             ? onOpenDirRef.current(p)
             : useFilesStore.getState().revealInFiles(p, { focus: true }),
         (message) => toast(message),
+        hasPathMenu ? (target, x, y) => openPathMenuRef.current?.(target, x, y) : undefined,
       );
     }
 
@@ -298,7 +307,7 @@ export function MarkdownView({
       stickyCleanup();
     };
     // wiInputs is read for the relink bookkeeping only: a change to it is the effect below.
-  }, [source, basePath, baseDir, repo, breaks, streaming, theme, codeWrapDefault, toast, hasSessionMenu, workItemRefs]);
+  }, [source, basePath, baseDir, repo, breaks, streaming, theme, codeWrapDefault, toast, hasSessionMenu, hasPathMenu, workItemRefs]);
 
   // Idempotent: existing anchors are skipped, and the links already there re-classify on click.
   useEffect(() => {

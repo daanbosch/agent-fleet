@@ -253,4 +253,9 @@ export const viewer = {
   "editor.suggestion.selection_too_large": "選択範囲が大きすぎて提案できません。",
   "editor.suggestion.instruction_invalid": "指示文が空か長すぎます。",
   "editor.suggestion.invalid": "この提案は適用できません。",
+  "view.path": "パス",
+  "view.copy_path": "パスをコピー",
+  "view.path_menu.open": "ペインで開く",
+  "view.path_menu.open_new": "新しいペインで開く",
+  "view.path_menu.reveal": "ファイル一覧で表示",
 };

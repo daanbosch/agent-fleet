@@ -12,6 +12,7 @@ import { useEffect, useRef, useState } from "react";
 import { Icon } from "../../ui/Icon.tsx";
 import { useT } from "../../lib/i18n/index.ts";
 import { MarkdownView } from "./MarkdownView.tsx";
+import { PathLinkMenuHost } from "./PathLinkMenu.tsx";
 import { anydocFailure, toMarkdown, type AnydocFailure, type AnydocFormat } from "./anydoc.ts";
 import type { ScrollMemoryRef } from "./parts/useScrollMemory.ts";
 
@@ -103,7 +104,9 @@ export function DocPreview({ src, format, size, basePath, onOpenFile, onOpenDir,
         <Icon name="info" /> {tr("view.doc.simple_preview_note")}
       </p>
       <div className="md-scroll" ref={scrollMemory}>
-        <MarkdownView source={state.markdown} basePath={basePath} onOpenFile={onOpenFile} onOpenDir={onOpenDir} />
+        <PathLinkMenuHost>
+          <MarkdownView source={state.markdown} basePath={basePath} onOpenFile={onOpenFile} onOpenDir={onOpenDir} />
+        </PathLinkMenuHost>
       </div>
     </div>
   );
