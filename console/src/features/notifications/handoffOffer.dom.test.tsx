@@ -89,6 +89,16 @@ describe("a handoff-offer notification", () => {
     expect(toast).toHaveBeenCalledWith(t("noti.handoff_closed"), { kind: "warn" });
   });
 
+  it("points to the inbox for a recovery row instead of opening the shared view (#2058)", async () => {
+    // Unshared or archived while the recipient's launch still holds it: the only thing left to
+    // do is the give-back, which lives in the inbox.
+    vi.mocked(api).mockResolvedValue({ offers: [{ ...offer("o1"), recoveryOnly: true, takeState: "unknown" }] });
+    const r = await openNotificationTarget(offerNotification(), false);
+    expect(r).toEqual({ opened: false, handoffClosed: true });
+    expect(openSharedSession).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith(t("noti.handoff_recovery", { inbox: t("handoff.inbox_title") }), { kind: "warn" });
+  });
+
   it("falls back to the shared view when the inbox cannot be read, rather than calling it closed", async () => {
     for (const fail of [() => Promise.resolve({ error: { code: "internal" } }), () => Promise.reject(new Error("offline"))]) {
       vi.clearAllMocks();

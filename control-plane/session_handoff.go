@@ -13,7 +13,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log"
@@ -132,7 +134,7 @@ type handoffOfferWire struct {
 }
 
 // handoffOfferInboxWire is one entry of the recipient's inbox: the base form plus three
-// keys, 17 in all with takeState. The three cannot be optional fields on the base type —
+// keys, 19 in all with every optional key. The three cannot be optional fields on the base type —
 // ownerUserKey is "" when the member is unknown and prompt is "" when the ciphertext cannot be
 // opened, and both still have to appear — so they are added by embedding, which JSON flattens.
 //
@@ -140,12 +142,28 @@ type handoffOfferWire struct {
 //
 // The effective JSON names of the base and the three additions must not collide:
 // encoding/json emits neither side of a collision, so a key would vanish silently. The
-// equivalence test catches that, and the counts 14 / 17 (takeState set) are pinned separately.
+// equivalence test catches that, and the counts 14 / 19 (optional keys set) are pinned
+// separately.
 type handoffOfferInboxWire struct {
 	handoffOfferWire
 	OwnerUserKey      string `json:"ownerUserKey"`
 	Prompt            string `json:"prompt"`
 	SourceSessionKind string `json:"sourceSessionKind"`
+	// TakeRev names the recipient's confirmed take (handoffTakeRev), and the give-back must send
+	// it back, so a confirmation made against one take never releases a later one. Only the
+	// recipient's inbox carries it.
+	TakeRev string `json:"takeRev,omitempty"`
+	// RecoveryOnly marks an offer the inbox lists only because the recipient's confirmed take
+	// still holds it after an unshare or archive (ListRecoverableSessionHandoffTakes): it
+	// carries no body or coordinates, and nothing launches from it.
+	RecoveryOnly bool `json:"recoveryOnly,omitempty"`
+}
+
+// handoffTakeRev is an opaque name for a take, safe to hand to the recipient's Console: a one-way
+// digest of the take's token, which itself never leaves the CP (it is the Agent key's suffix).
+func handoffTakeRev(token string) string {
+	sum := sha256.Sum256([]byte("af-handoff-take-rev\x00" + token))
+	return hex.EncodeToString(sum[:12])
 }
 
 func handoffOfferDTO(o store.SessionHandoffOffer, recipientKey string) handoffOfferWire {
@@ -450,6 +468,11 @@ func (a sessionHandoffAPI) listReceived(w http.ResponseWriter, r *http.Request, 
 		writeAPIErr(w, internalErr(err))
 		return
 	}
+	recoverable, err := a.mgr.store.ListRecoverableSessionHandoffTakes(r.Context(), mv.MembershipID)
+	if err != nil {
+		writeAPIErr(w, internalErr(err))
+		return
+	}
 	keys := a.userKeys(r.Context(), mv.TenantID)
 	out := []any{}
 	for _, o := range rows {
@@ -458,10 +481,37 @@ func (a sessionHandoffAPI) listReceived(w http.ResponseWriter, r *http.Request, 
 			OwnerUserKey:      keys[o.OwnerMembershipID],
 			Prompt:            a.open(r.Context(), o),
 			SourceSessionKind: o.SourceSessionKind,
+			TakeRev:           a.takeRevOf(r.Context(), o, mv),
+		})
+	}
+	// A take whose offer the inbox no longer lists (unshared or archived) would otherwise pin
+	// it with no way back for anyone. It is shown for the give-back only: no body, no
+	// coordinates to launch from.
+	for _, o := range recoverable {
+		d := handoffOfferDTO(o, keys[o.RecipientMembershipID])
+		d.Branch, d.RepoRemote, d.HeadSha = "", "", ""
+		out = append(out, handoffOfferInboxWire{
+			handoffOfferWire:  d,
+			OwnerUserKey:      keys[o.OwnerMembershipID],
+			SourceSessionKind: o.SourceSessionKind,
+			TakeRev:           a.takeRevOf(r.Context(), o, mv),
+			RecoveryOnly:      true,
 		})
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	writeJSON(w, http.StatusOK, map[string]any{"offers": out})
+}
+
+// takeRevOf is the TakeRev of the recipient's confirmed take on o, "" when none holds it.
+func (a sessionHandoffAPI) takeRevOf(ctx context.Context, o store.SessionHandoffOffer, mv store.MembershipView) string {
+	if o.TakeConfirmedAt == "" {
+		return ""
+	}
+	token, held, err := a.mgr.store.ConfirmedSessionHandoffTake(ctx, o.ID, mv.MembershipID)
+	if err != nil || !held {
+		return ""
+	}
+	return handoffTakeRev(token)
 }
 
 func (a sessionHandoffAPI) userKeys(ctx context.Context, tenantID string) map[string]string {
@@ -649,7 +699,10 @@ func confirmHandoffTake(ctx context.Context, st store.Store, mv store.Membership
 // to write the headers, a create still in progress — is an unknown outcome: the take stays
 // confirmed and the recipient's next take press asks their Agent (reconcileTake). Releasing
 // there would hand the offer back while the session may exist (ADR 0057 decision 6).
-func settleHandoffCreate(ctx context.Context, mgr *manager, res *resolved, take handoffTakeRef, status int, h http.Header, body []byte) {
+//
+// snap is the offer as it stood when the take was confirmed, so a session reported after the
+// offer is gone (the sender deleted the source session) still reaches the recipient.
+func settleHandoffCreate(ctx context.Context, mgr *manager, res *resolved, take handoffTakeRef, snap store.SessionHandoffOffer, status int, h http.Header, body []byte) {
 	ctx = context.WithoutCancel(ctx)
 	key := handoffCreateKey(take.OfferID, take.Token)
 	outcome := ""
@@ -670,7 +723,7 @@ func settleHandoffCreate(ctx context.Context, mgr *manager, res *resolved, take 
 		if err != nil {
 			log.Printf("handoff: offer %s left taken: accepting %s failed: %v", take.OfferID, s.Name, err)
 		} else if !accepted {
-			api.reportLateSession(ctx, res.ident, res.mv, take.OfferID, s.Name)
+			api.reportLateSession(ctx, res.ident, res.mv, snap, s.Name)
 		}
 	case outcome == "refused" && (status < 200 || status >= 300):
 		if _, err := mgr.store.ReleaseSessionHandoffOffer(ctx, take.OfferID, res.mv.MembershipID, take.Token); err != nil {
@@ -866,7 +919,7 @@ func (a sessionHandoffAPI) reconcileTake(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		if !accepted {
-			if a.reportLateSession(ctx, ident, mv, o.ID, s.Name) {
+			if a.reportLateSession(ctx, ident, mv, o, s.Name) {
 				writeHandoffErr(w, http.StatusConflict, "handoff_session_after_give_back",
 					"a session was started from this handoff after it was given back", map[string]any{
 						"offerStatus": a.statusOf(ctx, o.ID), "sessionName": s.Name})
@@ -925,19 +978,27 @@ func (a sessionHandoffAPI) retake(w http.ResponseWriter, ctx context.Context, id
 // not a Console is open, because only they can decide what to do with the session. Answers
 // false, telling nothing, when the offer was accepted by this very session (a concurrent press
 // settled it first).
-func (a sessionHandoffAPI) reportLateSession(ctx context.Context, ident store.Identity, mv store.MembershipView, offerID, sessionName string) bool {
-	o, ok, err := a.mgr.store.GetSessionHandoffOffer(ctx, offerID)
-	if err != nil || !ok || o.RecipientMembershipID != mv.MembershipID {
+//
+// snap is the recipient's offer as read before the Agent was asked. When the offer has since
+// been deleted with its source session, the report still goes to that recipient from snap,
+// with offerStatus "": the offer is not restored.
+func (a sessionHandoffAPI) reportLateSession(ctx context.Context, ident store.Identity, mv store.MembershipView, snap store.SessionHandoffOffer, sessionName string) bool {
+	o, status := snap, ""
+	if cur, ok, err := a.mgr.store.GetSessionHandoffOffer(ctx, snap.ID); err == nil && ok {
+		o, status = cur, cur.Status
+	}
+	if o.RecipientMembershipID != mv.MembershipID {
 		return false
 	}
-	if o.Status == "accepted" && o.AcceptedSessionName == sessionName {
+	if status == "accepted" && o.AcceptedSessionName == sessionName {
 		return false
 	}
+	offerID := o.ID
 	log.Printf("handoff: offer %s: the recipient's Agent reported a session after the take was given back", offerID)
 	// One notice per reported session: two launches given back could each turn up.
 	a.notify(mv.MembershipID, "handoff-late-session", "handoff-late-session-"+offerID+"-"+sessionName+"-"+mv.MembershipID,
 		"session", sessionName, o.SourceSessionKind, o.Title,
-		map[string]any{"offerId": offerID, "sessionName": sessionName, "offerStatus": o.Status})
+		map[string]any{"offerId": offerID, "sessionName": sessionName, "offerStatus": status})
 	_ = a.mgr.store.InsertAudit(context.Background(), store.AuditLog{ID: store.NewID(), TenantID: mv.TenantID,
 		ActorKind: "user", ActorID: ident.ID, Action: "session.handoff.late_session", Target: o.SourceSessionName,
 		HTTPStatus: http.StatusOK, At: store.NowTS()})
@@ -949,14 +1010,17 @@ func (a sessionHandoffAPI) reportLateSession(ctx context.Context, ident store.Id
 // give the offer back". It releases only a take in store.HandoffTakeState "unknown" — confirmed,
 // and older than the take window, so its create has had that long to answer — in one
 // conditional update; anything else is refused with the take's state, and nobody but the
-// recipient learns the offer exists. The body must carry confirmed=true: the Console sends
-// it only after the recipient acknowledged that if the session does exist the same work may
-// run twice. The statement is the recipient's, so the CP still drives nobody's workspace
+// recipient learns the offer exists. The body must carry confirmed=true and the take's
+// takeRev from the inbox: the Console sends them only after the recipient acknowledged that
+// the same work may run twice if the session exists, or if the earlier launch is still being
+// processed and starts later — giving back cancels nothing on the Agent, and the window is a
+// least wait, not a point by which a create has finished. The statement is the recipient's, so the CP still drives nobody's workspace
 // (ADR 0057 decision 3); if their Agent reports the session later, reportLateSession tells
 // them.
 func (a sessionHandoffAPI) giveBack(w http.ResponseWriter, r *http.Request, ident store.Identity, mv store.MembershipView) {
 	var in struct {
-		Confirmed bool `json:"confirmed"`
+		Confirmed bool   `json:"confirmed"`
+		TakeRev   string `json:"takeRev"`
 	}
 	_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&in)
 	o, ok := a.recipientOffer(w, r, mv)
@@ -967,7 +1031,24 @@ func (a sessionHandoffAPI) giveBack(w http.ResponseWriter, r *http.Request, iden
 		writeAPIErr(w, &apiError{http.StatusBadRequest, "handoff_give_back_unconfirmed", "giving the handoff back needs confirmed=true"})
 		return
 	}
-	released, err := a.mgr.store.GiveBackUnknownSessionHandoffTake(r.Context(), o.ID, mv.MembershipID, time.Now())
+	// The confirmation names the take it was made against (a missing takeRev names none). A
+	// later take — the one confirmed was given back and the offer taken again, while this
+	// screen or request was stale — is refused, and the update below is bound to the token
+	// checked here. With no confirmed take there is nothing to bind; the update then changes
+	// nothing and the answer says why.
+	token, held, err := a.mgr.store.ConfirmedSessionHandoffTake(r.Context(), o.ID, mv.MembershipID)
+	if err != nil {
+		writeAPIErr(w, internalErr(err))
+		return
+	}
+	if held && handoffTakeRev(token) != in.TakeRev {
+		cur, _, _ := a.mgr.store.GetSessionHandoffOffer(r.Context(), o.ID)
+		d := offerStatusDetail(cur.Status)
+		d["takeState"] = store.HandoffTakeState(cur, time.Now())
+		writeHandoffErr(w, http.StatusConflict, "handoff_give_back_stale", "the handoff is held by another launch than the one confirmed", d)
+		return
+	}
+	released, err := a.mgr.store.GiveBackUnknownSessionHandoffTake(r.Context(), o.ID, mv.MembershipID, token, time.Now())
 	if err != nil {
 		writeAPIErr(w, internalErr(err))
 		return

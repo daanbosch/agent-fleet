@@ -41,7 +41,34 @@ func (h *handoffRecovery) giveBack(who string, body map[string]any) *httptest.Re
 	return h.do(who, http.MethodPost, "/api/session-handoff-offers/"+h.offer+"/give-back", body)
 }
 
-var confirmedGiveBack = map[string]any{"confirmed": true}
+// confirmed is the give-back body the Console sends: the confirmation plus the takeRev the
+// recipient's inbox shows for the offer (none when it lists no confirmed take).
+func (h *handoffRecovery) confirmed() map[string]any {
+	h.t.Helper()
+	body := map[string]any{"confirmed": true}
+	if rev, _ := h.inboxRow()["takeRev"].(string); rev != "" {
+		body["takeRev"] = rev
+	}
+	return body
+}
+
+// inboxRow is the offer as the recipient's inbox lists it, nil when it is not listed.
+func (h *handoffRecovery) inboxRow() map[string]any {
+	h.t.Helper()
+	rec := h.do("b", http.MethodGet, "/api/session-handoff-offers/received", nil)
+	var out struct {
+		Offers []map[string]any `json:"offers"`
+	}
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &out) != nil {
+		h.t.Fatalf("inbox = %d %s", rec.Code, rec.Body.String())
+	}
+	for _, o := range out.Offers {
+		if o["id"] == h.offer {
+			return o
+		}
+	}
+	return nil
+}
 
 // ageTake moves the take's confirm past the take window, which is what makes its outcome
 // unknown rather than in progress.
@@ -108,14 +135,14 @@ func TestHandoffGiveBackOnlyByTheRecipientOfAnUnknownTake(t *testing.T) {
 	handoffDialects(t, func(t *testing.T, h *handoffRecovery) {
 		h.agent.set("drop", "old") // nothing created, and an Agent that cannot say so
 		token := h.mustTake()
-		h.requireTakeState(h.giveBack("b", confirmedGiveBack), "handoff_not_unknown", "starting")
+		h.requireTakeState(h.giveBack("b", h.confirmed()), "handoff_not_unknown", "starting")
 		h.requireTakeState(h.withdraw(), "handoff_being_taken", "starting")
 		_ = h.create(token)
 		rec, _ := h.take()
 		h.requireCode(rec, http.StatusConflict, "handoff_launch_unknown")
 
 		// Within the window the create may still be on its way: not given back.
-		h.requireTakeState(h.giveBack("b", confirmedGiveBack), "handoff_not_unknown", "confirming")
+		h.requireTakeState(h.giveBack("b", h.confirmed()), "handoff_not_unknown", "confirming")
 		h.requireTakeState(h.withdraw(), "handoff_being_taken", "confirming")
 		if s := h.listedTakeState("a", "/api/session-handoff-offers"); s != "confirming" {
 			t.Fatalf("the sender's ledger says takeState %q, want confirming", s)
@@ -130,14 +157,14 @@ func TestHandoffGiveBackOnlyByTheRecipientOfAnUnknownTake(t *testing.T) {
 		}
 		h.requireTakeState(h.withdraw(), "handoff_being_taken", "unknown")
 		for _, who := range []string{"a", "c", "x"} { // the sender, a tenant peer, another tenant
-			h.requireCode(h.giveBack(who, confirmedGiveBack), http.StatusNotFound, "not_found")
+			h.requireCode(h.giveBack(who, h.confirmed()), http.StatusNotFound, "not_found")
 		}
 		h.requireCode(h.giveBack("b", map[string]any{}), http.StatusBadRequest, "handoff_give_back_unconfirmed")
 		if o := h.row(); o.TakeConfirmedAt == "" {
 			t.Fatalf("a refused give-back moved the take: %+v", o)
 		}
 
-		rec = h.giveBack("b", confirmedGiveBack)
+		rec = h.giveBack("b", h.confirmed())
 		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"pending"`) {
 			t.Fatalf("give-back = %d %s, want 200 pending", rec.Code, rec.Body.String())
 		}
@@ -164,7 +191,7 @@ func TestHandoffGiveBackOnlyByTheRecipientOfAnUnknownTake(t *testing.T) {
 		h.agent.set("ok", "agent")
 		h.requireCode(h.create(token), http.StatusConflict, "handoff_take_lost")
 		h.requireCode(h.withdraw(), http.StatusOK, "")
-		h.requireCode(h.giveBack("b", confirmedGiveBack), http.StatusConflict, "handoff_already_decided")
+		h.requireCode(h.giveBack("b", h.confirmed()), http.StatusConflict, "handoff_already_decided")
 		if h.agent.count() != 0 {
 			t.Fatalf("sessions=%d, want none", h.agent.count())
 		}
@@ -195,11 +222,15 @@ func TestHandoffGiveBackRacesTheWithdraw(t *testing.T) {
 			if ok, err := h.st.ConfirmSessionHandoffTake(ctx, h.offer, h.members["b"], "tok", old); err != nil || !ok {
 				t.Fatalf("round %d: confirm=%v err=%v", i, ok, err)
 			}
+			body := h.confirmed()
+			if body["takeRev"] == nil {
+				t.Fatalf("round %d: the inbox shows no takeRev for the confirmed take", i)
+			}
 			var gave, wd *httptest.ResponseRecorder
 			var wg sync.WaitGroup
 			start := make(chan struct{})
 			wg.Add(2)
-			go func() { defer wg.Done(); <-start; gave = h.giveBack("b", confirmedGiveBack) }()
+			go func() { defer wg.Done(); <-start; gave = h.giveBack("b", body) }()
 			go func() { defer wg.Done(); <-start; wd = h.withdraw() }()
 			close(start)
 			wg.Wait()
@@ -256,7 +287,7 @@ func TestHandoffGiveBackRacesTheReconcile(t *testing.T) {
 		press := make(chan *httptest.ResponseRecorder, 1)
 		go func() { rec, _ := h.take(); press <- rec }()
 		<-arrived
-		gave := h.giveBack("b", confirmedGiveBack)
+		gave := h.giveBack("b", h.confirmed())
 		unblock()
 		rec := <-press
 		h.requireCode(gave, http.StatusOK, "")
@@ -291,7 +322,7 @@ func TestHandoffGiveBackAfterTheReconcileAccepted(t *testing.T) {
 		if rec, got := h.take(); rec.Code != http.StatusOK || got.Status != "accepted" {
 			t.Fatalf("reconcile = %d %s", rec.Code, rec.Body.String())
 		}
-		h.requireCode(h.giveBack("b", confirmedGiveBack), http.StatusConflict, "handoff_already_decided")
+		h.requireCode(h.giveBack("b", h.confirmed()), http.StatusConflict, "handoff_already_decided")
 		if o := h.row(); o.Status != "accepted" || o.AcceptedSessionName != "s-1" {
 			t.Fatalf("the give-back moved an accepted offer: %+v", o)
 		}
@@ -323,7 +354,7 @@ func TestHandoffLateCreateAfterGiveBack(t *testing.T) {
 		go func() { done <- h.create(token) }()
 		<-arrived
 		h.ageTake() // the create has been running for longer than the window
-		h.requireCode(h.giveBack("b", confirmedGiveBack), http.StatusOK, "")
+		h.requireCode(h.giveBack("b", h.confirmed()), http.StatusOK, "")
 		h.requireCode(h.withdraw(), http.StatusOK, "")
 		unblock()
 		if late := <-done; late.Code != http.StatusCreated {
@@ -339,5 +370,156 @@ func TestHandoffLateCreateAfterGiveBack(t *testing.T) {
 		if h.acceptedNotices() != 0 {
 			t.Fatal("the sender was told the offer was accepted")
 		}
+	})
+}
+
+// TestHandoffGiveBackRecoversAnUnsharedOrArchivedTake (review F1): a confirmed take outlives
+// the inbox's filters. After an unshare or an archive the recipient's inbox still lists the
+// offer as a recovery row — no body, no coordinates — whose give-back frees it: an unshared
+// offer expires, an archived one is the sender's to withdraw again.
+func TestHandoffGiveBackRecoversAnUnsharedOrArchivedTake(t *testing.T) {
+	for _, how := range []string{"unshare", "archive"} {
+		t.Run(how, func(t *testing.T) {
+			handoffDialects(t, func(t *testing.T, h *handoffRecovery) {
+				ctx := context.Background()
+				h.agent.set("drop", "old")
+				_ = h.create(h.mustTake())
+				h.ageTake()
+				if row := h.inboxRow(); row == nil || row["recoveryOnly"] != nil {
+					t.Fatalf("before the %s the inbox row is %v, want an ordinary row", how, row)
+				}
+				switch how {
+				case "unshare":
+					if err := h.st.DeleteSessionShare(ctx, "share-1", h.members["a"]); err != nil {
+						t.Fatal(err)
+					}
+				case "archive":
+					cats, err := h.st.ListSharedSessionCatalogByOwner(ctx, h.members["a"])
+					if err != nil || len(cats) != 1 {
+						t.Fatalf("catalog = %v err=%v", cats, err)
+					}
+					cats[0].Archived = true
+					if err := h.st.ReplaceSharedSessionCatalog(ctx, "ws-a", h.members["a"], cats); err != nil {
+						t.Fatal(err)
+					}
+				}
+				row := h.inboxRow()
+				if row == nil || row["recoveryOnly"] != true || row["takeState"] != "unknown" || row["takeRev"] == nil ||
+					row["prompt"] != "" || row["branch"] != "" || row["repoRemote"] != "" || row["headSha"] != "" {
+					t.Fatalf("after the %s the inbox row is %v, want a recovery row with no body or coordinates", how, row)
+				}
+				h.requireTakeState(h.withdraw(), "handoff_being_taken", "unknown")
+				rec := h.giveBack("b", h.confirmed())
+				want := map[string]string{"unshare": "expired", "archive": "pending"}[how]
+				if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"`+want+`"`) {
+					t.Fatalf("give-back = %d %s, want 200 %s", rec.Code, rec.Body.String(), want)
+				}
+				if row := h.inboxRow(); row != nil {
+					t.Fatalf("after the give-back the inbox still lists %v", row)
+				}
+				if how == "archive" {
+					h.requireCode(h.withdraw(), http.StatusOK, "")
+				}
+			})
+		})
+	}
+}
+
+// TestHandoffGiveBackStaleConfirmation (review F2): a give-back confirmed against take A must
+// not release take B, taken after A was given back, even once B's outcome is unknown too: an
+// old tab or a delayed request carries A's takeRev.
+func TestHandoffGiveBackStaleConfirmation(t *testing.T) {
+	handoffDialects(t, func(t *testing.T, h *handoffRecovery) {
+		h.agent.set("drop", "old")
+		_ = h.create(h.mustTake())
+		h.ageTake()
+		stale := h.confirmed()
+		h.requireCode(h.giveBack("b", stale), http.StatusOK, "")
+		_ = h.create(h.mustTake())
+		h.ageTake()
+		h.requireTakeState(h.giveBack("b", stale), "handoff_give_back_stale", "unknown")
+		h.requireCode(h.giveBack("b", map[string]any{"confirmed": true}), http.StatusConflict, "handoff_give_back_stale")
+		if o := h.row(); o.TakeConfirmedAt == "" {
+			t.Fatalf("a stale give-back released the later take: %+v", o)
+		}
+		h.requireTakeState(h.withdraw(), "handoff_being_taken", "unknown")
+		h.requireCode(h.giveBack("b", h.confirmed()), http.StatusOK, "")
+	})
+}
+
+// TestHandoffLateReportAfterTheSourceIsDeleted (review F4): after the give-back the sender
+// deletes the source session, which deletes the offer with it. A session the recipient's Agent
+// reports afterwards — to a reconcile already asking, or as the create's own late answer — is
+// still named to the recipient; the offer is not restored.
+func TestHandoffLateReportAfterTheSourceIsDeleted(t *testing.T) {
+	deleteSource := func(t *testing.T, h *handoffRecovery) {
+		t.Helper()
+		if err := h.st.ReplaceSharedSessionCatalog(context.Background(), "ws-a", h.members["a"], nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok, err := h.st.GetSessionHandoffOffer(context.Background(), h.offer); err != nil || ok {
+			t.Fatalf("the offer survived its source: ok=%v err=%v", ok, err)
+		}
+	}
+	t.Run("reconcile", func(t *testing.T) {
+		handoffDialects(t, func(t *testing.T, h *handoffRecovery) {
+			h.agent.set("lost", "agent")
+			_ = h.create(h.mustTake())
+			h.ageTake()
+			arrived, unblock := h.holdAbandon()
+			press := make(chan *httptest.ResponseRecorder, 1)
+			go func() { rec, _ := h.take(); press <- rec }()
+			<-arrived
+			h.requireCode(h.giveBack("b", h.confirmed()), http.StatusOK, "")
+			deleteSource(t, h)
+			unblock()
+			rec := <-press
+			var out struct {
+				Error struct{ Code, SessionName string } `json:"error"`
+			}
+			_ = json.Unmarshal(rec.Body.Bytes(), &out)
+			if rec.Code != http.StatusConflict || out.Error.Code != "handoff_session_after_give_back" || out.Error.SessionName != "s-1" {
+				t.Fatalf("the press = %d %s, want handoff_session_after_give_back naming s-1", rec.Code, rec.Body.String())
+			}
+			if n := h.notices("b", "handoff-late-session"); len(n) != 1 || n[0].TargetID != "s-1" {
+				t.Fatalf("the recipient's late-session notices: %+v, want one for s-1", n)
+			}
+			for _, who := range []string{"a", "c"} {
+				if n := h.notices(who, "handoff-late-session"); len(n) != 0 {
+					t.Fatalf("%s was told: %+v", who, n)
+				}
+			}
+		})
+	})
+	t.Run("create", func(t *testing.T) {
+		handoffDialects(t, func(t *testing.T, h *handoffRecovery) {
+			inner := h.agent.srv.Config.Handler
+			arrived, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			t.Cleanup(unblock)
+			h.agent.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && r.URL.Path == "/sessions" {
+					close(arrived)
+					<-release
+				}
+				inner.ServeHTTP(w, r)
+			})
+			token := h.mustTake()
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() { done <- h.create(token) }()
+			<-arrived
+			h.ageTake()
+			h.requireCode(h.giveBack("b", h.confirmed()), http.StatusOK, "")
+			deleteSource(t, h)
+			unblock()
+			if late := <-done; late.Code != http.StatusCreated {
+				t.Fatalf("the late create = %d %s", late.Code, late.Body.String())
+			}
+			n := h.notices("b", "handoff-late-session")
+			if len(n) != 1 || n[0].TargetID != "s-1" || n[0].DisplayName != "carry on" || !strings.Contains(n[0].Payload, `"offerStatus":""`) {
+				t.Fatalf("the recipient's late-session notices: %+v, want one for s-1 from the snapshot", n)
+			}
+		})
 	})
 }

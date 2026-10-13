@@ -301,13 +301,15 @@ func TestWireEquivInternalRepo(t *testing.T) {
 // --- (7) the two variants of sessionHandoffAPI (Console: HandoffOffer) ---
 //
 // One TS type, `HandoffOffer`, is filled in by two endpoints between them (create=14 /
-// listReceived=17, with takeState set). Measure both, or the narrow one is protected while the wide one is lost.
+// listReceived=19, with the optional keys set). Measure both, or the narrow one is protected while the wide one is lost.
 
 type handoffIn struct {
 	ID, SessionID, SessionName, RecipientUserKey, Title, Status  string
 	Branch, RepoRemote, HeadSha, CreatedAt, ExpiresAt, DecidedAt string
 	AcceptedSessionName, TakeState                               string
 	OwnerUserKey, Prompt, SourceSessionKind                      string
+	TakeRev                                                      string
+	RecoveryOnly                                                 bool
 }
 
 func handoffOldBase(in handoffIn) map[string]any { // copy of the old handoffOfferDTO
@@ -339,7 +341,7 @@ func handoffInputs() []handoffIn {
 		{ID: "o1", SessionID: "c1", SessionName: "s1", RecipientUserKey: "u2", Title: "t",
 			Status: "pending", Branch: "b", RepoRemote: "r", HeadSha: "h",
 			CreatedAt: "c", ExpiresAt: "e", DecidedAt: "d", AcceptedSessionName: "a", TakeState: "unknown",
-			OwnerUserKey: "u1", Prompt: "本文", SourceSessionKind: "claude"},
+			OwnerUserKey: "u1", Prompt: "本文", SourceSessionKind: "claude", TakeRev: "r", RecoveryOnly: true},
 		// Exactly why omitempty was not used: with no key in keys[…] ownerUserKey is "",
 		// and a.open() may return empty. The old shape emits those keys all the same.
 		{ID: "o2", Status: "withdrawn", OwnerUserKey: "", Prompt: "", SourceSessionKind: ""},
@@ -360,6 +362,12 @@ func TestWireEquivHandoffOfferInbox(t *testing.T) {
 			d["ownerUserKey"] = in.OwnerUserKey
 			d["prompt"] = in.Prompt
 			d["sourceSessionKind"] = in.SourceSessionKind
+			if in.TakeRev != "" { // fields the struct gained later, omitted when empty
+				d["takeRev"] = in.TakeRev
+			}
+			if in.RecoveryOnly {
+				d["recoveryOnly"] = true
+			}
 			return d
 		},
 		func(in handoffIn) any {
@@ -368,6 +376,8 @@ func TestWireEquivHandoffOfferInbox(t *testing.T) {
 				OwnerUserKey:      in.OwnerUserKey,
 				Prompt:            in.Prompt,
 				SourceSessionKind: in.SourceSessionKind,
+				TakeRev:           in.TakeRev,
+				RecoveryOnly:      in.RecoveryOnly,
 			}
 		})
 	t.Logf("comparison mode: %s", got)
@@ -394,7 +404,9 @@ func TestWireHandoffKeyCountsAreIndependentlyFixed(t *testing.T) {
 			OwnerUserKey:      in.OwnerUserKey,
 			Prompt:            in.Prompt,
 			SourceSessionKind: in.SourceSessionKind,
-		}, 17},
+			TakeRev:           in.TakeRev,
+			RecoveryOnly:      in.RecoveryOnly,
+		}, 19},
 	} {
 		b, err := json.Marshal(tc.v)
 		if err != nil {

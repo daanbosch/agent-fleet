@@ -305,18 +305,24 @@ func HandoffTakeState(o SessionHandoffOffer, now time.Time) string {
 // the race test's positive control can turn it off; nothing else assigns it.
 var handoffGiveBackGuards = true
 
-// GiveBackUnknownSessionHandoffTake releases a confirmed take whose create has had the whole
-// take window to answer and never did (HandoffTakeState "unknown"), on the recipient's own
-// statement that no session came of it (issue #2058). It is one conditional update, so it
-// cannot release a take that is not in that state when it lands: one still within the
-// window (its create may be on its way to the Agent), one that a reconcile accepted or gave
-// back meanwhile, or a fresh take that replaced it. Like the other releases, an offer whose
-// share was revoked meanwhile expires instead of going back to pending.
-func (s *SQL) GiveBackUnknownSessionHandoffTake(ctx context.Context, id, recipientMembershipID string, now time.Time) (bool, error) {
-	cond := ` AND status='pending' AND take_token<>'' AND take_confirmed_at<>'' AND take_confirmed_at<=?`
+// GiveBackUnknownSessionHandoffTake releases the confirmed take `token` once its create has had
+// the whole take window to answer and never did (HandoffTakeState "unknown"), on the
+// recipient's own statement that no session came of it (issue #2058). It is one conditional
+// update bound to that take, so it cannot release a take that is not in that state when it
+// lands: one still within the window (its create may be on its way to the Agent), one that a
+// reconcile accepted or gave back meanwhile, or a later take that replaced the one the
+// recipient confirmed against (a stale screen or a delayed request). The window is the least
+// the recipient waits, not a point by which the create has finished: giving back cancels
+// nothing on the Agent. Like the other releases, an offer whose share was revoked meanwhile
+// expires instead of going back to pending.
+func (s *SQL) GiveBackUnknownSessionHandoffTake(ctx context.Context, id, recipientMembershipID, token string, now time.Time) (bool, error) {
+	if token == "" {
+		return false, nil
+	}
+	cond := ` AND status='pending' AND take_token=? AND take_confirmed_at<>'' AND take_confirmed_at<=?`
 	args := []any{now.UTC().Format(time.RFC3339), id, recipientMembershipID}
 	if handoffGiveBackGuards {
-		args = append(args, now.UTC().Add(-HandoffTakeWindow).Format(time.RFC3339))
+		args = append(args, token, now.UTC().Add(-HandoffTakeWindow).Format(time.RFC3339))
 	} else {
 		cond = ""
 	}
@@ -330,6 +336,33 @@ func (s *SQL) GiveBackUnknownSessionHandoffTake(ctx context.Context, id, recipie
 	}
 	n, err := res.RowsAffected()
 	return n == 1, err
+}
+
+// ListRecoverableSessionHandoffTakes returns the recipient's pending offers that a confirmed take
+// of theirs still holds although the inbox no longer lists them: the share was revoked (body
+// erased) or the source session archived. Nothing else can release such a take — the sender's
+// withdraw and expiry wait for it — so the recipient must still see it to give it back
+// (issue #2058). The caller shows them without body or coordinates, and nothing launches
+// from them.
+func (s *SQL) ListRecoverableSessionHandoffTakes(ctx context.Context, membershipID string) ([]SessionHandoffOffer, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+handoffOfferCols+` FROM session_handoff_offer
+		WHERE recipient_membership_id=? AND status='pending' AND take_token<>'' AND take_confirmed_at<>''
+		  AND (ciphertext='' OR NOT EXISTS (SELECT 1 FROM shared_session_catalog c
+		              WHERE c.id=session_handoff_offer.catalog_id AND c.archived=0))
+		ORDER BY created_at DESC`, membershipID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SessionHandoffOffer{}
+	for rows.Next() {
+		r, _, err := scanHandoffOffer(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // ConfirmedSessionHandoffTake returns the token of the confirmed take holding a pending offer

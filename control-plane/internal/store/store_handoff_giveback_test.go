@@ -50,7 +50,7 @@ func TestHandoffGiveBackReleasesExactlyAnUnknownTake(t *testing.T) {
 			if _, err := st.CreateSessionHandoffOffer(ctx, o); err != nil {
 				t.Fatal(err)
 			}
-			ok, err := st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, now)
+			ok, err := st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, "x", now)
 			must(false, ok, err, "give back an untaken offer")
 			if s := state(o.ID); s != "" {
 				t.Fatalf("untaken offer state %q", s)
@@ -58,7 +58,7 @@ func TestHandoffGiveBackReleasesExactlyAnUnknownTake(t *testing.T) {
 
 			// Unconfirmed, fresh and stale: never an unknown launch.
 			_, _ = st.TakeSessionHandoffOffer(ctx, o.ID, f.recipient.ID, "u", NowTS())
-			ok, err = st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, now)
+			ok, err = st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, "u", now)
 			must(false, ok, err, "give back an unconfirmed take")
 			if s := state(o.ID); s != "starting" {
 				t.Fatalf("unconfirmed take state %q, want starting", s)
@@ -66,7 +66,7 @@ func TestHandoffGiveBackReleasesExactlyAnUnknownTake(t *testing.T) {
 			if _, err := st.DB().ExecContext(ctx, `UPDATE session_handoff_offer SET taken_at=? WHERE id=?`, old, o.ID); err != nil {
 				t.Fatal(err)
 			}
-			ok, err = st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, now)
+			ok, err = st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, "u", now)
 			must(false, ok, err, "give back a stale unconfirmed take")
 			if s := state(o.ID); s != "" {
 				t.Fatalf("stale unconfirmed take state %q, want none", s)
@@ -76,7 +76,7 @@ func TestHandoffGiveBackReleasesExactlyAnUnknownTake(t *testing.T) {
 
 			// Confirmed within the window: its create may still be running.
 			f.confirmedTake(t, o, "c", fresh)
-			ok, err = st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, now)
+			ok, err = st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, "c", now)
 			must(false, ok, err, "give back a take confirmed within the window")
 			if s := state(o.ID); s != "confirming" {
 				t.Fatalf("fresh confirmed take state %q, want confirming", s)
@@ -88,11 +88,13 @@ func TestHandoffGiveBackReleasesExactlyAnUnknownTake(t *testing.T) {
 			if s := state(o.ID); s != "unknown" {
 				t.Fatalf("confirmed take at the window's edge: state %q, want unknown", s)
 			}
-			ok, err = st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.other.ID, now)
+			ok, err = st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.other.ID, "c", now)
 			must(false, ok, err, "another member gives it back")
-			ok, err = st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.owner.ID, now)
+			ok, err = st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.owner.ID, "c", now)
 			must(false, ok, err, "the sender gives it back")
-			ok, err = st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, now)
+			ok, err = st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, "not-this-take", now)
+			must(false, ok, err, "the recipient gives back another take")
+			ok, err = st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, "c", now)
 			must(true, ok, err, "the recipient gives back the unknown take")
 			got, _, _ := st.GetSessionHandoffOffer(ctx, o.ID)
 			if got.Status != "pending" || got.TakenAt != "" || got.TakeConfirmedAt != "" || got.Ciphertext == "" {
@@ -102,14 +104,14 @@ func TestHandoffGiveBackReleasesExactlyAnUnknownTake(t *testing.T) {
 			must(false, ok, err, "a create under the given-back take")
 			ok, err = st.AcceptSessionHandoffOffer(ctx, o.ID, f.recipient.ID, "c", NowTS(), "late")
 			must(false, ok, err, "a late accept under the given-back take")
-			ok, err = st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, now)
+			ok, err = st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, "c", now)
 			must(false, ok, err, "a second give-back")
 
 			// A decided offer is never touched.
 			f.confirmedTake(t, o, "d", old)
 			ok, err = st.AcceptSessionHandoffOffer(ctx, o.ID, f.recipient.ID, "d", NowTS(), "s")
 			must(true, ok, err, "accept")
-			ok, err = st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, now)
+			ok, err = st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, "d", now)
 			must(false, ok, err, "give back an accepted offer")
 			if got, _, _ := st.GetSessionHandoffOffer(ctx, o.ID); got.Status != "accepted" || got.AcceptedSessionName != "s" {
 				t.Fatalf("the accepted offer moved: %+v", got)
@@ -124,9 +126,128 @@ func TestHandoffGiveBackReleasesExactlyAnUnknownTake(t *testing.T) {
 			if err := st.DeleteSessionShare(ctx, f.sessionShareRow.ID, f.owner.ID); err != nil {
 				t.Fatal(err)
 			}
-			ok, err = st.GiveBackUnknownSessionHandoffTake(ctx, gone.ID, f.recipient.ID, now)
+			ok, err = st.GiveBackUnknownSessionHandoffTake(ctx, gone.ID, f.recipient.ID, "g", now)
 			must(true, ok, err, "give back an unshared unknown take")
 			if got, _, _ := st.GetSessionHandoffOffer(ctx, gone.ID); got.Status != "expired" || got.DecidedAt == "" || got.TakenAt != "" {
+				t.Fatalf("after giving back an unshared offer: %+v, want expired", got)
+			}
+		})
+	}
+}
+
+// A confirmation is bound to the take it was made against (review F2): take A is given back,
+// take B is confirmed and also goes unknown, and a stale request for A — an old tab, or one that
+// was delayed — must not release B.
+func TestHandoffGiveBackIsBoundToTheTake(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range inboxStores(t) {
+		t.Run(name, func(t *testing.T) {
+			f := newHandoffFixtureOn(t, st)
+			now := time.Now().UTC()
+			old := now.Add(-HandoffTakeWindow - time.Minute).Format(time.RFC3339)
+			o := f.offer(t, "")
+			if _, err := st.CreateSessionHandoffOffer(ctx, o); err != nil {
+				t.Fatal(err)
+			}
+			f.confirmedTake(t, o, "A", old)
+			if ok, err := st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, "A", now); err != nil || !ok {
+				t.Fatalf("give back A: ok=%v err=%v", ok, err)
+			}
+			f.confirmedTake(t, o, "B", old)
+			if ok, err := st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, "A", now); err != nil || ok {
+				t.Fatalf("a stale give-back of A released B: ok=%v err=%v", ok, err)
+			}
+			if ok, err := st.TransitionSessionHandoffOffer(ctx, o.ID, "pending", "withdrawn", NowTS(), ""); err != nil || ok {
+				t.Fatalf("the sender withdrew past B: ok=%v err=%v", ok, err)
+			}
+			if ok, err := st.AcceptSessionHandoffOffer(ctx, o.ID, f.recipient.ID, "B", NowTS(), "s-b"); err != nil || !ok {
+				t.Fatalf("B's late accept: ok=%v err=%v", ok, err)
+			}
+		})
+	}
+}
+
+// A confirmed take outlives the inbox's own filters (review F1): after an unshare or an
+// archive the inbox drops the offer, but the recovery list still names it until it is given
+// back. An untaken or merely unconfirmed offer is not listed there.
+func TestHandoffRecoverableTakesOutliveUnshareAndArchive(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range inboxStores(t) {
+		t.Run(name, func(t *testing.T) {
+			f := newHandoffFixtureOn(t, st)
+			old := time.Now().UTC().Add(-HandoffTakeWindow - time.Minute).Format(time.RFC3339)
+			count := func(what string, inbox, recovery int) {
+				t.Helper()
+				in, err := st.ListSessionHandoffOffersByRecipient(ctx, f.recipient.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				rec, err := st.ListRecoverableSessionHandoffTakes(ctx, f.recipient.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(in) != inbox || len(rec) != recovery {
+					t.Fatalf("%s: inbox=%d recovery=%d, want %d and %d", what, len(in), len(rec), inbox, recovery)
+				}
+				if other, _ := st.ListRecoverableSessionHandoffTakes(ctx, f.other.ID); len(other) != 0 {
+					t.Fatalf("%s: another member's recovery list holds %d", what, len(other))
+				}
+			}
+			o := f.offer(t, "")
+			if _, err := st.CreateSessionHandoffOffer(ctx, o); err != nil {
+				t.Fatal(err)
+			}
+			count("untaken", 1, 0)
+			f.confirmedTake(t, o, "tok", old)
+			count("confirmed, shared", 1, 0)
+
+			// Archive: the inbox hides it, the recovery list keeps it; a give-back makes it pending.
+			arch := f.catalog
+			arch.Archived = true
+			if err := st.ReplaceSharedSessionCatalog(ctx, f.ws.ID, f.owner.ID, []SharedSessionCatalog{arch}); err != nil {
+				t.Fatal(err)
+			}
+			count("confirmed, archived", 0, 1)
+			if ok, err := st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, "tok", time.Now()); err != nil || !ok {
+				t.Fatalf("give back after archive: ok=%v err=%v", ok, err)
+			}
+			count("given back, archived", 0, 0)
+			if ok, err := st.TransitionSessionHandoffOffer(ctx, o.ID, "pending", "withdrawn", NowTS(), ""); err != nil || !ok {
+				t.Fatalf("withdraw after the give-back: ok=%v err=%v", ok, err)
+			}
+			if err := st.ReplaceSharedSessionCatalog(ctx, f.ws.ID, f.owner.ID, []SharedSessionCatalog{f.catalog}); err != nil {
+				t.Fatal(err)
+			}
+
+			// Unshare: the body goes, the recovery list keeps it; a give-back expires it.
+			u := f.offer(t, "")
+			if _, err := st.CreateSessionHandoffOffer(ctx, u); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.TakeSessionHandoffOffer(ctx, u.ID, f.recipient.ID, "live", NowTS()); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.DeleteSessionShare(ctx, f.sessionShareRow.ID, f.owner.ID); err != nil {
+				t.Fatal(err)
+			}
+			count("unconfirmed, unshared", 0, 0)
+			if err := st.PutSessionShare(ctx, f.sessionShareRow); err != nil {
+				t.Fatal(err)
+			}
+			u2 := f.offer(t, "")
+			if _, err := st.CreateSessionHandoffOffer(ctx, u2); err != nil {
+				t.Fatal(err)
+			}
+			f.confirmedTake(t, u2, "tok2", old)
+			if err := st.DeleteSessionShare(ctx, f.sessionShareRow.ID, f.owner.ID); err != nil {
+				t.Fatal(err)
+			}
+			count("confirmed, unshared", 0, 1)
+			if ok, err := st.GiveBackUnknownSessionHandoffTake(ctx, u2.ID, f.recipient.ID, "tok2", time.Now()); err != nil || !ok {
+				t.Fatalf("give back after unshare: ok=%v err=%v", ok, err)
+			}
+			count("given back, unshared", 0, 0)
+			if got, _, _ := st.GetSessionHandoffOffer(ctx, u2.ID); got.Status != "expired" {
 				t.Fatalf("after giving back an unshared offer: %+v, want expired", got)
 			}
 		})
@@ -154,7 +275,7 @@ func giveBackRace(t *testing.T, f handoffFixture, rounds int, other func(f hando
 		go func() {
 			defer wg.Done()
 			<-start
-			r, err := st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, time.Now())
+			r, err := st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, "tok", time.Now())
 			if err != nil {
 				t.Errorf("give back: %v", err)
 			}

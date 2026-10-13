@@ -113,7 +113,7 @@ describe("the received handoff row", () => {
   // #2058: a launch whose result stays unknown can be given back, by the recipient only, after a
   // confirmation that names the risk; a launch still in progress cannot.
   describe("giving back a launch whose result is unknown", () => {
-    const unknown: HandoffOffer = { ...offer, takeState: "unknown" };
+    const unknown: HandoffOffer = { ...offer, takeState: "unknown", takeRev: "rev-a" };
     const repos = [{ name: "private", path: "/r/private" }];
 
     it("is offered only for an unknown take", async () => {
@@ -132,7 +132,10 @@ describe("the received handoff row", () => {
       await render(repos, false, unknown);
       await act(async () => giveBackButton()!.click());
       expect(confirm).toHaveBeenCalledWith(t("handoff.give_back_confirm", { who: "alice" }));
+      // It must say both: the session may exist, and a launch still in progress is not cancelled.
       expect(confirm.mock.calls[0][0]).toMatch(/twice/);
+      expect(confirm.mock.calls[0][0]).toMatch(/does not cancel/);
+      expect(confirm.mock.calls[0][0]).toMatch(/still being processed/);
       expect(apiJSON).not.toHaveBeenCalled();
       confirm.mockRestore();
     });
@@ -142,7 +145,7 @@ describe("the received handoff row", () => {
       apiJSON.mockResolvedValue({ status: "pending" });
       await render(repos, false, unknown);
       await act(async () => giveBackButton()!.click());
-      expect(apiJSON).toHaveBeenCalledWith("api/session-handoff-offers/offer-1/give-back", "POST", { confirmed: true });
+      expect(apiJSON).toHaveBeenCalledWith("api/session-handoff-offers/offer-1/give-back", "POST", { confirmed: true, takeRev: "rev-a" });
       expect(document.body.textContent).toContain(t("handoff.give_back_done", { who: "alice" }));
       confirm.mockRestore();
     });
@@ -154,6 +157,32 @@ describe("the received handoff row", () => {
       await act(async () => giveBackButton()!.click());
       expect(document.body.textContent).toContain(t("handoff.give_back_too_soon"));
       confirm.mockRestore();
+    });
+
+    it("asks to check again when the row's launch was replaced meanwhile", async () => {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      apiJSON.mockResolvedValue({ error: { code: "handoff_give_back_stale", takeState: "unknown", status: 409 } });
+      await render(repos, false, unknown);
+      await act(async () => giveBackButton()!.click());
+      expect(document.body.textContent).toContain(t("handoff.give_back_stale"));
+      confirm.mockRestore();
+    });
+
+    it("shows an unshared or archived offer held by the launch as a give-back-only row", async () => {
+      const recovery: HandoffOffer = {
+        ...unknown, recoveryOnly: true, prompt: "", branch: "", headSha: "", repoRemote: "",
+      };
+      await render(repos, false, recovery);
+      expect(host.textContent).toContain(t("handoff.recovery_hint"));
+      expect(giveBackButton()).toBeDefined();
+      expect(acceptButton()).toBeUndefined();
+      expect(host.querySelector("select")).toBeNull();
+      expect(host.querySelector("pre")).toBeNull();
+      expect(host.textContent).not.toContain(t("handoff.decline"));
+      // Still within the window: no give-back yet, only the hint.
+      await render(repos, false, { ...recovery, takeState: "confirming" });
+      expect(giveBackButton()).toBeUndefined();
+      expect(host.textContent).toContain(t("handoff.confirming_hint"));
     });
   });
 });
