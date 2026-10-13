@@ -718,3 +718,81 @@ func TestAgentMemoryPurgeSweepsOrphanTransferFiles(t *testing.T) {
 		t.Fatal("an orphan export bundle survived the purge")
 	}
 }
+
+// A crash after the marker is written and before the ref transaction commits leaves the old refs
+// in place: the recovery must see that nothing moved and let the purge run again.
+func TestAgentMemoryPurgeCrashBeforeTheRefTransaction(t *testing.T) {
+	f := purgeSetup(t)
+	agentMemPurgeFault = func(s string) error {
+		if s == "marker" {
+			return errors.New("simulated crash")
+		}
+		return nil
+	}
+	t.Cleanup(func() { agentMemPurgeFault = nil })
+	if _, err := purgeDo(t, f, "a"); err == nil {
+		t.Fatal("expected the simulated crash")
+	}
+	agentMemPurgeFault = nil
+	if _, err := os.Stat(agentMemPurgePendingPath()); err != nil {
+		t.Fatal("fixture: the marker should exist")
+	}
+	// The next purge starts with the recovery and then goes through.
+	if _, err := purgeDo(t, f, "a"); err != nil {
+		t.Fatalf("purge after the crash window: %v", err)
+	}
+	if objectExists(f.oldBlob) || allObjectsContain(t, "Hollowbrook") {
+		t.Fatal("text survived")
+	}
+	if _, err := os.Stat(agentMemPurgePendingPath()); err == nil {
+		t.Fatal("marker left")
+	}
+	fsckClean(t)
+}
+
+func TestAgentMemoryPurgeRecoveryAfterAnUncommittedTransactionKeepsHistory(t *testing.T) {
+	f := purgeSetup(t)
+	agentMemPurgeFault = func(s string) error {
+		if s == "marker" {
+			return errors.New("simulated crash")
+		}
+		return nil
+	}
+	t.Cleanup(func() { agentMemPurgeFault = nil })
+	_, _ = purgeDo(t, f, "a")
+	agentMemPurgeFault = nil
+	ResumeMemoryPurge()
+	if !objectExists(f.oldBlob) {
+		t.Fatal("a recovery of a transaction that never committed rewrote history")
+	}
+	if _, err := os.Stat(agentMemPurgePendingPath()); err == nil {
+		t.Fatal("marker left")
+	}
+}
+
+// A young orphan upload (the Agent died right after saving it) is removed; one a handler is
+// still receiving is not.
+func TestAgentMemoryPurgeSweepsYoungOrphanUploadsButNotActiveOnes(t *testing.T) {
+	f := purgeSetup(t)
+	if err := os.MkdirAll(memoryWorkDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	orphan := memoryWorkDir() + "/upload-orphan"
+	active := memoryWorkDir() + "/upload-active"
+	for _, p := range []string{orphan, active} {
+		if err := os.WriteFile(p, []byte("bundle"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	memoryTrackUpload(active)
+	t.Cleanup(func() { memoryUntrackUpload(active) })
+	if _, err := purgeDo(t, f, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(orphan); err == nil {
+		t.Fatal("a young orphan upload survived")
+	}
+	if _, err := os.Stat(active); err != nil {
+		t.Fatal("an upload being received was removed")
+	}
+}

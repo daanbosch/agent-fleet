@@ -261,6 +261,12 @@ func HandleMemoryImport(w http.ResponseWriter, r *http.Request) {
 	}
 	max := memoryImportMaxBytes()
 	tmp, name := "", ""
+	// Until this handler is done with its upload, a purge must not take it for an orphan.
+	defer func() {
+		if tmp != "" {
+			memoryUntrackUpload(tmp)
+		}
+	}()
 	for {
 		part, perr := mr.NextPart()
 		if perr == io.EOF {
@@ -278,6 +284,8 @@ func HandleMemoryImport(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteErr(w, http.StatusInternalServerError, errCodeMemoryImportFailed, cerr.Error())
 			return
 		}
+		tmp = f.Name()
+		memoryTrackUpload(tmp)
 		n, werr := io.Copy(f, io.LimitReader(part, max+1))
 		_ = f.Close()
 		if werr != nil || n > max {

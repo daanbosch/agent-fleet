@@ -39,7 +39,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
+	"sync"
 )
 
 // agentMemPurgedTrailer marks the first kept change of a memory whose earlier revisions were
@@ -439,6 +439,15 @@ func (c purgeRawCommit) render() []byte {
 type agentMemPurgePending struct {
 	Path  string   `json:"path"` // af/<scope dir>/<name>.md
 	Blobs []string `json:"blobs"`
+	// Refs are the ref moves, so a recovery can tell a transaction that never committed (a ref
+	// still at Old) from one that did; "" means absent.
+	Refs []agentMemPurgeRefMove `json:"refs"`
+}
+
+type agentMemPurgeRefMove struct {
+	Name string `json:"name"`
+	Old  string `json:"old"`
+	New  string `json:"new"`
 }
 
 // agentMemPurgeResume finishes a purge a crash or a failed check cut short. The marker stays
@@ -450,6 +459,14 @@ func agentMemPurgeResume() error {
 	}
 	var p agentMemPurgePending
 	_ = json.Unmarshal(b, &p) // unreadable: still reset the index and collect
+	for _, m := range p.Refs {
+		cur, _ := memoryGitRun("rev-parse", "--verify", "--quiet", m.Name)
+		if m.Old != m.New && cur == m.Old {
+			// The transaction is atomic and this ref was not moved, so none was: nothing was
+			// rewritten, and the purge can simply be run again.
+			return os.Remove(agentMemPurgePendingPath())
+		}
+	}
 	if _, _, err := agentMemPurgeFinish(p); err != nil {
 		return err
 	}
@@ -524,24 +541,55 @@ func agentMemPurgeFinish(p agentMemPurgePending) (removed, shared int, err error
 	return removed, shared, nil
 }
 
+var (
+	memoryUploadsMu     sync.Mutex
+	memoryActiveUploads = map[string]bool{}
+)
+
+func memoryTrackUpload(path string) {
+	memoryUploadsMu.Lock()
+	memoryActiveUploads[path] = true
+	memoryUploadsMu.Unlock()
+}
+
+func memoryUntrackUpload(path string) {
+	memoryUploadsMu.Lock()
+	delete(memoryActiveUploads, path)
+	memoryUploadsMu.Unlock()
+}
+
 // agentMemPurgeSweepWork removes the transfer temporaries an interrupted export or import left in
 // the work dir; they can hold the old history. Exports and imports build theirs under the snapshot
-// lock, which the caller holds, so only an upload still being received (not yet under it) is spared.
-func agentMemPurgeSweepWork() {
-	ents, _ := os.ReadDir(memoryWorkDir())
+// lock, which the caller holds. An upload is spared only while a handler of this process is
+// receiving it (memoryTrackUpload): age cannot tell a live upload from an orphan, and a file no
+// handler owns is an orphan. Failing to remove one fails the purge.
+func agentMemPurgeSweepWork() error {
+	ents, err := os.ReadDir(memoryWorkDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	memoryUploadsMu.Lock()
+	defer memoryUploadsMu.Unlock()
 	for _, e := range ents {
 		n := e.Name()
+		full := filepath.Join(memoryWorkDir(), n)
 		switch {
 		case strings.HasPrefix(n, "export-"), strings.HasPrefix(n, "import-"):
 		case strings.HasPrefix(n, "upload-"):
-			if info, err := e.Info(); err != nil || time.Since(info.ModTime()) < 10*time.Minute {
+			if memoryActiveUploads[full] {
 				continue
 			}
 		default:
 			continue
 		}
-		_ = os.RemoveAll(filepath.Join(memoryWorkDir(), n))
+		if err := os.RemoveAll(full); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // ResumeMemoryPurge runs the pending gc of an interrupted purge, if there is one.
@@ -552,6 +600,9 @@ func ResumeMemoryPurge() {
 	defer memorySnapshotMu.Unlock()
 	if err := agentMemPurgeResume(); err != nil {
 		log.Printf("agent memory: finishing an interrupted purge: %s", agentMemErrKind(err))
+	}
+	if err := agentMemPurgeSweepWork(); err != nil {
+		log.Printf("agent memory: sweeping transfer leftovers: %s", agentMemErrKind(err))
 	}
 }
 
@@ -587,7 +638,9 @@ func agentMemPurge(req agentMemPurgeReq) (agentMemPurgeResult, error) {
 	if err := agentMemPurgeResume(); err != nil {
 		return agentMemPurgeResult{}, err
 	}
-	agentMemPurgeSweepWork()
+	if err := agentMemPurgeSweepWork(); err != nil {
+		return agentMemPurgeResult{}, err
+	}
 	res := agentMemPurgeResult{Scope: req.Scope, Name: req.Name}
 	if !memoryHasCommits() {
 		return res, memoryErrf(http.StatusConflict, errCodeMemoryConflict, "there is no history to purge")
@@ -685,24 +738,30 @@ func agentMemPurge(req agentMemPurgeReq) (agentMemPurgeResult, error) {
 	if err := os.MkdirAll(memoryWorkDir(), 0o700); err != nil {
 		return res, err
 	}
-	marker, _ := json.Marshal(agentMemPurgePending{Path: s.path, Blobs: s.purged})
-	if err := os.WriteFile(agentMemPurgePendingPath(), marker, 0o600); err != nil {
-		return res, err
-	}
 	var tx bytes.Buffer
+	var moves []agentMemPurgeRefMove
 	tx.WriteString("start\n")
 	for _, r := range s.refs {
 		switch nt := mapped[r.sha]; {
 		case nt == r.sha:
 		case nt == "":
 			fmt.Fprintf(&tx, "delete %s %s\n", r.Name, r.sha)
+			moves = append(moves, agentMemPurgeRefMove{Name: r.Name, Old: r.sha})
 			res.RefsDeleted++
 		default:
 			fmt.Fprintf(&tx, "update %s %s %s\n", r.Name, nt, r.sha)
+			moves = append(moves, agentMemPurgeRefMove{Name: r.Name, Old: r.sha, New: nt})
 			res.RefsRewritten++
 		}
 	}
 	tx.WriteString("prepare\ncommit\n")
+	marker, _ := json.Marshal(agentMemPurgePending{Path: s.path, Blobs: s.purged, Refs: moves})
+	if err := os.WriteFile(agentMemPurgePendingPath(), marker, 0o600); err != nil {
+		return res, err
+	}
+	if err := agentMemPurgeStage("marker"); err != nil {
+		return res, err
+	}
 	cmd := memoryGit("update-ref", "--stdin")
 	cmd.Stdin = &tx
 	if out, err := cmd.CombinedOutput(); err != nil {
