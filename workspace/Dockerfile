@@ -346,10 +346,10 @@ ENV COPILOT_AUTO_UPDATE=false
 # 当てるのと同じ OPENSSL_ia32cap マスクで検証する（0008 の 2026-09-07 決定）ので、
 # --version 検証を飛ばすのは x86 以外のビルドホストだけ（arm64 のクロスビルドは
 # バイナリを走らせられるとは限らない）。
-ARG AGY_VERSION=1.3.3
-ARG AGY_RELEASE_BUILD=5524738307653632
-ARG AGY_SHA256_X64=8ee3ca32574c431285efbf4d4732f7f8d53e959370bc4a61646e4fa496f7f2b6
-ARG AGY_SHA256_ARM64=a9d23fe1d7e5c8471881ab37723571a8d3f24e6ecace8fe082f8c0c8d90f41ca
+ARG AGY_VERSION=1.3.4
+ARG AGY_RELEASE_BUILD=5524158944247808
+ARG AGY_SHA256_X64=db5e81e8dee72d282cb1fb5fcd98dc5a43680730d71e3d637a67c874ec077ad3
+ARG AGY_SHA256_ARM64=56161a1849eff501fead19bc7c477ee80f26776bf470fda01c119cc345a1818c
 RUN if [ "${BAKE_AGENT_CLIS}" = "1" ]; then set -eux; \
       arch="$(dpkg --print-architecture)"; \
       case "$arch" in \
