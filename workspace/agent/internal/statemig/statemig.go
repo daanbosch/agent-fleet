@@ -75,6 +75,9 @@ var Entries = []string{
 	// The reply claude is still streaming (status/livetext.go). Introduced directly under
 	// AgentStateDir; it never existed under .config.
 	"live-text",
+	// The durable outcome of a create under an idempotency key (sessionx
+	// session_idempotency.go). Introduced directly under AgentStateDir.
+	"session-create-outcomes",
 	// Archives being built for a folder download (fs_zip.go). Introduced directly under
 	// AgentStateDir, and empty between requests; listed only so the drift check stays honest.
 	"zip-export",

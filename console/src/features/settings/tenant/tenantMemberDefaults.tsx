@@ -5,12 +5,8 @@ import { useCallback, useEffect, useState } from "react";
 import { api, apiJSON, errDetail } from "../../../core/api/client.ts";
 import { Icon } from "../../../ui/Icon.tsx";
 import { useT } from "../../../lib/i18n/index.ts";
-import { agentOf } from "../../../agents/registry.ts";
+import { MEMBER_DEFAULT_AGENTS, agentOf } from "../../../agents/registry.ts";
 import type { TenantMemberDefaults } from "../../../core/store/uiState.ts";
-
-/** The kinds a tenant may name. Mirrors memberDefaultAgents in control-plane/tenant_member_defaults.go,
- *  which refuses anything else. */
-export const MEMBER_DEFAULT_AGENTS = ["claude", "codex", "opencode", "cursor", "copilot", "kiro", "muse"] as const;
 
 /** GET/PUT /api/admin/tenants/{slug}/member-defaults. */
 export interface TenantMemberDefaultsView {

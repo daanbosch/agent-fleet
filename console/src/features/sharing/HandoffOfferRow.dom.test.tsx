@@ -42,13 +42,13 @@ const offer: HandoffOffer = {
 let root: Root | null = null;
 let host: HTMLDivElement;
 
-async function render(repos: { name: string; path?: string }[], withStartHost = false) {
+async function render(repos: { name: string; path?: string }[], withStartHost = false, row: HandoffOffer = offer) {
   useReposStore.setState({ repos } as never);
   await act(async () => {
     root!.render(
       <ToastProvider>
         <ul>
-          <HandoffOfferRow offer={offer} onDone={() => undefined} />
+          <HandoffOfferRow offer={row} onDone={() => undefined} />
         </ul>
         {withStartHost && <StartHost />}
       </ToastProvider>,
@@ -57,6 +57,8 @@ async function render(repos: { name: string; path?: string }[], withStartHost = 
 }
 
 const select = () => host.querySelector("select") as HTMLSelectElement;
+const giveBackButton = () =>
+  [...host.querySelectorAll("button")].find((b) => b.textContent?.includes(t("handoff.give_back"))) as HTMLButtonElement | undefined;
 const acceptButton = () =>
   [...host.querySelectorAll("button")].find((b) => b.textContent?.includes(t("handoff.accept"))) as HTMLButtonElement;
 
@@ -106,5 +108,81 @@ describe("the received handoff row", () => {
     expect(useLaunchSeed.getState().handoffOfferId).toBe("offer-1");
     // Opening the dialog must not hold the offer: a cancelled dialog leaves it pending.
     expect(apiJSON).not.toHaveBeenCalled();
+  });
+
+  // #2058: a launch whose result stays unknown can be given back, by the recipient only, after a
+  // confirmation that names the risk; a launch still in progress cannot.
+  describe("giving back a launch whose result is unknown", () => {
+    const unknown: HandoffOffer = { ...offer, takeState: "unknown", takeRev: "rev-a" };
+    const repos = [{ name: "private", path: "/r/private" }];
+
+    it("is offered only for an unknown take", async () => {
+      await render(repos);
+      expect(giveBackButton()).toBeUndefined();
+      await render(repos, false, { ...offer, takeState: "confirming" });
+      expect(giveBackButton()).toBeUndefined();
+      expect(host.textContent).toContain(t("handoff.confirming_hint"));
+      await render(repos, false, unknown);
+      expect(giveBackButton()).toBeDefined();
+      expect(host.textContent).toContain(t("handoff.unknown_hint"));
+    });
+
+    it("asks first, naming the risk, and sends nothing when cancelled", async () => {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+      await render(repos, false, unknown);
+      await act(async () => giveBackButton()!.click());
+      expect(confirm).toHaveBeenCalledWith(t("handoff.give_back_confirm", { who: "alice" }));
+      // It must say both: the session may exist, and a launch still in progress is not cancelled.
+      expect(confirm.mock.calls[0][0]).toMatch(/twice/);
+      expect(confirm.mock.calls[0][0]).toMatch(/does not cancel/);
+      expect(confirm.mock.calls[0][0]).toMatch(/still being processed/);
+      expect(apiJSON).not.toHaveBeenCalled();
+      confirm.mockRestore();
+    });
+
+    it("gives it back once confirmed and says so", async () => {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      apiJSON.mockResolvedValue({ status: "pending" });
+      await render(repos, false, unknown);
+      await act(async () => giveBackButton()!.click());
+      expect(apiJSON).toHaveBeenCalledWith("api/session-handoff-offers/offer-1/give-back", "POST", { confirmed: true, takeRev: "rev-a" });
+      expect(document.body.textContent).toContain(t("handoff.give_back_done", { who: "alice" }));
+      confirm.mockRestore();
+    });
+
+    it("says the launch may still be running when the CP refuses", async () => {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      apiJSON.mockResolvedValue({ error: { code: "handoff_not_unknown", takeState: "confirming", status: 409 } });
+      await render(repos, false, unknown);
+      await act(async () => giveBackButton()!.click());
+      expect(document.body.textContent).toContain(t("handoff.give_back_too_soon"));
+      confirm.mockRestore();
+    });
+
+    it("asks to check again when the row's launch was replaced meanwhile", async () => {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      apiJSON.mockResolvedValue({ error: { code: "handoff_give_back_stale", takeState: "unknown", status: 409 } });
+      await render(repos, false, unknown);
+      await act(async () => giveBackButton()!.click());
+      expect(document.body.textContent).toContain(t("handoff.give_back_stale"));
+      confirm.mockRestore();
+    });
+
+    it("shows an unshared or archived offer held by the launch as a give-back-only row", async () => {
+      const recovery: HandoffOffer = {
+        ...unknown, recoveryOnly: true, prompt: "", branch: "", headSha: "", repoRemote: "",
+      };
+      await render(repos, false, recovery);
+      expect(host.textContent).toContain(t("handoff.recovery_hint"));
+      expect(giveBackButton()).toBeDefined();
+      expect(acceptButton()).toBeUndefined();
+      expect(host.querySelector("select")).toBeNull();
+      expect(host.querySelector("pre")).toBeNull();
+      expect(host.textContent).not.toContain(t("handoff.decline"));
+      // Still within the window: no give-back yet, only the hint.
+      await render(repos, false, { ...recovery, takeState: "confirming" });
+      expect(giveBackButton()).toBeUndefined();
+      expect(host.textContent).toContain(t("handoff.confirming_hint"));
+    });
   });
 });

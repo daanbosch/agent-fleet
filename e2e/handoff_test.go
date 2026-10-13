@@ -106,8 +106,21 @@ func TestMemberHandoff(t *testing.T) {
 	// holds it the sender cannot withdraw it, so the same work cannot start on both sides.
 	token := takeOffer(t, b, offer.ID)
 	a.postJSON("/api/session-handoff-offers/"+offer.ID+"/take", map[string]any{}, http.StatusNotFound) // only the recipient takes
-	if c, _ := apiErr(a.call(http.MethodDelete, "/api/session-handoff-offers/"+offer.ID, nil, http.StatusConflict)); c != "handoff_being_taken" {
+	if got := a.call(http.MethodDelete, "/api/session-handoff-offers/"+offer.ID, nil, http.StatusConflict); takeStateOf(got) != "starting" {
+		t.Fatalf("withdraw during the recipient's take refused with %v, want handoff_being_taken while starting", got)
+	} else if c, _ := apiErr(got); c != "handoff_being_taken" {
 		t.Fatalf("withdraw during the recipient's take refused with %q, want handoff_being_taken", c)
+	}
+	// The give-back (#2058) is the recipient's alone, and only for a launch whose outcome stayed
+	// unknown past the take window: a take still starting is not given back.
+	a.postJSON("/api/session-handoff-offers/"+offer.ID+"/give-back", map[string]any{"confirmed": true}, http.StatusNotFound)
+	if got := b.postJSON("/api/session-handoff-offers/"+offer.ID+"/give-back", map[string]any{"confirmed": true}, http.StatusConflict); takeStateOf(got) != "starting" {
+		t.Fatalf("give-back of a starting take answered %v, want handoff_not_unknown while starting", got)
+	} else if c, _ := apiErr(got); c != "handoff_not_unknown" {
+		t.Fatalf("give-back of a starting take refused with %q, want handoff_not_unknown", c)
+	}
+	if o := ownedOffer(t, a, offer.ID); o.Status != "pending" || o.TakeState != "starting" {
+		t.Fatalf("A's ledger during the take: %s/%q, want pending/starting", o.Status, o.TakeState)
 	}
 	launched := b.createSession(map[string]any{
 		"kind": "shell", "title": in[0].Title, "dir": repoDir,
@@ -119,6 +132,12 @@ func TestMemberHandoff(t *testing.T) {
 	}
 	if got := b.shell(launched, "git branch --show-current"); got != branch {
 		t.Fatalf("launched session is on %q, want %s", got, branch)
+	}
+	// The CP saw the Agent create the session, so it has already accepted the offer: a
+	// Console that lost that answer does not leave the offer to its next press (#2040). The
+	// Console's own accept afterwards is answered as done.
+	if o := ownedOffer(t, a, offer.ID); o.Status != "accepted" || o.AcceptedSessionName != launched {
+		t.Fatalf("after the create: offer %s is %s/%q, want accepted/%q by the CP", o.ID, o.Status, o.AcceptedSessionName, launched)
 	}
 	acceptOffer(t, b, offer.ID, launched, token)
 
@@ -185,8 +204,16 @@ type handoffOffer struct {
 	RepoRemote          string `json:"repoRemote"`
 	HeadSha             string `json:"headSha"`
 	AcceptedSessionName string `json:"acceptedSessionName"`
+	TakeState           string `json:"takeState"`
 	OwnerUserKey        string `json:"ownerUserKey"`
 	Prompt              string `json:"prompt"`
+}
+
+// takeStateOf is the takeState an error answer names ("" when absent).
+func takeStateOf(v map[string]any) string {
+	e, _ := v["error"].(map[string]any)
+	s, _ := e["takeState"].(string)
+	return s
 }
 
 // recipientsView is GET /api/sessions/{name}/handoff-recipients reduced to the candidates'

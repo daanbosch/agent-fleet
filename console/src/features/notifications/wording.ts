@@ -27,6 +27,7 @@ export const NOTIFICATION_KIND_LABELS: Record<string, MsgKey> = {
   "handoff-offer": "noti.kind_handoff_offer",
   "handoff-accepted": "noti.kind_handoff_accepted",
   "handoff-expired": "noti.kind_handoff_expired",
+  "handoff-late-session": "noti.kind_handoff_late_session",
   "arch-residue": "noti.kind_arch_residue",
   "start-deadline": "noti.kind_start_deadline",
   "aws-login-required": "noti.kind_aws_login_required",
@@ -204,6 +205,16 @@ export function notificationWording(n: NotificationWordingInput): { title: strin
     // It expired without being accepted. No reason is asked for, but the fact that it is now left
     // hanging has to be reported.
     return { title: t("notif.handoff_expired.title"), body: name, speech: t("notif.handoff_expired.speech") };
+  }
+  if (n.kind === "handoff-late-session") {
+    // The recipient's Agent reported a session under a launch they had given back (#2058). The
+    // offer was left as it was, so whether the work now runs twice is theirs to check.
+    const session = typeof n.payload.sessionName === "string" ? n.payload.sessionName : "";
+    return {
+      title: t("notif.handoff_late_session.title"),
+      body: t("notif.handoff_late_session.body", { title: name, session }),
+      speech: t("notif.handoff_late_session.speech"),
+    };
   }
   if (n.kind === "schedule-failed" || n.kind === "schedule-skipped") {
     // A scheduled run did not happen (docs/log/38). Without this branch, schedule-* fell through

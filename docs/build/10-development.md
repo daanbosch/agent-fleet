@@ -287,6 +287,16 @@ npm --prefix console run build
   | `secret-scan` | credential leaks over the whole history (below) |
   | `release-scan` | the forbidden-token gate over the tracked tree — the same scanner the pre-commit hook runs over staged content |
   | `model-id-lint` | no model-id-shaped string literal in either Go module outside `workspace/agent/internal/modelfallback`; `// model-id-lint:allow <reason>` marks one that chooses no model |
+  | `migration-versions` | sets the `migration-version` commit status on every open PR into `develop`: failure when a migration the PR adds takes a version `develop` already holds (compared as the runner reads it, so `95_x` and `0095_y` collide), shares its version with another new file of the same PR, or has no readable version. This job is the script's self-test; the status is posted by `migration-version.yml`, which has no cancel-in-progress, on the PR's own events (including a retarget to `develop`) and again for every open PR on each push to `develop`. `scripts/migration-versions.sh` |
+
+  To make it a required check on `develop`, require the context **`migration-version`**
+  (the commit status, not the `migration-versions` job or the `migration-version.yml` workflow's `publish` job), source GitHub Actions. It judges
+  each PR against `develop` only, never against another open PR: two open PRs that take
+  the same number both stay green until the first merges, and the push that merge makes
+  turns the second red. A fork PR's token is read-only, so its PR is checked without a
+  status and stays unmergeable until the next push to `develop`, or until a maintainer runs
+  `gh workflow run migration-version.yml --ref develop`. The same manual run re-posts every open PR's
+  status after an outage or a broken job.
 
   On a pull request, the `changes` job skips `control-plane`, `workspace-agent`,
   `deploy-scripts` and `console` when every changed path is inert — `docs/` and `guide/`

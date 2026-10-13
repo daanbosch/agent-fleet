@@ -34,13 +34,20 @@ type inboxEnv struct {
 
 func newInboxEnv(t *testing.T) *inboxEnv {
 	t.Helper()
-	restoreAuthExemptions(t)
-	ctx := context.Background()
 	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "cp.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
+	return newInboxEnvOn(t, st)
+}
+
+// newInboxEnvOn is newInboxEnv on a store the caller opened, for the routes whose behaviour
+// is a conditional update and so has to be shown on Postgres as well.
+func newInboxEnvOn(t *testing.T, st *store.SQL) *inboxEnv {
+	t.Helper()
+	restoreAuthExemptions(t)
+	ctx := context.Background()
 	if err := st.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}

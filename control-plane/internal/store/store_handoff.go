@@ -183,8 +183,9 @@ func (s *SQL) TransitionSessionHandoffOffer(ctx context.Context, id, from, to, d
 }
 
 // TakeSessionHandoffOffer reserves a pending offer for its recipient before the launch
-// (issue #2020). taken=false means it is no longer pending, has run past its deadline, or
-// a take still holds it. Together with the guard on TransitionSessionHandoffOffer this makes
+// (issue #2020). taken=false means it is no longer pending, has run past its deadline, is no
+// longer launchable (unshared or archived: a recovery row must never yield a launch, whatever
+// a Console renders), or a take still holds it. Together with the guard on TransitionSessionHandoffOffer this makes
 // the sender's withdraw and the recipient's take exclusive: whichever lands first wins, the
 // other changes nothing (ADR 0057 decision 6).
 func (s *SQL) TakeSessionHandoffOffer(ctx context.Context, id, recipientMembershipID, token, now string) (bool, error) {
@@ -192,7 +193,7 @@ func (s *SQL) TakeSessionHandoffOffer(ctx context.Context, id, recipientMembersh
 		return false, nil
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE session_handoff_offer SET take_token=?,taken_at=?,take_confirmed_at=''
-		WHERE id=? AND recipient_membership_id=? AND status='pending' AND expires_at>?`+handoffNotHeld,
+		WHERE id=? AND recipient_membership_id=? AND status='pending' AND expires_at>?`+handoffLaunchable+handoffNotHeld,
 		token, now, id, recipientMembershipID, now, handoffTakeStale())
 	if err != nil {
 		return false, err
@@ -206,12 +207,16 @@ func (s *SQL) TakeSessionHandoffOffer(ctx context.Context, id, recipientMembersh
 // still pending under this very token, so a Console that took the offer, went quiet past
 // the take window and lost it — to the sender's withdraw or to another take — cannot start
 // the work when it resumes. Once confirmed, the take holds until it is accepted or released.
+//
+// A take confirms once: a second create under the same token is refused here, before it
+// reaches the Agent (issue #2040). Two creates under one take would share one Agent key, and
+// the answer of one could then settle the take while the other made the session.
 func (s *SQL) ConfirmSessionHandoffTake(ctx context.Context, id, recipientMembershipID, token, now string) (bool, error) {
 	if token == "" {
 		return false, nil
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE session_handoff_offer SET take_confirmed_at=?
-		WHERE id=? AND recipient_membership_id=? AND status='pending' AND take_token=?`,
+		WHERE id=? AND recipient_membership_id=? AND status='pending' AND take_token=? AND take_confirmed_at=''`,
 		now, id, recipientMembershipID, token)
 	if err != nil {
 		return false, err
@@ -220,10 +225,14 @@ func (s *SQL) ConfirmSessionHandoffTake(ctx context.Context, id, recipientMember
 	return n == 1, err
 }
 
-// ReleaseSessionHandoffOffer gives a take back after a launch that failed or was abandoned,
-// so the offer is pending and decidable again. Only the take's own token releases it. An
-// offer whose share was revoked while its take was confirmed (body already erased by
-// invalidateUnauthorizedShareDerivatives) expires instead: nobody may take it any more.
+// ReleaseSessionHandoffOffer gives any take back, confirmed or not, so the offer is pending and
+// decidable again. Only the CP calls it, on the recipient's Agent's own word that no session
+// exists under the take's key: the create was refused (a refusal is final for that key), or
+// the key was abandoned (reconcileTake). A Console's release goes through
+// ReleaseUnconfirmedSessionHandoffTake instead.
+// Only the take's own token releases it. An offer whose share was revoked while its take was
+// confirmed (body already erased by invalidateUnauthorizedShareDerivatives) expires instead:
+// nobody may take it any more.
 func (s *SQL) ReleaseSessionHandoffOffer(ctx context.Context, id, recipientMembershipID, token string) (bool, error) {
 	if token == "" {
 		return false, nil
@@ -240,6 +249,165 @@ func (s *SQL) ReleaseSessionHandoffOffer(ctx context.Context, id, recipientMembe
 	}
 	n, err := res.RowsAffected()
 	return n == 1, err
+}
+
+// ReleaseUnconfirmedSessionHandoffTake gives back a take whose create never reached the Agent,
+// or was refused by it: the Console's release, and the holder's next press after losing the
+// create's answer (issue #2040). A confirmed take is left alone, since its session may exist.
+// As with ReleaseSessionHandoffOffer, an offer whose share was revoked meanwhile expires. Releasing the
+// unconfirmed one is safe even while its create is still on the way, because that create's
+// confirm needs this very token and fails once it is gone.
+func (s *SQL) ReleaseUnconfirmedSessionHandoffTake(ctx context.Context, id, recipientMembershipID, token string) (bool, error) {
+	if token == "" {
+		return false, nil
+	}
+	now := NowTS()
+	res, err := s.db.ExecContext(ctx, `UPDATE session_handoff_offer
+		SET take_token='',taken_at='',take_confirmed_at='',
+		    status=CASE WHEN ciphertext='' THEN 'expired' ELSE status END,
+		    decided_at=CASE WHEN ciphertext='' THEN ? ELSE decided_at END
+		WHERE id=? AND recipient_membership_id=? AND status='pending' AND take_token=? AND take_confirmed_at=''`,
+		now, id, recipientMembershipID, token)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// HandoffTakeState names where an offer's take stands at now, for the two sides' screens and
+// for GiveBackUnknownSessionHandoffTake, whose SQL condition is the "unknown" case here:
+//   - "" — no take holds the offer (none, the offer is decided, or an unconfirmed take past
+//     the take window);
+//   - "starting" — an unconfirmed take within the window: the recipient is launching;
+//   - "confirming" — a confirmed take within the window: the create was sent and may still be
+//     running on the recipient's Agent;
+//   - "unknown" — a confirmed take older than the window: the CP never heard the create's
+//     outcome, and only the recipient's next press (reconcileTake) or their give-back
+//     settles it.
+func HandoffTakeState(o SessionHandoffOffer, now time.Time) string {
+	if o.Status != "pending" || o.TakenAt == "" {
+		return ""
+	}
+	stale := now.UTC().Add(-HandoffTakeWindow).Format(time.RFC3339)
+	switch {
+	case o.TakeConfirmedAt == "" && o.TakenAt <= stale:
+		return ""
+	case o.TakeConfirmedAt == "":
+		return "starting"
+	case o.TakeConfirmedAt <= stale:
+		return "unknown"
+	default:
+		return "confirming"
+	}
+}
+
+// handoffGiveBackGuards is what confines a give-back to an unknown take. A variable only so
+// the race test's positive control can turn it off; nothing else assigns it.
+var handoffGiveBackGuards = true
+
+// GiveBackUnknownSessionHandoffTake releases the confirmed take `token` once its create has had
+// the whole take window to answer and never did (HandoffTakeState "unknown"), on the
+// recipient's own statement that no session came of it (issue #2058). It is one conditional
+// update bound to that take, so it cannot release a take that is not in that state when it
+// lands: one still within the window (its create may be on its way to the Agent), one that a
+// reconcile accepted or gave back meanwhile, or a later take that replaced the one the
+// recipient confirmed against (a stale screen or a delayed request). The window is the least
+// the recipient waits, not a point by which the create has finished: giving back cancels
+// nothing on the Agent. Like the other releases, an offer whose share was revoked meanwhile
+// expires instead of going back to pending.
+func (s *SQL) GiveBackUnknownSessionHandoffTake(ctx context.Context, id, recipientMembershipID, token string, now time.Time) (bool, error) {
+	if token == "" {
+		return false, nil
+	}
+	cond := ` AND status='pending' AND take_token=? AND take_confirmed_at<>'' AND take_confirmed_at<=?`
+	args := []any{now.UTC().Format(time.RFC3339), id, recipientMembershipID}
+	if handoffGiveBackGuards {
+		args = append(args, token, now.UTC().Add(-HandoffTakeWindow).Format(time.RFC3339))
+	} else {
+		cond = ""
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE session_handoff_offer
+		SET take_token='',taken_at='',take_confirmed_at='',
+		    status=CASE WHEN ciphertext='' THEN 'expired' ELSE status END,
+		    decided_at=CASE WHEN ciphertext='' THEN ? ELSE decided_at END
+		WHERE id=? AND recipient_membership_id=?`+cond, args...)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// handoffLaunchable is the condition "the recipient can still launch from this offer": its body
+// is there (not erased by an unshare) and its source session is not archived. It is the inbox's
+// own filter, so a new take is never handed out for an offer the inbox does not show.
+const handoffLaunchable = ` AND ciphertext<>'' AND EXISTS (SELECT 1 FROM shared_session_catalog c
+		WHERE c.id=session_handoff_offer.catalog_id AND c.archived=0)`
+
+// ReceivedHandoffOffer is one row of the recipient's received list. ConfirmedTakeToken is the
+// token of the recipient's confirmed take as read in the same SELECT as the row, so a revision
+// derived from it names the take the row shows and never a later one; it is "" when no
+// confirmed take holds the offer, and it never leaves the CP.
+type ReceivedHandoffOffer struct {
+	SessionHandoffOffer
+	// RecoveryOnly: listed only because the recipient's confirmed take still holds an offer the
+	// inbox would otherwise drop (unshared or archived).
+	RecoveryOnly       bool
+	ConfirmedTakeToken string
+}
+
+// ListReceivedSessionHandoffOffers is the recipient's received list in one snapshot: the inbox's
+// offers (ListSessionHandoffOffersByRecipient's filter) plus, as recovery rows, pending offers
+// a confirmed take of theirs still holds although the share was revoked (body erased) or the
+// source session archived. Nothing else can release such a take — the sender's withdraw and
+// expiry wait for it — so the recipient must still see it to give it back (issue #2058). The
+// caller shows recovery rows without body or coordinates, and TakeSessionHandoffOffer never
+// hands out a launch for them.
+func (s *SQL) ListReceivedSessionHandoffOffers(ctx context.Context, membershipID string) ([]ReceivedHandoffOffer, error) {
+	launchable := `(1=1` + handoffLaunchable + `)`
+	rows, err := s.db.QueryContext(ctx, `SELECT `+handoffOfferCols+`,
+		CASE WHEN `+launchable+` THEN 0 ELSE 1 END,
+		CASE WHEN take_confirmed_at<>'' THEN take_token ELSE '' END
+		FROM session_handoff_offer
+		WHERE recipient_membership_id=? AND status='pending'
+		  AND (`+launchable+` OR (take_token<>'' AND take_confirmed_at<>''))
+		ORDER BY created_at DESC`, membershipID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ReceivedHandoffOffer{}
+	for rows.Next() {
+		var r ReceivedHandoffOffer
+		var recovery int
+		o := &r.SessionHandoffOffer
+		if err := rows.Scan(&o.ID, &o.TenantID, &o.CatalogID, &o.OwnerMembershipID, &o.RecipientMembershipID,
+			&o.Title, &o.Ciphertext, &o.KeyRef, &o.RepoRemote, &o.Branch, &o.HeadSha,
+			&o.SourceSessionName, &o.SourceSessionKind, &o.Status, &o.CreatedAt, &o.ExpiresAt,
+			&o.DecidedAt, &o.AcceptedSessionName, &o.TakenAt, &o.TakeConfirmedAt,
+			&recovery, &r.ConfirmedTakeToken); err != nil {
+			return nil, err
+		}
+		r.RecoveryOnly = recovery == 1
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ConfirmedSessionHandoffTake returns the token of the confirmed take holding a pending offer
+// of this recipient: a launch whose create reached the Agent and whose outcome the CP never
+// learnt. The CP needs the token to ask the recipient's Agent what became of that create; it
+// is never sent to a client.
+func (s *SQL) ConfirmedSessionHandoffTake(ctx context.Context, id, recipientMembershipID string) (string, bool, error) {
+	var token string
+	err := s.db.QueryRowContext(ctx, `SELECT take_token FROM session_handoff_offer
+		WHERE id=? AND recipient_membership_id=? AND status='pending' AND take_token<>'' AND take_confirmed_at<>''`,
+		id, recipientMembershipID).Scan(&token)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	return token, err == nil, err
 }
 
 // AcceptSessionHandoffOffer settles a take as accepted once the session exists. It needs the

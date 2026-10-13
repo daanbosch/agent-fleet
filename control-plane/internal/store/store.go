@@ -929,7 +929,9 @@ type SessionHandoffOffer struct {
 	Status, CreatedAt, ExpiresAt, DecidedAt, AcceptedSessionName      string
 	// TakenAt is set while the recipient holds the offer for a launch in progress
 	// (TakeSessionHandoffOffer), TakeConfirmedAt once that launch's create reached the Agent
-	// (ConfirmSessionHandoffTake). The take's token is never read back out of the store.
+	// (ConfirmSessionHandoffTake). The take's token is read back only by
+	// ConfirmedSessionHandoffTake, for the CP to look its create up on the recipient's Agent;
+	// it never leaves the CP.
 	TakenAt, TakeConfirmedAt string
 }
 
@@ -1026,6 +1028,10 @@ type SessionShareStore interface {
 	TakeSessionHandoffOffer(ctx context.Context, id, recipientMembershipID, token, now string) (bool, error)
 	ConfirmSessionHandoffTake(ctx context.Context, id, recipientMembershipID, token, now string) (bool, error)
 	ReleaseSessionHandoffOffer(ctx context.Context, id, recipientMembershipID, token string) (bool, error)
+	ReleaseUnconfirmedSessionHandoffTake(ctx context.Context, id, recipientMembershipID, token string) (bool, error)
+	ConfirmedSessionHandoffTake(ctx context.Context, id, recipientMembershipID string) (string, bool, error)
+	GiveBackUnknownSessionHandoffTake(ctx context.Context, id, recipientMembershipID, token string, now time.Time) (bool, error)
+	ListReceivedSessionHandoffOffers(ctx context.Context, membershipID string) ([]ReceivedHandoffOffer, error)
 	AcceptSessionHandoffOffer(ctx context.Context, id, recipientMembershipID, token, decidedAt, acceptedSessionName string) (bool, error)
 	ExpireSessionHandoffOffers(ctx context.Context, now string) ([]SessionHandoffOffer, error)
 	AcquireSessionShareOwnerLease(ctx context.Context, ownerMembershipID, operationID, now, leaseUntil string) (bool, error)

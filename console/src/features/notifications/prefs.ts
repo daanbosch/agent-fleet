@@ -67,6 +67,7 @@ const KIND_ROW: Record<string, NotifyRow> = {
   "handoff-offer": "handoff",
   "handoff-accepted": "handoff",
   "handoff-expired": "handoff",
+  "handoff-late-session": "handoff",
   "aws-login-required": "cloud-login",
   "aws-sso-expiring": "cloud-login",
   "gcp-login-required": "cloud-login",

@@ -517,7 +517,7 @@ func registerSessionShareRoutes(mux *http.ServeMux, cfg config) {
 	// Handoff to another member (docs/log/77 / ADR 0057). It derives from the share ACL,
 	// so it lives here and shares the inventory-sync throttle with the same instance of
 	// the share API.
-	h := newSessionHandoffAPI(cfg.mgr, a)
+	h := newSessionHandoffAPI(cfg.mgr, a, cfg.autostart)
 	mux.HandleFunc("GET /api/sessions/{name}/handoff-recipients", h.withResolved(h.recipients))
 	mux.HandleFunc("POST /api/session-handoff-offers", h.withResolved(h.create))
 	mux.HandleFunc("GET /api/session-handoff-offers", h.withMembership(h.listOwned))
@@ -527,6 +527,7 @@ func registerSessionShareRoutes(mux *http.ServeMux, cfg config) {
 	mux.HandleFunc("DELETE /api/session-handoff-offers/{id}", h.withMembership(h.withdraw))
 	mux.HandleFunc("POST /api/session-handoff-offers/{id}/take", h.withMembership(h.take))
 	mux.HandleFunc("POST /api/session-handoff-offers/{id}/release", h.withMembership(h.release))
+	mux.HandleFunc("POST /api/session-handoff-offers/{id}/give-back", h.withMembership(h.giveBack))
 	mux.HandleFunc("POST /api/session-handoff-offers/{id}/accept", h.withMembership(h.accept))
 	mux.HandleFunc("POST /api/session-handoff-offers/{id}/decline", h.withMembership(h.decline))
 }

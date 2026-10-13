@@ -11,6 +11,7 @@ import { useT } from "../lib/i18n/index.ts";
 import { useEscLayer } from "../lib/escLayer.ts";
 import { useBackClose } from "../lib/backClose.ts";
 import { useFocusTrap } from "../lib/focusTrap.ts";
+import { useBackdropClose } from "../lib/backdropClose.ts";
 import { registerConfirm } from "./confirmBridge.ts";
 
 export interface ConfirmOptions {
@@ -61,6 +62,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   useFocusTrap(dialogRef, !!req);
   const titleId = useId();
+  const backdrop = useBackdropClose(() => finish(false));
 
   // Expose this provider imperatively so non-React code (terminal/term.ts) can confirm.
   useEffect(() => {
@@ -77,7 +79,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
         // rendering would leave this overlay earlier in the DOM at the same z-index,
         // painting it BEHIND the modal.
         createPortal(
-          <div className="ui-modal-backdrop ui-confirm-backdrop" onClick={() => finish(false)}>
+          <div className="ui-modal-backdrop ui-confirm-backdrop" {...backdrop}>
             <div className="ui-confirm" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} onClick={(e: MouseEvent) => e.stopPropagation()}>
               <h3 className="ui-confirm-title" id={titleId}>{req.title}</h3>
               <div className="ui-confirm-body">{req.body}</div>

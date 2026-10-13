@@ -93,6 +93,8 @@ func TestMemberUIStateRefusesBadPatches(t *testing.T) {
 		{"unknown nested key", `{"onboarding":{"dismissed":true,"extra":1}}`, 400},
 		{"bad track", `{"onboarding":{"track":"ops"}}`, 400},
 		{"trailing data", `{} {}`, 400},
+		{"trailing bracket", `{}]`, 400},
+		{"trailing brace", `{"onboarding":{"dismissed":true,"track":""}}}`, 400},
 		{"not json", `nope`, 400},
 		{"too large", `{"onboarding":{"track":"` + strings.Repeat("x", memberUIStateMaxBody) + `"}}`, 413},
 	} {
@@ -180,6 +182,36 @@ func TestMemberUIStateIsPerMembership(t *testing.T) {
 			}
 			if _, ok, err := st.GetMemberUIState(ctx, e.mv); err != nil || ok {
 				t.Fatalf("row after DeleteMembership ok=%v err=%v, want gone", ok, err)
+			}
+		})
+	}
+}
+
+// if_absent fills a key only when it is not stored yet, inside the optimistic loop. It is what
+// keeps a late localStorage migration from undoing a "later" another tab already saved.
+func TestMemberUIStateIfAbsent(t *testing.T) {
+	for name, st := range ssmAPIStores(t) {
+		t.Run(name, func(t *testing.T) {
+			e := newUIStateEnv(t, st)
+			patch := func(query, body string) string {
+				r := httptest.NewRequest("PATCH", "/api/me/ui-state"+query, bytes.NewReader([]byte(body)))
+				r.Header.Set("X-Forwarded-Email", "u@x")
+				r.Header.Set("X-AF-Tenant", "default")
+				w := httptest.NewRecorder()
+				e.mux.ServeHTTP(w, r)
+				if w.Code != 200 {
+					t.Fatalf("PATCH%s = %d %s", query, w.Code, w.Body.String())
+				}
+				return strings.TrimSpace(w.Body.String())
+			}
+			// Nothing stored: the migration's value lands.
+			if got := patch("?if_absent=1", `{"onboarding":{"dismissed":false,"track":"dev"}}`); !strings.Contains(got, `"track":"dev"`) {
+				t.Fatalf("if_absent on an empty document = %s", got)
+			}
+			// Another tab says "later"; a second, late migration must not undo it.
+			patch("", `{"onboarding":{"dismissed":true,"track":"dev"}}`)
+			if got := patch("?if_absent=1", `{"onboarding":{"dismissed":false,"track":""}}`); !strings.Contains(got, `"dismissed":true,"track":"dev"`) {
+				t.Fatalf("a late migration overwrote the stored value: %s", got)
 			}
 		})
 	}

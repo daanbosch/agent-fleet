@@ -198,6 +198,10 @@ func TestRenumberedMigrationsStayReplayable(t *testing.T) {
 		// The repair for the file the collision silently swallowed.
 		"migrations/0059_cost_role_repair.sql":    {"CREATE TABLE IF NOT EXISTS cloud_cost_role_daily"},
 		"migrations-pg/0044_cost_role_repair.sql": {"CREATE TABLE IF NOT EXISTS cloud_cost_role_daily"},
+		// member_ui_state moved 0095 -> 0097 (pg 0080 -> 0082) when it collided with
+		// handoff_take on develop; the replayable side of the pair was the one renumbered.
+		"migrations/0097_member_ui_state.sql":    {"CREATE TABLE IF NOT EXISTS member_ui_state"},
+		"migrations-pg/0082_member_ui_state.sql": {"CREATE TABLE IF NOT EXISTS member_ui_state"},
 	}
 	for name, wants := range renumbered {
 		raw, err := os.ReadFile(name)

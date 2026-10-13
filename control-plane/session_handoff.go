@@ -13,9 +13,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -42,10 +45,13 @@ type sessionHandoffAPI struct {
 	// throttle (syncedAt) and the read-rate buckets. A separate instance would let this
 	// surface add its own round trips to the owner Workspace on top.
 	share sessionShareAPI
+	// ws reaches the recipient's own workspace when their take press has to ask their Agent
+	// what became of an earlier create (reconcileTake).
+	ws workspaceAPI
 }
 
-func newSessionHandoffAPI(m *manager, share sessionShareAPI) sessionHandoffAPI {
-	return sessionHandoffAPI{memberAuth: memberAuth{m}, share: share}
+func newSessionHandoffAPI(m *manager, share sessionShareAPI, autostart bool) sessionHandoffAPI {
+	return sessionHandoffAPI{memberAuth: memberAuth{m}, share: share, ws: newWorkspaceAPI(m, autostart)}
 }
 
 // writeHandoffErr writes an error carrying detail — the gate's reason, the current status.
@@ -122,23 +128,42 @@ type handoffOfferWire struct {
 	ExpiresAt           string `json:"expiresAt"`
 	DecidedAt           string `json:"decidedAt"`
 	AcceptedSessionName string `json:"acceptedSessionName"`
+	// TakeState is store.HandoffTakeState: "" when no take holds the offer, which is also
+	// every decided offer, so it is the one key that may be absent.
+	TakeState string `json:"takeState,omitempty"`
 }
 
 // handoffOfferInboxWire is one entry of the recipient's inbox: the base form plus three
-// keys, 16 in all. The three cannot be optional fields on the base type — ownerUserKey is ""
-// when the member is unknown and prompt is "" when the ciphertext cannot be opened, and both
-// still have to appear — so they are added by embedding, which JSON flattens.
+// keys, 19 in all with every optional key. The three cannot be optional fields on the base type —
+// ownerUserKey is "" when the member is unknown and prompt is "" when the ciphertext cannot be
+// opened, and both still have to appear — so they are added by embedding, which JSON flattens.
 //
 // was: map[string]any (handoffOfferDTO's return value) with listReceived adding three keys.
 //
 // The effective JSON names of the base and the three additions must not collide:
 // encoding/json emits neither side of a collision, so a key would vanish silently. The
-// equivalence test catches that, and the counts 13 / 16 are pinned separately.
+// equivalence test catches that, and the counts 14 / 19 (optional keys set) are pinned
+// separately.
 type handoffOfferInboxWire struct {
 	handoffOfferWire
 	OwnerUserKey      string `json:"ownerUserKey"`
 	Prompt            string `json:"prompt"`
 	SourceSessionKind string `json:"sourceSessionKind"`
+	// TakeRev names the recipient's confirmed take (handoffTakeRev), and the give-back must send
+	// it back, so a confirmation made against one take never releases a later one. Only the
+	// recipient's inbox carries it.
+	TakeRev string `json:"takeRev,omitempty"`
+	// RecoveryOnly marks an offer the inbox lists only because the recipient's confirmed take
+	// still holds it after an unshare or archive (ListReceivedSessionHandoffOffers): it
+	// carries no body or coordinates, and nothing launches from it.
+	RecoveryOnly bool `json:"recoveryOnly,omitempty"`
+}
+
+// handoffTakeRev is an opaque name for a take, safe to hand to the recipient's Console: a one-way
+// digest of the take's token, which itself never leaves the CP (it is the Agent key's suffix).
+func handoffTakeRev(token string) string {
+	sum := sha256.Sum256([]byte("af-handoff-take-rev\x00" + token))
+	return hex.EncodeToString(sum[:12])
 }
 
 func handoffOfferDTO(o store.SessionHandoffOffer, recipientKey string) handoffOfferWire {
@@ -148,6 +173,7 @@ func handoffOfferDTO(o store.SessionHandoffOffer, recipientKey string) handoffOf
 		Branch: o.Branch, RepoRemote: o.RepoRemote, HeadSha: o.HeadSha,
 		CreatedAt: o.CreatedAt, ExpiresAt: o.ExpiresAt, DecidedAt: o.DecidedAt,
 		AcceptedSessionName: o.AcceptedSessionName,
+		TakeState:           store.HandoffTakeState(o, time.Now()),
 	}
 }
 
@@ -437,20 +463,37 @@ func (a sessionHandoffAPI) listOwned(w http.ResponseWriter, r *http.Request, _ s
 // the prompt leaves CP.
 func (a sessionHandoffAPI) listReceived(w http.ResponseWriter, r *http.Request, _ store.Identity, mv store.MembershipView) {
 	a.expireDue(r.Context())
-	rows, err := a.mgr.store.ListSessionHandoffOffersByRecipient(r.Context(), mv.MembershipID)
+	// One snapshot: each row's takeRev comes from the take read with that row, so a row never
+	// pairs one take's state with a later take's revision.
+	rows, err := a.mgr.store.ListReceivedSessionHandoffOffers(r.Context(), mv.MembershipID)
 	if err != nil {
 		writeAPIErr(w, internalErr(err))
 		return
 	}
 	keys := a.userKeys(r.Context(), mv.TenantID)
 	out := []any{}
-	for _, o := range rows {
-		out = append(out, handoffOfferInboxWire{
+	for _, row := range rows {
+		o := row.SessionHandoffOffer
+		rev := ""
+		if row.ConfirmedTakeToken != "" {
+			rev = handoffTakeRev(row.ConfirmedTakeToken)
+		}
+		wire := handoffOfferInboxWire{
 			handoffOfferWire:  handoffOfferDTO(o, keys[o.RecipientMembershipID]),
 			OwnerUserKey:      keys[o.OwnerMembershipID],
-			Prompt:            a.open(r.Context(), o),
 			SourceSessionKind: o.SourceSessionKind,
-		})
+			TakeRev:           rev,
+			RecoveryOnly:      row.RecoveryOnly,
+		}
+		if row.RecoveryOnly {
+			// A take whose offer the inbox no longer lists (unshared or archived) would otherwise
+			// pin it with no way back for anyone. It is shown for the give-back only: no body, no
+			// coordinates to launch from.
+			wire.Branch, wire.RepoRemote, wire.HeadSha = "", "", ""
+		} else {
+			wire.Prompt = a.open(r.Context(), o)
+		}
+		out = append(out, wire)
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	writeJSON(w, http.StatusOK, map[string]any{"offers": out})
@@ -510,14 +553,38 @@ func (a sessionHandoffAPI) statusOf(ctx context.Context, id string) string {
 // writeUndecidable answers a conditional update on a pending offer that changed nothing. An
 // offer still pending was refused because the recipient holds it for a launch in progress,
 // which the Console words differently from "already decided": the launch may yet fail and
-// hand it back.
+// hand it back. takeState tells the sender whether the recipient is still starting it or the
+// launch was sent and its result is being confirmed; it carries no token or key.
 func (a sessionHandoffAPI) writeUndecidable(w http.ResponseWriter, ctx context.Context, id string) {
-	status := a.statusOf(ctx, id)
+	o, ok, err := a.mgr.store.GetSessionHandoffOffer(ctx, id)
+	status := ""
+	if err == nil && ok {
+		status = o.Status
+	}
 	if status == "pending" {
-		writeHandoffErr(w, http.StatusConflict, "handoff_being_taken", "the recipient is starting a session from this handoff", offerStatusDetail(status))
+		take := store.HandoffTakeState(o, time.Now())
+		if take == "" && !a.launchable(ctx, o) {
+			// Unshared or archived with no take left: still pending for the sender, but nothing
+			// may launch from it any more (TakeSessionHandoffOffer).
+			writeHandoffErr(w, http.StatusConflict, "handoff_unavailable", "the handoff is no longer shared with you or its session was archived", offerStatusDetail(status))
+			return
+		}
+		d := offerStatusDetail(status)
+		d["takeState"] = take
+		writeHandoffErr(w, http.StatusConflict, "handoff_being_taken", "the recipient is starting a session from this handoff", d)
 		return
 	}
 	writeHandoffErr(w, http.StatusConflict, "handoff_already_decided", "the handoff was already decided", offerStatusDetail(status))
+}
+
+// launchable mirrors the store's handoffLaunchable for an answer's wording: the body is there
+// and the source session is listed and not archived.
+func (a sessionHandoffAPI) launchable(ctx context.Context, o store.SessionHandoffOffer) bool {
+	if o.Ciphertext == "" {
+		return false
+	}
+	c, ok, err := a.mgr.store.GetSharedSessionCatalog(ctx, o.CatalogID)
+	return err == nil && ok && !c.Archived
 }
 
 // offerStatusDetail names the offer's status in an error. The Console reads offerStatus:
@@ -534,8 +601,14 @@ type handoffTakeRef struct {
 	Token   string `json:"token"`
 }
 
-// takeHandoffFence reads the handoff_take of a session-create body and removes it, so the
-// Agent receives the body it always did. nil means the create is not from an offer.
+// handoffCreateKey is the Agent idempotency key of the create one take makes. Bound to the
+// take, so the CP can later ask the recipient's Agent what became of exactly that create
+// (reconcileTake), and a new take after a release never collides with it.
+func handoffCreateKey(offerID, token string) string { return "handoff-" + offerID + "-" + token }
+
+// takeHandoffFence reads the handoff_take of a session-create body and replaces it with the
+// take's idempotency key, so the Agent receives the body it always did plus a key the CP can
+// look the create up by. nil means the create is not from an offer.
 func takeHandoffFence(r *http.Request) (*handoffTakeRef, *apiError) {
 	body, err := readAllBody(r)
 	if err != nil {
@@ -552,6 +625,8 @@ func takeHandoffFence(r *http.Request) (*handoffTakeRef, *apiError) {
 		return nil, &apiError{http.StatusBadRequest, "bad_handoff_take", "handoff_take needs an offer id and a token"}
 	}
 	delete(fields, "handoff_take")
+	fields["idempotency_key"], _ = json.Marshal(handoffCreateKey(take.OfferID, take.Token))
+	fields["idempotency_durable"] = json.RawMessage("true")
 	stripped, err := json.Marshal(fields)
 	if err != nil {
 		restoreBody(r, body)
@@ -559,6 +634,39 @@ func takeHandoffFence(r *http.Request) (*handoffTakeRef, *apiError) {
 	}
 	restoreBody(r, stripped)
 	return &take, nil
+}
+
+// reserveHandoffCreate records the take's key on the recipient's Agent after the take is
+// confirmed and before the create is sent (issue #2040). The reservation is what lets the Agent later
+// answer "not created" for the key (reconcileTake): a key it has no record of may have been
+// created under by an Agent that kept none, so its absence proves nothing. An Agent without
+// the route (no key header on its 404) gets the create anyway, and an unknown outcome there
+// stays unknown. Any other failure refuses the create, and the caller gives the take back.
+func reserveHandoffCreate(ctx context.Context, res *resolved, take handoffTakeRef) *apiError {
+	key := handoffCreateKey(take.OfferID, take.Token)
+	failed := &apiError{http.StatusBadGateway, "handoff_reserve_failed", "your workspace could not record the launch; nothing was started"}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		res.rt.Endpoint()+"/sessions-idempotency/"+url.PathEscape(key)+"/reserve", nil)
+	if err != nil {
+		return failed
+	}
+	if res.rt.Token() != "" {
+		req.Header.Set("Authorization", "Bearer "+res.rt.Token())
+	}
+	resp, err := agentRelayClient.Do(req)
+	if err != nil {
+		return failed
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	switch {
+	case resp.StatusCode == http.StatusOK && resp.Header.Get(createKeyHeader) == key:
+		return nil
+	case resp.StatusCode == http.StatusNotFound && resp.Header.Get(createKeyHeader) == "":
+		return nil
+	default:
+		return failed
+	}
 }
 
 // confirmHandoffTake is the commit point of a launch from an offer, run by sessionCreateThen
@@ -572,9 +680,83 @@ func confirmHandoffTake(ctx context.Context, st store.Store, mv store.Membership
 		return internalErr(err)
 	}
 	if !ok {
+		if token, held, _ := st.ConfirmedSessionHandoffTake(ctx, take.OfferID, mv.MembershipID); held && token == take.Token {
+			return &apiError{http.StatusConflict, "handoff_take_used", "this launch of the handoff already reached your workspace"}
+		}
 		return &apiError{http.StatusConflict, "handoff_take_lost", "the handoff was withdrawn or taken elsewhere before the session was created"}
 	}
 	return nil
+}
+
+// settleHandoffCreate settles a confirmed take from the Agent's answer to its create, so the
+// offer no longer depends on the Console hearing that answer (issue #2040). Only the Agent's
+// own word moves it, and that word is the answer's create headers naming this take's key
+// (createKeyHeader / createOutcomeHeader, which a proxy in between does not write):
+//   - created with a session name: the offer is accepted with that session;
+//   - refused: no session came of it, nor ever will under this key (the Agent keeps a durable
+//     key refused for good, and only the create that owns the key reports an outcome), so the
+//     take is given back. The Console's driver fallback starts over under a new take.
+//
+// Anything else — no answer, a gateway's or proxy's own error, JSON or not, an Agent too old
+// to write the headers, a create still in progress — is an unknown outcome: the take stays
+// confirmed and the recipient's next take press asks their Agent (reconcileTake). Releasing
+// there would hand the offer back while the session may exist (ADR 0057 decision 6).
+//
+// snap is the offer as it stood when the take was confirmed, so a session reported after the
+// offer is gone (the sender deleted the source session) still reaches the recipient.
+func settleHandoffCreate(ctx context.Context, mgr *manager, res *resolved, take handoffTakeRef, snap store.SessionHandoffOffer, status int, h http.Header, body []byte) {
+	ctx = context.WithoutCancel(ctx)
+	key := handoffCreateKey(take.OfferID, take.Token)
+	outcome := ""
+	if h.Get(createKeyHeader) == key {
+		outcome = h.Get(createOutcomeHeader)
+	}
+	switch {
+	case outcome == "created" && status >= 200 && status < 300:
+		var s struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(body, &s) != nil || s.Name == "" {
+			log.Printf("handoff: offer %s left taken: the Agent answered %d without a session name", take.OfferID, status)
+			return
+		}
+		api := sessionHandoffAPI{memberAuth: memberAuth{mgr}}
+		accepted, err := api.acceptTake(ctx, res.ident, res.mv, take.OfferID, take.Token, s.Name)
+		if err != nil {
+			log.Printf("handoff: offer %s left taken: accepting %s failed: %v", take.OfferID, s.Name, err)
+		} else if !accepted {
+			api.reportLateSession(ctx, res.ident, res.mv, snap, s.Name)
+		}
+	case outcome == "refused" && (status < 200 || status >= 300):
+		if _, err := mgr.store.ReleaseSessionHandoffOffer(ctx, take.OfferID, res.mv.MembershipID, take.Token); err != nil {
+			log.Printf("handoff: offer %s: releasing the take after a refused create failed: %v", take.OfferID, err)
+		}
+	default:
+		log.Printf("handoff: offer %s left taken after create status %d (outcome %q)", take.OfferID, status, outcome)
+	}
+}
+
+// createKeyHeader and createOutcomeHeader are the Agent's create headers
+// (workspace/agent sessionx createOutcomeWriter): the key the answer is about, and created or
+// refused.
+const (
+	createKeyHeader     = "X-AF-Create-Key"
+	createOutcomeHeader = "X-AF-Create-Outcome"
+)
+
+// acceptTake settles a take as accepted by the session it created and records the decision.
+// accepted=false means the offer is no longer held by this take.
+func (a sessionHandoffAPI) acceptTake(ctx context.Context, ident store.Identity, mv store.MembershipView, offerID, token, sessionName string) (bool, error) {
+	o, ok, err := a.mgr.store.GetSessionHandoffOffer(ctx, offerID)
+	if err != nil || !ok || o.RecipientMembershipID != mv.MembershipID {
+		return false, err
+	}
+	accepted, err := a.mgr.store.AcceptSessionHandoffOffer(ctx, offerID, mv.MembershipID, token, store.NowTS(), sessionName)
+	if err != nil || !accepted {
+		return false, err
+	}
+	a.recordDecision(ident, mv, o, "accepted", sessionName)
+	return true, nil
 }
 
 // recipientOffer loads an offer for its recipient, answering 404 for anyone else: as with
@@ -629,18 +811,275 @@ func (a sessionHandoffAPI) take(w http.ResponseWriter, r *http.Request, ident st
 		return
 	}
 	if !taken {
-		a.writeUndecidable(w, r.Context(), o.ID)
+		a.reconcileTake(w, r, ident, mv, o, readHandoffTakeBody(r).Token)
 		return
 	}
+	a.writeTaken(w, ident, mv, o, token)
+}
+
+func (a sessionHandoffAPI) writeTaken(w http.ResponseWriter, ident store.Identity, mv store.MembershipView, o store.SessionHandoffOffer, token string) {
 	_ = a.mgr.store.InsertAudit(context.Background(), store.AuditLog{ID: store.NewID(), TenantID: mv.TenantID,
 		ActorKind: "user", ActorID: ident.ID, Action: "session.handoff.take", Target: o.SourceSessionName,
 		HTTPStatus: http.StatusOK, At: store.NowTS()})
 	writeJSON(w, http.StatusOK, map[string]any{"status": "pending", "token": token})
 }
 
-// release (POST /api/session-handoff-offers/{id}/release) gives a take back after the
-// launch failed or was abandoned, so the offer is pending again and the sender can withdraw
-// it or the recipient retry. A release that no longer matches the take answers 409; the
+// reconcileTake answers a take press that found the offer held. A Console that lost its
+// previous launch's answer sends that take's token (prev): when the take is still
+// unconfirmed, nothing reached the Agent under it, so it is released and this press takes
+// the offer afresh. When the hold is this recipient's own confirmed take — an earlier launch
+// whose create reached their Agent and whose outcome nobody learnt (settleHandoffCreate) — it asks their Agent to abandon that
+// create's idempotency key, which reports a create that began and otherwise records the key
+// so that a create arriving late is refused. It never creates anything itself:
+//   - the session exists: the offer is accepted with it, and the answer names it;
+//   - still being created: busy, as for any held offer;
+//   - the Agent answers not_created (the key is now recorded as abandoned): the stale take
+//     is released and this press takes the offer afresh;
+//   - anything else (the Agent is unreachable, has no record of the key — it was never
+//     reserved there, as with an Agent from before reserveHandoffCreate — its record is
+//     unreadable, or it is too old to abandon; every answer must name the key in
+//     createKeyHeader):
+//     handoff_launch_unknown, and the take stays.
+//
+// The Agent is asked only on the recipient's own press, in their own workspace (ADR 0057
+// decision 3). A confirmed take therefore holds only until the recipient next presses
+// launch on the offer, and only when the CP never saw the Agent's answer.
+func (a sessionHandoffAPI) reconcileTake(w http.ResponseWriter, r *http.Request, ident store.Identity, mv store.MembershipView, o store.SessionHandoffOffer, prev string) {
+	ctx := r.Context()
+	released, err := a.mgr.store.ReleaseUnconfirmedSessionHandoffTake(ctx, o.ID, mv.MembershipID, prev)
+	if err != nil {
+		writeAPIErr(w, internalErr(err))
+		return
+	}
+	if released {
+		a.retake(w, ctx, ident, mv, o)
+		return
+	}
+	token, held, err := a.mgr.store.ConfirmedSessionHandoffTake(ctx, o.ID, mv.MembershipID)
+	if err != nil {
+		writeAPIErr(w, internalErr(err))
+		return
+	}
+	if !held {
+		a.writeUndecidable(w, ctx, o.ID)
+		return
+	}
+	unknown := func() {
+		writeHandoffErr(w, http.StatusConflict, "handoff_launch_unknown",
+			"a session may already have been started from this handoff; check your sessions", offerStatusDetail("pending"))
+	}
+	id := a.mgr.resolveIdentity(r)
+	res, aerr := a.mgr.resolveFull(ctx, id.key, id.email, tenantSel(r))
+	if aerr != nil || res.mv.MembershipID != mv.MembershipID {
+		unknown()
+		return
+	}
+	if a.ws.autostart {
+		if aerr := a.ws.ensureWorkspaceReady(ctx, res); aerr != nil {
+			unknown()
+			return
+		}
+	} else if res.rt.State(ctx) != "running" {
+		unknown()
+		return
+	}
+	key := handoffCreateKey(o.ID, token)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		res.rt.Endpoint()+"/sessions-idempotency/"+url.PathEscape(key)+"/abandon", nil)
+	if err != nil {
+		unknown()
+		return
+	}
+	if res.rt.Token() != "" {
+		req.Header.Set("Authorization", "Bearer "+res.rt.Token())
+	}
+	resp, err := agentRelayClient.Do(req)
+	if err != nil {
+		unknown()
+		return
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.Header.Get(createKeyHeader) != key {
+		// Not the Agent's answer about this key (an Agent from before abandon, or something
+		// in between): it proves nothing either way.
+		unknown()
+		return
+	}
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		var s struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(b, &s) != nil || s.Name == "" {
+			unknown()
+			return
+		}
+		accepted, err := a.acceptTake(ctx, ident, mv, o.ID, token, s.Name)
+		if err != nil {
+			writeAPIErr(w, internalErr(err))
+			return
+		}
+		if !accepted {
+			if a.reportLateSession(ctx, ident, mv, o, s.Name) {
+				writeHandoffErr(w, http.StatusConflict, "handoff_session_after_give_back",
+					"a session was started from this handoff after it was given back", map[string]any{
+						"offerStatus": a.statusOf(ctx, o.ID), "sessionName": s.Name})
+				return
+			}
+			a.writeUndecidable(w, ctx, o.ID)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "accepted", "sessionName": s.Name})
+	case resp.StatusCode == http.StatusAccepted:
+		writeHandoffErr(w, http.StatusConflict, "handoff_being_taken", "the recipient is starting a session from this handoff", offerStatusDetail("pending"))
+	case resp.StatusCode == http.StatusNotFound && agentErrCode(b) == "not_created":
+		// The Agent recorded the key as abandoned: the confirmed create never ran and never
+		// will (a late one is refused), so the take can go.
+		if _, err := a.mgr.store.ReleaseSessionHandoffOffer(ctx, o.ID, mv.MembershipID, token); err != nil {
+			writeAPIErr(w, internalErr(err))
+			return
+		}
+		a.retake(w, ctx, ident, mv, o)
+	default:
+		unknown()
+	}
+}
+
+// agentErrCode is the error code of an Agent's JSON error answer, "" for anything else.
+func agentErrCode(body []byte) string {
+	var e struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(body, &e)
+	return e.Error.Code
+}
+
+// retake takes the offer under a new token after reconcileTake gave a stale take back.
+func (a sessionHandoffAPI) retake(w http.ResponseWriter, ctx context.Context, ident store.Identity, mv store.MembershipView, o store.SessionHandoffOffer) {
+	fresh := store.NewID()
+	taken, err := a.mgr.store.TakeSessionHandoffOffer(ctx, o.ID, mv.MembershipID, fresh, store.NowTS())
+	if err != nil {
+		writeAPIErr(w, internalErr(err))
+		return
+	}
+	if !taken {
+		a.writeUndecidable(w, ctx, o.ID)
+		return
+	}
+	a.writeTaken(w, ident, mv, o, fresh)
+}
+
+// reportLateSession handles the recipient's Agent reporting a session under a take that no
+// longer holds the offer: the create's answer, or a reconcile's, arrived after the recipient
+// gave the take back (giveBack). The offer is left as it is — it may be pending again,
+// retaken, withdrawn or accepted by another launch, and the sender may already be acting on
+// it — and the recipient is told instead, through a notification that reaches them whether or
+// not a Console is open, because only they can decide what to do with the session. Answers
+// false, telling nothing, when the offer was accepted by this very session (a concurrent press
+// settled it first).
+//
+// snap is the recipient's offer as read before the Agent was asked. When the offer has since
+// been deleted with its source session, the report still goes to that recipient from snap,
+// with offerStatus "": the offer is not restored.
+func (a sessionHandoffAPI) reportLateSession(ctx context.Context, ident store.Identity, mv store.MembershipView, snap store.SessionHandoffOffer, sessionName string) bool {
+	o, status := snap, ""
+	if cur, ok, err := a.mgr.store.GetSessionHandoffOffer(ctx, snap.ID); err == nil && ok {
+		o, status = cur, cur.Status
+	}
+	if o.RecipientMembershipID != mv.MembershipID {
+		return false
+	}
+	if status == "accepted" && o.AcceptedSessionName == sessionName {
+		return false
+	}
+	offerID := o.ID
+	log.Printf("handoff: offer %s: the recipient's Agent reported a session after the take was given back", offerID)
+	// One notice per reported session: two launches given back could each turn up.
+	a.notify(mv.MembershipID, "handoff-late-session", "handoff-late-session-"+offerID+"-"+sessionName+"-"+mv.MembershipID,
+		"session", sessionName, o.SourceSessionKind, o.Title,
+		map[string]any{"offerId": offerID, "sessionName": sessionName, "offerStatus": status})
+	_ = a.mgr.store.InsertAudit(context.Background(), store.AuditLog{ID: store.NewID(), TenantID: mv.TenantID,
+		ActorKind: "user", ActorID: ident.ID, Action: "session.handoff.late_session", Target: o.SourceSessionName,
+		HTTPStatus: http.StatusOK, At: store.NowTS()})
+	return true
+}
+
+// giveBack (POST /api/session-handoff-offers/{id}/give-back) is the recipient's way out of a
+// launch whose outcome stays unknown (issue #2058): "this session is not in my workspace —
+// give the offer back". It releases only a take in store.HandoffTakeState "unknown" — confirmed,
+// and older than the take window, so its create has had that long to answer — in one
+// conditional update; anything else is refused with the take's state, and nobody but the
+// recipient learns the offer exists. The body must carry confirmed=true and the take's
+// takeRev from the inbox: the Console sends them only after the recipient acknowledged that
+// the same work may run twice if the session exists, or if the earlier launch is still being
+// processed and starts later — giving back cancels nothing on the Agent, and the window is a
+// least wait, not a point by which a create has finished. The statement is the recipient's, so the CP still drives nobody's workspace
+// (ADR 0057 decision 3); if their Agent reports the session later, reportLateSession tells
+// them.
+func (a sessionHandoffAPI) giveBack(w http.ResponseWriter, r *http.Request, ident store.Identity, mv store.MembershipView) {
+	var in struct {
+		Confirmed bool   `json:"confirmed"`
+		TakeRev   string `json:"takeRev"`
+	}
+	_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&in)
+	o, ok := a.recipientOffer(w, r, mv)
+	if !ok {
+		return
+	}
+	if !in.Confirmed {
+		writeAPIErr(w, &apiError{http.StatusBadRequest, "handoff_give_back_unconfirmed", "giving the handoff back needs confirmed=true"})
+		return
+	}
+	// The confirmation names the take it was made against (a missing takeRev names none). A
+	// later take — the one confirmed was given back and the offer taken again, while this
+	// screen or request was stale — is refused, and the update below is bound to the token
+	// checked here. With no confirmed take there is nothing to bind; the update then changes
+	// nothing and the answer says why.
+	token, held, err := a.mgr.store.ConfirmedSessionHandoffTake(r.Context(), o.ID, mv.MembershipID)
+	if err != nil {
+		writeAPIErr(w, internalErr(err))
+		return
+	}
+	if held && handoffTakeRev(token) != in.TakeRev {
+		cur, _, _ := a.mgr.store.GetSessionHandoffOffer(r.Context(), o.ID)
+		d := offerStatusDetail(cur.Status)
+		d["takeState"] = store.HandoffTakeState(cur, time.Now())
+		writeHandoffErr(w, http.StatusConflict, "handoff_give_back_stale", "the handoff is held by another launch than the one confirmed", d)
+		return
+	}
+	released, err := a.mgr.store.GiveBackUnknownSessionHandoffTake(r.Context(), o.ID, mv.MembershipID, token, time.Now())
+	if err != nil {
+		writeAPIErr(w, internalErr(err))
+		return
+	}
+	if !released {
+		cur, ok, err := a.mgr.store.GetSessionHandoffOffer(r.Context(), o.ID)
+		if err != nil {
+			writeAPIErr(w, internalErr(err))
+			return
+		}
+		if !ok || cur.Status != "pending" {
+			writeHandoffErr(w, http.StatusConflict, "handoff_already_decided", "the handoff was already decided", offerStatusDetail(cur.Status))
+			return
+		}
+		d := offerStatusDetail(cur.Status)
+		d["takeState"] = store.HandoffTakeState(cur, time.Now())
+		writeHandoffErr(w, http.StatusConflict, "handoff_not_unknown", "the handoff is not held by a launch whose outcome is unknown", d)
+		return
+	}
+	_ = a.mgr.store.InsertAudit(context.Background(), store.AuditLog{ID: store.NewID(), TenantID: mv.TenantID,
+		ActorKind: "user", ActorID: ident.ID, Action: "session.handoff.give_back", Target: o.SourceSessionName,
+		HTTPStatus: http.StatusOK, At: store.NowTS()})
+	// Usually pending again; expired when the share was revoked during the launch.
+	writeJSON(w, http.StatusOK, map[string]any{"status": a.statusOf(r.Context(), o.ID)})
+}
+
+// release (POST /api/session-handoff-offers/{id}/release) gives an unconfirmed take back after
+// the launch failed or was abandoned, so the offer is pending again and the sender can
+// withdraw it or the recipient retry. A release that no longer matches the take answers 409; the
 // Console ignores that, since the offer has moved on either way.
 func (a sessionHandoffAPI) release(w http.ResponseWriter, r *http.Request, _ store.Identity, mv store.MembershipView) {
 	in := readHandoffTakeBody(r)
@@ -648,12 +1087,20 @@ func (a sessionHandoffAPI) release(w http.ResponseWriter, r *http.Request, _ sto
 	if !ok {
 		return
 	}
-	released, err := a.mgr.store.ReleaseSessionHandoffOffer(r.Context(), o.ID, mv.MembershipID, in.Token)
+	// Only an unconfirmed take is given back on the Console's word. A confirmed one may have
+	// made its session: a Console, current or older, that read a gateway's error as a failure
+	// must not hand the offer to the sender. reconcileTake settles it instead.
+	released, err := a.mgr.store.ReleaseUnconfirmedSessionHandoffTake(r.Context(), o.ID, mv.MembershipID, in.Token)
 	if err != nil {
 		writeAPIErr(w, internalErr(err))
 		return
 	}
 	if !released {
+		if token, held, _ := a.mgr.store.ConfirmedSessionHandoffTake(r.Context(), o.ID, mv.MembershipID); held && token == in.Token {
+			writeHandoffErr(w, http.StatusConflict, "handoff_launch_unknown",
+				"the launch reached your workspace and its outcome is not known; launch again to check", offerStatusDetail("pending"))
+			return
+		}
 		writeHandoffErr(w, http.StatusConflict, "handoff_not_taken", "this launch does not hold the handoff", offerStatusDetail(a.statusOf(r.Context(), o.ID)))
 		return
 	}
@@ -681,16 +1128,22 @@ func (a sessionHandoffAPI) accept(w http.ResponseWriter, r *http.Request, ident 
 	if !ok {
 		return
 	}
-	accepted, err := a.mgr.store.AcceptSessionHandoffOffer(r.Context(), o.ID, mv.MembershipID, in.Token, store.NowTS(), in.SessionName)
+	accepted, err := a.acceptTake(r.Context(), ident, mv, o.ID, in.Token, in.SessionName)
 	if err != nil {
 		writeAPIErr(w, internalErr(err))
 		return
 	}
 	if !accepted {
+		// The CP settles the take itself when it sees the create succeed
+		// (settleHandoffCreate), so the Console's own accept usually finds it done.
+		if cur, ok, _ := a.mgr.store.GetSessionHandoffOffer(r.Context(), o.ID); ok && cur.Status == "accepted" &&
+			in.SessionName != "" && cur.AcceptedSessionName == in.SessionName {
+			writeJSON(w, http.StatusOK, map[string]any{"status": "accepted"})
+			return
+		}
 		writeHandoffErr(w, http.StatusConflict, "handoff_not_taken", "this launch does not hold the handoff", offerStatusDetail(a.statusOf(r.Context(), o.ID)))
 		return
 	}
-	a.recordDecision(ident, mv, o, "accepted", in.SessionName)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "accepted"})
 }
 

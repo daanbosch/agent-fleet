@@ -96,6 +96,9 @@ export interface LaunchResult {
   /** Name of the session that was created (only when ok). Accepting a handoff (docs/log/77)
    *  needs it to tell the offering side which session took the work. */
   name?: string;
+  /** A launch from a handoff offer whose create got no definite answer: the session may exist,
+   *  so the offer's take is kept for the next press to reconcile (acceptHandoff.ts). */
+  unknown?: boolean;
 }
 
 interface LaunchModalProps {

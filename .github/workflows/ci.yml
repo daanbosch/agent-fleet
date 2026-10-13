@@ -102,6 +102,19 @@ jobs:
       - name: scan full history
         run: /tmp/gitleaks --version && /tmp/gitleaks git --log-opts="--all --full-history -m" --redact --verbose
 
+  # Self-test of scripts/migration-versions.sh (#2046), on every event so a broken script
+  # fails on its own PR. The `migration-version` status itself is posted by
+  # migration-version.yml, not here: this workflow's cancel-in-progress could kill a
+  # publisher between its post and its re-check of develop and leave a stale success.
+  migration-versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the self-test reads a pinned commit of develop
+      - name: self-test
+        run: ./scripts/migration-versions-test.sh
+
   # Core verification of the forbidden-token gate for shipped artifacts (docs/log/35
   # §35.7.5). The artifacts themselves are scanned by release-gate and publish-dist (both
   # need a build); what this job confirms every time is that the mechanism works and that
