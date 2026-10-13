@@ -673,3 +673,57 @@ func TestTrashRacesKeepTheBackupSnapshot(t *testing.T) {
 		})
 	}
 }
+
+// The live log's age and its bytes must come from one state of one file: swapped for an older
+// complete log after its metadata was taken, it must not win the canonical path over the newer
+// backup (ported from the round-5 review reproduction).
+func TestArchiveLiveSwappedAfterStatDoesNotOutrankBackup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AF_SESSIONS_DIR", filepath.Join(home, "sessions"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
+	srv := httptest.NewServer(trashMux())
+	defer srv.Close()
+	dir := filepath.Join(home, "repos", "app")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	m := session.Meta{Name: "readage", Dir: dir, Kind: session.KindClaude, CreatedAt: time.Now().Format(time.RFC3339)}
+	session.WriteMeta(m)
+	jsonl := filepath.Join(home, "claude", "projects", claude.ProjectKey(dir), session.UUID(dir, m.Name)+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(jsonl), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"type":"user","message":"KNOWN NEWER BACKUP"}` + "\n"
+	if err := os.WriteFile(jsonl, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := claude.BackupTranscript(m); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(jsonl, []byte(`{"type":"user","message":"NEWER LIVE THAT WAS STATTED"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(jsonl, future, future); err != nil {
+		t.Fatal(err)
+	}
+	archiveLiveReadGate = func(path string) {
+		if path != jsonl {
+			return
+		}
+		_ = os.WriteFile(jsonl, []byte(`{"type":"user","message":"OLD"}`+"\n"), 0o600)
+		past := time.Now().Add(-24 * time.Hour)
+		_ = os.Chtimes(jsonl, past, past)
+	}
+	defer func() { archiveLiveReadGate = nil }()
+	var out struct{ Archive string }
+	do(t, srv, "DELETE", "/sessions/"+m.Name, nil, http.StatusOK, &out)
+	archiveLiveReadGate = nil
+	do(t, srv, "POST", "/cleanup/archives/"+out.Archive+"/restore", nil, http.StatusOK, nil)
+	got, err := os.ReadFile(jsonl)
+	if err != nil || string(got) != body {
+		aside, _ := os.ReadFile(jsonl + ".backup.archived")
+		t.Fatalf("restored canonical = %q, %v; the newer backup is hidden beside it: %q", got, err, aside)
+	}
+}

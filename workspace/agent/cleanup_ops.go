@@ -15,6 +15,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/sessionsearch"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/sessionx"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -252,6 +253,40 @@ func removeSessionSideFiles(name string) {
 // sweep or the backup loop can change them. Nil in production.
 var archiveAfterMatch func(m session.Meta)
 
+// archiveLiveReadGate is a test seam between opening a live log and reading it. Nil in production.
+var archiveLiveReadGate func(path string)
+
+// readLiveLog reads p through one descriptor and reports the metadata of that same open file.
+// stable is false when the file changed during the read (descriptor size/mtime before and after
+// differ, or the path now names another file), in which case the pair is not a reliable
+// "this content has this age".
+func readLiveLog(p string) (data []byte, fi os.FileInfo, stable bool, err error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	defer f.Close()
+	fi, err = f.Stat()
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if archiveLiveReadGate != nil {
+		archiveLiveReadGate(p)
+	}
+	if data, err = io.ReadAll(f); err != nil {
+		return nil, nil, false, err
+	}
+	after, err := f.Stat()
+	if err != nil {
+		return nil, nil, false, err
+	}
+	at, perr := os.Stat(p)
+	stable = perr == nil && os.SameFile(at, fi) &&
+		after.Size() == fi.Size() && after.ModTime().Equal(fi.ModTime()) &&
+		int64(len(data)) == fi.Size()
+	return data, fi, stable, nil
+}
+
 // archiveSessionForDelete bundles a session's meta + jsonl(s) into a cleanup archive
 // and returns the archive id. Non-claude transcripts live in the agent's native store
 // (codex rollout / opencode sqlite), which we do not reclaim here — the meta is still
@@ -286,8 +321,7 @@ func archiveSessionForDelete(m session.Meta) (string, error) {
 			archiveAfterMatch(m)
 		}
 		for i, p := range matched {
-			fi, serr := os.Stat(p)
-			b, err := os.ReadFile(p)
+			b, fi, stable, err := readLiveLog(p)
 			if errors.Is(err, os.ErrNotExist) {
 				continue // removed since it was listed (claude's sweep): the backup snapshot above is in
 			}
@@ -296,7 +330,9 @@ func archiveSessionForDelete(m session.Meta) (string, error) {
 			}
 			dest := p
 			if hasBackup && p == bkDest {
-				if serr == nil && fi.ModTime().After(bkMod) && claude.CompleteBytes(b) {
+				// The metadata and the bytes must describe one state of one file; a live log that
+				// changed while it was read never outranks the backup.
+				if stable && fi.ModTime().After(bkMod) && claude.CompleteBytes(b) {
 					liveWon = true
 				} else {
 					dest = p + ".superseded.archived"
