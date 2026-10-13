@@ -227,12 +227,16 @@ func TestHandoffPushRunsPrePushHook(t *testing.T) {
 	}
 }
 
-// A gate that is already open pushes nothing.
+// A gate that is already open pushes nothing, and still answers only for the confirmed commit.
 func TestHandoffPushNothingToDo(t *testing.T) {
 	work, _ := pushFixture(t)
-	res, perr := pushForHandoff(context.Background(), work, handoffPushRequest{})
+	c := buildHandoffContext(work)
+	res, perr := pushForHandoff(context.Background(), work, handoffPushRequest{Branch: c.Branch, HeadSha: c.HeadSha, PushRemote: c.Remote})
 	if perr != nil || res.Pushed || res.Context.Blocked != "" {
 		t.Fatalf("clean pushed branch: res=%+v err=%+v, want pushed=false and no error", res, perr)
+	}
+	if _, perr := pushForHandoff(context.Background(), work, handoffPushRequest{Branch: "other", HeadSha: c.HeadSha, PushRemote: c.Remote}); perr == nil || perr.code != handoffPushChanged {
+		t.Fatalf("open gate, another branch confirmed: %+v, want changed", perr)
 	}
 }
 

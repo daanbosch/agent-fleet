@@ -39,7 +39,7 @@ type handoffLife struct {
 	agentCtx map[string]any
 	hits     map[string]int
 	// push answers POST /sessions/session-1/handoff-push, called with f.mu held; nil
-	// answers 404 like an Agent without the route.
+	// answers a plain 404 like an Agent whose mux lacks the route.
 	push func(r *http.Request, body []byte) (int, map[string]any)
 }
 
@@ -107,11 +107,13 @@ func newHandoffLife(t *testing.T) *handoffLife {
 		case "/sessions/session-1/handoff-push":
 			f.mu.Lock()
 			push := f.push
-			code, body := http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found", "message": "no route"}}
-			if push != nil && r.Method == http.MethodPost {
-				raw, _ := io.ReadAll(r.Body)
-				code, body = push(r, raw)
+			if push == nil || r.Method != http.MethodPost {
+				f.mu.Unlock()
+				http.NotFound(w, r) // what an Agent's mux without the route answers
+				return
 			}
+			raw, _ := io.ReadAll(r.Body)
+			code, body := push(r, raw)
 			f.mu.Unlock()
 			w.WriteHeader(code)
 			_ = json.NewEncoder(w).Encode(body)

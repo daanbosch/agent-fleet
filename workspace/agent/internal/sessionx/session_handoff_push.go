@@ -196,6 +196,9 @@ func pushForHandoff(ctx context.Context, dir string, want handoffPushRequest) (h
 	switch {
 	case before.Vcs != "git":
 		return handoffPushResult{}, &handoffPushError{http.StatusConflict, "not_git", "the working copy is not a git repository"}
+	case before.Blocked == "" && (before.Branch != want.Branch || before.HeadSha != want.HeadSha):
+		return handoffPushResult{}, &handoffPushError{http.StatusConflict, handoffPushChanged,
+			"the branch or commit changed after it was shown; check it again"}
 	case before.Blocked == "":
 		return handoffPushResult{Context: before}, nil
 	case before.Blocked == handoffBlockDetached:
@@ -236,7 +239,8 @@ func pushForHandoff(ctx context.Context, dir string, want handoffPushRequest) (h
 		// A hook checked out or committed meanwhile: what was published is not what the
 		// state now shows, so nothing may be offered on it.
 		return handoffPushResult{}, &handoffPushError{http.StatusConflict, handoffPushChanged,
-			"the working copy changed while it was being pushed; nothing was sent, check it again"}
+			"the push went through, but the working copy changed while it ran (a hook moved HEAD), " +
+				"so no handoff was offered; check it again"}
 	}
 	return handoffPushResult{Pushed: true, Remote: sanitizeRemoteURL(t.url), Branch: t.branch, HeadSha: want.HeadSha,
 		Output: out, Context: after}, nil

@@ -187,3 +187,29 @@ func TestHandoffPushAfterwardsMustStillMatch(t *testing.T) {
 		})
 	}
 }
+
+// The gate opened by itself after the modal was shown (another client pushed) and the branch then
+// moved: "push, then send" was confirmed for one commit, so no offer names another.
+func TestHandoffPushFirstOnAnOpenGateStillMatchesTheSnapshot(t *testing.T) {
+	f := newHandoffLife(t)
+	f.setAgent(map[string]any{"headSha": "0123456789abcdef"})
+	f.requireConflict(f.offer(confirmedPush()), "handoff_changed", "")
+	if n := f.offerRows(); n != 0 || f.pushHits() != 0 {
+		t.Fatalf("rows=%d pushHits=%d, want 0 and 0", n, f.pushHits())
+	}
+	f.setAgent(map[string]any{"headSha": confirmedHead})
+	if o := f.mustOffer(confirmedPush()); o.HeadSha != confirmedHead || f.pushHits() != 0 {
+		t.Fatalf("matching open gate: offer %+v, pushHits=%d", o, f.pushHits())
+	}
+}
+
+// An Agent without the route answers 404 too; that is a refused push, not "no such session".
+func TestHandoffPushOnAnAgentWithoutTheRoute(t *testing.T) {
+	f := newHandoffLife(t)
+	f.blockedForPush("unpushed_commits")
+	rec := f.offer(confirmedPush()) // f.push is nil: the stub answers 404 with no Agent code
+	f.requireConflict(rec, "handoff_push_failed", "")
+	if n := f.offerRows(); n != 0 {
+		t.Fatalf("%d offers stored", n)
+	}
+}

@@ -425,7 +425,9 @@ func (a sessionHandoffAPI) pushThenRecheck(w http.ResponseWriter, r *http.Reques
 		// credentials by the Agent, and it is what tells the owner what to do next.
 		pe, _ := payload["error"].(map[string]any)
 		code, msg := str(pe, "code"), str(pe, "message")
-		if status == http.StatusNotFound {
+		if status == http.StatusNotFound && code == "not_found" {
+			// Only the Agent's own "no such session"; an Agent without the route also answers
+			// 404, and that is a refused push, reported below with its code.
 			return fail(&apiError{http.StatusNotFound, "not_found", "no such session"})
 		}
 		if code == "" {
@@ -522,6 +524,15 @@ func (a sessionHandoffAPI) create(w http.ResponseWriter, r *http.Request, res *r
 	if e != nil {
 		writeAPIErr(w, e)
 		return
+	}
+	if in.PushFirst && in.PushExpect != nil && blocked == "" {
+		// The gate opened by itself since the modal was shown (someone else pushed). The owner
+		// still confirmed one branch and commit: an offer naming another is not what they sent.
+		str := func(k string) string { s, _ := hctx[k].(string); return s }
+		if str("branch") != in.PushExpect.Branch || str("headSha") != in.PushExpect.HeadSha || str("remote") != in.PushExpect.PushRemote {
+			writeHandoffErr(w, http.StatusConflict, "handoff_changed", "the working copy changed after it was shown; check it again", map[string]any{"context": hctx})
+			return
+		}
 	}
 	if blocked != "" && in.PushFirst && handoffPushClears(blocked) {
 		var ok bool
