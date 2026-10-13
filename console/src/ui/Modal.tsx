@@ -12,6 +12,7 @@ import { coarsePointer } from "../lib/device.ts";
 import { useEscLayer } from "../lib/escLayer.ts";
 import { useBackClose } from "../lib/backClose.ts";
 import { useFocusTrap } from "../lib/focusTrap.ts";
+import { useBackdropClose } from "../lib/backdropClose.ts";
 
 interface ModalProps {
   title?: ReactNode;
@@ -60,6 +61,7 @@ export function Modal({
   // focus (see the hook).
   useFocusTrap(panelRef, true);
   const titleId = useId();
+  const backdrop = useBackdropClose(onClose, !lockClose);
 
   const Panel = as;
   const panelProps: Record<string, unknown> = {
@@ -86,7 +88,7 @@ export function Modal({
     // element with its own onContextMenu (e.g. a repo row's right-click menu).
     <div
       className="ui-modal-backdrop"
-      onClick={lockClose ? undefined : onClose}
+      {...backdrop}
       onContextMenu={(e) => e.stopPropagation()}
     >
       <Panel {...panelProps}>
