@@ -63,6 +63,7 @@ import { MarkStrip } from "./transcript/MarkStrip.tsx";
 import { targetLang } from "./translate.ts";
 import { useTranslate } from "./useTranslate.ts";
 import { SessionLinkMenuHost } from "../sessions/SessionLinkMenu.tsx";
+import { PathLinkMenuHost } from "../viewer/PathLinkMenu.tsx";
 import { useMirrorState } from "./parts/useMirrorState.ts";
 import { useOlderHistory, useTranscriptPoll } from "./parts/useTranscriptPoll.ts";
 import { useMirrorActions } from "./parts/useMirrorActions.ts";
@@ -92,10 +93,13 @@ export type { MirrorSignal } from "./parts/composerInput.ts";
 // not token-by-token. Prompts typed in the raw terminal DO appear (they're logged as
 // user turns), just at the next poll.
 export function MirrorView(props: Parameters<typeof MirrorViewBody>[0]) {
-  // Session slugs in the transcript open the session context menu (SessionLinkMenu.tsx).
+  // Session slugs in the transcript open the session context menu (SessionLinkMenu.tsx), file
+  // and folder links the path menu (PathLinkMenu.tsx).
   return (
     <SessionLinkMenuHost>
-      <MirrorViewBody {...props} />
+      <PathLinkMenuHost>
+        <MirrorViewBody {...props} />
+      </PathLinkMenuHost>
     </SessionLinkMenuHost>
   );
 }

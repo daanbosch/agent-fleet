@@ -52,6 +52,7 @@ import type { Conversation, ChatMessage, ChatStep } from "../../types/chat.ts";
 import type { Assistant } from "../../types/assistant.ts";
 import type { SessionKind } from "../../types/session.ts";
 import { SessionLinkMenuHost } from "../sessions/SessionLinkMenu.tsx";
+import { PathLinkMenuHost } from "../viewer/PathLinkMenu.tsx";
 
 // ChatView renders one assistant-chat conversation (docs/log/19) — a headless-CLI LLM
 // chat/translation thread. Unlike the terminal panes it never mounts xterm; it's a
@@ -73,10 +74,13 @@ interface ChatViewProps {
 const chatDraftKey = (conversationId: string) => "af.chat-draft." + conversationId;
 
 export function ChatView(props: ChatViewProps) {
-  // Session slugs in the conversation open the session context menu (SessionLinkMenu.tsx).
+  // Session slugs in the conversation open the session context menu (SessionLinkMenu.tsx), file
+  // and folder links the path menu (PathLinkMenu.tsx).
   return (
     <SessionLinkMenuHost>
-      <ChatViewBody {...props} />
+      <PathLinkMenuHost>
+        <ChatViewBody {...props} />
+      </PathLinkMenuHost>
     </SessionLinkMenuHost>
   );
 }

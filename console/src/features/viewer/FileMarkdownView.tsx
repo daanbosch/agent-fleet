@@ -2,6 +2,7 @@
 // file knows: which repository its `#N` references belong to (the working copy it lives in).
 import { useReposStore } from "../repos/store.ts";
 import { originOf } from "../workitems/refs.ts";
+import { PathLinkMenuHost } from "./PathLinkMenu.tsx";
 import { MarkdownView, type MarkdownViewProps } from "./MarkdownView.tsx";
 import { repoOfFilePath } from "./repoOfPath.ts";
 
@@ -14,5 +15,9 @@ export function FileMarkdownView(props: Omit<MarkdownViewProps, "repo" | "workIt
   // neither GitHub nor Bitbucket) nothing is linked at all: a qualified `owner/name#N` or a Jira key
   // would otherwise still link, against a repository this file has nothing to do with.
   const linkable = useReposStore((s) => !!repo && !nestedRepo && originOf(s.repos.find((r) => r.name === repo)) !== null);
-  return <MarkdownView {...rest} basePath={filePath} repo={repo} workItemRefs={linkable} />;
+  return (
+    <PathLinkMenuHost>
+      <MarkdownView {...rest} basePath={filePath} repo={repo} workItemRefs={linkable} />
+    </PathLinkMenuHost>
+  );
 }

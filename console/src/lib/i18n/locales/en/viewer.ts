@@ -255,4 +255,9 @@ export const viewer: Record<keyof typeof jaViewer, string> = {
   "editor.suggestion.selection_too_large": "The selection is too large to suggest on.",
   "editor.suggestion.instruction_invalid": "The instruction is empty or too long.",
   "editor.suggestion.invalid": "This suggestion cannot be applied.",
+  "view.path": "path",
+  "view.copy_path": "Copy the path",
+  "view.path_menu.open": "Open in pane",
+  "view.path_menu.open_new": "Open in new pane",
+  "view.path_menu.reveal": "Show in Files",
 };
