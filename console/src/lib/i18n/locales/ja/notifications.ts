@@ -122,6 +122,7 @@ export const notifications = {
   "noti.session_not_in_list": "該当セッションは現在の一覧にありません。",
   "noti.conversation_gone": "報告先の会話が見つかりません（{title}）。削除された可能性があります。",
   "noti.conversation_gone_session": "報告先の会話が見つかりません（{title}）。報告元のセッションを開きました。",
+  "noti.handoff_closed": "この引き継ぎはもう受け取れません。引き継ぎ済み・辞退済み・取り下げ・期限切れのいずれかか、共有が解除されています。",
   "noti.conversation_untitled": "無題",
   "noti.notifications": "通知",
   "noti.center": "通知センター",

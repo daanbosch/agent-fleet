@@ -61,6 +61,23 @@ export function pendingHandoffCount(offers: HandoffOffer[]): number {
   return offers.filter((o) => o.status === "pending").length;
 }
 
+/** Whether a received offer can still be decided: "pending" when the inbox lists it, "closed"
+ *  when a fresh inbox does not, "unknown" when the inbox could not be read. The inbox route
+ *  returns only pending offers whose share is alive, so "closed" folds accepted, declined,
+ *  withdrawn, expired and unshared together; telling them apart would need a route the
+ *  recipient does not have. The store is trusted when it already lists the offer; otherwise it
+ *  may simply predate the offer (the poll is 15 s, the notification is pushed), so the inbox
+ *  is fetched once. The fetch is done here rather than through refresh(), which turns a failure
+ *  into an empty inbox and would read as "closed". */
+export async function receivedOfferState(offerId: string): Promise<"pending" | "closed" | "unknown"> {
+  if (useHandoffStore.getState().received.some((o) => o.id === offerId)) return "pending";
+  const d = await api("api/session-handoff-offers/received").catch(() => null);
+  if (!d || d.error || !Array.isArray(d.offers)) return "unknown";
+  const received: HandoffOffer[] = d.offers;
+  useHandoffStore.setState({ received });
+  return received.some((o) => o.id === offerId && o.status === "pending") ? "pending" : "closed";
+}
+
 /** Where a session stands right now. A session has at most one undecided offer (ADR 0057
  *  decision 10), so a pending one is the answer; otherwise return the most recent decision. */
 export function offerForSession(offers: HandoffOffer[], sessionName: string): HandoffOffer | undefined {
