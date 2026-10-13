@@ -154,6 +154,13 @@ func Verify(r *http.Request, body []byte) (Claims, error) { return VerifyAt(r, b
 
 // VerifyAt is Verify at a given time.
 func VerifyAt(r *http.Request, body []byte, t time.Time) (Claims, error) {
+	sum := sha256.Sum256(body)
+	return VerifyHashAt(r, hex.EncodeToString(sum[:]), t)
+}
+
+// VerifyHashAt is VerifyAt for a body the caller has already hashed (hex SHA-256), as an upload
+// too large to hold in memory is.
+func VerifyHashAt(r *http.Request, bodySHA256 string, t time.Time) (Claims, error) {
 	h := strings.TrimSpace(r.Header.Get(Header))
 	mu.Lock()
 	defer mu.Unlock()
@@ -188,7 +195,6 @@ func VerifyAt(r *http.Request, body []byte, t time.Time) (Claims, error) {
 	if err := dec.Decode(&cl); err != nil {
 		return Claims{}, invalid("malformed claims")
 	}
-	sum := sha256.Sum256(body)
 	switch {
 	case cl.Method != r.Method:
 		return Claims{}, invalid("method mismatch")
@@ -196,7 +202,7 @@ func VerifyAt(r *http.Request, body []byte, t time.Time) (Claims, error) {
 		return Claims{}, invalid("path mismatch")
 	case cl.Query != r.URL.RawQuery:
 		return Claims{}, invalid("query mismatch")
-	case cl.BodySHA256 != hex.EncodeToString(sum[:]):
+	case cl.BodySHA256 != bodySHA256:
 		return Claims{}, invalid("body mismatch")
 	case cl.Workspace != c.workspace:
 		return Claims{}, invalid("signed for another workspace")
@@ -233,6 +239,82 @@ func VerifyAt(r *http.Request, body []byte, t time.Time) (Claims, error) {
 	}
 	nonces[cl.Nonce] = cl.Expires
 	return cl, nil
+}
+
+// RequireUpload is Require for a multipart upload the mark signs by body hash. The body is spooled
+// into a file under dir() while it is hashed (it can be far over what the CP buffers), verified,
+// and handed to next from that file; the file is removed afterwards. Spooling happens before
+// verifying, so maxBody bounds what a marked-looking caller can make the Agent write; a request
+// with no mark at all is refused before anything is written, and spool files an earlier crash left
+// behind are swept.
+//
+// Limit: the spool, and the handler's own temporary copy, are writable by any process of the
+// Agent's uid. The mark decides who may start an import; it does not protect the bytes taken in
+// from a same-uid rewrite between verifying and reading (the same limit as writing the store
+// directly, ADR 0113's threat model).
+func RequireUpload(maxBody int64, dir func() (string, error), next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimSpace(r.Header.Get(Header)) == "" {
+			httpx.WriteErr(w, http.StatusForbidden, CodeRequired, "this route accepts only a member's request relayed by the Control Plane")
+			return
+		}
+		d, err := dir()
+		if err != nil {
+			httpx.WriteErr(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		sweepSpool(d)
+		f, err := os.CreateTemp(d, "marked-upload-*")
+		if err != nil {
+			httpx.WriteErr(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		defer func() { _ = f.Close(); _ = os.Remove(f.Name()) }()
+		h := sha256.New()
+		n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(r.Body, maxBody+1))
+		if err != nil {
+			httpx.WriteErr(w, http.StatusBadRequest, "bad_request", "could not read the request body")
+			return
+		}
+		if n > maxBody {
+			httpx.WriteErr(w, http.StatusRequestEntityTooLarge, "too_large", "request body is too large")
+			return
+		}
+		cl, err := VerifyHashAt(r, hex.EncodeToString(h.Sum(nil)), time.Now())
+		if err != nil {
+			var e *Error
+			if errors.As(err, &e) {
+				httpx.WriteErr(w, e.Status, e.Code, e.Msg)
+			} else {
+				httpx.WriteErr(w, http.StatusForbidden, CodeInvalid, err.Error())
+			}
+			return
+		}
+		if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "multipart/form-data" {
+			httpx.WriteErr(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "this upload takes multipart/form-data")
+			return
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			httpx.WriteErr(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, cl))
+		r.Body = io.NopCloser(f)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// sweepSpool removes spool files older than a request can run for: what a crashed Agent left.
+func sweepSpool(dir string) {
+	ents, _ := os.ReadDir(dir)
+	for _, e := range ents {
+		if !strings.HasPrefix(e.Name(), "marked-upload-") {
+			continue
+		}
+		if fi, err := e.Info(); err == nil && time.Since(fi.ModTime()) > time.Hour {
+			_ = os.Remove(dir + "/" + e.Name())
+		}
+	}
 }
 
 type ctxKey struct{}

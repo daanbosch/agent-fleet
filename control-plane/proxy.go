@@ -232,10 +232,13 @@ func (a agentProxyAPI) rest(w http.ResponseWriter, r *http.Request, res *resolve
 		target += "?" + r.URL.RawQuery
 	}
 
-	body, mark, aerr := a.mgr.relayBody(r, res)
+	body, mark, aerr := a.mgr.relayBody(w, r, res)
 	if aerr != nil {
 		writeAPIErr(w, aerr)
 		return
+	}
+	if u, ok := body.(spooledUpload); ok {
+		defer u.Close() // the transport closes it too; this covers a request that never goes out
 	}
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, body)
 	if err != nil {

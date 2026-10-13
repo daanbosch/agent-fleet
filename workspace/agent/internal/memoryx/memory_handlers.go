@@ -18,6 +18,7 @@ import (
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/codex"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin"
 )
 
 // memoryRootView is one root as returned by the roots API.
@@ -240,10 +241,26 @@ func HandleMemoryRestore(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, res)
 }
 
+// MemberImportHandler is HandleMemoryImport behind the member-origin mark (ADR 0113). The mark
+// signs the SHA-256 of the multipart body, so the upload is hashed as it is spooled and not held in
+// memory; the cap is the import limit plus room for the multipart framing.
+func MemberImportHandler() http.Handler {
+	return memberorigin.RequireUpload(memoryImportMaxBytes()+memberImportFramingSlack, func() (string, error) {
+		d := memoryWorkDir()
+		return d, os.MkdirAll(d, 0o700)
+	}, http.HandlerFunc(HandleMemoryImport))
+}
+
+// memberImportFramingSlack covers the multipart boundary and part headers around the file.
+const memberImportFramingSlack = 1 << 20
+
 // HandleMemoryImport takes in a bundle / tar.gz, imports it into refs/imports/<id> as an
 // independent lineage and returns a preview (docs/log/39 item 5). At this point live is not
 // touched at all — what gets applied is the user's decision, made from the preview.
 func HandleMemoryImport(w http.ResponseWriter, r *http.Request) {
+	if !memberorigin.RefuseUnverified(w, r) {
+		return
+	}
 	if err := memoryEnsureRepo(); err != nil {
 		httpx.WriteErr(w, http.StatusInternalServerError, errCodeMemoryImportFailed, err.Error())
 		return

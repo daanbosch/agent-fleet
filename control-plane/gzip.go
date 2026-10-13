@@ -101,3 +101,7 @@ func (w *gzipWriter) close() {
 		w.gz = nil
 	}
 }
+
+// Unwrap lets http.NewResponseController reach the connection through this wrapper (read
+// deadlines, flushing); without it those calls answer ErrNotSupported.
+func (w *gzipWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }

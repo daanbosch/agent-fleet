@@ -164,3 +164,39 @@ Gated routes are listed identically on both sides; `TestMemberOriginRoutesAgreeW
 every selected slug, and a large bundle can exceed the save limit.
 
 Follow-ups: #2076
+
+## Note 2026-10-14: import is marked by body hash; restore and the CLI routes stay open (#2076)
+
+- **`POST /agents/memory/import` is gated.** The upload is multipart and up to 64 MiB
+  (`AF_MEMORY_IMPORT_MAX`), far over the 2 MiB the CP buffers for a JSON mark, so the mark signs the
+  body's SHA-256 as before but the hash is computed while streaming. The CP spools the upload to a
+  file, hashes it, signs and relays the file (cap 130 MiB, 413 above it); the Agent spools what it
+  receives, hashes it, verifies the mark against that hash, then hands the handler the file
+  (`memberorigin.RequireUpload`). Because a cross-origin page can send a multipart POST without a
+  preflight, the JSON content-type defence of decision 6 does not apply; the CP instead requires the
+  custom header `X-AF-Console` (forcing a preflight it never answers), plus the same `Sec-Fetch-Site`
+  and `Origin` checks. The mark's crypto and the claims are unchanged.
+- **`POST /agents/memory/restore` stays open, and cannot be protected by the mark.** Its legitimate
+  agent caller is the assistant's `restore_memory_snapshot` tool, which runs in the separate af-mcp
+  process and reaches the Agent over loopback with `AGENT_TOKEN`. The Agent cannot tell that process
+  from a session shell, so any route the tool can reach is reachable by a session; a second
+  token-only route would only move the hole. The user-approved restore flow is kept over a nominal gate.
+- **`claude-import`, `muse-import` and `claude-export` stay open** (owner decision, #2076): the
+  `af-memory` CLI calls them from sessions and that is a supported use. Decision 8 therefore still
+  holds for those routes: their `member` author is the route they came by.
+
+The table above is updated by this note: `import` is **gated**; `restore` and the three CLI routes are open for the
+reasons given here.
+
+Review notes on the above (same day):
+
+- The mark's lifetime for an upload starts when the CP has read the whole body, not when the request
+  began, so a slow upload is not signed already half-expired.
+- CP spooling is bounded (4 uploads at once, one per membership, 429 beyond) because the spool lives
+  on the CP's size-limited temp volume.
+- **A limit of the hashed form.** The Agent's spool, and the import handler's own temporary copy, are
+  writable by any process of the Agent's uid. The mark decides who may start an import; it does not
+  protect the bytes taken in from a same-uid rewrite between verification and reading. That is the
+  same limit as writing the store directly (Threat model, "What the mark does not do"), not a new
+  capability, and it is not closed in code: an open or unlinked descriptor is reachable through
+  `/proc/<pid>/fd` just the same.

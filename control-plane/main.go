@@ -705,3 +705,7 @@ func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	w.status = http.StatusSwitchingProtocols
 	return hj.Hijack()
 }
+
+// Unwrap lets http.NewResponseController reach the connection through this wrapper (read
+// deadlines, flushing); without it those calls answer ErrNotSupported.
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }

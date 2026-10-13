@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -46,6 +47,7 @@ func TestMemberOriginRoutesAreTheMemberWrites(t *testing.T) {
 		"POST /api/agents/memory/entries/pin",
 		"POST /api/agents/memory/entries/project-move",
 		"POST /api/agents/memory/entries/revert",
+		"POST /api/agents/memory/import",
 		"POST /api/agents/memory/import/apply",
 		"POST /api/agents/memory/snapshots",
 	}
@@ -329,5 +331,243 @@ func TestMemberOriginRefusesCrossOriginRequests(t *testing.T) {
 	}
 	if calls != 2 || marks[0] == "" || marks[1] == "" {
 		t.Fatalf("accepted requests: calls=%d marks=%q", calls, marks)
+	}
+}
+
+// The bundle import is a multipart upload signed by its body hash: the Agent gets the exact bytes
+// (over the 2 MiB JSON cap included) with a mark over their SHA-256, and a page other than the
+// Console is refused before anything is hashed.
+func TestHashedUploadIsSignedByBodyHash(t *testing.T) {
+	var gotBody []byte
+	var gotMark string
+	calls := 0
+	proxy, res, _, cleanup := newFSProxyTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		gotBody, _ = io.ReadAll(r.Body)
+		gotMark = r.Header.Get(memberOriginHeader)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer cleanup()
+	t.Setenv(memberOriginKeyVersionEnv, "")
+	pub := memberOriginKey(proxy.mgr.tokenSignMaster(), 1).Public().(ed25519.PublicKey)
+
+	big := "--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"b.tgz\"\r\n\r\n" +
+		strings.Repeat("x", 3<<20) + "\r\n--B--\r\n" // over memberOriginMaxBody
+	send := func(h map[string]string, body string) int {
+		req := httptest.NewRequest(http.MethodPost, "https://console.example/api/agents/memory/import", strings.NewReader(body))
+		for k, v := range h {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		proxy.rest(deadlineRecorder{rec}, req, res)
+		return rec.Code
+	}
+	mp := "multipart/form-data; boundary=B"
+	for name, c := range map[string]struct {
+		h    map[string]string
+		want int
+	}{
+		"no Console header": {map[string]string{"Content-Type": mp}, http.StatusForbidden},
+		"text/plain":        {map[string]string{"Content-Type": "text/plain", memberOriginConsoleHeader: "1"}, http.StatusUnsupportedMediaType},
+		"JSON":              {map[string]string{"Content-Type": "application/json", memberOriginConsoleHeader: "1"}, http.StatusUnsupportedMediaType},
+		"cross-site":        {map[string]string{"Content-Type": mp, memberOriginConsoleHeader: "1", "Sec-Fetch-Site": "same-site"}, http.StatusForbidden},
+		"foreign origin":    {map[string]string{"Content-Type": mp, memberOriginConsoleHeader: "1", "Origin": "https://p.preview.example"}, http.StatusForbidden},
+	} {
+		if got := send(c.h, big); got != c.want {
+			t.Errorf("%s: %d, want %d", name, got, c.want)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("a refused upload reached the Agent %d times", calls)
+	}
+	ok := map[string]string{"Content-Type": mp, memberOriginConsoleHeader: "1", "Origin": "https://console.example", "Sec-Fetch-Site": "same-origin"}
+	if got := send(ok, big); got != http.StatusOK {
+		t.Fatalf("Console upload: %d", got)
+	}
+	if string(gotBody) != big {
+		t.Fatalf("the Agent received %d bytes, want %d", len(gotBody), len(big))
+	}
+	c := decodeMark(t, pub, gotMark)
+	sum := sha256.Sum256([]byte(big))
+	if c.Path != "/agents/memory/import" || c.BodySHA256 != hex.EncodeToString(sum[:]) {
+		t.Fatalf("claims = %+v", c)
+	}
+}
+
+// deadlineRecorder is a ResponseRecorder that, like the real server's writer, accepts read
+// deadlines (the hashed upload refuses to start without being able to set one).
+type deadlineRecorder struct{ *httptest.ResponseRecorder }
+
+func (deadlineRecorder) SetReadDeadline(time.Time) error { return nil }
+
+// slowBody delivers its bytes, waits, then ends; doneAt is when it ended.
+type slowBody struct {
+	r      io.Reader
+	wait   time.Duration
+	doneAt time.Time
+	fail   error
+}
+
+func (b *slowBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if err == io.EOF {
+		if b.fail != nil {
+			return n, b.fail
+		}
+		time.Sleep(b.wait)
+		b.doneAt = time.Now()
+	}
+	return n, err
+}
+
+// The mark's lifetime starts when the upload has been read, not when it began (a slow upload may
+// take longer than the mark lives); the spool is bounded, and nothing is left in the temp dir after
+// a success, an oversize body, a refusal or a dropped connection.
+func TestHashedUploadTimingLimitsAndCleanup(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	var gotMark string
+	proxy, res, _, cleanup := newFSProxyTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		gotMark = r.Header.Get(memberOriginHeader)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer cleanup()
+	t.Setenv(memberOriginKeyVersionEnv, "")
+	pub := memberOriginKey(proxy.mgr.tokenSignMaster(), 1).Public().(ed25519.PublicKey)
+	old := memberOriginUploadMax
+	memberOriginUploadMax = 1 << 10
+	defer func() { memberOriginUploadMax = old }()
+
+	send := func(body io.Reader) int {
+		req := httptest.NewRequest(http.MethodPost, "https://console.example/api/agents/memory/import", body)
+		req.Header.Set("Content-Type", "multipart/form-data; boundary=B")
+		req.Header.Set(memberOriginConsoleHeader, "1")
+		rec := httptest.NewRecorder()
+		proxy.rest(deadlineRecorder{rec}, req, res)
+		return rec.Code
+	}
+	empty := func(when string) {
+		t.Helper()
+		if left, _ := os.ReadDir(tmp); len(left) != 0 {
+			t.Fatalf("%s: %d spool files left", when, len(left))
+		}
+		if uploadsActive != 0 || len(uploadsByMember) != 0 {
+			t.Fatalf("%s: upload slots still held", when)
+		}
+	}
+
+	sb := &slowBody{r: strings.NewReader("small"), wait: 1200 * time.Millisecond}
+	if code := send(sb); code != http.StatusOK {
+		t.Fatalf("slow upload: %d", code)
+	}
+	if c := decodeMark(t, pub, gotMark); c.IssuedAt < sb.doneAt.Unix() {
+		t.Fatalf("iat %d is before the body was read (%d)", c.IssuedAt, sb.doneAt.Unix())
+	}
+	empty("after success")
+	if code := send(strings.NewReader(strings.Repeat("x", 2<<10))); code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize: %d", code)
+	}
+	empty("after 413")
+	if code := send(&slowBody{r: strings.NewReader("part"), fail: io.ErrUnexpectedEOF}); code != http.StatusBadRequest {
+		t.Fatalf("dropped connection: %d", code)
+	}
+	empty("after a dropped connection")
+
+	// One upload per membership, and a global bound.
+	if !acquireUploadSlot("mb-a") || acquireUploadSlot("mb-a") {
+		t.Fatal("a membership must hold one slot")
+	}
+	for i := 1; i < memberOriginUploadSlots; i++ {
+		if !acquireUploadSlot("mb-" + strconv.Itoa(i)) {
+			t.Fatalf("slot %d refused", i)
+		}
+	}
+	if acquireUploadSlot("mb-extra") {
+		t.Fatal("the global bound did not hold")
+	}
+	releaseUploadSlot("mb-a")
+	for i := 1; i < memberOriginUploadSlots; i++ {
+		releaseUploadSlot("mb-" + strconv.Itoa(i))
+	}
+	if !acquireUploadSlot(res.ws.MembershipID) {
+		t.Fatal("slot not free")
+	}
+	if code := send(strings.NewReader("x")); code != http.StatusTooManyRequests {
+		t.Fatalf("second upload of one member: %d", code)
+	}
+	releaseUploadSlot(res.ws.MembershipID)
+	empty("after the slot test")
+}
+
+// A stalled upload is dropped (408) and gives its slot back; one that keeps moving is not.
+func TestHashedUploadStallFreesTheSlot(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	proxy, res, _, cleanup := newFSProxyTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer cleanup()
+	oldIdle := memberOriginUploadIdle
+	memberOriginUploadIdle = 300 * time.Millisecond
+	defer func() { memberOriginUploadIdle = oldIdle }()
+	// The production wrappers, outermost first (main.go): they hide the connection unless they
+	// Unwrap, and browsers send Accept-Encoding: gzip on a POST too.
+	srv := httptest.NewServer(logRequests(gzipMiddleware(etagJSON(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy.rest(w, r, res)
+	})))))
+	defer srv.Close()
+
+	post := func(body io.Reader) (int, error) {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/agents/memory/import", body)
+		req.Header.Set("Content-Type", "multipart/form-data; boundary=B")
+		req.Header.Set(memberOriginConsoleHeader, "1")
+		req.Header.Set("Accept-Encoding", "gzip")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return 0, err
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode, nil
+	}
+	// Sends a little and then nothing, without closing.
+	pr, pw := io.Pipe()
+	go func() { _, _ = pw.Write([]byte("--B\r\n")) }()
+	code, err := post(pr)
+	_ = pw.Close()
+	if err != nil || code != http.StatusRequestTimeout {
+		t.Fatalf("stalled upload: %d %v", code, err)
+	}
+	uploadMu.Lock()
+	held := uploadsActive
+	uploadMu.Unlock()
+	if held != 0 {
+		t.Fatalf("%d slots still held after the stall", held)
+	}
+	// Slow but moving: each gap is under the idle limit, the total is over it.
+	pr2, pw2 := io.Pipe()
+	go func() {
+		for i := 0; i < 4; i++ {
+			_, _ = pw2.Write([]byte("x"))
+			time.Sleep(150 * time.Millisecond)
+		}
+		_ = pw2.Close()
+	}()
+	if code, err := post(pr2); err != nil || code != http.StatusOK {
+		t.Fatalf("slow upload: %d %v", code, err)
+	}
+}
+
+// Without a way to set a read deadline the upload is refused rather than left unbounded.
+func TestHashedUploadRefusedWhenNoDeadlineCanBeSet(t *testing.T) {
+	proxy, res, _, cleanup := newFSProxyTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer cleanup()
+	req := httptest.NewRequest(http.MethodPost, "https://console.example/api/agents/memory/import", strings.NewReader("x"))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=B")
+	req.Header.Set(memberOriginConsoleHeader, "1")
+	rec := httptest.NewRecorder() // no SetReadDeadline
+	proxy.rest(rec, req, res)
+	if rec.Code != http.StatusInternalServerError || uploadsActive != 0 {
+		t.Fatalf("code %d, slots %d", rec.Code, uploadsActive)
 	}
 }

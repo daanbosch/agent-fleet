@@ -83,6 +83,11 @@ export const errors = {
   // 来たとき。失敗ではなく「まだ」なので、赤くしても再試行を促す言い方にする。
   "err.workspace_starting": "ワークスペースを起動中です。準備ができてからもう一度お試しください。",
   "err.driver_unavailable": "このエージェントではマネージド実行を利用できません。",
+  "err.member_origin_required": "この操作は Console からのみ行えます。ログイン中のセッションから送られた要求ではありません。",
+  "err.member_origin_invalid": "要求があなたのものだと確認できませんでした（期限切れの可能性があります）。もう一度お試しください。",
+  "err.member_origin_unavailable": "ワークスペースのエージェントが起動直後か、再起動が必要です。1 分ほど待ってから再試行してください。",
+  "err.too_many_uploads": "別のメモリのインポートが実行中です。完了してから再度お試しください。",
+  "err.upload_timeout": "アップロードが止まったか、時間がかかりすぎました。もう一度お試しください。",
   "err.runtime_failed": "エージェントを起動できませんでした。しばらく待ってから再試行してください。",
   // ↑ は「待てば直る」失敗のための文言。共有 daemon が未認証で起こされなかった場合は
   // 待っても直らないので、runtime_failed に潰さず専用コードで出す（workspace/agent の
