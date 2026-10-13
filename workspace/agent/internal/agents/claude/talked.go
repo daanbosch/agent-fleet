@@ -77,7 +77,27 @@ func HadConversation(slot string) bool { _, ok := talkedID(slot); return ok }
 // The logs are enumerated with an exact-id sweep of every project directory, not
 // rawJSONLPathsIn: that returns a single cwd-guessed hit or a memoized answer, and a second
 // copy under another project would survive and be resumed.
+//
+// The whole fresh start holds the slot's backup lock, the one RestoreTranscript takes: a restore
+// slipping in between the set-aside of the logs and of the backup would resume the old
+// conversation on the next launch.
 func StartFresh(slot string) error {
+	defer lockBackup(slot)()
+	return startFreshLocked(slot)
+}
+
+// StartFreshIfLost is StartFresh that re-checks, inside the lock, that the conversation is still
+// lost: a restore that ran since the caller looked has made it resumable again, and a stale
+// request must not discard it. It reports whether it started fresh.
+func StartFreshIfLost(slot string) (bool, error) {
+	defer lockBackup(slot)()
+	if !lostTranscript(slot) {
+		return false, nil
+	}
+	return true, startFreshLocked(slot)
+}
+
+func startFreshLocked(slot string) error {
 	ids := map[string]bool{slot: true}
 	if live := sids.Read(slot); live != "" {
 		ids[live] = true

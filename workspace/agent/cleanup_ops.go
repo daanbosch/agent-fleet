@@ -257,30 +257,49 @@ func archiveSessionForDelete(m session.Meta) (string, error) {
 	payloads := map[string][]byte{}
 	as := cleanupArchivedSession{Name: m.Name, Display: session.Display(m), Kind: m.Kind, Meta: metaJSON}
 	if m.Kind == session.KindClaude {
+		// The Agent's backup stands in for the current conversation's log whenever that log is
+		// not on disk as a conversation: gone, or replaced by a stub, or only an older slot log
+		// left. Deleting the session removes the backup, so the archive must hold it then.
+		var bkSrc, bkDest string
+		haveCurrent, err := claude.HasCurrentLog(m)
+		if err != nil {
+			return "", err
+		}
+		if !haveCurrent {
+			src, dest, ok, err := claude.ArchiveBackup(m)
+			if err != nil {
+				return "", err
+			}
+			if ok {
+				bkSrc, bkDest = src, dest
+			}
+		}
+		off := 0
+		if bkSrc != "" {
+			off = 1
+			b, err := os.ReadFile(bkSrc)
+			if err != nil {
+				return "", err
+			}
+			entry := "sessions/" + idSlug(m.Name) + "/" + jsonlEntryName(0, bkDest)
+			payloads[entry] = b
+			as.JSONLPaths = append(as.JSONLPaths, bkDest)
+			as.JSONLNames = append(as.JSONLNames, entry)
+		}
 		if _, _, matched := claude.TranscriptRead(session.UUID(m.Dir, m.Name)); len(matched) > 0 {
 			for i, p := range matched {
+				if p == bkDest {
+					continue // the stub the backup replaces in the archive
+				}
 				b, err := os.ReadFile(p)
 				if err != nil {
 					continue
 				}
-				entry := "sessions/" + idSlug(m.Name) + "/" + jsonlEntryName(i, p)
+				entry := "sessions/" + idSlug(m.Name) + "/" + jsonlEntryName(i+off, p)
 				payloads[entry] = b
 				as.JSONLPaths = append(as.JSONLPaths, p)
 				as.JSONLNames = append(as.JSONLNames, entry)
 			}
-		} else if src, dest, ok, err := claude.ArchiveBackup(m); err != nil {
-			// The log is gone and the backup cannot be read: deleting now would lose the
-			// conversation, so the delete is refused.
-			return "", err
-		} else if ok {
-			b, err := os.ReadFile(src)
-			if err != nil {
-				return "", err
-			}
-			entry := "sessions/" + idSlug(m.Name) + "/" + jsonlEntryName(0, dest)
-			payloads[entry] = b
-			as.JSONLPaths = append(as.JSONLPaths, dest)
-			as.JSONLNames = append(as.JSONLNames, entry)
 		}
 	}
 	man := cleanupManifest{

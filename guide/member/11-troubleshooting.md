@@ -74,8 +74,10 @@ earlier, or a lower value in your own claude `settings.json`, can still delete a
 keeps a copy of each stopped session's log and puts it back when you resume, so this message only
 appears when no copy exists (the log vanished before the first copy, or before the feature) — the
 copy cannot be brought back from the Console by hand. If resuming instead fails with "could not
-restore the conversation log from the backup", the copy exists but could not be read or written
-(check the Agent log and the free disk space); nothing was changed. Choose **"Start a new conversation"** to continue in
+restore the conversation log from the backup", the restore itself failed (the Agent log has the
+reason: an unreadable folder, a full disk, or a log that appeared meanwhile). The backup is kept;
+a stub log that was in the way may have been moved aside as `.superseded.<number>`. Resume again
+after fixing the cause. Choose **"Start a new conversation"** to continue in
 the same session without the old context, and remove a low `cleanupPeriodDays` if you set one
 (see [02](02-sessions.md)).
 

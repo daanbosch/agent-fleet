@@ -1,6 +1,8 @@
 package claude
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -97,6 +99,24 @@ func recordedLogID(slot string) string {
 	return slot
 }
 
+// errSourceChanged marks a copy abandoned because its source changed underneath it.
+var errSourceChanged = errors.New("source changed while it was being copied")
+
+// completeTranscript reports whether p is a whole transcript worth keeping: every line a
+// complete JSON value (a half-written last line has no newline), and a real conversation in it.
+func completeTranscript(p string) bool {
+	b, err := os.ReadFile(p)
+	if err != nil || len(b) == 0 || b[len(b)-1] != '\n' {
+		return false
+	}
+	for _, line := range bytes.Split(b, []byte{'\n'}) {
+		if len(bytes.TrimSpace(line)) > 0 && !json.Valid(line) {
+			return false
+		}
+	}
+	return resumablePaths([]string{p})
+}
+
 // copyPreserving copies src to a new file tmpDir/<pattern>*, with src's permission bits and
 // mtime, and returns its path. The mtime is what BackupTranscript compares to decide which of
 // two copies is newer, so it must survive the copy.
@@ -122,6 +142,15 @@ func copyPreserving(src, tmpDir, pattern string) (string, error) {
 	}
 	if _, err := io.Copy(out, in); err != nil {
 		return fail(err)
+	}
+	// The source may be appended to while it is copied (a resume racing the background copy).
+	// Same file, same size and mtime before and after is the only evidence the copy is a
+	// snapshot of one state, not a mix of two.
+	if after, err := in.Stat(); err != nil || after.Size() != fi.Size() || !after.ModTime().Equal(fi.ModTime()) {
+		return fail(errSourceChanged)
+	}
+	if at, err := os.Stat(src); err != nil || !os.SameFile(at, fi) {
+		return fail(errSourceChanged)
 	}
 	if err := out.Chmod(fi.Mode().Perm()); err != nil {
 		return fail(err)
@@ -156,45 +185,41 @@ func BackupTranscript(m session.Meta) error {
 		return nil
 	}
 	id := recordedLogID(slot)
-	logs, err := exactLogs(id)
-	if err != nil {
-		return err
-	}
-	var live string
-	var liveInfo fs.FileInfo
-	for _, p := range logs {
-		if !resumablePaths([]string{p}) {
-			continue
-		}
-		fi, err := os.Stat(p)
-		if err != nil {
-			return err
-		}
-		if live == "" || fi.ModTime().After(liveInfo.ModTime()) {
-			live, liveInfo = p, fi
-		}
-	}
-	if live == "" {
-		return nil
-	}
-	project := filepath.Base(filepath.Dir(live))
 	have, haveProject, err := backupFile(slotDir, id)
 	if err != nil {
 		return err
 	}
-	if have != "" && haveProject == project {
-		bi, err := os.Stat(have)
-		if err == nil && !liveInfo.ModTime().After(bi.ModTime()) {
-			return nil // unchanged, or the backup is the newer of the two
+	var haveInfo fs.FileInfo
+	if have != "" {
+		if haveInfo, err = os.Stat(have); err != nil {
+			return err
 		}
 	}
+	live, liveInfo, err := newestLiveLog(slot, id, haveProject)
+	if err != nil || live == "" {
+		return err
+	}
+	// Whatever project the live log is in, a backup at least as new wins: an old log left in
+	// another project directory must not replace a newer conversation whose original is gone.
+	if haveInfo != nil && !liveInfo.ModTime().After(haveInfo.ModTime()) {
+		return nil
+	}
+	project := filepath.Base(filepath.Dir(live))
 	dstDir := filepath.Join(slotDir, project)
 	if err := os.MkdirAll(dstDir, 0o700); err != nil {
 		return err
 	}
 	tmp, err := copyPreserving(live, slotDir, ".tmp-*")
+	if errors.Is(err, errSourceChanged) {
+		return nil // being written to: the next attempt copies the settled log
+	}
 	if err != nil {
 		return err
+	}
+	// Judged on the copy, not on the original it was taken from.
+	if !completeTranscript(tmp) {
+		_ = os.Remove(tmp)
+		return nil
 	}
 	if err := os.Rename(tmp, filepath.Join(dstDir, id+".jsonl")); err != nil {
 		_ = os.Remove(tmp)
@@ -226,14 +251,54 @@ func BackupTranscript(m session.Meta) error {
 	return errors.Join(errs...)
 }
 
+// newestLiveLog finds the log with this id to back up, as cheaply as the answer allows: the
+// launch directory's project and the project the backup came from are single Lstats, and only
+// when neither holds it is every project directory swept. A log that is not even a
+// conversation by its markers is skipped here; the copy is validated properly afterwards.
+func newestLiveLog(slot, id, haveProject string) (string, fs.FileInfo, error) {
+	var cands []string
+	if p := guessProjectPath(session.CWDForUUID(slot), id+".jsonl"); p != "" {
+		cands = append(cands, p)
+	} else if haveProject != "" {
+		p := filepath.Join(ConfigDir(), "projects", haveProject, id+".jsonl")
+		if _, err := os.Lstat(p); err == nil {
+			cands = append(cands, p)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return "", nil, err
+		}
+	}
+	if len(cands) == 0 {
+		var err error
+		if cands, err = exactLogs(id); err != nil {
+			return "", nil, err
+		}
+	}
+	var best string
+	var bestInfo fs.FileInfo
+	for _, p := range cands {
+		fi, err := os.Stat(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", nil, err
+		}
+		if best == "" || fi.ModTime().After(bestInfo.ModTime()) {
+			best, bestInfo = p, fi
+		}
+	}
+	return best, bestInfo, nil
+}
+
 // backupRetry spaces the background attempts per slot: the session list polls every few
 // seconds, and a stopped session's log does not change.
 const backupRetry = time.Minute
 
 var lastBackupTry = struct {
-	mu sync.Mutex
-	m  map[string]time.Time
-}{m: map[string]time.Time{}}
+	mu       sync.Mutex
+	m        map[string]time.Time
+	inflight map[string]bool
+}{m: map[string]time.Time{}, inflight: map[string]bool{}}
 
 // backupStopped runs BackupTranscript off the caller's goroutine (the list poll must not wait
 // for a large copy), at most once per backupRetry per session.
@@ -244,9 +309,19 @@ func backupStopped(m session.Meta) {
 		lastBackupTry.mu.Unlock()
 		return
 	}
+	if lastBackupTry.inflight[slot] {
+		lastBackupTry.mu.Unlock()
+		return
+	}
 	lastBackupTry.m[slot] = time.Now()
+	lastBackupTry.inflight[slot] = true
 	lastBackupTry.mu.Unlock()
 	go func() {
+		defer func() {
+			lastBackupTry.mu.Lock()
+			delete(lastBackupTry.inflight, slot)
+			lastBackupTry.mu.Unlock()
+		}()
 		if err := BackupTranscript(m); err != nil {
 			log.Printf("claude transcript backup of %s failed: %v", m.Name, err)
 		}
@@ -298,14 +373,25 @@ func RestoreTranscript(slot, cwd string) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 		return false, err
 	}
-	if _, err := os.Lstat(dest); err == nil {
-		if err := setAside(dest); err != nil {
-			return false, err
-		}
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	// Stage first, decide last: the copy is ready before anything at dest is touched, and the
+	// logs are looked at again right before the hand-over, so a conversation another writer
+	// created since the first look (in any project) aborts the restore instead of being
+	// set aside as if it were a stub.
+	tmp, err := copyPreserving(have, filepath.Dir(dest), ".restore-*")
+	if err != nil {
 		return false, err
 	}
-	created, err := placeCopy(have, dest)
+	defer os.Remove(tmp)
+	if logs, err = exactLogs(id); err != nil {
+		return false, err
+	}
+	if resumablePaths(logs) {
+		return false, nil
+	}
+	if err := setAsideStub(dest); err != nil {
+		return false, err
+	}
+	created, err := placeStaged(tmp, dest)
 	if err != nil {
 		return false, err
 	}
@@ -315,16 +401,57 @@ func RestoreTranscript(slot, cwd string) (bool, error) {
 	return created, nil
 }
 
-// placeCopy creates dest as a copy of src unless something is already there, and never
-// replaces anything. The copy is staged next to dest and linked in (atomic, so claude never
-// sees half a log); where the filesystem has no hard links it is written to dest directly with
-// O_EXCL instead, and removed again if that fails part way.
-func placeCopy(src, dest string) (created bool, err error) {
-	tmp, err := copyPreserving(src, filepath.Dir(dest), ".restore-*")
-	if err != nil {
-		return false, err
+// setAsideStub moves a non-conversation file (a bridge-session stub) out of dest's way, keeping
+// it as <dest>.superseded.<ns>. The file is opened and judged first and the move is checked
+// against that same inode; a file that changed or is a real conversation is moved back (when
+// dest is still free) and the restore is abandoned, because something else is writing there.
+func setAsideStub(dest string) error {
+	f, err := os.Open(dest)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
 	}
-	defer os.Remove(tmp)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if resumablePaths([]string{dest}) {
+		return fmt.Errorf("%s holds a conversation now; not restoring over it", dest)
+	}
+	if at, err := os.Lstat(dest); err != nil || !os.SameFile(at, fi) {
+		return fmt.Errorf("%s changed while it was being checked", dest)
+	}
+	moved, err := setAsideTo(dest)
+	if err != nil {
+		return err
+	}
+	if at, err := os.Lstat(moved); err != nil || !os.SameFile(at, fi) || resumablePaths([]string{moved}) {
+		_ = os.Link(moved, dest) // best effort, and never over something that is there now
+		return fmt.Errorf("%s changed while it was being set aside", dest)
+	}
+	return nil
+}
+
+// setAsideTo is setAside reporting the name it chose.
+func setAsideTo(p string) (string, error) {
+	for i := 0; i < 5; i++ {
+		dst := fmt.Sprintf("%s.superseded.%d", p, time.Now().UnixNano())
+		if _, err := os.Lstat(dst); err == nil {
+			continue
+		}
+		return dst, os.Rename(p, dst)
+	}
+	return "", fmt.Errorf("no free name to set aside %s", p)
+}
+
+// placeStaged creates dest from the staged file tmp unless something is already there, and
+// never replaces anything. It is linked in (atomic, so claude never sees half a log); where the
+// filesystem has no hard links it is copied to dest with O_EXCL instead, and removed again if
+// that fails part way.
+func placeStaged(tmp, dest string) (created bool, err error) {
 	err = os.Link(tmp, dest)
 	if err == nil {
 		return true, nil
@@ -362,6 +489,16 @@ func placeCopy(src, dest string) (created bool, err error) {
 	return true, nil
 }
 
+// HasCurrentLog reports whether the log of the conversation the slot last wrote (under the
+// recorded id) is on disk and holds a conversation. An older slot log or a stub does not count.
+func HasCurrentLog(m session.Meta) (bool, error) {
+	logs, err := exactLogs(recordedLogID(session.UUID(m.Dir, m.Name)))
+	if err != nil {
+		return false, err
+	}
+	return resumablePaths(logs), nil
+}
+
 // ArchiveBackup returns the backed-up log of a session whose own log is gone, for the cleanup
 // archive: the file to read and the path a restore of the archive should write it to. ok=false
 // when there is no backup. Deleting the session removes the backup, so without this a
@@ -386,13 +523,13 @@ func ArchiveBackup(m session.Meta) (src, dest string, ok bool, err error) {
 // conversation behind, so the backup must not bring it back. Like the live logs it is kept,
 // not deleted, under <slot>.superseded.<unixnano> (removed with the session), because when the
 // original log is already gone the backup is the only copy.
+//
+// The caller holds the slot's backup lock (StartFresh does, across the whole fresh start).
 func supersedeBackup(slot string) error {
 	slotDir, err := backupSlotDir(slot)
 	if err != nil {
 		return err
 	}
-	unlock := lockBackup(slot)
-	defer unlock()
 	if _, err := os.Lstat(slotDir); errors.Is(err, fs.ErrNotExist) {
 		return nil
 	} else if err != nil {

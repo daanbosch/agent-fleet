@@ -438,3 +438,41 @@ func TestTrashRemovesTranscriptBackupAndArchivesItWhenLogIsGone(t *testing.T) {
 		})
 	}
 }
+
+// A stub where the current log was must not stand in for it: the archive takes the good backup,
+// and restoring the archive gives the conversation back, not the stub.
+func TestTrashArchivesBackupWhenLogIsReplacedByStub(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AF_SESSIONS_DIR", filepath.Join(home, "sessions"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
+	srv := httptest.NewServer(trashMux())
+	defer srv.Close()
+	dir := filepath.Join(home, "repos", "app")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	m := session.Meta{Name: "bkpstub", Dir: dir, Kind: session.KindClaude, CreatedAt: time.Now().Format(time.RFC3339)}
+	session.WriteMeta(m)
+	jsonl := filepath.Join(home, "claude", "projects", claude.ProjectKey(dir), session.UUID(dir, m.Name)+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(jsonl), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"type":"user","message":"keep me"}` + "\n"
+	if err := os.WriteFile(jsonl, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := claude.BackupTranscript(m); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(jsonl, []byte(`{"type":"bridge-session"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out struct{ Archive string }
+	do(t, srv, "DELETE", "/sessions/bkpstub", nil, http.StatusOK, &out)
+	_ = os.Remove(jsonl)
+	do(t, srv, "POST", "/cleanup/archives/"+out.Archive+"/restore", nil, http.StatusOK, nil)
+	if got, err := os.ReadFile(jsonl); err != nil || string(got) != body {
+		t.Fatalf("restored = %q, %v; want the backed-up conversation", got, err)
+	}
+}

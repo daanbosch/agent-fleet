@@ -268,3 +268,110 @@ func TestBackupSkipsDeletedSession(t *testing.T) {
 		t.Fatal("a backup was made for a session with no meta")
 	}
 }
+
+// An older copy of the same conversation in ANOTHER project directory must not replace a newer
+// backup once the original is gone.
+func TestBackupOlderLogInOtherProjectDoesNotReplaceNewerBackup(t *testing.T) {
+	cfg, m, sid, logPath := backupFixture(t, "bk-other-proj")
+	mustBackup(t, m)
+	slotDir, _ := backupSlotDir(sid)
+	bp, _, _ := backupFile(slotDir, sid)
+	want, _ := os.ReadFile(bp)
+	if err := os.Remove(logPath); err != nil {
+		t.Fatal(err)
+	}
+	other := writeSlotJSONL(t, cfg, "other-project", sid)
+	if err := os.WriteFile(other, []byte(`{"type":"user","old":1}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(other, past, past); err != nil {
+		t.Fatal(err)
+	}
+	mustBackup(t, m)
+	bp2, _, _ := backupFile(slotDir, sid)
+	if got, _ := os.ReadFile(bp2); string(got) != string(want) {
+		t.Fatalf("backup replaced by the older log: %q", got)
+	}
+}
+
+// A log with a half-written last line is not copied over a complete backup.
+func TestBackupRejectsTornLog(t *testing.T) {
+	_, m, sid, logPath := backupFixture(t, "bk-torn")
+	mustBackup(t, m)
+	slotDir, _ := backupSlotDir(sid)
+	bp, _, _ := backupFile(slotDir, sid)
+	want, _ := os.ReadFile(bp)
+	torn := `{"type":"user"}` + "\n" + `{"type":"assistant","message":"par`
+	if err := os.WriteFile(logPath, []byte(torn), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(logPath, future, future); err != nil {
+		t.Fatal(err)
+	}
+	mustBackup(t, m)
+	if got, _ := os.ReadFile(bp); string(got) != string(want) {
+		t.Fatalf("a torn log replaced the backup: %q", got)
+	}
+	// Positive control: the same log completed is taken.
+	if err := os.WriteFile(logPath, []byte(torn+`t"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(logPath, future, future); err != nil {
+		t.Fatal(err)
+	}
+	mustBackup(t, m)
+	if got, _ := os.ReadFile(bp); !strings.Contains(string(got), `part"}`) {
+		t.Fatalf("a complete newer log was not taken: %q", got)
+	}
+}
+
+// StartFresh and RestoreTranscript exclude each other, and a fresh start asked for after a
+// restore made the log resumable again does nothing.
+func TestStartFreshIfLostRechecksAndLocks(t *testing.T) {
+	_, m, sid, logPath := backupFixture(t, "bk-lock")
+	mustBackup(t, m)
+	if err := os.Remove(logPath); err != nil {
+		t.Fatal(err)
+	}
+	if restored, err := RestoreTranscript(sid, m.Dir); err != nil || !restored {
+		t.Fatalf("restore: %v %v", restored, err)
+	}
+	if started, err := StartFreshIfLost(sid); err != nil || started {
+		t.Fatalf("started = %v, %v; want no fresh start of a resumable conversation", started, err)
+	}
+	if _, err := os.Stat(logPath); err != nil {
+		t.Fatalf("the restored log was set aside: %v", err)
+	}
+
+	unlock := lockBackup(sid)
+	done := make(chan struct{})
+	go func() { _ = StartFresh(sid); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("StartFresh ran while the slot lock was held")
+	case <-time.After(150 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("StartFresh did not finish after the lock was released")
+	}
+}
+
+// A conversation that appears at the destination is never set aside as if it were a stub.
+func TestSetAsideStubRefusesConversation(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "x.jsonl")
+	body := `{"type":"user"}` + "\n"
+	if err := os.WriteFile(dest, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := setAsideStub(dest); err == nil {
+		t.Fatal("a conversation was set aside")
+	}
+	if got, _ := os.ReadFile(dest); string(got) != body {
+		t.Fatalf("conversation touched: %q", got)
+	}
+}
