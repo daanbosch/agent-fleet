@@ -898,3 +898,29 @@ their body in `data`, which `handleServeEvent` now reads. A v2 turn that ends wi
 running is reported as unknown unless an assistant message newer than the input exists. The v2
 contract (`contract_serveapi_test.go`) runs by hand only: `opencode-contract.yml` covers the
 `opencode-ai` pins, not `@opencode/cli` (#2105 owns the drift side).
+
+## 2026-10-14 note: session state on opencode 2 comes from the API (#2103, part of #2101)
+
+On a v2 daemon the read layer no longer touches `opencode.db`: v2 migrates the v1 tables in place
+and never writes them again, so history, state, queue, usage and recall read through
+`/api/session/{id}`, `/message`, `/inbox` and `/api/session/active`
+(`workspace/agent/internal/agents/opencode/v2state.go`; the v1 SQLite path is unchanged and the
+default). Measured on 2.0.28 against a loopback stub provider (fixtures: `testdata/v2/`):
+
+- A turn is several assistant messages (one per model step); v1 stored one. `v2Turns` merges a run
+  back (cost summed, tokens from the last step, as v1 filled them) and hands it to `parseMessage`.
+- Outcomes are explicit. The execution leaves an `idle` message with `outcome` succeeded | failed |
+  interrupted (+ `error`), and `session.execution.*` says the same on the stream. A 4xx fails at once
+  (`provider.auth`, status 401); a 5xx is retried (`session.retry.scheduled`) for about 90 s first
+  (`provider.internal`). An interrupted step carries `error.type = "aborted"`, which maps to the
+  abort that v1 records, so it is never shown as a failure. `sendTurn` reads the outcome off the idle
+  message and returns it in v1's body shape, so `runTurn`'s classification is shared; the stream only
+  wakes the wait early.
+- Cost sits on assistant messages and on `compaction` messages (the session total is both), so the
+  usage fold counts a compaction as a cost-only turn. A failed compaction still ends its execution as
+  succeeded; its failure is on the compaction message. Fork copies keep `time.created` and get new
+  ids, so the v1 "older than its session" rule still finds them.
+- Not available from the API (follow-ups: #2115): todos (no route, no tool, so `Tasks` stays empty) and the question tool
+  (forms; reply is unsupported on v2, #2102), so a v2 turn waiting on a question reads as working.
+- The Terminal route has no daemon address yet: `v2TargetFor` answers false for it (#2105 plugs in
+  there), which leaves it on the SQLite reader.

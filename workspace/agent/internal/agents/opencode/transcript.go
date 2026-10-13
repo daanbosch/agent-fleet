@@ -33,6 +33,9 @@ import (
 //     text/reasoning: {text}          tool: {tool, state:{input:{command|file_path|…}}}
 //     patch: {files:[...]}            step-*: framing, dropped
 
+// This file is the v1 reader. A managed session served by an opencode 2 daemon is read through
+// the API instead (v2state.go): v2 never writes the tables below.
+
 // dbPath is the shared SQLite store the opencode TUI sessions write.
 func dbPath() string {
 	return filepath.Join(paths.HomeDir(), ".local", "share", "opencode", "opencode.db")
@@ -130,6 +133,9 @@ func metaCreatedMs(m session.Meta) int64 {
 // plugin status instead of guessing. Verified: renaming `message` turns a live
 // "working" into "" (fallback), not a silent "idle".
 func LiveState(m session.Meta) string {
+	if t, ok := v2TargetFor(m); ok {
+		return liveStateV2(t, m)
+	}
 	db, ok := openRO()
 	if !ok {
 		return ""
@@ -186,6 +192,9 @@ func liveState(db *sql.DB, m session.Meta) string {
 // chat turns plus the db path (diagnostics). ok is always true; no conversation yet
 // yields nil turns (an empty chat).
 func readTranscript(m session.Meta) (agents.TranscriptData, bool) {
+	if t, ok := v2TargetFor(m); ok {
+		return readTranscriptV2(t, m), true
+	}
 	db, ok := openRO()
 	if !ok {
 		return agents.TranscriptData{}, true
@@ -294,6 +303,9 @@ func promptText(raw string) string {
 // isCompacting reports whether the session is compacting its conversation right now — the
 // session list's "compacting" state (WireLive).
 func isCompacting(m session.Meta) bool {
+	if t, ok := v2TargetFor(m); ok {
+		return compactingV2(t, m)
+	}
 	db, ok := openRO()
 	if !ok {
 		return false
@@ -684,6 +696,9 @@ func messageCost(data []byte) (float64, string, string) {
 // usageTurns is the conversation as the usage fold reads it: readTranscript's turns plus the
 // CostOnly ones.
 func usageTurns(m session.Meta) []transcript.Turn {
+	if t, ok := v2TargetFor(m); ok {
+		return usageTurnsV2(t, m)
+	}
 	db, ok := openRO()
 	if !ok {
 		return nil

@@ -542,33 +542,6 @@ func TestV2TurnFailsAfterConsecutiveMisses(t *testing.T) {
 	}
 }
 
-func TestV2TurnNeverSeenRunningIsUnknownUnlessAnswered(t *testing.T) {
-	f := newFakeServe(t, 2, "pw")
-	healthy(f.srv.URL)
-	v2Fast(t)
-	answer := ""
-	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/prompt"):
-			_, _ = w.Write([]byte(`{"data":{"id":"msg_5"}}`))
-		case strings.HasSuffix(r.URL.Path, "/message"):
-			_, _ = w.Write([]byte(`{"data":[{"id":"` + answer + `","type":"assistant"}]}`))
-		default:
-			f.handle(w, r)
-		}
-	})
-	answer = "msg_4" // older than our input: not an answer to it
-	if _, err := v2Turn(t, f); err == nil {
-		t.Fatal("a turn that never ran was reported as completed")
-	}
-	answer = "msg_6"
-	res, err := v2Turn(t, f)
-	if err != nil {
-		t.Fatalf("a turn that finished before the first poll: %v", err)
-	}
-	res.Body.Close()
-}
-
 // v2 events carry their body in "data"; the permission auto-allow must still fire.
 func TestV2PermissionEventIsAutoAllowed(t *testing.T) {
 	f := newFakeServe(t, 2, "pw")

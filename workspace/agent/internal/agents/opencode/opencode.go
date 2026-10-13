@@ -51,6 +51,16 @@ func (agentImpl) Caps() agents.Caps {
 // source. An interrupted conversation is refused: opencode re-runs the incomplete
 // turn on resume/fork, which is never what a fork should do.
 func (agentImpl) ForkSource(m session.Meta) (string, error) {
+	if t, ok := v2TargetFor(m); ok {
+		info, err := t.v2Session(m)
+		if err != nil {
+			return "", errors.New("opencode の会話ストアを読めません")
+		}
+		if info == nil {
+			return "", errors.New("分岐できる会話がまだありません")
+		}
+		return info.ID, nil
+	}
 	db, ok := openRO()
 	if !ok {
 		return "", errors.New("opencode の会話ストアを読めません")
@@ -79,6 +89,9 @@ func (agentImpl) ResolveForkAt(m session.Meta, at agents.ForkPoint) (string, err
 	if m.DriverKind() != session.DriverManaged {
 		return "", fmt.Errorf("%w: opencode の発言時点からの分岐は managed のセッションでのみ利用できます",
 			agents.ErrForkAtRoute)
+	}
+	if t, ok := v2TargetFor(m); ok {
+		return resolveForkAtV2(t, m, at)
 	}
 	db, ok := openRO()
 	if !ok {

@@ -19,6 +19,11 @@ package opencode
 //	   "metadata":{"url":"https://opencode.ai/zen/v1/chat/completions"}}}},
 //	 "parts":[]}
 //
+// opencode 2 reports the same failure explicitly (session.execution.failed, an idle message
+// with outcome "failed", an error on the assistant message); v2state.go maps its
+// {type, message, status} onto this shape, so the rendering and the classification below are
+// shared. v2 also retries a 5xx before it fails, so a failure that arrives is final.
+//
 // Other observed names carry their detail in the same `data` envelope (ProviderAuthError
 // adds providerID; MessageOutputLengthError carries no message at all), so the decoder
 // stays permissive and falls back to the name.

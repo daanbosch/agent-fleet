@@ -1,0 +1,63 @@
+{
+ "data": [
+  {
+   "id": "msg_137724196001HZXSuoXjYlYKeT",
+   "time": {
+    "created": 1791931597206
+   },
+   "type": "model-switched",
+   "model": {
+    "id": "m",
+    "providerID": "stub"
+   }
+  },
+  {
+   "id": "msg_13772459f001hbJ4l28e0Nwpum",
+   "time": {
+    "created": 1791931598277
+   },
+   "text": "FAIL5 again",
+   "type": "user"
+  },
+  {
+   "id": "msg_1377245da001GAG5Ha14haOoAu",
+   "time": {
+    "created": 1791931687026,
+    "completed": 1791931687076
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "m",
+    "providerID": "stub",
+    "variant": "default"
+   },
+   "content": [],
+   "finish": "error",
+   "error": {
+    "type": "provider.internal",
+    "message": "stub upstream exploded",
+    "status": 500,
+    "response": {
+     "body": "{\"error\":{\"message\":\"stub upstream exploded\",\"type\":\"server_error\"}}"
+    }
+   }
+  },
+  {
+   "id": "msg_13773a0aa001utYMn8dERHTYRu",
+   "time": {
+    "created": 1791931687082
+   },
+   "type": "idle",
+   "outcome": "failed",
+   "error": {
+    "type": "provider.internal",
+    "message": "stub upstream exploded",
+    "status": 500,
+    "response": {
+     "body": "{\"error\":{\"message\":\"stub upstream exploded\",\"type\":\"server_error\"}}"
+    }
+   }
+  }
+ ]
+}
