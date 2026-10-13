@@ -228,8 +228,9 @@ func buildMux() *http.ServeMux {
 	// model or the Console wrote.
 	mux.HandleFunc("GET /sessions/{name}/handoff-context", sessionx.HandleSessionHandoffContext)
 	// "Push, then send" (#2072): the CP pushes the current branch through here, on the owner's
-	// own click inside the offer request, then asks handoff-context again.
-	mux.HandleFunc("POST /sessions/{name}/handoff-push", sessionx.HandleSessionHandoffPush)
+	// own click inside the offer request, then asks handoff-context again. Only a request the
+	// CP marked gets in: AGENT_TOKEN alone is what every session's shell holds (ADR 0113).
+	mux.Handle("POST /sessions/{name}/handoff-push", memberorigin.Require(sessionx.HandoffPushMaxRequest, http.HandlerFunc(sessionx.HandleSessionHandoffPush)))
 	// Transcript marks (docs/log/69 / ADR 0050). Read and written by the owner's Console and,
 	// through the CP, by a share recipient.
 	mux.HandleFunc("GET /sessions/{name}/marks", sessionx.HandleSessionMarks)

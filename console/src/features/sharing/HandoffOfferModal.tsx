@@ -40,7 +40,8 @@ interface HandoffContext {
   dirty?: boolean;
   blocked?: string;
   warning?: string;
-  /** What "push, then send" would publish; set only when a push can clear the gate. */
+  /** Where "push, then send" would publish (the push URL, credentials removed) and how many
+   *  commits; set only when a push can clear the gate and lands where the offer points. */
   pushRemote?: string;
   pushCommits?: number;
 }
@@ -106,6 +107,9 @@ export function HandoffOfferModal({
         setLoadErr("");
         setMembers(Array.isArray(d.members) ? d.members : []);
         setCtx((d.context || null) as HandoffContext | null);
+        // A refreshed verdict is a new snapshot: the push the owner confirmed was for the
+        // previous one, so the box starts unticked again.
+        setPushFirst(false);
         setRecipient((prev) => prev || (d.members?.[0]?.userKey ?? ""));
       })
       .catch(() => setLoadErr(tr("handoff.load_failed")))
@@ -131,6 +135,9 @@ export function HandoffOfferModal({
       prompt,
       ackWarning,
       pushFirst: pushing,
+      // What the owner saw next to the box. The CP pushes only while the working copy still
+      // matches it, exactly that commit, and sends only if the state after the push does too.
+      ...(pushing && { pushExpect: { branch: ctx?.branch, headSha: ctx?.headSha, pushRemote: ctx?.pushRemote } }),
     }).catch(() => ({ error: { message: tr("handoff.send_failed") } }));
     setSending(false);
     if (d?.error?.code === "handoff_push_failed") {

@@ -113,14 +113,22 @@ describe("HandoffOfferModal", () => {
     ])("offers the push for %s, with branch, remote and commit count", async (reason, extra) => {
       await render({
         members: MEMBERS,
-        context: { vcs: "git", branch: "temp/x", blocked: reason, pushRemote: "origin", pushCommits: 2, ...extra },
+        context: {
+          vcs: "git",
+          branch: "temp/x",
+          headSha: "abc123",
+          blocked: reason,
+          pushRemote: "https://x/y.git",
+          pushCommits: 2,
+          ...extra,
+        },
       });
       expect(sendButton()?.disabled).toBe(true);
       const box = pushBox();
       expect(box).toBeTruthy();
       const summary = find(".handoff-push-summary")?.textContent || "";
       expect(summary).toContain("temp/x");
-      expect(summary).toContain("origin");
+      expect(summary).toContain("https://x/y.git");
       expect(summary).toContain("2");
       await act(async () => {
         box!.click();
@@ -133,7 +141,10 @@ describe("HandoffOfferModal", () => {
       expect(apiJSON).toHaveBeenCalledWith(
         "api/session-handoff-offers",
         "POST",
-        expect.objectContaining({ pushFirst: true }),
+        expect.objectContaining({
+          pushFirst: true,
+          pushExpect: { branch: "temp/x", headSha: "abc123", pushRemote: "https://x/y.git" },
+        }),
       );
     });
 
@@ -196,6 +207,9 @@ describe("HandoffOfferModal", () => {
       });
       expect(find(".handoff-push-error pre")?.textContent).toBe(gitSaid);
       expect(onClose).not.toHaveBeenCalled();
+      // The verdict was fetched again; the push is not re-armed on the new snapshot.
+      expect(pushBox()?.checked).toBe(false);
+      expect(sendButton()?.disabled).toBe(true);
     });
   });
 

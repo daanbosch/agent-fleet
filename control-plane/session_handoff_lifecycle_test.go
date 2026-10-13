@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -39,7 +40,7 @@ type handoffLife struct {
 	hits     map[string]int
 	// push answers POST /sessions/session-1/handoff-push, called with f.mu held; nil
 	// answers 404 like an Agent without the route.
-	push func() (int, map[string]any)
+	push func(r *http.Request, body []byte) (int, map[string]any)
 }
 
 func newHandoffLife(t *testing.T) *handoffLife {
@@ -108,7 +109,8 @@ func newHandoffLife(t *testing.T) *handoffLife {
 			push := f.push
 			code, body := http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found", "message": "no route"}}
 			if push != nil && r.Method == http.MethodPost {
-				code, body = push()
+				raw, _ := io.ReadAll(r.Body)
+				code, body = push(r, raw)
 			}
 			f.mu.Unlock()
 			w.WriteHeader(code)

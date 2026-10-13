@@ -60,25 +60,25 @@ func TestMemberHandoff(t *testing.T) {
 	// The owner never pushes from a shell: the offer's pushFirst has the owner's Agent push
 	// the branch and the gate is asked again before the offer is stored.
 	offerBody := map[string]any{"sessionName": src, "recipientUserKey": b.key, "title": title, "prompt": prompt}
-	pushFirst := withKey(offerBody, "pushFirst", true)
 	rc := handoffRecipients(t, a, src)
 	if len(rc.members) != 1 || rc.members[0] != b.key {
 		t.Fatalf("handoff candidates = %v, want [%s]", rc.members, b.key)
 	}
 	requireGate(t, rc, "no_upstream", "") // a never-pushed branch has no upstream and ahead 0
-	requirePushOffer(t, rc, "origin", 1)
+	requirePushOffer(t, rc, repoURL, 1)
 	requireOfferRefused(t, a, offerBody, "handoff_blocked", "no_upstream") // the push is opt-in
 	remoteHead := func() string { return a.shell(aGit, "git ls-remote origin refs/heads/"+branch+" | cut -f1") }
 
 	// An offer the warning would refuse anyway publishes nothing.
 	a.shell(aGit, "echo dirty > scratch.txt")
-	requireOfferRefused(t, a, pushFirst, "handoff_warning", "uncommitted_changes")
+	rc = handoffRecipients(t, a, src)
+	requireOfferRefused(t, a, pushFirst(offerBody, rc), "handoff_warning", "uncommitted_changes")
 	if got := remoteHead(); got != "" {
 		t.Fatalf("origin has %s at %s after a refused offer; nothing may be pushed", branch, got)
 	}
 
 	// From a never-pushed branch: pushed, upstream recorded, offer carries the pushed head.
-	first := createOffer(t, a, pushFirst)
+	first := createOffer(t, a, pushFirst(offerBody, rc))
 	head := a.shell(aGit, "git rev-parse HEAD")
 	if first.HeadSha != head || remoteHead() != head {
 		t.Fatalf("first offer head %s, origin %s, want both at %s", first.HeadSha, remoteHead(), head)
@@ -92,12 +92,19 @@ func TestMemberHandoff(t *testing.T) {
 	a.shell(aGit, "echo two >> work.txt && git commit -q -am two")
 	rc = handoffRecipients(t, a, src)
 	requireGate(t, rc, "unpushed_commits", "uncommitted_changes")
-	requirePushOffer(t, rc, "origin", 1)
+	requirePushOffer(t, rc, repoURL, 1)
 	requireOfferRefused(t, a, withKey(offerBody, "ackWarning", true), "handoff_blocked", "unpushed_commits")
 	head = a.shell(aGit, "git rev-parse HEAD")
 
 	// --- the offer (H-5) ---
-	offer := createOffer(t, a, pushFirst)
+	// A push for a snapshot that is no longer the working copy's publishes nothing.
+	stale := pushFirst(offerBody, rc)
+	stale["pushExpect"].(map[string]any)["headSha"] = first.HeadSha
+	requireOfferRefused(t, a, withKey(stale, "ackWarning", true), "handoff_changed", "")
+	if got := remoteHead(); got != first.HeadSha {
+		t.Fatalf("origin %s = %s after a stale push-then-send, want %s", branch, got, first.HeadSha)
+	}
+	offer := createOffer(t, a, pushFirst(offerBody, rc))
 	if offer.Status != "pending" || offer.Branch != branch || offer.HeadSha != head || offer.RepoRemote != repoURL {
 		t.Fatalf("offer = %+v, want pending %s@%s from %s", offer, branch, head, repoURL)
 	}
@@ -248,6 +255,7 @@ type recipientsView struct {
 	blocked, warning string
 	pushRemote       string
 	pushCommits      int
+	branch, headSha  string
 }
 
 func handoffRecipients(t *testing.T, m *member, session string) recipientsView {
@@ -261,11 +269,14 @@ func handoffRecipients(t *testing.T, m *member, session string) recipientsView {
 			Warning     string `json:"warning"`
 			PushRemote  string `json:"pushRemote"`
 			PushCommits int    `json:"pushCommits"`
+			Branch      string `json:"branch"`
+			HeadSha     string `json:"headSha"`
 		} `json:"context"`
 	}
 	decode(t, m, http.MethodGet, "/api/sessions/"+session+"/handoff-recipients", nil, 200, &out)
 	v := recipientsView{blocked: out.Context.Blocked, warning: out.Context.Warning,
-		pushRemote: out.Context.PushRemote, pushCommits: out.Context.PushCommits}
+		pushRemote: out.Context.PushRemote, pushCommits: out.Context.PushCommits,
+		branch: out.Context.Branch, headSha: out.Context.HeadSha}
 	for _, c := range out.Members {
 		v.members = append(v.members, c.UserKey)
 	}
@@ -285,6 +296,13 @@ func requirePushOffer(t *testing.T, v recipientsView, remote string, commits int
 	if v.pushRemote != remote || v.pushCommits != commits {
 		t.Fatalf("push offer = %q/%d, want %q/%d", v.pushRemote, v.pushCommits, remote, commits)
 	}
+}
+
+// pushFirst is body with the modal's "push, then send" ticked for the snapshot v shows.
+func pushFirst(body map[string]any, v recipientsView) map[string]any {
+	b := withKey(body, "pushFirst", true)
+	b["pushExpect"] = map[string]any{"branch": v.branch, "headSha": v.headSha, "pushRemote": v.pushRemote}
+	return b
 }
 
 // withKey is body with one more key, leaving body as it was.
