@@ -3,19 +3,20 @@
 // hidden; opened from "new share" in the share list (ShareListModal) it has no
 // initialTarget and the target is chosen here. It follows the same as="form" +
 // ui-field/ui-seg + ui-modal-foot shape as the other creation forms (NewRepoModal, …).
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { Modal } from "../../ui/Modal.tsx";
 import { Button } from "../../ui/Button.tsx";
 import { Icon } from "../../ui/Icon.tsx";
 import { useToast } from "../../ui/ToastProvider.tsx";
-import { api, apiJSON, errText } from "../../core/api/client.ts";
+import { api, errText } from "../../core/api/client.ts";
 import { useT } from "../../lib/i18n/index.ts";
 import { useDebounced } from "../../lib/useDebounced.ts";
 import { useReposStore } from "../repos/store.ts";
 import { useSessionsStore } from "../sessions/store.ts";
 import { agentOf } from "../../agents/registry.ts";
 import { useMySharesStore } from "./store.ts";
+import { boundedRequest, type BoundedRequest } from "./boundedRequest.ts";
 import "./sharing.css";
 
 interface RecipientCandidate {
@@ -43,6 +44,7 @@ export function ShareCreateModal({ initialTarget, onClose, onCreated }: ShareCre
   const [searching, setSearching] = useState(false);
   const [permission, setPermission] = useState<"ro" | "rw">("ro");
   const [saving, setSaving] = useState(false);
+  const inflight = useRef<BoundedRequest | null>(null);
   const locked = !!initialTarget;
   const debouncedQuery = useDebounced(recipientQuery, 250);
   useEffect(() => {
@@ -77,17 +79,43 @@ export function ShareCreateModal({ initialTarget, onClose, onCreated }: ShareCre
     const [type, key] = target.split(":", 2);
     if (!type || !key) return;
     setSaving(true);
-    const d = await apiJSON("api/session-shares", "POST", { recipientUserKey: recipientPick.userKey, scope: { type, key }, permission })
-      .catch(() => ({ error: { message: tr("share.save_failed") } }));
+    const req = boundedRequest();
+    inflight.current = req;
+    const d = await api("api/session-shares", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ recipientUserKey: recipientPick.userKey, scope: { type, key }, permission }),
+      signal: req.signal,
+    }).catch(() => (req.signal.aborted && !req.timedOut() ? null : { error: { message: tr(req.timedOut() ? "share.save_timeout" : "share.save_failed") } }));
+    req.settle();
+    if (inflight.current !== req) return; // the dialog was closed meanwhile
+    inflight.current = null;
     setSaving(false);
-    if (d?.error) { toast(errText(d.error)); return; }
+    if (d?.error) {
+      toast(errText(d.error));
+      // A timed-out create may still land on the server; show whatever it did.
+      if (req.timedOut()) void useMySharesStore.getState().refresh();
+      return;
+    }
     void useMySharesStore.getState().refresh();
     onCreated?.();
     onClose();
   };
+  // Closing never waits for the request: it abandons it. The server may still finish it,
+  // so the share list is refreshed rather than assumed unchanged.
+  const close = () => {
+    const req = inflight.current;
+    if (req) {
+      inflight.current = null;
+      req.cancel();
+      void useMySharesStore.getState().refresh();
+    }
+    onClose();
+  };
+  useEffect(() => () => inflight.current?.cancel(), []);
 
   return (
-    <Modal title={tr("share.create_title")} onClose={onClose} as="form" onSubmit={submit} lockClose={saving} className="share-create-modal">
+    <Modal title={tr("share.create_title")} onClose={close} as="form" onSubmit={submit} className="share-create-modal">
       <div className="ui-modal-body">
         <p className="ui-field-hint">{tr("share.exposure_warning")}</p>
         {/* Marks (docs/log/69 / ADR 0050 decision 6). Showing the author's name is required
@@ -154,8 +182,11 @@ export function ShareCreateModal({ initialTarget, onClose, onCreated }: ShareCre
         </div>
       </div>
       <footer className="ui-modal-foot">
-        <Button variant="ghost" onClick={onClose} disabled={saving}>{tr("ui.cancel")}</Button>
-        <Button variant="primary" type="submit" icon="broadcast" disabled={!canSubmit || saving}>{tr("share.create")}</Button>
+        <Button variant="ghost" onClick={close}>{tr("ui.cancel")}</Button>
+        <Button variant="primary" type="submit" icon={saving ? "loading" : "broadcast"} className={saving ? "share-busy" : undefined}
+          aria-busy={saving} disabled={!canSubmit || saving}>
+          {saving ? tr("share.saving") : tr("share.create")}
+        </Button>
       </footer>
     </Modal>
   );

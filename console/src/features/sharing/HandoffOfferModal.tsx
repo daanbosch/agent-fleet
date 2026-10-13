@@ -19,6 +19,7 @@ import { useT } from "../../lib/i18n/index.ts";
 import { SESSION_TITLE_MAX, clampSessionTitle } from "../../lib/sessionTitle.ts";
 import { ShareCreateModal } from "./ShareCreateModal.tsx";
 import { useHandoffStore } from "./handoffStore.ts";
+import { boundedRequest } from "./boundedRequest.ts";
 import "./sharing.css";
 
 interface RecipientCandidate {
@@ -81,9 +82,12 @@ export function HandoffOfferModal({
   const [sending, setSending] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
 
+  // The recipient lookup syncs the owner's session catalog first; bound it so "loading"
+  // always ends, in the list or in the load error below.
   const load = () => {
     setLoading(true);
-    api(`api/sessions/${encodeURIComponent(session)}/handoff-recipients`)
+    const req = boundedRequest();
+    api(`api/sessions/${encodeURIComponent(session)}/handoff-recipients`, { signal: req.signal })
       .then((d) => {
         if (d?.error) {
           setLoadErr(errText(d.error));
@@ -96,7 +100,10 @@ export function HandoffOfferModal({
         setRecipient((prev) => prev || (d.members?.[0]?.userKey ?? ""));
       })
       .catch(() => setLoadErr(tr("handoff.load_failed")))
-      .finally(() => setLoading(false));
+      .finally(() => {
+        req.settle();
+        setLoading(false);
+      });
   };
   useEffect(load, [session]); // eslint-disable-line react-hooks/exhaustive-deps
 

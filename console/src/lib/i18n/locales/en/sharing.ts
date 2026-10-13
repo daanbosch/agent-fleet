@@ -49,6 +49,11 @@ export const sharing: Record<keyof typeof jaSharing, string> = {
   "share.create": "Share",
   "share.unshare": "Unshare",
   "share.save_failed": "Could not save the share.",
+  "share.saving": "Sharing…",
+  "share.save_timeout": "The share request did not answer in time. Check the share list to see whether it was created.",
+  "share.unshare_failed": "Could not unshare.",
+  "share.permission_failed": "Could not change the permission.",
+  "share.request_timeout": "The request did not answer in time. Refresh the list to see the current state.",
   "share.exposure_warning": "This shares the full conversation, including prompts, agent replies, and tool output. Secrets in a conversation cannot be detected reliably. Recipients can save what they view, and those copies cannot be recalled after unsharing. RW input reaches the agent only after owner approval.",
   "share.marks_warning": "Highlights drawn on the conversation are shared too. An RW recipient can draw their own, and those appear without approval (they never reach the agent). The login id of whoever drew a highlight is shown to you and to every other recipient.",
 };
