@@ -25,7 +25,7 @@ const tenantMemberDefaultsMaxBody = 4 << 10
 
 // memberDefaultAgents are the kinds a tenant may name: the ones a member connects with their own
 // account. shell and ssm need no connection, lcpp is governed by engine access, and agy is
-// experimental.
+// experimental. The Console's MEMBER_DEFAULT_AGENTS (console/src/agents/registry.ts) must match.
 var memberDefaultAgents = []string{"claude", "codex", "opencode", "cursor", "copilot", "kiro", "muse"}
 
 // tenantMemberDefaultsWire is the stored document, the admin PUT body and, for members, the
@@ -117,6 +117,7 @@ func (a adminAPI) setTenantMemberDefaults(w http.ResponseWriter, r *http.Request
 // and the admin would believe the default says something it does not.
 func decodeTenantMemberDefaults(w http.ResponseWriter, r *http.Request) (tenantMemberDefaultsWire, *apiError) {
 	var d tenantMemberDefaultsWire
+	var in *tenantMemberDefaultsWire
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, tenantMemberDefaultsMaxBody))
 	var tooBig *http.MaxBytesError
 	if errors.As(err, &tooBig) {
@@ -127,10 +128,16 @@ func decodeTenantMemberDefaults(w http.ResponseWriter, r *http.Request) (tenantM
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&d); err != nil {
+	if err := dec.Decode(&in); err != nil {
 		return d, &apiError{http.StatusBadRequest, "invalid_defaults", "invalid member defaults: " + err.Error()}
 	}
-	if dec.More() {
+	// The save replaces the document, so `null` must not read as "clear everything".
+	if in == nil {
+		return d, &apiError{http.StatusBadRequest, "invalid_defaults", "member defaults must be an object"}
+	}
+	d = *in
+	// A second Decode must reach the end: dec.More() lets `{"agent":"codex"}]` through.
+	if extra := dec.Decode(&struct{}{}); !errors.Is(extra, io.EOF) {
 		return d, &apiError{http.StatusBadRequest, "invalid_defaults", "unexpected data after the defaults object"}
 	}
 	if err := d.validate(); err != nil {

@@ -84,6 +84,9 @@ func TestTenantMemberDefaultsAdminIsTheTenants(t *testing.T) {
 		`{"agent":"Claude"}`,
 		`{"agent":"claude","role":"dev"}`,
 		`{"agent":"claude"} {}`,
+		`{"agent":"claude"}]`,
+		`{}}`,
+		`null`,
 		`not json`,
 		`{"agent":"` + strings.Repeat("x", tenantMemberDefaultsMaxBody) + `"}`,
 	} {
@@ -153,16 +156,17 @@ func storeTenantMemberDefaults(tenantID, doc string) store.TenantMemberDefaults 
 	return store.TenantMemberDefaults{TenantID: tenantID, Defaults: doc, UpdatedAt: store.NowTS()}
 }
 
-// The tenant editor offers its own copy of the list. An agent only the Console offers is refused
-// on save; one only the CP accepts can never be chosen. Either way they must match.
+// The Console keeps its own copy of the list (the tenant editor offers it, the first-run card
+// completes on it). An agent only the Console offers is refused on save; one only the CP accepts
+// can never be chosen. Either way they must match.
 func TestMemberDefaultAgentsMatchTheConsole(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join("..", "console", "src", "features", "settings", "tenant", "tenantMemberDefaults.tsx"))
+	src, err := os.ReadFile(filepath.Join("..", "console", "src", "agents", "registry.ts"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	m := regexp.MustCompile(`MEMBER_DEFAULT_AGENTS = \[([^\]]*)\]`).FindSubmatch(src)
 	if m == nil {
-		t.Fatal("MEMBER_DEFAULT_AGENTS not found in tenantMemberDefaults.tsx")
+		t.Fatal("MEMBER_DEFAULT_AGENTS not found in agents/registry.ts")
 	}
 	var ts []string
 	for _, q := range regexp.MustCompile(`"([a-z]+)"`).FindAllSubmatch(m[1], -1) {
