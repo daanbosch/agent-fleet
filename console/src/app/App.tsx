@@ -472,6 +472,9 @@ export function App() {
     if (!booted || identityRev === identityRevDoneRef.current) return;
     identityRevDoneRef.current = identityRev;
     void resyncAccumulatedForIdentitySwitch();
+    // The member's UI state is keyed by (user, tenant): a whoami that resolves late moves that key
+    // without a tenant change, and the answer the boot load got under the old key was dropped.
+    void useUIStateStore.getState().load();
     // A whoami that failed at boot, or a user change inside one tenant, moves the owner without
     // a tenant change, so the per-tenant effect above never re-applied the look.
     applyTenantAppearance();

@@ -6,6 +6,7 @@ package main
 //
 //	Console ──▶ GET   /api/me/ui-state   the member's document, plus the tenant's `defaults`
 //	        ──▶ PATCH /api/me/ui-state   replaces the top-level keys it carries, keeps the rest
+//	                                     (?if_absent=1: only fills keys not stored yet)
 //
 // Both resolve with withMembership, so they never build or wake a workspace.
 
@@ -43,9 +44,11 @@ type onboardingStateWire struct {
 	Track     string `json:"track"` // "" or "dev"
 }
 
-// merge copies every key the patch carries over s.
-func (s *memberUIStateWire) merge(p memberUIStateWire) {
-	if p.Onboarding != nil {
+// merge copies every key the patch carries over s. With ifAbsent it only fills keys s does not
+// have yet: the Console's one-time localStorage migration uses that, so an old browser value
+// uploaded late can never undo what another tab already saved (decision 6).
+func (s *memberUIStateWire) merge(p memberUIStateWire, ifAbsent bool) {
+	if p.Onboarding != nil && (!ifAbsent || s.Onboarding == nil) {
 		o := *p.Onboarding
 		s.Onboarding = &o
 	}
@@ -67,7 +70,9 @@ func decodeMemberUIState(b []byte) (memberUIStateWire, error) {
 	if err := dec.Decode(&s); err != nil {
 		return s, err
 	}
-	if dec.More() {
+	// A second Decode must reach the end: dec.More() only looks inside the current value and lets
+	// `{}]` or a stray `}` through.
+	if extra := dec.Decode(&struct{}{}); !errors.Is(extra, io.EOF) {
 		return s, errors.New("trailing data after the JSON document")
 	}
 	return s, s.validate()
@@ -144,6 +149,9 @@ func (a memberUIStateAPI) patch(w http.ResponseWriter, r *http.Request, _ store.
 		writeAPIErr(w, &apiError{http.StatusBadRequest, "bad_request", err.Error()})
 		return
 	}
+	// The check runs inside the optimistic loop: a key that appears between our read and our
+	// write fails the version and is seen on the next pass.
+	ifAbsent := r.URL.Query().Get("if_absent") == "1"
 	ctx := r.Context()
 	for range memberUIStateRetries {
 		cur, version, err := a.load(ctx, mv.MembershipID)
@@ -151,7 +159,7 @@ func (a memberUIStateAPI) patch(w http.ResponseWriter, r *http.Request, _ store.
 			writeAPIErr(w, &apiError{http.StatusInternalServerError, "store", err.Error()})
 			return
 		}
-		cur.merge(p)
+		cur.merge(p, ifAbsent)
 		out, err := json.Marshal(cur)
 		if err != nil {
 			writeAPIErr(w, &apiError{http.StatusInternalServerError, "encode", err.Error()})

@@ -20,7 +20,7 @@ import { useChatStore } from "../chat/store.ts";
 import { chatList } from "../chat/api.ts";
 import { openAssistantDraft } from "../chat/open.ts";
 import { useUIStateStore } from "../../core/store/uiState.ts";
-import { agentOf } from "../../agents/registry.ts";
+import { AGENTS, MEMBER_DEFAULT_AGENTS, agentOf } from "../../agents/registry.ts";
 import type { ConnectionsStatus } from "../../types/session.ts";
 
 // The flagship builtin assistant (workspace/agent/assistants.go: afAssistantID).
@@ -67,13 +67,9 @@ function useGuideState(): GuideState {
     cpDown: wsState === "unknown", // fetch failed — see the field's comment
     startBusy: wsStartBusy(wsState), // start already in flight / ECS cold pull
     gitOk: !!(conns?.github?.connected || conns?.bitbucket?.connected),
-    agentOk: !!(
-      conns?.claude?.connected ||
-      conns?.codex?.connected ||
-      // opencode counts as connected via either an API key (env) or an opencode account (OAuth).
-      (conns?.opencode?.envs?.length ?? 0) > 0 ||
-      !!conns?.opencode?.oauth
-    ),
+    // Any kind a tenant may name completes the step, judged by the registry's own launch
+    // predicate: a tenant that names Cursor must not leave its members stuck after connecting it.
+    agentOk: MEMBER_DEFAULT_AGENTS.some((k) => AGENTS[k].available({ conns })),
     conns,
     startWs,
     openStart,
