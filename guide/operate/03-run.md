@@ -116,8 +116,9 @@ The commands are in the runbook's "Upgrade" section.
   The same finding is shown to super_admins as a banner on every section of the Console's
   Admin screen ("no daily EFS backup"), so it is not lost if nobody reads the `update.sh`
   output. `update.sh` records it in the ingress stack (parameter `EfsBackup`), and the banner
-  clears at the first `update.sh` run after the data stack has its backup. A deployment whose
-  `update.sh` could not read the data stack shows no banner: absent is not "missing".
+  clears at the first `update.sh` run that confirms the data stack has its backup. Never filled
+  means no banner. If `update.sh` cannot read or evaluate the data stack it keeps the previous
+  verdict, so an existing banner stays until a run confirms the fix.
 
 ### ecs-ec2: replacing slots after a launch template change
 

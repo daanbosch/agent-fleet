@@ -37,6 +37,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=deploy/aws/ecs/env.sh
 . "$HERE/env.sh"
+# shellcheck source=deploy/aws/ecs/efs-backup-check.sh
+. "$HERE/efs-backup-check.sh"
 
 usage() {
   cat >&2 <<'EOF'
@@ -682,15 +684,14 @@ fi
 # --- 6) ingress (parameters holding physical IDs get the new outputs) --------
 af_read_params 30-ingress
 af_param_override ImageTag "$TAG"
-# EFS backup state for the Console's warning, from the data stack this run just deployed. Only
-# written when the data stack could be read, never as an empty value.
+# EFS backup state for the Console's warning: the same verdict update.sh reaches (vault AND a
+# plan selecting the file system), read from the data stack this run just deployed. A failed
+# or unevaluable read gives no marker and nothing is overridden, so it can neither raise nor
+# clear the warning.
 if [ "$AF_DRY" != 1 ]; then
-  data_persistence="$(af_stack_param "$AF_STACK_DATA" Persistence)"
-  data_vault="$(af_stack_output "$AF_STACK_DATA" EfsBackupVaultName)"
-  case "$data_persistence" in
-    retain) af_param_override EfsBackup "$([ -n "$data_vault" ] && echo present || echo missing)" ;;
-    delete) af_param_override EfsBackup off ;;
-  esac
+  af_efs_backup_check "$AF_STACK_DATA" "$AF_PROFILE" "$AF_REGION"
+  data_marker="$(af_efs_backup_marker "$AF_EFS_BACKUP_VERDICT" || true)"
+  [ -z "$data_marker" ] || af_param_override EfsBackup "$data_marker"
 fi
 # Speech: pass the engine's real service name and DNS name, or nothing at all. Read from
 # the stack's outputs rather than the capture for the same reason as the launch template —

@@ -122,6 +122,18 @@ case "$args" in
   *"cloudformation list-exports"*"EnginesSsmParam"*)
     [ "${STUB_ENGINES_LIVE:-0}" = 1 ] && echo "af-ecs-engines-EnginesSsmParam" || echo "" ;;
   *"cloudformation list-exports"*) echo "t-cluster" ;;
+  # The EFS backup facts efs-backup-check.sh reads. STUB_VAULT: unset = a data stack without the
+  # vault output (pre-0.26.0), ok = vault and a plan selecting fs-1, noplan = vault but the
+  # plan selects another file system, fail = every one of these reads errors.
+  *"Outputs[?OutputKey=='EfsBackupVaultName']"*)
+    case "${STUB_VAULT:-}" in fail) exit 1 ;; ok|noplan) echo "t-data-efs-1" ;; *) echo "None" ;; esac ;;
+  *"Stacks[0].StackId"*) echo "arn:aws:cloudformation:ap-northeast-1:111122223333:stack/t-data/u" ;;
+  *"logical-resource-id EfsBackupPlan"*) echo "plan-1" ;;
+  *"backup list-backup-selections"*) echo "sel-1" ;;
+  *"backup get-backup-selection"*"length(NotResources"*) printf '0\t0\t0\n' ;;
+  *"backup get-backup-selection"*"BackupSelection.Resources"*)
+    [ "${STUB_VAULT:-}" = noplan ] && echo "arn:aws:elasticfilesystem:ap-northeast-1:111122223333:file-system/fs-other" \
+      || echo "arn:aws:elasticfilesystem:ap-northeast-1:111122223333:file-system/fs-1" ;;
   *"--profile p2"*"describe-stack-resource"*) echo "t-db" ;;
   *"describe-stack-resource"*) echo "None" ;;
   *"cloudformation describe-stacks"*"Outputs[?OutputKey=='EfsId']"*) echo "fs-1" ;;
@@ -813,6 +825,26 @@ fi
 if grep -q "MANAGED_INSTANCES" "$ECS/cfn/60-engines.yaml"; then
   fail "a task definition still requires MANAGED_INSTANCES (it cannot be placed on an EC2 box)"
 fi
+
+echo "== case 3g-efs: standup hands the EFS backup state of the data stack to 30-ingress =="
+# Only a confirmed verdict is written. An unreadable stack must not be turned into "missing"
+# (a false banner), and must not overwrite an earlier value either: nothing is passed.
+efs_standup() { # <profile> [VAR=val ...] -> $WORK/out3e
+  local prof="$1"; shift
+  : > "$LOG"
+  env "$@" "$ECS/standup.sh" --profile "$prof" --region ap-northeast-1 --stack t-ingress --yes > "$WORK/out3e" 2>&1 </dev/null \
+    || { cat "$WORK/out3e"; fail "standup for $prof failed"; }
+}
+efs_standup p2 STUB_VAULT=ok
+grep -q "deploy --stack-name t-ingress .*EfsBackup=present" "$LOG" || fail "retain + vault + plan did not give EfsBackup=present"
+efs_standup p2
+grep -q "deploy --stack-name t-ingress .*EfsBackup=missing" "$LOG" || fail "retain without a vault did not give EfsBackup=missing"
+efs_standup p2 STUB_VAULT=noplan
+grep -q "deploy --stack-name t-ingress .*EfsBackup=missing" "$LOG" || fail "a plan selecting another file system did not give EfsBackup=missing"
+efs_standup p2 STUB_VAULT=fail
+if grep -q "deploy --stack-name t-ingress .*EfsBackup=" "$LOG"; then fail "an unreadable data stack overrode EfsBackup"; fi
+efs_standup p
+grep -q "deploy --stack-name t-ingress .*EfsBackup=off" "$LOG" || fail "Persistence=delete did not give EfsBackup=off"
 
 echo "== case 3h: update.sh carries a pre-P6 role over instead of deleting it =="
 #

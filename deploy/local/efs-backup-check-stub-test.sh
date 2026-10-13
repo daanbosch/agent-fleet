@@ -175,8 +175,17 @@ grep -q 'af_efs_backup_marker "\$AF_EFS_BACKUP_VERDICT"' "$UPD" || fail "update.
 grep -q '"EfsBackup=\$EFS_BACKUP_MARKER"' "$UPD" || fail "update.sh does not pass EfsBackup to the ingress deploy"
 grep -q 'af_param_override EfsBackup' "$ROOT/deploy/aws/ecs/standup.sh" || fail "standup.sh does not pass EfsBackup"
 ING="$ROOT/deploy/aws/ecs/cfn/30-ingress.yaml"
-grep -q 'AllowedValues: \[ "", off, present, missing \]' "$ING" || fail "30-ingress EfsBackup values drifted from the CP's"
+grep -q 'AllowedValues: \[ "", "off", present, missing \]' "$ING" || fail "30-ingress EfsBackup values drifted from the CP's"
 grep -q 'Name: AF_EFS_BACKUP, Value: !Ref EfsBackup' "$ING" || fail "30-ingress does not hand EfsBackup to the CP"
+# CloudFormation parses YAML 1.1, where an unquoted off is the boolean false and the parameter
+# would then refuse the very value the scripts pass. Parse the way it does: all strings, all four.
+python3 - "$ING" <<'PY' || fail "30-ingress EfsBackup AllowedValues do not parse as the four strings"
+import sys, yaml
+class L(yaml.SafeLoader): pass
+L.add_multi_constructor("!", lambda l, s, n: None)
+v = yaml.load(open(sys.argv[1]), L)["Parameters"]["EfsBackup"]["AllowedValues"]
+sys.exit(0 if v == ["", "off", "present", "missing"] and all(type(x) is str for x in v) else 1)
+PY
 # A new parameter must not be mandatory for existing stacks.
 awk '/^  EfsBackup:/{f=1} f&&/Default: ""/{ok=1} f&&/^  CustodianKmsKeyArn:/{exit} END{exit !ok}' "$ING" || fail "EfsBackup has no empty default"
 
