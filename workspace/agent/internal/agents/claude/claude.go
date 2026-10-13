@@ -102,17 +102,18 @@ func (agentImpl) BuildLaunch(m session.Meta, _ agents.LaunchOpts) (agents.Launch
 	// "bridge-session" line when RC connected but nothing was said. claude --resume
 	// then dies with "No conversation found". Drop such a stub so buildProgram
 	// starts fresh (--session-id) instead of resuming.
+	// The slot held a conversation and its log is gone: never fall through to a blank
+	// `--session-id` start under the old session (see ErrTranscriptLost). Checked before
+	// anything else so an older slot log cannot stand in for a deleted live one.
+	if lostTranscript(sid) {
+		return agents.LaunchPlan{}, ErrTranscriptLost
+	}
 	if JSONLResumable(sid) {
 		// Covers slots that talked before the marker existed.
 		NoteTalked(sid)
 	} else {
 		for _, p := range jsonlPaths(sid) {
 			_ = os.Remove(p)
-		}
-		// The slot held a conversation and its log is gone: never fall through to a blank
-		// `--session-id` start under the old session (see ErrTranscriptLost).
-		if HadConversation(sid) {
-			return agents.LaunchPlan{}, ErrTranscriptLost
 		}
 	}
 	// First launch of a POINT fork (docs/log/55): write our own truncated transcript before
@@ -232,7 +233,7 @@ func (agentImpl) WireLive(m session.Meta, alive bool) agents.LiveInfo {
 	return li
 }
 
-func (agentImpl) ClearResume(sid string) { ForgetTalked(sid) }
+func (agentImpl) ClearResume(sid string) { StartFresh(sid) }
 
 // RemoteSessionURL derives the claude.ai Remote Control page for sid from its
 // jsonl "bridge-session" line (written when RC connects). The web URL is

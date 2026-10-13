@@ -5,7 +5,7 @@
 // repaint flickered the terminal cursor in the old console.
 import { createElement } from "react";
 import { create } from "zustand";
-import { api, isTransientErr } from "../../core/api/client.ts";
+import { api, getTenant, getUser, isTransientErr } from "../../core/api/client.ts";
 import { pushHealthy, pushStamp } from "../../core/push/events.ts";
 import { useWorkspaceStore, wsRunning } from "../../core/store/workspace.ts";
 import { dismissToast, toast } from "../../ui/toast.ts";
@@ -37,6 +37,10 @@ interface SessionsStore {
    * caller can leave its resume affordance armed instead of waiting forever. */
   start(name: string, opts?: { fresh?: boolean }): Promise<boolean>;
 }
+
+/** Which (user, tenant) a request was made for. The lost-log toast outlives a tenant switch, and its
+ *  button names a session by slug only, so it must act on the workspace it was raised for. */
+const scopeNow = () => `${getUser()}\u0000${getTenant()}`;
 
 let ser = ""; // last published serialization (module-level: not render state)
 
@@ -113,32 +117,37 @@ export const useSessionsStore = create<SessionsStore>((set, get) => ({
       // still letting go of its conversation, 409 codex_releasing) must be told apart from one
       // that happened.
       const q = opts?.fresh ? "?fresh=1" : "";
+      const scope = scopeNow();
       const r = await api(`api/sessions/${encodeURIComponent(name)}/start${q}`, { method: "POST" });
       if (r?.error?.code === "transcript_lost") {
         // The conversation log was deleted (claude's retention sweep or by hand). Never start a
         // blank conversation under the old session on our own: say so, and let the user choose.
         ok = false;
-        const key = `transcript-lost:${name}`;
-        toast(
-          createElement(
-            "span",
-            { className: "update-toast" },
-            createElement("span", { className: "update-toast-txt" }, tr("srow.transcript_lost")),
+        const key = `transcript-lost:${scope}:${name}`;
+        // A late answer for a workspace the user has since left must not surface in this one.
+        if (scopeNow() === scope) {
+          toast(
             createElement(
-              "button",
-              {
-                type: "button",
-                className: "update-toast-btn",
-                onClick: () => {
-                  dismissToast(key);
-                  void get().start(name, { fresh: true });
+              "span",
+              { className: "update-toast" },
+              createElement("span", { className: "update-toast-txt" }, tr("srow.transcript_lost")),
+              createElement(
+                "button",
+                {
+                  type: "button",
+                  className: "update-toast-btn",
+                  onClick: () => {
+                    dismissToast(key);
+                    if (scopeNow() !== scope) return;
+                    void get().start(name, { fresh: true });
+                  },
                 },
-              },
-              tr("srow.transcript_lost_fresh"),
+                tr("srow.transcript_lost_fresh"),
+              ),
             ),
-          ),
-          { kind: "error", duration: 0, key },
-        );
+            { kind: "error", duration: 0, key },
+          );
+        }
       } else if (r?.error) {
         ok = false;
         // An uncatalogued code (start_failed carrying tmux's stderr, say) keeps the server's

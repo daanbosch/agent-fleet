@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/claude"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 )
 
 // The lost-log refusal reaches the Console as its own code (409 transcript_lost), wrapped or
@@ -21,5 +22,27 @@ func TestWriteCodexReleasingErrMapsTranscriptLost(t *testing.T) {
 		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"transcript_lost"`) {
 			t.Fatalf("%v: got %d %s", err, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+// "Start a new conversation" on a lost fork must not re-copy the parent: ForkFrom / ForkAt go,
+// ForkSids (cache provenance) stays.
+func TestStartFreshDropsForkSource(t *testing.T) {
+	t.Setenv("AF_SESSIONS_DIR", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	dir := t.TempDir()
+	session.WriteMeta(session.Meta{Name: "forked", Dir: dir, Kind: session.KindClaude,
+		ForkFrom: "parent-sid", ForkAt: "anchor", ForkSids: []string{"parent-sid"}})
+	claude.NoteTalked(session.UUID(dir, "forked"))
+
+	startFresh("forked")
+
+	m, _ := session.ReadMeta("forked")
+	if m.ForkFrom != "" || m.ForkAt != "" || len(m.ForkSids) != 1 {
+		t.Fatalf("meta after fresh: %+v", m)
+	}
+	if claude.HadConversation(session.UUID(dir, "forked")) {
+		t.Fatal("conversation marker survived StartFresh")
 	}
 }

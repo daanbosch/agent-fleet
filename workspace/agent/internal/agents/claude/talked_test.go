@@ -2,6 +2,8 @@ package claude
 
 import (
 	"errors"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/status"
+	"os"
 	"strings"
 	"testing"
 
@@ -28,7 +30,7 @@ func TestBuildLaunchNeverTalkedStartsFresh(t *testing.T) {
 }
 
 // A slot that talked and then lost its jsonl must refuse, not start a blank conversation under
-// the old session; ForgetTalked (the user's explicit choice) lets it start fresh.
+// the old session; StartFresh (the user's explicit choice) lets it start fresh.
 func TestBuildLaunchTalkedWithoutTranscriptIsRefused(t *testing.T) {
 	isolateSlot(t)
 	m := session.Meta{Kind: session.KindClaude, Name: "lost-log", Dir: t.TempDir()}
@@ -37,10 +39,10 @@ func TestBuildLaunchTalkedWithoutTranscriptIsRefused(t *testing.T) {
 	if _, err := launchOf(t, m); !errors.Is(err, ErrTranscriptLost) {
 		t.Fatalf("err = %v, want ErrTranscriptLost", err)
 	}
-	ForgetTalked(sid)
+	StartFresh(sid)
 	plan, err := launchOf(t, m)
 	if err != nil {
-		t.Fatalf("after ForgetTalked: %v", err)
+		t.Fatalf("after StartFresh: %v", err)
 	}
 	if !strings.Contains(plan.Program, "--session-id") {
 		t.Fatalf("program = %q, want a fresh start", plan.Program)
@@ -63,5 +65,43 @@ func TestBuildLaunchResumeMarksSlot(t *testing.T) {
 	}
 	if !HadConversation(sid) {
 		t.Fatal("resume did not mark the slot as talked")
+	}
+}
+
+// A slot that finished a turn before the marker existed (status TurnEnd) is still recognised.
+func TestBuildLaunchLegacyTurnEndEvidenceIsRefused(t *testing.T) {
+	isolateSlot(t)
+	m := session.Meta{Kind: session.KindClaude, Name: "legacy-lost", Dir: t.TempDir()}
+	sid := session.UUID(m.Dir, m.Name)
+	status.PersistTurnEndFor(sid, "idle", "", "real-prompt")
+	if _, err := launchOf(t, m); !errors.Is(err, ErrTranscriptLost) {
+		t.Fatalf("err = %v, want ErrTranscriptLost", err)
+	}
+	StartFresh(sid)
+	if _, err := launchOf(t, m); err != nil {
+		t.Fatalf("after StartFresh: %v", err)
+	}
+}
+
+// Both the slot log and the drifted live log exist; deleting only the live one must not fall
+// back to the older slot log (LiveSID's fall-back) and silently resume stale context.
+func TestBuildLaunchDeletedLiveLogDoesNotFallBackToSlot(t *testing.T) {
+	cfg := isolateSlot(t)
+	m := session.Meta{Kind: session.KindClaude, Name: "drifted", Dir: t.TempDir()}
+	sid := session.UUID(m.Dir, m.Name)
+	live := "47000000-0000-4000-8000-0000000live2"
+	writeSlotJSONL(t, cfg, "p", sid)
+	livePath := writeSlotJSONL(t, cfg, "p", live)
+	sids.Write(sid, live)
+	NoteTalked(sid)
+	plan, err := launchOf(t, m)
+	if err != nil || !strings.Contains(plan.Program, "--resume '"+live+"'") && !strings.Contains(plan.Program, "--resume "+live) {
+		t.Fatalf("positive control: plan %q err %v, want resume of the live log", plan.Program, err)
+	}
+	if err := os.Remove(livePath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := launchOf(t, m); !errors.Is(err, ErrTranscriptLost) {
+		t.Fatalf("err = %v, want ErrTranscriptLost", err)
 	}
 }

@@ -480,8 +480,11 @@ in claude that turns conversation saving off.
 If a log is gone anyway (deleted before this setting existed, or by a lower value of your own),
 **"Resume"** does not silently start an empty conversation under the old session. It shows
 **"This session's conversation log was deleted…"** with a **"Start a new conversation"** button;
-pressing it starts a fresh conversation in the same session. A session that never exchanged a
-message resumes as before.
+pressing it starts a fresh conversation in the same session (for a forked session, without
+copying its source again). A session that never exchanged a message resumes as before.
+Limit: a deleted log is recognised only for sessions Agent Fleet has a record of a finished turn
+for. An old session with no such record is indistinguishable from one that never talked, so if
+its log was already gone it still starts empty without a warning.
 
 ### The warning when the branch has been swapped
 
