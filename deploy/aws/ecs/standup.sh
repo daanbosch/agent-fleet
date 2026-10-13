@@ -37,6 +37,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=deploy/aws/ecs/env.sh
 . "$HERE/env.sh"
+# shellcheck source=deploy/aws/ecs/efs-backup-check.sh
+. "$HERE/efs-backup-check.sh"
 
 usage() {
   cat >&2 <<'EOF'
@@ -682,6 +684,18 @@ fi
 # --- 6) ingress (parameters holding physical IDs get the new outputs) --------
 af_read_params 30-ingress
 af_param_override ImageTag "$TAG"
+# EFS backup state for the Console's warning: the same verdict update.sh reaches (vault AND a
+# plan selecting the file system), read from the data stack this run just deployed. A failed
+# or unevaluable read gives no marker and nothing is overridden, so it can neither raise nor
+# clear the warning.
+# The capture's EfsBackup is a snapshot of a derived fact, not an input: drop it, or an unknown
+# verdict would still pass the stale value and overwrite what update.sh recorded since.
+af_param_drop EfsBackup
+if [ "$AF_DRY" != 1 ]; then
+  af_efs_backup_check "$AF_STACK_DATA" "$AF_PROFILE" "$AF_REGION"
+  data_marker="$(af_efs_backup_marker "$AF_EFS_BACKUP_VERDICT" || true)"
+  [ -z "$data_marker" ] || af_param_override EfsBackup "$data_marker"
+fi
 # Speech: pass the engine's real service name and DNS name, or nothing at all. Read from
 # the stack's outputs rather than the capture for the same reason as the launch template —
 # a rebuilt stack produces new values, and a stale one here is a CP that drives a service

@@ -122,6 +122,18 @@ case "$args" in
   *"cloudformation list-exports"*"EnginesSsmParam"*)
     [ "${STUB_ENGINES_LIVE:-0}" = 1 ] && echo "af-ecs-engines-EnginesSsmParam" || echo "" ;;
   *"cloudformation list-exports"*) echo "t-cluster" ;;
+  # The EFS backup facts efs-backup-check.sh reads. STUB_VAULT: unset = a data stack without the
+  # vault output (pre-0.26.0), ok = vault and a plan selecting fs-1, noplan = vault but the
+  # plan selects another file system, fail = every one of these reads errors.
+  *"Outputs[?OutputKey=='EfsBackupVaultName']"*)
+    case "${STUB_VAULT:-}" in fail) exit 1 ;; ok|noplan) echo "t-data-efs-1" ;; *) echo "None" ;; esac ;;
+  *"Stacks[0].StackId"*) echo "arn:aws:cloudformation:ap-northeast-1:111122223333:stack/t-data/u" ;;
+  *"logical-resource-id EfsBackupPlan"*) echo "plan-1" ;;
+  *"backup list-backup-selections"*) echo "sel-1" ;;
+  *"backup get-backup-selection"*"length(NotResources"*) printf '0\t0\t0\n' ;;
+  *"backup get-backup-selection"*"BackupSelection.Resources"*)
+    [ "${STUB_VAULT:-}" = noplan ] && echo "arn:aws:elasticfilesystem:ap-northeast-1:111122223333:file-system/fs-other" \
+      || echo "arn:aws:elasticfilesystem:ap-northeast-1:111122223333:file-system/fs-1" ;;
   *"--profile p2"*"describe-stack-resource"*) echo "t-db" ;;
   *"describe-stack-resource"*) echo "None" ;;
   *"cloudformation describe-stacks"*"Outputs[?OutputKey=='EfsId']"*) echo "fs-1" ;;
@@ -814,6 +826,31 @@ if grep -q "MANAGED_INSTANCES" "$ECS/cfn/60-engines.yaml"; then
   fail "a task definition still requires MANAGED_INSTANCES (it cannot be placed on an EC2 box)"
 fi
 
+echo "== case 3g-efs: standup hands the EFS backup state of the data stack to 30-ingress =="
+# Only a confirmed verdict is written. An unreadable stack must not be turned into "missing"
+# (a false banner), and must not overwrite an earlier value either: nothing is passed.
+efs_standup() { # <profile> [VAR=val ...] -> $WORK/out3e
+  local prof="$1"; shift
+  : > "$LOG"
+  env "$@" "$ECS/standup.sh" --profile "$prof" --region ap-northeast-1 --stack t-ingress --yes > "$WORK/out3e" 2>&1 </dev/null \
+    || { cat "$WORK/out3e"; fail "standup for $prof failed"; }
+}
+efs_standup p2 STUB_VAULT=ok
+grep -q "deploy --stack-name t-ingress .*EfsBackup=present" "$LOG" || fail "retain + vault + plan did not give EfsBackup=present"
+efs_standup p2
+grep -q "deploy --stack-name t-ingress .*EfsBackup=missing" "$LOG" || fail "retain without a vault did not give EfsBackup=missing"
+efs_standup p2 STUB_VAULT=noplan
+grep -q "deploy --stack-name t-ingress .*EfsBackup=missing" "$LOG" || fail "a plan selecting another file system did not give EfsBackup=missing"
+# ...including a value the capture itself holds: it is a snapshot, and the live stack may have moved on.
+for stale in present missing; do
+  echo "EfsBackup=$stale" >> "$STATE2/params/30-ingress"
+  efs_standup p2 STUB_VAULT=fail
+  if grep -q "deploy --stack-name t-ingress .*EfsBackup=" "$LOG"; then fail "an unreadable data stack still passed the captured EfsBackup=$stale"; fi
+  sed -i '/^EfsBackup=/d' "$STATE2/params/30-ingress"
+done
+efs_standup p
+grep -q "deploy --stack-name t-ingress .*EfsBackup=off" "$LOG" || fail "Persistence=delete did not give EfsBackup=off"
+
 echo "== case 3h: update.sh carries a pre-P6 role over instead of deleting it =="
 #
 # update.sh redeploys 60-engines on every release and passes NO parameters, which is normally
@@ -841,9 +878,11 @@ if grep -qE "deploy --stack-name af-ecs-engines .*(LlmModelS3Key|ImageModelS3Key
   fail "update.sh passed a parameter retired in ADR 0072 P6"
 fi
 # And 30-ingress still gets ImageTag and nothing else - the engine gate must not leak into the
-# call the comment above it says never to add a parameter to.
-grep -q "deploy --stack-name t-ingress .*--parameter-overrides ImageTag=9.9.9-dev-test --no-fail" "$LOG" \
-  || fail "the ingress deploy no longer overrides ImageTag alone"
+# call the comment above it says never to add a parameter to. The one exception is EfsBackup,
+# the data stack's backup state for the Console's warning (the stub's data stack is
+# Persistence=delete, so "off").
+grep -q "deploy --stack-name t-ingress .*--parameter-overrides ImageTag=9.9.9-dev-test EfsBackup=off --no-fail" "$LOG" \
+  || fail "the ingress deploy overrides something besides ImageTag and EfsBackup"
 grep -q "deploy --stack-name t-ingress .*CAPABILITY_NAMED_IAM" "$LOG" \
   || fail "update.sh deploys 30-ingress without CAPABILITY_NAMED_IAM (InsufficientCapabilitiesException)"
 iam_caps

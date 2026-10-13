@@ -40,6 +40,20 @@ af_efs_backup_verdict() {
   if [ "$complex" = 1 ]; then echo unknown; else echo no-plan; fi
 }
 
+# af_efs_backup_marker <verdict>
+# Prints the value for the ingress stack's EfsBackup parameter (AF_EFS_BACKUP in the Control
+# Plane, which warns in the Console on "missing"): ok -> present, skip -> off, no-vault|no-plan
+# -> missing. Prints nothing for unknown (and returns 1): the caller must then NOT pass the
+# parameter, so a failed read keeps the previous value instead of raising or clearing a warning.
+af_efs_backup_marker() {
+  case "$1" in
+    ok) echo present ;;
+    skip) echo off ;;
+    no-vault|no-plan) echo missing ;;
+    *) return 1 ;;
+  esac
+}
+
 # af_efs_backup_data_stack <ingress-stack>
 # Prints the data stack's name. Returns 1 when the ingress stack cannot be read: the caller
 # must then say "unknown" and must NOT fall back to the default name, which could be another

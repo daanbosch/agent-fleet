@@ -75,6 +75,10 @@ type manager struct {
 	// concurrent-session quota is not enforced there — see sessionQuotaExceeded.
 	nativeRuntime bool
 
+	// efsBackupMissing is set at boot from AF_RUNTIME and AF_EFS_BACKUP (efsBackupMissing in
+	// master_key_guard.go) and only ever true on an ECS runtime.
+	efsBackupMissing bool
+
 	// template fields shared by every runtime
 	image    string
 	dataRoot string

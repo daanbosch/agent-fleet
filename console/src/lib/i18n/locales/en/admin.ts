@@ -12,6 +12,8 @@ export const admin: Record<keyof typeof jaAdmin, string> = {
   "admin.forbidden": "You don't have permission (super_admin only).",
   "admin.deploy_warn_plaintext_secrets":
     "This deployment has no master key (AF_MASTER_KEY), so members' stored credentials (git tokens, the Claude token, API keys, MCP and chat connections) are kept unencrypted in their homes. Set the key in the Control Plane's environment and restart it, then stop and start every existing workspace (a running one has no key yet), and only then have members reconnect what they had stored. The old unencrypted file stays in each home and in backups until deleted, so delete it and rotate those credentials.",
+  "admin.deploy_warn_efs_backup_missing":
+    "This deployment keeps member data on EFS (Persistence=retain) but its data stack has no daily EFS backup: the backup vault and plan were added in 0.26.0 and are not created by updating the other stacks. Homes and Claude state are not protected against deletion or corruption. Update the data stack with a change set that adds only the four EfsBackup* resources (see the EFS backup section of the ECS deployment runbook), then run update.sh again so this notice clears.",
   "admin.mode_sessions": "Sessions",
   "admin.mode_usage": "Running time",
   "admin.mode_audit": "Audit",

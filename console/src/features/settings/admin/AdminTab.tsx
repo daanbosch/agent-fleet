@@ -302,6 +302,11 @@ export function AdminTab() {
             {tr("admin.deploy_warn_plaintext_secrets")}
           </p>
         )}
+        {warnings.includes("efs_backup_missing") && (
+          <p className="admin-hint warn" role="alert">
+            {tr("admin.deploy_warn_efs_backup_missing")}
+          </p>
+        )}
         <div className="admin">{body()}</div>
       </div>
     </div>

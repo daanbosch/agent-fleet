@@ -598,6 +598,16 @@ existing membership is consulted first, so this only stops NEW auto-admissions. 
 built-in default is still `auto` — it is this template that starts closed, so a deployment
 that never set it keeps its behaviour until you redeploy.)
 
+### `EfsBackup`
+
+The data stack's daily EFS backup state, for the Console's admin warning. Not a setting:
+`update.sh` / `standup.sh` write it after reading the data stack (`present` = `Persistence=retain`
+with a vault and a plan selecting the file system, `missing` = `retain` without them, `off` =
+`Persistence=delete`). It reaches the CP as `AF_EFS_BACKUP`, which warns on `missing` and
+only on an ECS runtime. Empty (the default, so existing stacks need no new value) = never
+filled or unreadable = no warning. It exists because the CP must learn this without new IAM:
+importing a data-stack export would fail the deploy for a data stack older than 0.26.0.
+
 ### `AuthMode`
 
 CP auth mode. `oauth` (default) = the CP-native login (Google and/or OIDC). `dev` = fixed

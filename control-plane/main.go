@@ -260,6 +260,9 @@ func main() {
 	}
 	mgr.rtFactory = rtFactory
 	mgr.nativeRuntime = rtProfile == "native" || rtProfile == "wsl"
+	if mgr.efsBackupMissing = efsBackupMissing(rtProfile, os.Getenv("AF_EFS_BACKUP")); mgr.efsBackupMissing {
+		log.Print(efsBackupMissingLog)
+	}
 
 	publicBaseURL := os.Getenv("PUBLIC_BASE_URL")
 	// Internal git provider: the clone host workspaces authenticate against is the
