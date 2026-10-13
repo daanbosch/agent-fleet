@@ -310,7 +310,8 @@ func HandleListSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleSessionCatalog is the sharing inventory. Unlike the ordinary list it
-// includes archived rows, but only kinds with a structured transcript.
+// includes archived rows, but only kinds with a structured transcript. With ?since= it
+// answers only what changed after that cursor (catalog_delta.go).
 func HandleSessionCatalog(w http.ResponseWriter, r *http.Request) {
 	live := tmuxx.LiveSessionNames()
 	items := []session.CatalogEntry{}
@@ -325,7 +326,12 @@ func HandleSessionCatalog(w http.ResponseWriter, r *http.Request) {
 		items = append(items, catalogEntry(m, alive))
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt > items[j].CreatedAt })
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"sessions": items})
+	since, asked := r.URL.Query()["since"]
+	if !asked {
+		httpx.WriteJSON(w, http.StatusOK, session.CatalogResponse{Sessions: items})
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, catalogChanges.respond(items, since[0]))
 }
 
 // catalogEntry builds a catalog row. Only a live session pays for wireSession, whose State

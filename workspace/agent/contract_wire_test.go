@@ -132,6 +132,52 @@ func agentContractFamilies() []contractFamily {
 			goOnly: map[string]string{},
 		},
 
+		// Moving the memories of a project whose working copy is gone (#1984).
+		{
+			name:    "agentMemProjectRow",
+			goPath:  "internal/memoryx/agent_memory_project_move.go",
+			goName:  "agentMemProjectRow",
+			binding: agentMemProjectRowBinding,
+			tsPath:  "../../console/src/features/settings/memory/memoryTypes.ts",
+			tsName:  "ProjectRow",
+			tsKeys:  keySet("project", "count", "withheld", "orphaned", "live"),
+			tsOnly:  map[string]string{},
+			goOnly:  map[string]string{},
+		},
+		{
+			name:    "agentMemMoveItem",
+			goPath:  "internal/memoryx/agent_memory_project_move.go",
+			goName:  "agentMemMoveItem",
+			binding: agentMemMoveItemBinding,
+			tsPath:  "../../console/src/features/settings/memory/memoryTypes.ts",
+			tsName:  "MoveItem",
+			tsKeys:  keySet("name", "newName", "status", "description", "type", "revision"),
+			tsOnly:  map[string]string{},
+			goOnly:  map[string]string{},
+		},
+		{
+			name:    "agentMemMovePreview",
+			goPath:  "internal/memoryx/agent_memory_project_move.go",
+			goName:  "agentMemMovePreview",
+			binding: agentMemMovePreviewBinding,
+			tsPath:  "../../console/src/features/settings/memory/memoryTypes.ts",
+			tsName:  "MovePreview",
+			tsKeys:  keySet("from", "to", "items", "counts", "withheld", "collision", "needsPolicy"),
+			tsOnly:  map[string]string{},
+			goOnly:  map[string]string{},
+		},
+		{
+			name:    "agentMemMoveResultItem",
+			goPath:  "internal/memoryx/agent_memory_project_move.go",
+			goName:  "agentMemMoveResultItem",
+			binding: agentMemMoveResultItemBinding,
+			tsPath:  "../../console/src/features/settings/memory/memoryTypes.ts",
+			tsName:  "MoveResultItem",
+			tsKeys:  keySet("name", "newName", "result", "reason", "commit"),
+			tsOnly:  map[string]string{},
+			goOnly:  map[string]string{},
+		},
+
 		// The preview of a memory import.
 		// AST route: `memoryImportPreview` is an unexported type in internal/memoryx.
 		{
@@ -236,6 +282,24 @@ var agentMemChangeViewBinding = map[string]string{
 	"PurgedBefore": "purgedBefore",
 }
 
+var agentMemProjectRowBinding = map[string]string{
+	"Project": "project", "Count": "count", "Withheld": "withheld", "Orphaned": "orphaned", "Live": "live",
+}
+
+var agentMemMoveItemBinding = map[string]string{
+	"Name": "name", "NewName": "newName", "Status": "status", "Description": "description",
+	"Type": "type", "Revision": "revision",
+}
+
+var agentMemMovePreviewBinding = map[string]string{
+	"From": "from", "To": "to", "Items": "items", "Counts": "counts", "Withheld": "withheld",
+	"Collision": "collision", "NeedsPolicy": "needsPolicy",
+}
+
+var agentMemMoveResultItemBinding = map[string]string{
+	"Name": "name", "NewName": "newName", "Result": "result", "Reason": "reason", "Commit": "commit",
+}
+
 var memoryImportPreviewBinding = map[string]string{
 	"ImportID": "importId", "Format": "format", "Ref": "ref", "Head": "head",
 	"HeadTs": "headTs", "Snapshots": "snapshots", "Kinds": "kinds", "Projects": "projects",
@@ -278,7 +342,7 @@ func TestContractFamilies(t *testing.T) {
 	fams := agentContractFamilies()
 	// Guard the population being scanned (the #320 shape): a family that silently
 	// disappears is caught here.
-	if len(fams) != 10 {
+	if len(fams) != 14 {
 		t.Fatalf("only %d families - one has dropped out of the table (if you added one, fix the count too)", len(fams))
 	}
 	for _, f := range fams {

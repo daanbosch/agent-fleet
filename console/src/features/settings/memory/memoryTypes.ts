@@ -277,3 +277,44 @@ export interface MemoryBody extends MemoryListed {
 export interface MemorySearchHit extends MemoryListed {
   snippets?: string[];
 }
+
+/** One project of the store (member `entries/projects`): orphaned means its working copy is known to be gone. */
+export interface ProjectRow {
+  project: MemoryChangeProject;
+  count: number;
+  /** Files left out because they failed the scan or cannot be parsed; they are never moved. */
+  withheld?: number;
+  orphaned: boolean;
+  /** A working copy under ~/repos belongs to the project, so it can receive a move before it holds a memory. */
+  live: boolean;
+}
+
+export type MoveStatus = "move" | "same" | "collision" | "rename" | "skip";
+export type MoveCollision = "skip" | "rename";
+export interface MoveItem {
+  name: string;
+  /** Present when the memory moves under another name (rename) or an earlier run already put it there (same). */
+  newName?: string;
+  status: MoveStatus;
+  description: string;
+  type?: string;
+  revision: number;
+}
+export interface MovePreview {
+  from: MemoryChangeProject;
+  to: MemoryChangeProject;
+  items: MoveItem[];
+  counts: Partial<Record<MoveStatus, number>>;
+  withheld?: number;
+  collision?: MoveCollision;
+  /** A name is taken in the target and no policy was chosen, so the Agent would refuse the move. */
+  needsPolicy?: boolean;
+}
+export interface MoveResultItem {
+  name: string;
+  newName?: string;
+  /** partial: the copy is in the target and the source copy is still there; failed: nothing was written. */
+  result: "moved" | "merged" | "renamed" | "skipped" | "partial" | "failed";
+  reason?: string;
+  commit?: string;
+}

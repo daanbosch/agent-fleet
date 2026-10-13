@@ -57,6 +57,9 @@ func wireGoldenTypes() []struct {
 		// Session list / SSE. This is a relay that decodes the Agent's answer and re-emits
 		// it, so a field missing here is dropped silently (it has happened three times).
 		{"sessionWire", reflect.TypeOf(sessionWire{})},
+		// What the catalog sync reads from the Agent's GET /sessions/catalog; its delta
+		// protocol (cursor / delta / deleted) is agreed with workspace/agent's CatalogResponse.
+		{"agentCatalogWire", reflect.TypeOf(agentCatalogWire{})},
 		{"adminSessionRow", reflect.TypeOf(adminSessionRow{})},
 		// Usage: the admin aggregates and the heatmap.
 		{"usageTotal", reflect.TypeOf(usageTotal{})},

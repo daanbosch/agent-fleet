@@ -227,6 +227,11 @@ func PushEngineProviders(engines []EngineProvider) error {
 	if !Serve().Running() {
 		return ErrNoDaemon
 	}
+	if isV2() {
+		// PATCH /api/experimental/config takes `shell` only and refuses a provider block with
+		// 400 (measured 2.0.28), so there is no live path: the caller asks for a restart.
+		return ErrLiveConfigUnsupported
+	}
 	providers := map[string]any{}
 	for _, e := range engines {
 		if e.Provider == "" || e.BaseURL == "" || len(e.Models) == 0 {

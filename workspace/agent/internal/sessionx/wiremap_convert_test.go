@@ -5,6 +5,7 @@ package sessionx
 import (
 	"testing"
 
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/wiretest"
 )
 
@@ -35,5 +36,19 @@ func TestWireEquivManagedThreadSettings(t *testing.T) {
 				DynamicMode: in.DynamicMode,
 			}
 		})
+	t.Logf("comparison mode: %s", got)
+}
+
+// GET /sessions/catalog without ?since is the body an older Control Plane reads: the same bytes
+// the map literal produced, including an empty list as [] rather than null.
+func TestWireEquivCatalogResponse(t *testing.T) {
+	inputs := [][]session.CatalogEntry{
+		{},
+		{{Name: "a", Kind: "claude", Dir: "/d", Repo: "r", CreatedAt: "2026-10-01T00:00:00Z", Alive: true, State: "idle"},
+			{Name: "b", Kind: "codex", CreatedAt: "2026-09-01T00:00:00Z", Archived: true, WorkingCopyID: "wc_x", Title: "t", Label: "l"}},
+	}
+	got := wiretest.AssertEquiv(t, "HandleSessionCatalog", inputs,
+		func(in []session.CatalogEntry) any { return map[string]any{"sessions": in} }, // old shape
+		func(in []session.CatalogEntry) any { return session.CatalogResponse{Sessions: in} })
 	t.Logf("comparison mode: %s", got)
 }

@@ -198,11 +198,63 @@ describe("HandoffOfferModal", () => {
     expect(document.body.textContent || "").toContain("引き継ぎ先を取得できませんでした");
   });
 
+  const MEMBER = { members: [{ userKey: "b-example-com", email: "b@example.com" }] };
+  const submitBtn = () => buttons().find((b) => b.type === "submit")!;
+
+  // The git run behind the verdict is the slow part for a member with many working copies:
+  // the recipients must not wait for it, and the send must not go out before it.
+  it("shows the recipients before the verdict arrives, and keeps send disabled until it passes", async () => {
+    let answer: (v: unknown) => void = () => {};
+    handler = async (path) => {
+      if (path.includes("/handoff-recipients")) return MEMBER;
+      if (path.endsWith("/handoff-context")) return new Promise((r) => { answer = r; });
+      return {};
+    };
+    await mount(<HandoffOfferModal session="s1" initialTitle="next" initialPrompt="continue" onClose={() => {}} />);
+    expect(document.querySelector(".ui-modal select")?.textContent).toContain("b@example.com");
+    expect(document.body.textContent || "").toContain("確認しています");
+    expect(submitBtn().disabled).toBe(true);
+    await act(async () => answer({ context: { vcs: "git", branch: "main", headSha: "abcdef12", ahead: 0 } }));
+    await flush();
+    expect(document.body.textContent || "").not.toContain("確認しています");
+    expect(submitBtn().disabled).toBe(false);
+  });
+
+  it("keeps send disabled when the verdict that arrives is a block", async () => {
+    handler = async (path) => {
+      if (path.includes("/handoff-recipients")) return MEMBER;
+      if (path.endsWith("/handoff-context")) return { context: { vcs: "git", branch: "main", blocked: "detached_head" } };
+      return {};
+    };
+    await mount(<HandoffOfferModal session="s1" initialTitle="next" initialPrompt="continue" onClose={() => {}} />);
+    expect(document.querySelector(".handoff-blocked")).toBeTruthy();
+    expect(submitBtn().disabled).toBe(true);
+  });
+
+  it("never enables send when the verdict cannot be read", async () => {
+    handler = async (path) => {
+      if (path.includes("/handoff-recipients")) return MEMBER;
+      if (path.endsWith("/handoff-context")) return { error: { code: "handoff_no_working_copy", message: "no working copy" } };
+      return {};
+    };
+    await mount(<HandoffOfferModal session="s1" initialTitle="next" initialPrompt="continue" onClose={() => {}} />);
+    expect(document.body.textContent || "").toContain("no working copy");
+    expect(submitBtn().disabled).toBe(true);
+  });
+
+  it("asks for the recipients without the verdict, and for the verdict on its own route", async () => {
+    handler = async (path) => (path.includes("/handoff-recipients") ? MEMBER : { context: { vcs: "git", branch: "main" } });
+    await mount(<HandoffOfferModal session="s1" initialPrompt="continue" onClose={() => {}} />);
+    expect(calls.map((c) => c.path).sort()).toEqual([
+      "api/sessions/s1/handoff-context",
+      "api/sessions/s1/handoff-recipients?context=skip",
+    ]);
+  });
+
   async function openAndSend(onClose: () => void) {
     handler = async (path, opts) => {
-      if (path.endsWith("/handoff-recipients")) {
-        return { members: [{ userKey: "b-example-com", email: "b@example.com" }], context: { vcs: "git", branch: "main", ahead: 0 } };
-      }
+      if (path.includes("/handoff-recipients")) return { members: [{ userKey: "b-example-com", email: "b@example.com" }] };
+      if (path.endsWith("/handoff-context")) return { context: { vcs: "git", branch: "main", ahead: 0 } };
       if (path === "api/session-handoff-offers" && opts?.method === "POST") return hang(opts);
       return {};
     };
@@ -229,11 +281,9 @@ describe("HandoffOfferModal", () => {
   // must not abandon it at the ordinary deadline.
   it("waits for the push bound on top of the deadline when the send pushes first", async () => {
     handler = async (path, opts) => {
-      if (path.endsWith("/handoff-recipients")) {
-        return {
-          members: [{ userKey: "b-example-com", email: "b@example.com" }],
-          context: { vcs: "git", branch: "x", headSha: "abc", blocked: "unpushed_commits", pushRemote: "origin", pushCommits: 1 },
-        };
+      if (path.includes("/handoff-recipients")) return { members: [{ userKey: "b-example-com", email: "b@example.com" }] };
+      if (path.endsWith("/handoff-context")) {
+        return { context: { vcs: "git", branch: "x", headSha: "abc", blocked: "unpushed_commits", pushRemote: "origin", pushCommits: 1 } };
       }
       if (path === "api/session-handoff-offers" && opts?.method === "POST") return hang(opts);
       return {};

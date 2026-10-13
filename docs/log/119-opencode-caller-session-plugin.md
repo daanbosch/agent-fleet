@@ -140,3 +140,28 @@
 - opencode の task ツールで作られる子セッションは `ses_` が別なので一致せず、cwd 推定に落ちる
   （悪化はしない）。親をたどるなら opencode のストアの `parent_id` が使える。
 - Terminal の opencode は `AF_SESSION_NAME` が先に決まるので、プラグインの申告は除かれるだけ。
+
+## 2026-10-14: opencode 2 (#2104, part of #2101)
+
+Measured on `@opencode/cli` 2.0.28 and `opencode-ai` 1.19.0, each in an isolated `HOME`, against a
+stub OpenAI-compatible endpoint and a stub MCP server (no real model).
+
+- The three plugins are now one module per file: a plain default-exported
+  `{ id, setup(ctx), server() }`. 2.0.28 loads it from `~/.config/opencode/plugin/` (and from
+  `plugins/`) without `@opencode/plugin`, `.ts` included, and ignores `server`; 1.19.0 calls
+  `server`. The directory stays `plugin/`, so `CallerPluginCurrent` and the entrypoint seed are
+  unchanged and no stale file can collide on an id. `/api/plugin` lists the ids.
+- `ctx.tool.hook("execute.before")` fires for the model's `shell` call and, separately, for each
+  MCP call made inside the Code Mode `execute` tool (tool name `af_<hex>_<tool>`, with
+  `sessionID`). Mutating `event.input` in place reaches the tool: the rtk rewrite took effect.
+  `POST /api/session/{id}/shell` (the user's own shell) does not fire it.
+- **The stamped argument does not survive on 2.0.28 when the tool's `inputSchema` is closed**
+  (`additionalProperties: false`, as af's are); with an open schema it arrives. Every 2.0.28
+  `tools/call` carries `params._meta["ai.opencode/sessionID"]` (1.19.0 sends none), so
+  `mcpStdioCall` now takes that as a second source; the stamp still wins, and `_meta` needs only the
+  rotated server key, not the plugin, since the model cannot write it.
+- Status events: `session.execution.started` → working; `succeeded`, `failed` and `interrupted`
+  → idle (each observed; `session.idle` was not emitted). Subagent sessions carry `parentID` on
+  `session.created` and are left out so their end does not flip the badge.
+- Not covered: a Terminal (CLI) opencode 2 shares one background service, so
+  `AF_SESSION_SID` in the plugin's environment is the service starter's (#2105).

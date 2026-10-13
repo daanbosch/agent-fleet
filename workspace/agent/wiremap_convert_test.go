@@ -107,6 +107,7 @@ func TestWireEquivConvertedSitesAreAllCovered(t *testing.T) {
 		"mcpRegistryWire":           "TestWireEquivMCPRegistry (internal/mcpx)",
 		"memoryRootsWire":           "TestWireEquivMemoryRoots (internal/memoryx)",
 		"managedThreadSettingsWire": "TestWireEquivManagedThreadSettings (internal/sessionx)",
+		"CatalogResponse":           "TestWireEquivCatalogResponse (internal/sessionx)",
 	}
 	declared := wiremapConvertedWireTypes(t, ".")
 	for _, name := range declared {

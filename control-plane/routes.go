@@ -519,6 +519,7 @@ func registerSessionShareRoutes(mux *http.ServeMux, cfg config) {
 	// the share API.
 	h := newSessionHandoffAPI(cfg.mgr, a, cfg.autostart)
 	mux.HandleFunc("GET /api/sessions/{name}/handoff-recipients", h.withResolved(h.recipients))
+	mux.HandleFunc("GET /api/sessions/{name}/handoff-context", h.withResolved(h.handoffContextGET))
 	mux.HandleFunc("POST /api/session-handoff-offers", h.withResolved(h.create))
 	mux.HandleFunc("GET /api/session-handoff-offers", h.withMembership(h.listOwned))
 	// The recipient's inbox. A literal segment outranks {id}, so this ordering does not
@@ -939,6 +940,10 @@ func registerAgentEnvRoutes(mux *http.ServeMux, cfg config) {
 	// the purge (member_origin.go) and audits it (proxy.go); the preview only reads.
 	mux.HandleFunc("GET /api/agents/memory/entries/purge-preview", rest)
 	mux.HandleFunc("POST /api/agents/memory/entries/purge", rest)
+	// Moving the memories of a project whose working copy is gone (#1984). The move is signed.
+	mux.HandleFunc("GET /api/agents/memory/entries/projects", rest)
+	mux.HandleFunc("GET /api/agents/memory/entries/project-move-preview", rest)
+	mux.HandleFunc("POST /api/agents/memory/entries/project-move", rest)
 	// The one-time import of claude's own memory: sources, a read-only preview, and the apply.
 	mux.HandleFunc("GET /api/agents/memory/claude-import", rest)
 	mux.HandleFunc("GET /api/agents/memory/claude-import/preview", rest)

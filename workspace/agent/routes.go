@@ -498,6 +498,12 @@ func buildMux() *http.ServeMux {
 	// The member's create/edit (#1997).
 	mux.Handle("POST /agents/memory/entries/member-save", memberorigin.Require(memoryx.MemberWriteMaxRequest, http.HandlerFunc(memoryx.HandleAgentMemoryMemberSave)))
 	mux.HandleFunc("GET /agents/memory/entries/member-search", memoryx.HandleAgentMemoryMemberSearch)
+	// Moving the memories of a project whose working copy is gone into another project (#1984).
+	// The list and the preview write nothing; the move answers only a member-origin mark, and
+	// no MCP tool reaches it.
+	mux.HandleFunc("GET /agents/memory/entries/projects", memoryx.HandleAgentMemoryMemberProjects)
+	mux.HandleFunc("GET /agents/memory/entries/project-move-preview", memoryx.HandleAgentMemoryMemberMovePreview)
+	mux.Handle("POST /agents/memory/entries/project-move", memberorigin.Require(memoryx.MemberWriteMaxRequest, http.HandlerFunc(memoryx.HandleAgentMemoryMemberMove)))
 	mux.HandleFunc("GET /agents/memory/entries/member-latest", memoryx.HandleAgentMemoryMemberLatest)
 	mux.HandleFunc("GET /agents/memory/entries/member-forgotten", memoryx.HandleAgentMemoryMemberForgotten)
 	// The member's purge of one memory's past revisions from the history (#1982): a read-only

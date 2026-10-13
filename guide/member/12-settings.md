@@ -378,6 +378,18 @@ Version control over the memory an agent accumulates by itself (claude's auto-me
     limit (200 lines, 24 KiB) and replaces the old one; Claude's memory is snapshotted first
     (trigger "pre-write-back"), so you can restore it from the history below. It works with the switch on or off;
     while it is on, end Claude Code sessions started before it was switched on first.
+  - **Move memories of a project that no longer exists**: below the write-back. A project is tied to the folder of its
+    repository, so a repository you renamed, moved or cloned again starts as a new, empty project and the old one
+    keeps its memories where no session can reach them. This lists such projects (those whose working copy is known
+    to be gone; when Agent Fleet cannot tell, for instance a folder on a disk that is not mounted, the project is not
+    listed) with their memory counts. Pick one and the project that replaces it (any project that has memories or a
+    working copy under `~/repos`) and read the preview before confirming. A memory whose name is already taken in
+    the target is **never overwritten**: you choose to leave those where they are or to move them under a new name
+    (`<name>-moved`); one whose text is identical to the target's copy only has the old copy removed. A memory that
+    changed since the preview, or whose file looks like it contains a secret, stays in the old project. Each memory
+    becomes two entries in the recent changes list, one in each project, so you can revert either there. If the
+    move is interrupted, run it again: nothing is lost and it finishes where it stopped. This works with the
+    sessions' switch on or off and is only available from the Console.
   - **From a terminal**: `af-memory export-sources`, `af-memory export --project <id|name> --dry-run` (preview) and
     `af-memory export --project <id|name> [--overwrite <name>]...` (write back).
 

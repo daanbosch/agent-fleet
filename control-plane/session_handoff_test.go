@@ -193,3 +193,51 @@ func TestHandoffRecipientsThrottlesInventorySync(t *testing.T) {
 		t.Fatalf("/repos hits=%d (first=%d) - a re-read within the TTL is running the inventory sync", got, first)
 	}
 }
+
+// The modal opens on the recipient list alone: ?context=skip must not make the owner's Agent
+// run the git status behind the verdict, and the verdict is read from its own route.
+func TestHandoffRecipientsContextSkipDoesNotAskTheAgentForTheVerdict(t *testing.T) {
+	f := newHandoffAPIFixture(t, oneSession)
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/session-1/handoff-recipients?context=skip", nil)
+	req.SetPathValue("name", "session-1")
+	rec := httptest.NewRecorder()
+	f.api.recipients(rec, req, f.res)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := got["context"]; has {
+		t.Fatalf("body has a context although it was skipped: %s", rec.Body.String())
+	}
+	if _, has := got["members"]; !has {
+		t.Fatalf("body has no members: %s", rec.Body.String())
+	}
+	if n := f.agentHits.get("/sessions/session-1/handoff-context"); n != 0 {
+		t.Fatalf("the Agent was asked for the verdict %d times", n)
+	}
+}
+
+func TestHandoffContextRouteRelaysTheAgentsVerdict(t *testing.T) {
+	f := newHandoffAPIFixture(t, oneSession)
+	get := func(name string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/sessions/"+name+"/handoff-context", nil)
+		req.SetPathValue("name", name)
+		rec := httptest.NewRecorder()
+		f.api.handoffContextGET(rec, req, f.res)
+		return rec
+	}
+	rec := get("session-1")
+	var got struct {
+		Context map[string]any `json:"context"`
+	}
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &got) != nil || got.Context["branch"] != "main" {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	// "No such session" stays a 404, never "no working copy" and never an empty verdict.
+	if rec := get("no-such-session"); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown session: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
