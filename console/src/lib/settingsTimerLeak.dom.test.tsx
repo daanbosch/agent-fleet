@@ -49,3 +49,27 @@ describe("cancelPrefsTimersForTest", () => {
     expect(apiJSONMock).not.toHaveBeenCalled();
   });
 });
+
+describe("a hydrate still in flight when its test ends", () => {
+  let finish!: (v: unknown) => void;
+
+  it("starts a GET that never answers inside the test", async () => {
+    vi.resetModules();
+    apiMock.mockReset().mockReturnValue(new Promise((r) => (finish = r)));
+    const s = await import("./settings.ts");
+    void s.hydrateUIPrefs();
+    expect(apiMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not re-arm the retry when the late answer fails", async () => {
+    vi.useFakeTimers();
+    try {
+      apiMock.mockClear();
+      finish({ error: { code: "http_502", message: "down" } });
+      await vi.advanceTimersByTimeAsync(70_000);
+      expect(apiMock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

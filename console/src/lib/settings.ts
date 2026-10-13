@@ -1871,16 +1871,22 @@ export function cancelPrefsTimersForTest(): { save: boolean; hydrateRetry: boole
   saveTimer = null;
   hydrateRetry = null;
   savePending = false;
+  // An answer still in flight (a GET or PUT this test started) must not re-arm the retry or
+  // move the sync state after the test is over.
+  hydrateGen++;
+  saveGen++;
   return pending;
 }
 
 // Registry for src/test/prefsTimersSetup.ts. It cannot import this module itself: a test's
 // vi.mock / vi.resetModules decides which instance (and which `api` binding) this file gets, so
-// each instance registers its own hook here.
-const prefsHooks = ((globalThis as any)[Symbol.for("af.prefsTimerHooks")] ??= new Set()) as Set<
-  typeof cancelPrefsTimersForTest
->;
-prefsHooks.add(cancelPrefsTimersForTest);
+// each instance registers its own hook here. Vite folds MODE at build time, so the production
+// bundle carries neither the registration nor the hook.
+if (import.meta.env.MODE === "test") {
+  const key = Symbol.for("af.prefsTimerHooks");
+  const g = globalThis as any;
+  (g[key] ??= new Set<typeof cancelPrefsTimersForTest>()).add(cancelPrefsTimersForTest);
+}
 
 function warnPrefsSaveFailed(err: unknown): void {
   try {
