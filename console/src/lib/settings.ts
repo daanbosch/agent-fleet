@@ -1861,6 +1861,33 @@ function scheduleServerSave(): void {
   }, 600);
 }
 
+/** Test hook: cancel the debounced save and the hydrate retry, drop the queued change, and
+ *  return what was still pending. A timer left running fires after its test, in another file's
+ *  module environment (a different `apiJSON` mock, or none). Never called in production. */
+export function cancelPrefsTimersForTest(): { save: boolean; hydrateRetry: boolean } {
+  const pending = { save: saveTimer !== null, hydrateRetry: hydrateRetry !== null };
+  if (saveTimer) clearTimeout(saveTimer);
+  if (hydrateRetry) clearTimeout(hydrateRetry);
+  saveTimer = null;
+  hydrateRetry = null;
+  savePending = false;
+  // An answer still in flight (a GET or PUT this test started) must not re-arm the retry or
+  // move the sync state after the test is over.
+  hydrateGen++;
+  saveGen++;
+  return pending;
+}
+
+// Registry for src/test/prefsTimersSetup.ts. It cannot import this module itself: a test's
+// vi.mock / vi.resetModules decides which instance (and which `api` binding) this file gets, so
+// each instance registers its own hook here. Vite folds MODE at build time, so the production
+// bundle carries neither the registration nor the hook.
+if (import.meta.env.MODE === "test") {
+  const key = Symbol.for("af.prefsTimerHooks");
+  const g = globalThis as any;
+  (g[key] ??= new Set<typeof cancelPrefsTimersForTest>()).add(cancelPrefsTimersForTest);
+}
+
 function warnPrefsSaveFailed(err: unknown): void {
   try {
     console.warn("[settings] failed to save ui-prefs to the server (kept locally)", err);
