@@ -102,30 +102,18 @@ jobs:
       - name: scan full history
         run: /tmp/gitleaks --version && /tmp/gitleaks git --log-opts="--all --full-history -m" --redact --verbose
 
-  # Migration versions taken twice (#2046). Two PRs that each take the next free number are
-  # green on their own and collide only once both merge; the store tests then go red on
-  # develop. Nothing re-runs a PR's checks when develop moves, so every push to develop
-  # re-checks each open PR's new migrations against the new tip and sets a
-  # `migration-version` status on the PR, red before the second one is merged. The
-  # self-test runs on PRs too, so a broken script fails on its own PR.
+  # Self-test of scripts/migration-versions.sh (#2046), on every event so a broken script
+  # fails on its own PR. The `migration-version` status itself is posted by
+  # migration-version.yml, not here: this workflow's cancel-in-progress could kill a
+  # publisher between its post and its re-check of develop and leave a stale success.
   migration-versions:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-      statuses: write
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # the self-test reads a pinned commit of develop
       - name: self-test
         run: ./scripts/migration-versions-test.sh
-      - name: flag open PRs whose migration version develop now holds
-        # Never on a fork: its pushes have nothing to mark, and a fork's PR token is read-only.
-        if: github.event_name == 'push' && github.ref == 'refs/heads/develop' && github.repository == 'k-k1/agent-fleet'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: ./scripts/migration-versions.sh --open-prs HEAD
 
   # Core verification of the forbidden-token gate for shipped artifacts (docs/log/35
   # §35.7.5). The artifacts themselves are scanned by release-gate and publish-dist (both
