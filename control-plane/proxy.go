@@ -232,6 +232,9 @@ func (a agentProxyAPI) rest(w http.ResponseWriter, r *http.Request, res *resolve
 		writeAPIErr(w, aerr)
 		return
 	}
+	if c, ok := body.(io.Closer); ok {
+		defer c.Close() // a spooled upload's file; the transport closes it too
+	}
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, body)
 	if err != nil {
 		http.Error(w, "bad proxy request", http.StatusBadGateway)

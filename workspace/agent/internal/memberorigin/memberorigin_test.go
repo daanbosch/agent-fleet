@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -267,5 +268,42 @@ func TestNonJSONBodyIsRefused(t *testing.T) {
 	s.Sign(r, []byte(`{}`))
 	if w := serve(r); w.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("text/plain: %d %s", w.Code, w.Body)
+	}
+}
+
+// An upload is hashed as it is spooled: the mark must cover exactly those bytes, the handler reads
+// them back, an oversize body is refused, and no spool file outlives the request.
+func TestRequireUploadVerifiesTheBodyHash(t *testing.T) {
+	dir := t.TempDir()
+	h := memberorigin.RequireUpload(1<<10, func() (string, error) { return dir, nil },
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			_, _ = w.Write(b)
+		}))
+	s := memberorigintest.Install(t)
+	do := func(signed, sent string, ct string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "/agents/memory/import", strings.NewReader(sent))
+		r.Header.Set("Content-Type", ct)
+		s.Sign(r, []byte(signed))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	mp := "multipart/form-data; boundary=B"
+	if w := do("abc", "abc", mp); w.Code != http.StatusOK || w.Body.String() != "abc" {
+		t.Fatalf("good upload: %d %q", w.Code, w.Body)
+	}
+	if w := do("abc", "abd", mp); w.Code != http.StatusForbidden {
+		t.Fatalf("tampered upload: %d", w.Code)
+	}
+	if w := do("abc", "abc", "application/json"); w.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("wrong content type: %d", w.Code)
+	}
+	big := strings.Repeat("x", 2<<10)
+	if w := do(big, big, mp); w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize upload: %d", w.Code)
+	}
+	if left, _ := os.ReadDir(dir); len(left) != 0 {
+		t.Fatalf("%d spool files left behind", len(left))
 	}
 }

@@ -104,7 +104,13 @@ export function TransferSection({
     try {
       const fd = new FormData();
       fd.append("file", file, file.name);
-      const res = await raw("api/agents/memory/import", { method: "POST", body: fd });
+      // The header is what keeps another page out: a multipart POST needs no preflight, a custom
+      // header does, and the CP signs this upload for the Agent only when it carries it (ADR 0113).
+      const res = await raw("api/agents/memory/import", {
+        method: "POST",
+        headers: { "X-AF-Console": "1" },
+        body: fd,
+      });
       const body = await res.json().catch(() => null);
       if (!res.ok) {
         toast(body?.error ? errDetail(body.error) : tr("mem.import_failed"));

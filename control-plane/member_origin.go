@@ -58,6 +58,30 @@ var memberOriginRoutes = map[string]bool{
 	// snapshot and the apply step of a bundle import.
 	"POST /api/agents/memory/snapshots":    true,
 	"POST /api/agents/memory/import/apply": true,
+	// A multipart upload: signed by body hash (memberOriginHashedRoutes), not buffered.
+	"POST /api/agents/memory/import": true,
+}
+
+// memberOriginHashedRoutes are the signed routes whose body is a multipart upload too large to
+// buffer. The CP spools it to a file while hashing it, signs the hash, and relays the file; the
+// Agent hashes what it receives and checks it against the mark.
+var memberOriginHashedRoutes = map[string]bool{
+	"POST /api/agents/memory/import": true,
+}
+
+// memberOriginUploadMax bounds a hashed upload. The Agent's import limit is 64 MiB by default
+// (AF_MEMORY_IMPORT_MAX); this leaves room for that, a raised limit up to twice the default, and
+// the multipart framing. A larger body is refused here with 413 and nothing reaches the Agent.
+const memberOriginUploadMax = 130 << 20
+
+// memberOriginConsoleHeader must accompany a hashed upload. The body is multipart/form-data,
+// which a cross-origin page can send without a preflight, so unlike the JSON routes the content
+// type does not keep other pages out; a custom header does (it forces a preflight the CP never
+// answers). The Console's own fetch sets it.
+const memberOriginConsoleHeader = "X-AF-Console"
+
+func memberOriginHashedRoute(r *http.Request) bool {
+	return memberOriginHashedRoutes[r.Method+" "+r.URL.Path]
 }
 
 func memberOriginRoute(r *http.Request) bool { return memberOriginRoutes[r.Method+" "+r.URL.Path] }
@@ -134,6 +158,10 @@ func (m *manager) memberOriginMark(r *http.Request, res *resolved, now time.Time
 	if aerr := memberOriginRequestCheck(r); aerr != nil {
 		return nil, "", aerr
 	}
+	return m.memberOriginMarkBuffered(r, res, now)
+}
+
+func (m *manager) memberOriginMarkBuffered(r *http.Request, res *resolved, now time.Time) ([]byte, string, *apiError) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, memberOriginMaxBody+1))
 	if err != nil {
 		return nil, "", &apiError{http.StatusBadRequest, "bad_request", "could not read the request body"}
@@ -154,6 +182,12 @@ func (m *manager) memberOriginMark(r *http.Request, res *resolved, now time.Time
 // call it makes on the member's own request (the handoff push), after checking that the workspace
 // is the caller's own.
 func (m *manager) memberOriginSign(res *resolved, method, path, query string, body []byte, now time.Time) (string, *apiError) {
+	sum := sha256.Sum256(body)
+	return m.memberOriginSignHash(res, method, path, query, hex.EncodeToString(sum[:]), now)
+}
+
+// memberOriginSignHash is memberOriginSign for a body already hashed (hex SHA-256).
+func (m *manager) memberOriginSignHash(res *resolved, method, path, query, bodySHA256 string, now time.Time) (string, *apiError) {
 	v := memberOriginKeyVersion()
 	if v <= 0 {
 		return "", nil
@@ -162,10 +196,9 @@ func (m *manager) memberOriginSign(res *resolved, method, path, query string, bo
 	if _, err := rand.Read(nonce); err != nil {
 		return "", &apiError{http.StatusInternalServerError, "internal", "could not sign the request"}
 	}
-	sum := sha256.Sum256(body)
 	c := memberOriginClaims{
 		Method: method, Path: path, Query: query,
-		BodySHA256: hex.EncodeToString(sum[:]), Workspace: res.ws.ID, Membership: res.ws.MembershipID,
+		BodySHA256: bodySHA256, Workspace: res.ws.ID, Membership: res.ws.MembershipID,
 		Subject: res.ident.ID, IssuedAt: now.Unix(), Expires: now.Add(memberOriginTTL).Unix(),
 		Nonce: base64.RawURLEncoding.EncodeToString(nonce),
 	}
@@ -177,6 +210,9 @@ func (m *manager) memberOriginSign(res *resolved, method, path, query string, bo
 func (m *manager) relayBody(r *http.Request, res *resolved) (io.Reader, string, *apiError) {
 	if !memberOriginRoute(r) {
 		return r.Body, "", nil
+	}
+	if memberOriginHashedRoute(r) {
+		return m.hashedUploadMark(r, res, time.Now())
 	}
 	body, mark, aerr := m.memberOriginMark(r, res, time.Now())
 	if aerr != nil {
@@ -207,6 +243,11 @@ func memberOriginRequestCheck(r *http.Request) *apiError {
 	if err != nil || mt != "application/json" {
 		return &apiError{http.StatusUnsupportedMediaType, "unsupported_media_type", "member writes take application/json"}
 	}
+	return memberOriginOriginCheck(r)
+}
+
+// memberOriginOriginCheck is the browser-origin half of memberOriginRequestCheck.
+func memberOriginOriginCheck(r *http.Request) *apiError {
 	if s := r.Header.Get("Sec-Fetch-Site"); s != "" && s != "same-origin" {
 		return &apiError{http.StatusForbidden, "forbidden", "member writes are accepted from the Console's own origin only"}
 	}
@@ -214,4 +255,59 @@ func memberOriginRequestCheck(r *http.Request) *apiError {
 		return &apiError{http.StatusForbidden, "forbidden", "member writes are accepted from the Console's own origin only"}
 	}
 	return nil
+}
+
+// spooledUpload is a hashed upload on disk; Close removes the file.
+type spooledUpload struct {
+	*os.File
+}
+
+func (u spooledUpload) Close() error {
+	err := u.File.Close()
+	_ = os.Remove(u.File.Name())
+	return err
+}
+
+// hashedUploadMark spools a member's multipart upload to a file while hashing it, and returns the
+// file (rewound; the relay closes it) with the mark over the hash. The same ownership and
+// same-origin checks as the JSON routes apply, with the custom header standing in for the JSON
+// content type.
+func (m *manager) hashedUploadMark(r *http.Request, res *resolved, now time.Time) (io.Reader, string, *apiError) {
+	if res.ws.MembershipID == "" || res.ws.MembershipID != res.mv.MembershipID {
+		return nil, "", &apiError{http.StatusForbidden, "forbidden", "only the workspace's own member can change its memory"}
+	}
+	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "multipart/form-data" {
+		return nil, "", &apiError{http.StatusUnsupportedMediaType, "unsupported_media_type", "this upload takes multipart/form-data"}
+	}
+	if r.Header.Get(memberOriginConsoleHeader) == "" {
+		return nil, "", &apiError{http.StatusForbidden, "forbidden", "member writes are accepted from the Console only"}
+	}
+	if aerr := memberOriginOriginCheck(r); aerr != nil {
+		return nil, "", aerr
+	}
+	f, err := os.CreateTemp("", "af-member-upload-*")
+	if err != nil {
+		return nil, "", &apiError{http.StatusInternalServerError, "internal", "could not buffer the upload"}
+	}
+	fail := func(aerr *apiError) (io.Reader, string, *apiError) {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return nil, "", aerr
+	}
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(r.Body, memberOriginUploadMax+1))
+	if err != nil {
+		return fail(&apiError{http.StatusBadRequest, "bad_request", "could not read the request body"})
+	}
+	if n > memberOriginUploadMax {
+		return fail(&apiError{http.StatusRequestEntityTooLarge, "too_large", "request body is too large"})
+	}
+	mark, aerr := m.memberOriginSignHash(res, r.Method, strings.TrimPrefix(r.URL.Path, "/api"), r.URL.RawQuery, hex.EncodeToString(h.Sum(nil)), now)
+	if aerr != nil {
+		return fail(aerr)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return fail(&apiError{http.StatusInternalServerError, "internal", "could not buffer the upload"})
+	}
+	return spooledUpload{f}, mark, nil
 }

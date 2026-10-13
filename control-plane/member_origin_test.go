@@ -45,6 +45,7 @@ func TestMemberOriginRoutesAreTheMemberWrites(t *testing.T) {
 		"POST /api/agents/memory/entries/member-save",
 		"POST /api/agents/memory/entries/pin",
 		"POST /api/agents/memory/entries/revert",
+		"POST /api/agents/memory/import",
 		"POST /api/agents/memory/import/apply",
 		"POST /api/agents/memory/snapshots",
 	}
@@ -328,5 +329,65 @@ func TestMemberOriginRefusesCrossOriginRequests(t *testing.T) {
 	}
 	if calls != 2 || marks[0] == "" || marks[1] == "" {
 		t.Fatalf("accepted requests: calls=%d marks=%q", calls, marks)
+	}
+}
+
+// The bundle import is a multipart upload signed by its body hash: the Agent gets the exact bytes
+// (over the 2 MiB JSON cap included) with a mark over their SHA-256, and a page other than the
+// Console is refused before anything is hashed.
+func TestHashedUploadIsSignedByBodyHash(t *testing.T) {
+	var gotBody []byte
+	var gotMark string
+	calls := 0
+	proxy, res, _, cleanup := newFSProxyTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		gotBody, _ = io.ReadAll(r.Body)
+		gotMark = r.Header.Get(memberOriginHeader)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer cleanup()
+	t.Setenv(memberOriginKeyVersionEnv, "")
+	pub := memberOriginKey(proxy.mgr.tokenSignMaster(), 1).Public().(ed25519.PublicKey)
+
+	big := "--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"b.tgz\"\r\n\r\n" +
+		strings.Repeat("x", 3<<20) + "\r\n--B--\r\n" // over memberOriginMaxBody
+	send := func(h map[string]string, body string) int {
+		req := httptest.NewRequest(http.MethodPost, "https://console.example/api/agents/memory/import", strings.NewReader(body))
+		for k, v := range h {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		proxy.rest(rec, req, res)
+		return rec.Code
+	}
+	mp := "multipart/form-data; boundary=B"
+	for name, c := range map[string]struct {
+		h    map[string]string
+		want int
+	}{
+		"no Console header": {map[string]string{"Content-Type": mp}, http.StatusForbidden},
+		"text/plain":        {map[string]string{"Content-Type": "text/plain", memberOriginConsoleHeader: "1"}, http.StatusUnsupportedMediaType},
+		"JSON":              {map[string]string{"Content-Type": "application/json", memberOriginConsoleHeader: "1"}, http.StatusUnsupportedMediaType},
+		"cross-site":        {map[string]string{"Content-Type": mp, memberOriginConsoleHeader: "1", "Sec-Fetch-Site": "same-site"}, http.StatusForbidden},
+		"foreign origin":    {map[string]string{"Content-Type": mp, memberOriginConsoleHeader: "1", "Origin": "https://p.preview.example"}, http.StatusForbidden},
+	} {
+		if got := send(c.h, big); got != c.want {
+			t.Errorf("%s: %d, want %d", name, got, c.want)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("a refused upload reached the Agent %d times", calls)
+	}
+	ok := map[string]string{"Content-Type": mp, memberOriginConsoleHeader: "1", "Origin": "https://console.example", "Sec-Fetch-Site": "same-origin"}
+	if got := send(ok, big); got != http.StatusOK {
+		t.Fatalf("Console upload: %d", got)
+	}
+	if string(gotBody) != big {
+		t.Fatalf("the Agent received %d bytes, want %d", len(gotBody), len(big))
+	}
+	c := decodeMark(t, pub, gotMark)
+	sum := sha256.Sum256([]byte(big))
+	if c.Path != "/agents/memory/import" || c.BodySHA256 != hex.EncodeToString(sum[:]) {
+		t.Fatalf("claims = %+v", c)
 	}
 }

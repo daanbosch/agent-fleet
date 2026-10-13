@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin/memberorigintest"
 )
 
 // memoryLiveOrEmpty returns the contents of the live memory file, or "" when there is none.
@@ -406,11 +407,27 @@ func TestMemoryImportAPI(t *testing.T) {
 	}
 
 	body, ctype := memoryMultipart(t, "af-memory.bundle", bundle)
-	req := httptest.NewRequest("POST", "/agents/memory/import", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer smoke-token")
-	req.Header.Set("Content-Type", ctype)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
+	// Without the mark the upload is refused, whatever it holds.
+	signer := memberorigintest.Install(t)
+	send := func(sign []byte, payload []byte, ct string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", "/agents/memory/import", bytes.NewReader(payload))
+		r.Header.Set("Authorization", "Bearer smoke-token")
+		r.Header.Set("Content-Type", ct)
+		if sign != nil {
+			signer.Sign(r, sign)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	if w := send(nil, body, ctype); w.Code != http.StatusForbidden {
+		t.Fatalf("unmarked import: %d %s", w.Code, w.Body.String())
+	}
+	// A mark over other bytes (a different bundle) does not admit this one.
+	if w := send(append([]byte("x"), body...), body, ctype); w.Code != http.StatusForbidden {
+		t.Fatalf("import with a mark for other bytes: %d %s", w.Code, w.Body.String())
+	}
+	w := send(body, body, ctype)
 	if w.Code != http.StatusOK {
 		t.Fatalf("import: %d %s", w.Code, w.Body.String())
 	}
@@ -437,10 +454,16 @@ func TestMemoryImportAPI(t *testing.T) {
 	if w := markedDo(t, h, "POST", "/agents/memory/import/apply", `{"importId":"x/../y","scope":{"all":true}}`); w.Code != http.StatusBadRequest {
 		t.Errorf("bad importId: %d %s", w.Code, w.Body.String())
 	}
-	// A request carrying no file is a 400.
-	if w := smokeDo(t, h, "POST", "/agents/memory/import", "smoke-token", ""); w.Code != http.StatusBadRequest {
+	// A marked request carrying no file is a 400.
+	signer = memberorigintest.Install(t) // markedDo above installed its own key
+	var eb bytes.Buffer
+	emw := multipart.NewWriter(&eb)
+	_ = emw.WriteField("note", "no file here")
+	_ = emw.Close()
+	if w := send(eb.Bytes(), eb.Bytes(), emw.FormDataContentType()); w.Code != http.StatusBadRequest {
 		t.Errorf("import without a file: %d %s", w.Code, w.Body.String())
 	}
+
 }
 
 // memoryTarEntry is one entry of the archive being assembled; a non-empty Link means a symlink.

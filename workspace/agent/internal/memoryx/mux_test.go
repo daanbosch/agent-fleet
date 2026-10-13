@@ -44,7 +44,7 @@ var memoryTestRoutes = map[string]http.HandlerFunc{
 	"POST /agents/memory/restore":        HandleMemoryRestore,
 	"PUT /agents/memory/settings":        HandleMemorySettings,
 	"GET /agents/memory/export":          HandleMemoryExport,
-	"POST /agents/memory/import":         HandleMemoryImport,
+	"POST /agents/memory/import":         HandleMemoryImport, // wrapped by buildMux, as routes.go does
 	"POST /agents/memory/import/apply":   HandleMemoryImportApply,
 	"GET /agents/memory/entries":         HandleAgentMemoryIndex,
 	"GET /agents/memory/entries/search":  HandleAgentMemorySearch,
@@ -87,6 +87,10 @@ var memberOnlyTestRoutes = map[string]bool{
 func buildMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	for pattern, h := range memoryTestRoutes {
+		if pattern == "POST /agents/memory/import" {
+			mux.Handle(pattern, MemberImportHandler())
+			continue
+		}
 		if memberOnlyTestRoutes[pattern] {
 			limit := int64(MemberWriteMaxRequest)
 			if pattern == "POST /agents/memory/import/apply" {

@@ -153,14 +153,14 @@ func TestMemoryAPIRejectsBadInput(t *testing.T) {
 func TestHistoryWritesGate(t *testing.T) {
 	memberorigintest.Install(t)
 	h := buildMux()
-	for _, p := range []string{"/agents/memory/snapshots", "/agents/memory/import/apply"} {
+	for _, p := range []string{"/agents/memory/snapshots", "/agents/memory/import", "/agents/memory/import/apply"} {
 		w := smokeDo(t, h, "POST", p, "smoke-token", `{}`)
 		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), memberorigin.CodeRequired) {
 			t.Errorf("POST %s without a mark: %d %s", p, w.Code, w.Body)
 		}
 	}
 	for _, p := range []string{
-		"/agents/memory/restore", "/agents/memory/import",
+		"/agents/memory/restore",
 		"/agents/memory/claude-import", "/agents/memory/muse-import", "/agents/memory/claude-export",
 	} {
 		w := smokeDo(t, h, "POST", p, "smoke-token", `not json`)
