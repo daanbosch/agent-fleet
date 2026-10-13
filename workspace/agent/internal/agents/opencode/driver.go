@@ -9,8 +9,9 @@ package opencode
 //   - Turns are driven by the v1 blocking POST /session/{id}/message, the only entry
 //     point that writes the message/part records the read layer treats as canonical; a
 //     goroutine wraps it to make it asynchronous. prompt_async only writes the user
-//     message and never starts a turn (measured), and v2 /api/session/{id}/prompt writes
-//     to a different store (session_message) that the read layer cannot see.
+//     message and never starts a turn (measured). On v2 the turn is /api/session/{id}/prompt
+//     and the read layer goes through the API too (v2state.go), because v2 never writes the
+//     v1 tables.
 //   - v1 has no mid-turn steer entry point (v2's delivery=steer is not injected into the
 //     running v1 turn, it starts its own — measured). Steer is held in a driver-side
 //     queue and submitted as the next turn once the running one finishes, which is
@@ -672,10 +673,6 @@ func (h *threadHandle) runTurn(t *agents.Taken) {
 		} else {
 			h.setState(agents.TurnFailed)
 		}
-	case !hasErr && asked && isV2():
-		// v2 ends an aborted turn without an error body, so the request we made is the only
-		// evidence; v1 reports it as an abort error (next case).
-		h.setState(agents.TurnCancelled)
 	case hasErr && turnErr.isAbort() && asked:
 		// We asked: a stop / halt / archive, or the drain before the daemon is swapped.
 		// The partial answer is in the parts and the user already knows why.
@@ -1250,6 +1247,41 @@ func handleServeEvent(data []byte) {
 		}
 		if h := handleBySes(p.Info.SessionID); h != nil {
 			h.setCompacting(p.Info.inFlight())
+		}
+	case "session.compaction.started":
+		// v2: the summary is being written. Cleared by .ended / .failed, and by every
+		// terminal turn state (setState), so a missed end event cannot keep it on.
+		var p struct {
+			SessionID string `json:"sessionID"`
+		}
+		if json.Unmarshal(ev.Properties, &p) == nil {
+			if h := handleBySes(p.SessionID); h != nil {
+				h.setCompacting(true)
+			}
+		}
+	case "session.compaction.ended", "session.compaction.failed":
+		var p struct {
+			SessionID string `json:"sessionID"`
+		}
+		if json.Unmarshal(ev.Properties, &p) == nil {
+			if h := handleBySes(p.SessionID); h != nil {
+				h.setCompacting(false)
+			}
+		}
+	case "session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted":
+		// v2: a turn started or ended (testdata/v2/). The payload names its session, so a subagent's
+		// execution events (its own id) never reach the parent's turn.
+		var p struct {
+			SessionID string `json:"sessionID"`
+		}
+		if json.Unmarshal(ev.Properties, &p) != nil || p.SessionID == "" {
+			return
+		}
+		wakeExec(p.SessionID)
+		if ev.Type != "session.execution.started" {
+			if h := handleBySes(p.SessionID); h != nil {
+				h.setCompacting(false)
+			}
 		}
 	case "session.compacted", "session.idle":
 		var p struct {

@@ -1,0 +1,122 @@
+{
+ "data": [
+  {
+   "id": "msg_137701981001TGv92N7WC4GrSK",
+   "time": {
+    "created": 1791931455873
+   },
+   "type": "model-switched",
+   "model": {
+    "id": "m",
+    "providerID": "stub"
+   }
+  },
+  {
+   "id": "msg_137701d89001YWv4QftTtLmV1H",
+   "time": {
+    "created": 1791931456949
+   },
+   "text": "please TOOL",
+   "type": "user"
+  },
+  {
+   "id": "msg_137701dc1001ndKLbw5ACDpEJp",
+   "time": {
+    "created": 1791931456988,
+    "streamed": 1791931457026,
+    "completed": 1791931457117
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "m",
+    "providerID": "stub",
+    "variant": "default"
+   },
+   "content": [
+    {
+     "type": "tool",
+     "id": "call_1",
+     "name": "shell",
+     "executed": false,
+     "state": {
+      "status": "completed",
+      "input": {
+       "command": "echo hi",
+       "description": "say hi"
+      },
+      "content": [
+       {
+        "type": "text",
+        "text": "hi\n"
+       }
+      ],
+      "metadata": {
+       "status": "completed",
+       "truncated": false,
+       "exit": 0
+      }
+     },
+     "time": {
+      "created": 1791931457013,
+      "ran": 1791931457022,
+      "completed": 1791931457112
+     }
+    }
+   ],
+   "finish": "tool-calls",
+   "rawFinish": "tool_calls",
+   "cost": 0.00014,
+   "tokens": {
+    "input": 100,
+    "output": 20,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_137701e75001I9pvmBhDsBR6qw",
+   "time": {
+    "created": 1791931457165,
+    "streamed": 1791931457189,
+    "completed": 1791931457192
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "m",
+    "providerID": "stub",
+    "variant": "default"
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "working tool done"
+    }
+   ],
+   "finish": "stop",
+   "rawFinish": "stop",
+   "cost": 0.00014,
+   "tokens": {
+    "input": 100,
+    "output": 20,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_137701eae0011PhDahxIhDyUUm",
+   "time": {
+    "created": 1791931457198
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  }
+ ]
+}

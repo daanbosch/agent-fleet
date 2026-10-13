@@ -16,6 +16,9 @@ package opencode
 //   - v2's session list filters on `directory`; `location[directory]` is accepted and
 //     silently ignored (returns every project's sessions).
 //
+// Reading a session's history, queue and outcome on v2 is v2state.go; it needs no route here
+// beyond the paths it builds from the same address and authenticated client.
+//
 // Until the image pin moves (workspace/Dockerfile OPENCODE_VERSION) the v1 routes stay the
 // default: serveMajor() is v1 until a probe has seen a v2 server.
 
@@ -400,10 +403,11 @@ func newTurnRequest(addr, ses, dir string, in agents.TurnInput, st agents.Thread
 	return http.NewRequest("POST", dirQ(addr+"/session/"+url.PathEscape(ses)+"/message", dir), bytes.NewReader(buf))
 }
 
-// v2 turn pacing. /prompt only queues the input (its answer is the stored user message), so
-// the end of the turn is read off /api/session/active: it has to be seen running first, and
-// then gone. Not measured against a model turn (no credentials in the measuring sandbox);
-// the exit conditions below are the conservative reading of the spec.
+// v2 turn pacing. /prompt only queues the input (its answer is the stored user message), so the
+// end of the turn is read off /api/session/active: the session has to be seen running, then
+// gone. How it ended is explicit (measured 2.0.28, testdata/v2/): the execution leaves an idle
+// message behind with outcome succeeded | failed | interrupted and, on a failure, the error. The
+// session.execution.* events on the stream only wake the loop earlier than its tick.
 var (
 	v2PollEvery   = 500 * time.Millisecond
 	v2StartWithin = 10 * time.Second
@@ -411,12 +415,16 @@ var (
 )
 
 // sendTurn submits the input and returns once the turn has ended, shaped like v1's blocking
-// answer so the caller's state machine is the same on both majors. A transport failure
-// (the daemon went away) is an error, exactly as on v1.
+// answer (a body runTurn can read an error or an abort out of) so the caller's state machine is
+// the same on both majors. A transport failure (the daemon went away) is an error, exactly as on
+// v1.
 func sendTurn(addr, ses, dir string, req *http.Request, st agents.ThreadSettings) (*http.Response, error) {
 	if !isV2() {
 		return turnClient.Do(req)
 	}
+	// Armed before the prompt goes out, so the start event cannot slip between the two.
+	events, stop := watchExec(ses)
+	defer stop()
 	if err := applyV2Settings(addr, ses, st); err != nil {
 		return nil, err
 	}
@@ -433,8 +441,8 @@ func sendTurn(addr, ses, dir string, req *http.Request, st agents.ThreadSettings
 	}
 	_ = json.Unmarshal(promptBody, &userMsg)
 	gen := Serve().Generation()
-	seen, misses := false, 0
-	started := time.Now()
+	seen, misses, outMisses := false, 0, 0 // failed active reads / failed outcome reads, in a row
+	lastLive := time.Now()                 // the last moment the turn was known to be alive or not yet due
 	for {
 		m, err := activeSessions(addr, dir)
 		// A new generation means the daemon this turn ran on is gone, whatever the new one
@@ -443,58 +451,42 @@ func sendTurn(addr, ses, dir string, req *http.Request, st agents.ThreadSettings
 		if Serve().Generation() != gen {
 			return nil, errors.New("opencode serve was replaced during the turn")
 		}
-		switch {
-		case err != nil:
+		running := err == nil && m[ses] != ""
+		if running {
+			seen, misses, lastLive = true, 0, time.Now()
+		} else if err != nil {
 			if misses++; misses >= v2PollMisses {
 				return nil, err
 			}
-		case m[ses] != "":
-			seen, misses = true, 0
-		case seen:
-			// Provider failures are not visible here (v2 reports them on the event stream,
-			// #2103), so an ended turn reads as completed.
-			return v2Done(), nil
-		case time.Since(started) > v2StartWithin:
-			// Never seen running: either it finished before the first poll or it never
-			// started. Only an assistant message newer than our input says which.
-			if v2Answered(addr, ses, userMsg.Data.ID) {
-				return v2Done(), nil
+		}
+		// The record of THIS input's execution decides, whether or not the session is running:
+		// a queued input behind it may already have started the next execution, and only
+		// the first idle message after our input is ours. Only an explicit outcome ends the
+		// turn; a record that cannot be read or does not appear is unknown, never success.
+		if err == nil && (!running || seen) {
+			kind, e, found, oerr := v2OutcomeFor(addr, ses, userMsg.Data.ID)
+			switch {
+			case oerr != nil:
+				if outMisses++; outMisses >= v2PollMisses {
+					return nil, fmt.Errorf("opencode v2 turn outcome unreadable: %w", oerr)
+				}
+			case found:
+				return v2OutcomeResponse(kind, e), nil
+			case !running && time.Since(lastLive) > v2StartWithin:
+				return nil, errors.New("opencode v2 turn state unknown: no outcome was recorded")
+			default:
+				outMisses = 0 // read fine, just not recorded yet
 			}
-			return nil, errors.New("opencode v2 turn state unknown: the session never ran")
-		default:
-			misses = 0
 		}
-		time.Sleep(v2PollEvery)
+		select {
+		case <-events: // look at the daemon now instead of at the next tick
+		case <-time.After(v2PollEvery):
+		}
 	}
 }
 
-func v2Done() *http.Response {
-	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(""))}
-}
-
-// v2Answered reports whether the session holds an assistant message newer than after (the
-// id /prompt returned; message ids sort by time).
-func v2Answered(addr, ses, after string) bool {
-	res, err := serveClient.Get(addr + "/api/session/" + url.PathEscape(ses) + "/message?order=desc&limit=5")
-	if err != nil {
-		return false
-	}
-	defer res.Body.Close()
-	var w struct {
-		Data []struct {
-			ID   string `json:"id"`
-			Type string `json:"type"`
-		} `json:"data"`
-	}
-	if res.StatusCode != http.StatusOK || json.NewDecoder(res.Body).Decode(&w) != nil || after == "" {
-		return false
-	}
-	for _, m := range w.Data {
-		if m.Type == "assistant" && m.ID > after {
-			return true
-		}
-	}
-	return false
+func v2OutcomeResponse(kind string, e *v2Err) *http.Response {
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(v2OutcomeBody(kind, e)))}
 }
 
 // applyV2Settings pushes the settings v1 carried in each message body: v2 keeps agent and

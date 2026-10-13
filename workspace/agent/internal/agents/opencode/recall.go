@@ -18,6 +18,9 @@ import (
 // conversation. A switch with no prompt after it is not in the store at all — opencode
 // itself loses it too.
 func (agentImpl) RecallSettings(m session.Meta) agents.RecalledSettings {
+	if t, ok := v2TargetFor(m); ok {
+		return recallSettingsV2(t, m) // the session record names its model and agent
+	}
 	db, ok := openRO()
 	if !ok {
 		return agents.RecalledSettings{}

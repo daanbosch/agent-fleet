@@ -1,0 +1,98 @@
+{
+ "data": [
+  {
+   "id": "msg_137710503001EZ0Cn7CM41h3rI",
+   "time": {
+    "created": 1791931516163
+   },
+   "type": "model-switched",
+   "model": {
+    "id": "m",
+    "providerID": "stub"
+   }
+  },
+  {
+   "id": "msg_137710909001UWkBtVN4O7s5i6",
+   "time": {
+    "created": 1791931517214
+   },
+   "text": "hello OK",
+   "type": "user"
+  },
+  {
+   "id": "msg_137710926001lom4XrvphDl9IW",
+   "time": {
+    "created": 1791931517244,
+    "streamed": 1791931517275,
+    "completed": 1791931517278
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "m",
+    "providerID": "stub",
+    "variant": "default"
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "working ok:hello OK"
+    }
+   ],
+   "finish": "stop",
+   "rawFinish": "stop",
+   "cost": 0.00014,
+   "tokens": {
+    "input": 100,
+    "output": 20,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_137710964001oSWoKRzJsdR1pf",
+   "time": {
+    "created": 1791931517284
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  },
+  {
+   "type": "compaction",
+   "id": "msg_1377118c9001XRORaeJdYnU2Jy",
+   "time": {
+    "created": 1791931521241
+   },
+   "status": "completed",
+   "reason": "manual",
+   "model": {
+    "id": "m",
+    "providerID": "stub",
+    "variant": "default"
+   },
+   "summary": "## Objective\n- stub objective\n\n## Requirements\n- (none)\n\n## Decisions\n- (none)\n\n## Work State\n### Completed\n- (none)\n\n### Active\n- (none)\n\n### Blocked\n- (none)\n\n## Next Move\n1. (none)\n\n## Relevant Files\n- (none)\n\n## Important Context\n- (none)",
+   "recent": "",
+   "cost": 0.00014,
+   "tokens": {
+    "input": 100,
+    "output": 20,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_13771191600155xUHOoYLVXj3n",
+   "time": {
+    "created": 1791931521302
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  }
+ ]
+}

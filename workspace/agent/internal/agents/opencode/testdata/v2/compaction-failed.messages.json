@@ -1,0 +1,95 @@
+{
+ "data": [
+  {
+   "id": "msg_13770afc1001grH5ZYlMfB4cvA",
+   "time": {
+    "created": 1791931494337
+   },
+   "type": "model-switched",
+   "model": {
+    "id": "m",
+    "providerID": "stub"
+   }
+  },
+  {
+   "id": "msg_13770b3c9001eiNZttEF5pQgBG",
+   "time": {
+    "created": 1791931495412
+   },
+   "text": "hello OK",
+   "type": "user"
+  },
+  {
+   "id": "msg_13770b3ff001jAccUqyQIcqnLH",
+   "time": {
+    "created": 1791931495448,
+    "streamed": 1791931495476,
+    "completed": 1791931495480
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "m",
+    "providerID": "stub",
+    "variant": "default"
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "working ok:hello OK"
+    }
+   ],
+   "finish": "stop",
+   "rawFinish": "stop",
+   "cost": 0.00014,
+   "tokens": {
+    "input": 100,
+    "output": 20,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_13770b43f001W8o1c25bk19mOd",
+   "time": {
+    "created": 1791931495487
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  },
+  {
+   "type": "compaction",
+   "id": "msg_13770c391001N4Xogd7xBV04c6",
+   "time": {
+    "created": 1791931499419
+   },
+   "status": "failed",
+   "reason": "manual",
+   "error": {
+    "type": "compaction.failed",
+    "message": "Compaction summary did not match the required template"
+   },
+   "cost": 0.00028,
+   "tokens": {
+    "input": 200,
+    "output": 40,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_13770c3d5001IbHO0dNV7P5daS",
+   "time": {
+    "created": 1791931499477
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  }
+ ]
+}
