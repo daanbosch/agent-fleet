@@ -32,6 +32,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -934,7 +935,7 @@ var agentMemPurgeLockHeld = func(path string) (bool, error) {
 		}
 		fds, err := os.ReadDir(filepath.Join("/proc", e.Name(), "fd"))
 		if err != nil {
-			if os.IsNotExist(err) {
+			if os.IsNotExist(err) || errors.Is(err, syscall.ESRCH) {
 				continue // exited meanwhile
 			}
 			if os.IsPermission(err) && purgeOtherUser(filepath.Join("/proc", e.Name())) {
@@ -988,6 +989,12 @@ func agentMemPurgeClearLocks(moves []agentMemPurgeRefMove) error {
 			return err
 		}
 		held, herr := agentMemPurgeLockHeld(l)
+		if herr != nil {
+			log.Printf("agent memory: purge lock check: %v", herr) // /proc detail only, no memory text
+		}
+		if herr == nil && (held || info.ModTime().Before(st.ModTime().Add(-purgeLockSkew))) {
+			log.Printf("agent memory: purge lock check: held=%v lock mtime %s, marker mtime %s", held, info.ModTime().Format(time.RFC3339Nano), st.ModTime().Format(time.RFC3339Nano))
+		}
 		if herr != nil || held || info.ModTime().Before(st.ModTime().Add(-purgeLockSkew)) {
 			return memoryErrf(http.StatusInternalServerError, errCodeMemorySnapshotFailed,
 				"a ref is locked by something other than the interrupted purge; it was left as it is")
