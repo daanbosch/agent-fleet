@@ -56,6 +56,18 @@ describe("notification row headings", () => {
     expect(w.body).toBe("残作業の続き");
   });
 
+  // #2058: a session the recipient's Agent reported after they gave the handoff back. The body
+  // must name that session, since the offer it came from was left unchanged.
+  it("a session after a give-back names the session and the handoff", () => {
+    setLocale("en");
+    const w = notificationWording({ kind: "handoff-late-session", displayName: "Carry on", payload: { sessionName: "s-1" } });
+    expect(w.title).toBe(en["notif.handoff_late_session.title"]);
+    expect(w.body).toContain("s-1");
+    expect(w.body).toContain("Carry on");
+    expect(notificationKindLabel("handoff-late-session")).toBe(en["noti.kind_handoff_late_session"]);
+    setLocale("ja");
+  });
+
   // Notification about residue an architecture change could not restore automatically
   // (docs/decisions/0068). Its subject is the workspace, not a session, so displayName is empty:
   // taking the default "body = displayName" would produce a notification with no content. The row

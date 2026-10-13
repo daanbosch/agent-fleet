@@ -1030,6 +1030,7 @@ type SessionShareStore interface {
 	ReleaseSessionHandoffOffer(ctx context.Context, id, recipientMembershipID, token string) (bool, error)
 	ReleaseUnconfirmedSessionHandoffTake(ctx context.Context, id, recipientMembershipID, token string) (bool, error)
 	ConfirmedSessionHandoffTake(ctx context.Context, id, recipientMembershipID string) (string, bool, error)
+	GiveBackUnknownSessionHandoffTake(ctx context.Context, id, recipientMembershipID string, now time.Time) (bool, error)
 	AcceptSessionHandoffOffer(ctx context.Context, id, recipientMembershipID, token, decidedAt, acceptedSessionName string) (bool, error)
 	ExpireSessionHandoffOffers(ctx context.Context, now string) ([]SessionHandoffOffer, error)
 	AcquireSessionShareOwnerLease(ctx context.Context, ownerMembershipID, operationID, now, leaseUntil string) (bool, error)

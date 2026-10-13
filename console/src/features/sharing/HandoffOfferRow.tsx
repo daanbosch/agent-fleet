@@ -67,6 +67,23 @@ export function HandoffOfferRow({ offer, onDone }: { offer: HandoffOffer; onDone
     }
     void useHandoffStore.getState().refresh();
   };
+  // "This session is not in my workspace — give it back" (#2058): only for a launch whose result
+  // stays unknown. The confirmation names the risk because the CP cannot check the statement: if
+  // the session does exist, the sender may start the same work and it runs twice.
+  const giveBack = async () => {
+    if (busy) return;
+    if (!window.confirm(tr("handoff.give_back_confirm", { who: offer.ownerUserKey || "" }))) return;
+    setBusy(true);
+    const d = await apiJSON(`api/session-handoff-offers/${encodeURIComponent(offer.id)}/give-back`, "POST", {
+      confirmed: true,
+    }).catch(() => ({ error: { message: tr("err.network") } }));
+    setBusy(false);
+    const e = d?.error as { code?: string; message?: string; takeState?: string } | undefined;
+    if (!e) toast(tr("handoff.give_back_done", { who: offer.ownerUserKey || "" }));
+    else if (e.code === "handoff_not_unknown") toast(tr(e.takeState ? "handoff.give_back_too_soon" : "handoff.give_back_not_held"));
+    else toast(tr("handoff.give_back_failed", { err: errText({ code: e.code, message: e.message }) }));
+    void useHandoffStore.getState().refresh();
+  };
 
   return (
     <li className="handoff-inbox-row">
@@ -99,7 +116,17 @@ export function HandoffOfferRow({ offer, onDone }: { offer: HandoffOffer; onDone
           out. */}
       {repos.length === 0 && <p className="ui-field-hint handoff-blocked">{tr("handoff.accept_no_repo_hint")}</p>}
       <p className="ui-field-hint">{tr("handoff.accept_cost_hint")}</p>
+      {offer.takeState === "unknown" ? (
+        <p className="ui-field-hint handoff-blocked">{tr("handoff.unknown_hint")}</p>
+      ) : offer.takeState ? (
+        <p className="ui-field-hint">{tr("handoff.confirming_hint")}</p>
+      ) : null}
       <div className="handoff-inbox-actions">
+        {offer.takeState === "unknown" && (
+          <Button variant="ghost" disabled={busy} onClick={() => void giveBack()}>
+            {tr("handoff.give_back")}
+          </Button>
+        )}
         <Button variant="ghost" disabled={busy} onClick={() => void decline()}>
           {tr("handoff.decline")}
         </Button>

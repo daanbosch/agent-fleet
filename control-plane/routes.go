@@ -527,6 +527,7 @@ func registerSessionShareRoutes(mux *http.ServeMux, cfg config) {
 	mux.HandleFunc("DELETE /api/session-handoff-offers/{id}", h.withMembership(h.withdraw))
 	mux.HandleFunc("POST /api/session-handoff-offers/{id}/take", h.withMembership(h.take))
 	mux.HandleFunc("POST /api/session-handoff-offers/{id}/release", h.withMembership(h.release))
+	mux.HandleFunc("POST /api/session-handoff-offers/{id}/give-back", h.withMembership(h.giveBack))
 	mux.HandleFunc("POST /api/session-handoff-offers/{id}/accept", h.withMembership(h.accept))
 	mux.HandleFunc("POST /api/session-handoff-offers/{id}/decline", h.withMembership(h.decline))
 }

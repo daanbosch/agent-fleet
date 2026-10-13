@@ -300,24 +300,28 @@ func TestWireEquivInternalRepo(t *testing.T) {
 
 // --- (7) the two variants of sessionHandoffAPI (Console: HandoffOffer) ---
 //
-// One TS type, `HandoffOffer`, is filled in by two endpoints between them (create=13 /
-// listReceived=16). Measure both, or the narrow one is protected while the wide one is lost.
+// One TS type, `HandoffOffer`, is filled in by two endpoints between them (create=14 /
+// listReceived=17, with takeState set). Measure both, or the narrow one is protected while the wide one is lost.
 
 type handoffIn struct {
 	ID, SessionID, SessionName, RecipientUserKey, Title, Status  string
 	Branch, RepoRemote, HeadSha, CreatedAt, ExpiresAt, DecidedAt string
-	AcceptedSessionName                                          string
+	AcceptedSessionName, TakeState                               string
 	OwnerUserKey, Prompt, SourceSessionKind                      string
 }
 
 func handoffOldBase(in handoffIn) map[string]any { // copy of the old handoffOfferDTO
-	return map[string]any{
+	m := map[string]any{
 		"id": in.ID, "sessionId": in.SessionID, "sessionName": in.SessionName,
 		"recipientUserKey": in.RecipientUserKey, "title": in.Title, "status": in.Status,
 		"branch": in.Branch, "repoRemote": in.RepoRemote, "headSha": in.HeadSha,
 		"createdAt": in.CreatedAt, "expiresAt": in.ExpiresAt, "decidedAt": in.DecidedAt,
 		"acceptedSessionName": in.AcceptedSessionName,
 	}
+	if in.TakeState != "" { // not in the map literal: a field the struct gained later, omitted when empty
+		m["takeState"] = in.TakeState
+	}
+	return m
 }
 
 func handoffNewBase(in handoffIn) handoffOfferWire {
@@ -326,7 +330,7 @@ func handoffNewBase(in handoffIn) handoffOfferWire {
 		RecipientUserKey: in.RecipientUserKey, Title: in.Title, Status: in.Status,
 		Branch: in.Branch, RepoRemote: in.RepoRemote, HeadSha: in.HeadSha,
 		CreatedAt: in.CreatedAt, ExpiresAt: in.ExpiresAt, DecidedAt: in.DecidedAt,
-		AcceptedSessionName: in.AcceptedSessionName,
+		AcceptedSessionName: in.AcceptedSessionName, TakeState: in.TakeState,
 	}
 }
 
@@ -334,7 +338,7 @@ func handoffInputs() []handoffIn {
 	return []handoffIn{
 		{ID: "o1", SessionID: "c1", SessionName: "s1", RecipientUserKey: "u2", Title: "t",
 			Status: "pending", Branch: "b", RepoRemote: "r", HeadSha: "h",
-			CreatedAt: "c", ExpiresAt: "e", DecidedAt: "d", AcceptedSessionName: "a",
+			CreatedAt: "c", ExpiresAt: "e", DecidedAt: "d", AcceptedSessionName: "a", TakeState: "unknown",
 			OwnerUserKey: "u1", Prompt: "本文", SourceSessionKind: "claude"},
 		// Exactly why omitempty was not used: with no key in keys[…] ownerUserKey is "",
 		// and a.open() may return empty. The old shape emits those keys all the same.
@@ -384,13 +388,13 @@ func TestWireHandoffKeyCountsAreIndependentlyFixed(t *testing.T) {
 		v    any
 		want int
 	}{
-		{"create (the base shape)", handoffNewBase(in), 13},
+		{"create (the base shape)", handoffNewBase(in), 14},
 		{"listReceived (the inbox)", handoffOfferInboxWire{
 			handoffOfferWire:  handoffNewBase(in),
 			OwnerUserKey:      in.OwnerUserKey,
 			Prompt:            in.Prompt,
 			SourceSessionKind: in.SourceSessionKind,
-		}, 16},
+		}, 17},
 	} {
 		b, err := json.Marshal(tc.v)
 		if err != nil {

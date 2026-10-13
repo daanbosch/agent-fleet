@@ -126,18 +126,21 @@ type handoffOfferWire struct {
 	ExpiresAt           string `json:"expiresAt"`
 	DecidedAt           string `json:"decidedAt"`
 	AcceptedSessionName string `json:"acceptedSessionName"`
+	// TakeState is store.HandoffTakeState: "" when no take holds the offer, which is also
+	// every decided offer, so it is the one key that may be absent.
+	TakeState string `json:"takeState,omitempty"`
 }
 
 // handoffOfferInboxWire is one entry of the recipient's inbox: the base form plus three
-// keys, 16 in all. The three cannot be optional fields on the base type — ownerUserKey is ""
-// when the member is unknown and prompt is "" when the ciphertext cannot be opened, and both
-// still have to appear — so they are added by embedding, which JSON flattens.
+// keys, 17 in all with takeState. The three cannot be optional fields on the base type —
+// ownerUserKey is "" when the member is unknown and prompt is "" when the ciphertext cannot be
+// opened, and both still have to appear — so they are added by embedding, which JSON flattens.
 //
 // was: map[string]any (handoffOfferDTO's return value) with listReceived adding three keys.
 //
 // The effective JSON names of the base and the three additions must not collide:
 // encoding/json emits neither side of a collision, so a key would vanish silently. The
-// equivalence test catches that, and the counts 13 / 16 are pinned separately.
+// equivalence test catches that, and the counts 14 / 17 (takeState set) are pinned separately.
 type handoffOfferInboxWire struct {
 	handoffOfferWire
 	OwnerUserKey      string `json:"ownerUserKey"`
@@ -152,6 +155,7 @@ func handoffOfferDTO(o store.SessionHandoffOffer, recipientKey string) handoffOf
 		Branch: o.Branch, RepoRemote: o.RepoRemote, HeadSha: o.HeadSha,
 		CreatedAt: o.CreatedAt, ExpiresAt: o.ExpiresAt, DecidedAt: o.DecidedAt,
 		AcceptedSessionName: o.AcceptedSessionName,
+		TakeState:           store.HandoffTakeState(o, time.Now()),
 	}
 }
 
@@ -514,11 +518,18 @@ func (a sessionHandoffAPI) statusOf(ctx context.Context, id string) string {
 // writeUndecidable answers a conditional update on a pending offer that changed nothing. An
 // offer still pending was refused because the recipient holds it for a launch in progress,
 // which the Console words differently from "already decided": the launch may yet fail and
-// hand it back.
+// hand it back. takeState tells the sender whether the recipient is still starting it or the
+// launch was sent and its result is being confirmed; it carries no token or key.
 func (a sessionHandoffAPI) writeUndecidable(w http.ResponseWriter, ctx context.Context, id string) {
-	status := a.statusOf(ctx, id)
+	o, ok, err := a.mgr.store.GetSessionHandoffOffer(ctx, id)
+	status := ""
+	if err == nil && ok {
+		status = o.Status
+	}
 	if status == "pending" {
-		writeHandoffErr(w, http.StatusConflict, "handoff_being_taken", "the recipient is starting a session from this handoff", offerStatusDetail(status))
+		d := offerStatusDetail(status)
+		d["takeState"] = store.HandoffTakeState(o, time.Now())
+		writeHandoffErr(w, http.StatusConflict, "handoff_being_taken", "the recipient is starting a session from this handoff", d)
 		return
 	}
 	writeHandoffErr(w, http.StatusConflict, "handoff_already_decided", "the handoff was already decided", offerStatusDetail(status))
@@ -655,8 +666,11 @@ func settleHandoffCreate(ctx context.Context, mgr *manager, res *resolved, take 
 			return
 		}
 		api := sessionHandoffAPI{memberAuth: memberAuth{mgr}}
-		if _, err := api.acceptTake(ctx, res.ident, res.mv, take.OfferID, take.Token, s.Name); err != nil {
+		accepted, err := api.acceptTake(ctx, res.ident, res.mv, take.OfferID, take.Token, s.Name)
+		if err != nil {
 			log.Printf("handoff: offer %s left taken: accepting %s failed: %v", take.OfferID, s.Name, err)
+		} else if !accepted {
+			api.reportLateSession(ctx, res.ident, res.mv, take.OfferID, s.Name)
 		}
 	case outcome == "refused" && (status < 200 || status >= 300):
 		if _, err := mgr.store.ReleaseSessionHandoffOffer(ctx, take.OfferID, res.mv.MembershipID, take.Token); err != nil {
@@ -852,6 +866,12 @@ func (a sessionHandoffAPI) reconcileTake(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		if !accepted {
+			if a.reportLateSession(ctx, ident, mv, o.ID, s.Name) {
+				writeHandoffErr(w, http.StatusConflict, "handoff_session_after_give_back",
+					"a session was started from this handoff after it was given back", map[string]any{
+						"offerStatus": a.statusOf(ctx, o.ID), "sessionName": s.Name})
+				return
+			}
 			a.writeUndecidable(w, ctx, o.ID)
 			return
 		}
@@ -895,6 +915,83 @@ func (a sessionHandoffAPI) retake(w http.ResponseWriter, ctx context.Context, id
 		return
 	}
 	a.writeTaken(w, ident, mv, o, fresh)
+}
+
+// reportLateSession handles the recipient's Agent reporting a session under a take that no
+// longer holds the offer: the create's answer, or a reconcile's, arrived after the recipient
+// gave the take back (giveBack). The offer is left as it is — it may be pending again,
+// retaken, withdrawn or accepted by another launch, and the sender may already be acting on
+// it — and the recipient is told instead, through a notification that reaches them whether or
+// not a Console is open, because only they can decide what to do with the session. Answers
+// false, telling nothing, when the offer was accepted by this very session (a concurrent press
+// settled it first).
+func (a sessionHandoffAPI) reportLateSession(ctx context.Context, ident store.Identity, mv store.MembershipView, offerID, sessionName string) bool {
+	o, ok, err := a.mgr.store.GetSessionHandoffOffer(ctx, offerID)
+	if err != nil || !ok || o.RecipientMembershipID != mv.MembershipID {
+		return false
+	}
+	if o.Status == "accepted" && o.AcceptedSessionName == sessionName {
+		return false
+	}
+	log.Printf("handoff: offer %s: the recipient's Agent reported a session after the take was given back", offerID)
+	// One notice per reported session: two launches given back could each turn up.
+	a.notify(mv.MembershipID, "handoff-late-session", "handoff-late-session-"+offerID+"-"+sessionName+"-"+mv.MembershipID,
+		"session", sessionName, o.SourceSessionKind, o.Title,
+		map[string]any{"offerId": offerID, "sessionName": sessionName, "offerStatus": o.Status})
+	_ = a.mgr.store.InsertAudit(context.Background(), store.AuditLog{ID: store.NewID(), TenantID: mv.TenantID,
+		ActorKind: "user", ActorID: ident.ID, Action: "session.handoff.late_session", Target: o.SourceSessionName,
+		HTTPStatus: http.StatusOK, At: store.NowTS()})
+	return true
+}
+
+// giveBack (POST /api/session-handoff-offers/{id}/give-back) is the recipient's way out of a
+// launch whose outcome stays unknown (issue #2058): "this session is not in my workspace —
+// give the offer back". It releases only a take in store.HandoffTakeState "unknown" — confirmed,
+// and older than the take window, so its create has had that long to answer — in one
+// conditional update; anything else is refused with the take's state, and nobody but the
+// recipient learns the offer exists. The body must carry confirmed=true: the Console sends
+// it only after the recipient acknowledged that if the session does exist the same work may
+// run twice. The statement is the recipient's, so the CP still drives nobody's workspace
+// (ADR 0057 decision 3); if their Agent reports the session later, reportLateSession tells
+// them.
+func (a sessionHandoffAPI) giveBack(w http.ResponseWriter, r *http.Request, ident store.Identity, mv store.MembershipView) {
+	var in struct {
+		Confirmed bool `json:"confirmed"`
+	}
+	_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&in)
+	o, ok := a.recipientOffer(w, r, mv)
+	if !ok {
+		return
+	}
+	if !in.Confirmed {
+		writeAPIErr(w, &apiError{http.StatusBadRequest, "handoff_give_back_unconfirmed", "giving the handoff back needs confirmed=true"})
+		return
+	}
+	released, err := a.mgr.store.GiveBackUnknownSessionHandoffTake(r.Context(), o.ID, mv.MembershipID, time.Now())
+	if err != nil {
+		writeAPIErr(w, internalErr(err))
+		return
+	}
+	if !released {
+		cur, ok, err := a.mgr.store.GetSessionHandoffOffer(r.Context(), o.ID)
+		if err != nil {
+			writeAPIErr(w, internalErr(err))
+			return
+		}
+		if !ok || cur.Status != "pending" {
+			writeHandoffErr(w, http.StatusConflict, "handoff_already_decided", "the handoff was already decided", offerStatusDetail(cur.Status))
+			return
+		}
+		d := offerStatusDetail(cur.Status)
+		d["takeState"] = store.HandoffTakeState(cur, time.Now())
+		writeHandoffErr(w, http.StatusConflict, "handoff_not_unknown", "the handoff is not held by a launch whose outcome is unknown", d)
+		return
+	}
+	_ = a.mgr.store.InsertAudit(context.Background(), store.AuditLog{ID: store.NewID(), TenantID: mv.TenantID,
+		ActorKind: "user", ActorID: ident.ID, Action: "session.handoff.give_back", Target: o.SourceSessionName,
+		HTTPStatus: http.StatusOK, At: store.NowTS()})
+	// Usually pending again; expired when the share was revoked during the launch.
+	writeJSON(w, http.StatusOK, map[string]any{"status": a.statusOf(r.Context(), o.ID)})
 }
 
 // release (POST /api/session-handoff-offers/{id}/release) gives an unconfirmed take back after

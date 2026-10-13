@@ -11,6 +11,12 @@ import { api } from "../../core/api/client.ts";
 
 export type HandoffOfferStatus = "pending" | "accepted" | "declined" | "withdrawn" | "expired";
 
+/** Where the recipient's take of a pending offer stands (the CP's store.HandoffTakeState):
+ *  starting = they are launching; confirming = the launch was sent and may still be running;
+ *  unknown = it was sent longer ago than the take window and its result was never heard, which
+ *  only the recipient can settle (launch again, or give the offer back). Absent: no take holds it. */
+export type HandoffTakeState = "starting" | "confirming" | "unknown";
+
 export interface HandoffOffer {
   id: string;
   /** Share catalogue id (the key that opens the recipient's shared view). */
@@ -28,6 +34,7 @@ export interface HandoffOffer {
   expiresAt?: string;
   decidedAt?: string;
   acceptedSessionName?: string;
+  takeState?: HandoffTakeState;
   /** Only the inbox carries the body: the recipient has to read it to decide whether to accept. */
   prompt?: string;
   sourceSessionKind?: string;

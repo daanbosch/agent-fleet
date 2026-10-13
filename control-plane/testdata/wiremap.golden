@@ -6,7 +6,7 @@
 #   partial = the variable is assigned more than once, so the key set is not fully opened
 #   dyn     = a non-literal key is present, so the key set is not statically known and it cannot become a struct
 # A key gained or lost in this diff IS the wire possibly changing. State in the PR why it was retaken.
-# count: 147
+# count: 148
 admin_sessions.go adminAPI.allSessions x1 {sessions}
 admin_stats.go adminAPI.memberSessions x3 {sessions}
 admin_stats.go adminAPI.memberStats x1 {auto_stop,cpu_pct,disk_quota,disk_used,exit_code,mem_max,oom_kill_total,oom_killed,oom_recent,running,starting} cond{auto_stop,cpu_pct,disk_quota,disk_used,exit_code,mem_max,oom_kill_total,oom_killed,oom_recent,running,starting} dyn+partial
@@ -100,6 +100,7 @@ schedule.go scheduleAPI.delete x1 {deleted,id}
 schedule.go scheduleAPI.runs x1 {runs,schedule_id}
 session_handoff.go sessionHandoffAPI.accept x2 {status}
 session_handoff.go sessionHandoffAPI.decide x1 {status}
+session_handoff.go sessionHandoffAPI.giveBack x1 {status}
 session_handoff.go sessionHandoffAPI.listOwned x1 {offers}
 session_handoff.go sessionHandoffAPI.listReceived x1 {offers}
 session_handoff.go sessionHandoffAPI.recipients x1 {context,members,pendingOfferId}

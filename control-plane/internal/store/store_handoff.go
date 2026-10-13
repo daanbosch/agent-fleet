@@ -274,6 +274,64 @@ func (s *SQL) ReleaseUnconfirmedSessionHandoffTake(ctx context.Context, id, reci
 	return n == 1, err
 }
 
+// HandoffTakeState names where an offer's take stands at now, for the two sides' screens and
+// for GiveBackUnknownSessionHandoffTake, whose SQL condition is the "unknown" case here:
+//   - "" — no take holds the offer (none, the offer is decided, or an unconfirmed take past
+//     the take window);
+//   - "starting" — an unconfirmed take within the window: the recipient is launching;
+//   - "confirming" — a confirmed take within the window: the create was sent and may still be
+//     running on the recipient's Agent;
+//   - "unknown" — a confirmed take older than the window: the CP never heard the create's
+//     outcome, and only the recipient's next press (reconcileTake) or their give-back
+//     settles it.
+func HandoffTakeState(o SessionHandoffOffer, now time.Time) string {
+	if o.Status != "pending" || o.TakenAt == "" {
+		return ""
+	}
+	stale := now.UTC().Add(-HandoffTakeWindow).Format(time.RFC3339)
+	switch {
+	case o.TakeConfirmedAt == "" && o.TakenAt <= stale:
+		return ""
+	case o.TakeConfirmedAt == "":
+		return "starting"
+	case o.TakeConfirmedAt <= stale:
+		return "unknown"
+	default:
+		return "confirming"
+	}
+}
+
+// handoffGiveBackGuards is what confines a give-back to an unknown take. A variable only so
+// the race test's positive control can turn it off; nothing else assigns it.
+var handoffGiveBackGuards = true
+
+// GiveBackUnknownSessionHandoffTake releases a confirmed take whose create has had the whole
+// take window to answer and never did (HandoffTakeState "unknown"), on the recipient's own
+// statement that no session came of it (issue #2058). It is one conditional update, so it
+// cannot release a take that is not in that state when it lands: one still within the
+// window (its create may be on its way to the Agent), one that a reconcile accepted or gave
+// back meanwhile, or a fresh take that replaced it. Like the other releases, an offer whose
+// share was revoked meanwhile expires instead of going back to pending.
+func (s *SQL) GiveBackUnknownSessionHandoffTake(ctx context.Context, id, recipientMembershipID string, now time.Time) (bool, error) {
+	cond := ` AND status='pending' AND take_token<>'' AND take_confirmed_at<>'' AND take_confirmed_at<=?`
+	args := []any{now.UTC().Format(time.RFC3339), id, recipientMembershipID}
+	if handoffGiveBackGuards {
+		args = append(args, now.UTC().Add(-HandoffTakeWindow).Format(time.RFC3339))
+	} else {
+		cond = ""
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE session_handoff_offer
+		SET take_token='',taken_at='',take_confirmed_at='',
+		    status=CASE WHEN ciphertext='' THEN 'expired' ELSE status END,
+		    decided_at=CASE WHEN ciphertext='' THEN ? ELSE decided_at END
+		WHERE id=? AND recipient_membership_id=?`+cond, args...)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
 // ConfirmedSessionHandoffTake returns the token of the confirmed take holding a pending offer
 // of this recipient: a launch whose create reached the Agent and whose outcome the CP never
 // learnt. The CP needs the token to ask the recipient's Agent what became of that create; it

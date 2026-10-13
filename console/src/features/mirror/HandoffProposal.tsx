@@ -181,7 +181,16 @@ export function HandoffProposal({
       const d = await apiJSON(`api/session-handoff-offers/${encodeURIComponent(offer.id)}`, "DELETE");
       void useHandoffStore.getState().refresh();
       if (d?.error) {
-        toast(tr("handoff.withdraw_lost"));
+        // A take holds it: say whether the recipient is still starting it or their launch's
+        // result is being confirmed, so the sender knows waiting is the way on.
+        const take = d.error.code === "handoff_being_taken" ? d.error.takeState : "";
+        toast(
+          take === "confirming" || take === "unknown"
+            ? tr("handoff.withdraw_confirming", { who: offer.recipientUserKey })
+            : take === "starting"
+              ? tr("handoff.withdraw_starting", { who: offer.recipientUserKey })
+              : tr("handoff.withdraw_lost"),
+        );
         return;
       }
     }
@@ -276,7 +285,11 @@ function HandoffOfferStatus({ offer }: { offer: ReturnType<typeof offerForSessio
   if (!offer) return null;
   const key =
     offer.status === "pending"
-      ? "handoff.state_pending"
+      ? offer.takeState === "confirming" || offer.takeState === "unknown"
+        ? "handoff.state_confirming"
+        : offer.takeState === "starting"
+          ? "handoff.state_starting"
+          : "handoff.state_pending"
       : offer.status === "accepted"
         ? "handoff.state_accepted"
         : offer.status === "declined"
