@@ -1,7 +1,9 @@
 package gitx
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -99,16 +101,46 @@ func (a fingerprint) equal(b fingerprint) bool {
 	return true
 }
 
-// globalConfigPaths are the git configs outside the repository that can change what a
-// repository reports (url.<base>.insteadOf rewrites `remote get-url`).
-func globalConfigPaths() []string {
-	home := homeDir()
-	paths := []string{"/etc/gitconfig", filepath.Join(home, ".gitconfig")}
-	xdg := os.Getenv("XDG_CONFIG_HOME")
-	if xdg == "" {
-		xdg = filepath.Join(home, ".config")
+// gitGlobals is the git configuration outside the repository. simple=false means something
+// there (an include, a [branch] section, environment-injected config) can change what a
+// repository reports in a way the fingerprint does not follow, so no copy is cached.
+type gitGlobals struct {
+	paths  []string
+	simple bool
+}
+
+// globalConfigPaths reads the global git configs once per request. url.<base>.insteadOf
+// there rewrites `remote get-url`, so their signatures are part of every fingerprint.
+func globalConfigPaths() gitGlobals {
+	g := gitGlobals{simple: os.Getenv("GIT_CONFIG_COUNT") == "" && os.Getenv("GIT_CONFIG_PARAMETERS") == "" &&
+		os.Getenv("GIT_CONFIG_SYSTEM") == "" && os.Getenv("GIT_CONFIG_NOSYSTEM") == ""}
+	if v := os.Getenv("GIT_CONFIG_GLOBAL"); v != "" {
+		g.paths = []string{"/etc/gitconfig", v}
+	} else {
+		home := homeDir()
+		xdg := os.Getenv("XDG_CONFIG_HOME")
+		if xdg == "" {
+			xdg = filepath.Join(home, ".config")
+		}
+		g.paths = []string{"/etc/gitconfig", filepath.Join(home, ".gitconfig"), filepath.Join(xdg, "git", "config")}
 	}
-	return append(paths, filepath.Join(xdg, "git", "config"))
+	for _, p := range g.paths {
+		if b, err := os.ReadFile(p); err == nil && !configFollowable(string(b), true) {
+			g.simple = false
+		}
+	}
+	return g
+}
+
+// configFollowable reports whether the fingerprint can follow what this config text says.
+// An include pulls in files it does not watch; a global [branch] section would name an
+// upstream the repo config does not; refstorage changes where refs live.
+func configFollowable(text string, global bool) bool {
+	lower := strings.ToLower(text)
+	if strings.Contains(lower, "[include") || strings.Contains(lower, "refstorage") || strings.Contains(lower, "worktreeconfig") {
+		return false
+	}
+	return !global || !strings.Contains(lower, "[branch")
 }
 
 // gitLocation resolves where a working copy keeps its git data. gitDir holds HEAD and the
@@ -152,16 +184,15 @@ func gitLocation(dir string) (gitDir, commonDir string, ok bool) {
 // repository config text. "" means "no upstream" (nothing to watch). ok=false means the
 // config uses something the fingerprint cannot follow.
 func upstreamRef(config, branch string) (ref string, ok bool) {
-	lower := strings.ToLower(config)
-	if strings.Contains(lower, "[include") || strings.Contains(lower, "refstorage") {
+	if !configFollowable(config, false) {
 		return "", false
 	}
-	var section, remote, merge string
+	var section, sub, remote, merge string
 	fetchOK := true
 	for _, raw := range strings.Split(config, "\n") {
 		line := strings.TrimSpace(raw)
 		if strings.HasPrefix(line, "[") {
-			section = strings.ToLower(line)
+			section, sub = parseSectionHeader(line)
 			continue
 		}
 		k, v, found := strings.Cut(line, "=")
@@ -170,14 +201,13 @@ func upstreamRef(config, branch string) (ref string, ok bool) {
 		}
 		k, v = strings.ToLower(strings.TrimSpace(k)), strings.Trim(strings.TrimSpace(v), `"`)
 		switch {
-		case section == `[branch "`+strings.ToLower(branch)+`"]` && k == "remote":
+		case section == "branch" && sub == branch && k == "remote":
 			remote = v
-		case section == `[branch "`+strings.ToLower(branch)+`"]` && k == "merge":
+		case section == "branch" && sub == branch && k == "merge":
 			merge = v
-		case strings.HasPrefix(section, "[remote ") && k == "fetch":
+		case section == "remote" && k == "fetch":
 			// Only the default mapping puts refs/heads/x of remote r at refs/remotes/r/x.
-			name := strings.TrimSuffix(strings.TrimPrefix(section, `[remote "`), `"]`)
-			if v != "+refs/heads/*:refs/remotes/"+name+"/*" {
+			if v != "+refs/heads/*:refs/remotes/"+sub+"/*" {
 				fetchOK = false
 			}
 		}
@@ -194,11 +224,19 @@ func upstreamRef(config, branch string) (ref string, ok bool) {
 	return "refs/remotes/" + remote + "/" + strings.TrimPrefix(merge, "refs/heads/"), true
 }
 
+// parseSectionHeader splits `[branch "x"]` into ("branch", "x"). The section name is
+// case-insensitive in git, the subsection is not.
+func parseSectionHeader(line string) (section, sub string) {
+	line = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "["), "]"))
+	name, rest, _ := strings.Cut(line, " ")
+	return strings.ToLower(strings.TrimSpace(name)), strings.Trim(strings.TrimSpace(rest), `"`)
+}
+
 // refsFingerprint covers everything `git status --branch` reads from the repository's
 // metadata. ok=false when the copy cannot be fingerprinted precisely.
-func refsFingerprint(dir string, global []string) (fp fingerprint, ok bool) {
+func refsFingerprint(dir string, global gitGlobals) (fp fingerprint, ok bool) {
 	gitDir, commonDir, found := gitLocation(dir)
-	if !found {
+	if !found || !global.simple {
 		return fp, false
 	}
 	fp.add(filepath.Join(dir, ".git"))
@@ -209,7 +247,7 @@ func refsFingerprint(dir string, global []string) (fp fingerprint, ok bool) {
 	fp.add(filepath.Join(commonDir, "packed-refs"))
 	cfgPath := filepath.Join(commonDir, "config")
 	fp.add(cfgPath)
-	for _, g := range global {
+	for _, g := range global.paths {
 		fp.add(g)
 	}
 	headBody, err := os.ReadFile(head)
@@ -242,15 +280,20 @@ func refsFingerprint(dir string, global []string) (fp fingerprint, ok bool) {
 
 // identFingerprint covers what the identity result reads: the .git marker (its mtime is
 // createdAt), the repository config and the global configs.
-func identFingerprint(dir string, global []string) (fp fingerprint, ok bool) {
+func identFingerprint(dir string, global gitGlobals) (fp fingerprint, ok bool) {
 	_, commonDir, found := gitLocation(dir)
-	if !found {
+	if !found || !global.simple {
 		return fp, false
 	}
 	fp.add(filepath.Join(dir, ".git"))
-	fp.add(filepath.Join(commonDir, "config"))
-	for _, g := range global {
+	cfgPath := filepath.Join(commonDir, "config")
+	fp.add(cfgPath)
+	for _, g := range global.paths {
 		fp.add(g)
+	}
+	cfg, err := os.ReadFile(cfgPath)
+	if err != nil || !configFollowable(string(cfg), false) {
+		return fp, false
 	}
 	return fp, true
 }
@@ -296,16 +339,17 @@ type repoCache struct {
 	mu      sync.Mutex
 	entries map[string]*copyEntry
 	sem     chan struct{}
+	max     int // entry cap
 }
 
-var listCache = &repoCache{entries: map[string]*copyEntry{}, sem: make(chan struct{}, gitParallelism)}
+var listCache = &repoCache{entries: map[string]*copyEntry{}, sem: make(chan struct{}, gitParallelism), max: maxCacheEntries}
 
 func (c *repoCache) entry(dir string) *copyEntry {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e := c.entries[dir]
 	if e == nil {
-		if len(c.entries) >= maxCacheEntries {
+		if len(c.entries) >= c.max {
 			c.evictOldestLocked()
 		}
 		e = &copyEntry{}
@@ -344,7 +388,7 @@ func (c *repoCache) gitSlot() func() {
 }
 
 // inspect returns the status and identity of the git working copy at dir.
-func (c *repoCache) inspect(dir string, global []string) (RepoStatus, repoIdent) {
+func (c *repoCache) inspect(dir string, global gitGlobals) (RepoStatus, repoIdent) {
 	e := c.entry(dir)
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -352,9 +396,9 @@ func (c *repoCache) inspect(dir string, global []string) (RepoStatus, repoIdent)
 	identFP, identOK := identFingerprint(dir, global)
 	if !identOK || !e.ident.fresh(identFP, maxIdentAge) {
 		release := c.gitSlot()
-		id := computeIdent(dir)
+		id, complete := computeIdent(dir)
 		release()
-		if identOK {
+		if identOK && complete {
 			e.ident.set(identFP, id)
 		} else {
 			e.ident = slot[repoIdent]{val: id}
@@ -363,9 +407,9 @@ func (c *repoCache) inspect(dir string, global []string) (RepoStatus, repoIdent)
 	statusFP, statusOK := refsFingerprint(dir, global)
 	if !statusOK || !e.status.fresh(statusFP, maxStatusAge) {
 		release := c.gitSlot()
-		st, _ := GitStatus(dir)
+		st, err := GitStatus(dir)
 		release()
-		if statusOK {
+		if statusOK && err == nil {
 			e.status.set(statusFP, st)
 		} else {
 			e.status = slot[RepoStatus]{val: st}
@@ -374,23 +418,47 @@ func (c *repoCache) inspect(dir string, global []string) (RepoStatus, repoIdent)
 	return e.status.val, e.ident.val
 }
 
-func computeIdent(dir string) repoIdent {
-	var id repoIdent
-	if origin, ok := GitOriginURL(dir); ok {
+// computeIdent returns the identity and whether every git call it made gave a real answer.
+// A git that failed (killed, a lock, a transient error) is not the same as "no origin" or
+// "not a worktree", and must not be remembered as if it were: complete=false keeps the
+// result out of the cache so the next call asks again.
+func computeIdent(dir string) (id repoIdent, complete bool) {
+	complete = true
+	// Cmd directly: Run flattens the error and loses the exit code.
+	out, err := Cmd(dir, "remote", "get-url", "origin").Output()
+	switch {
+	case err == nil:
+		origin := strings.TrimSpace(string(out))
 		id.provider, id.host = gitProviderHost(origin)
 		id.remotePath = gitRemotePath(origin)
+	case !isNoSuchRemote(err):
+		complete = false
 	}
-	if IsLinkedWorktree(dir) {
+	abs, err := Run(dir, "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return id, false
+	}
+	if strings.Contains(filepath.ToSlash(abs), "/.git/worktrees/") {
 		id.worktree = true
-		id.parentDir = WorktreeParent(dir)
+		common, err := Run(dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+		if err != nil {
+			return id, false
+		}
+		id.parentDir = filepath.Dir(common)
 		id.parent = filepath.Base(id.parentDir)
 		id.createdAt = worktreeCreatedAt(dir)
 	}
-	return id
+	return id, complete
+}
+
+// isNoSuchRemote: `git remote get-url` exits 2 for a remote that is not configured.
+func isNoSuchRemote(err error) bool {
+	var ee *exec.ExitError
+	return errors.As(err, &ee) && ee.ExitCode() == 2
 }
 
 // integration returns the linked worktree's comparison with its parent's upstream.
-func (c *repoCache) integration(dir, parentDir, targetBranch string, global []string) RepoIntegration {
+func (c *repoCache) integration(dir, parentDir, targetBranch string, global gitGlobals) RepoIntegration {
 	e := c.entry(dir)
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -412,7 +480,7 @@ func (c *repoCache) integration(dir, parentDir, targetBranch string, global []st
 	release := c.gitSlot()
 	r := GitWorktreeIntegration(parentDir, dir, targetBranch)
 	release()
-	if ok {
+	if ok && r.Relation != "unknown" { // unknown is also what a failed git run reports
 		e.integ.set(fp, r)
 		e.integKey = key
 	} else {
@@ -421,13 +489,45 @@ func (c *repoCache) integration(dir, parentDir, targetBranch string, global []st
 	return r
 }
 
-// parentDir is the main working copy of the linked worktree at dir, from the identity slot
-// inspect just filled.
-func (c *repoCache) parentDir(dir string) string {
-	e := c.entry(dir)
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.ident.val.parentDir
+// fillGitFacts fills the git-derived fields of repos[i] for every i in idx, in two phases:
+// each copy's own status and identity, then the linked worktrees' integration, which needs
+// the parent's branch label from the first phase. The parent directory travels in a
+// per-call snapshot rather than being read back from the cache: the cache is capped, and an
+// eviction between the phases must change performance only, never the answer.
+func fillGitFacts(c *repoCache, repos []Repo, idx []int, global gitGlobals) {
+	parents := make([]string, len(repos))
+	parallel(idx, func(i int) {
+		dir := repos[i].Path
+		st, id := c.inspect(dir, global)
+		repos[i].WorkingCopyID = WorkingCopyID(dir)
+		repos[i].Branch, repos[i].Dirty, repos[i].Ahead, repos[i].Behind, repos[i].Unborn = st.Branch, st.Dirty, st.Ahead, st.Behind, st.Unborn
+		repos[i].Provider, repos[i].Remote, repos[i].RemotePath = id.provider, id.host, id.remotePath
+		if id.worktree {
+			repos[i].Worktree, repos[i].Parent, repos[i].CreatedAt = true, id.parent, id.createdAt
+			parents[i] = id.parentDir
+		}
+	})
+	// Compare linked worktrees only after the full list is available, so the
+	// target label comes from the already-read parent status. The actual commit
+	// comparison uses the parent path reported by Git rather than trusting names.
+	byName := make(map[string]Repo, len(repos))
+	for _, repo := range repos {
+		byName[repo.Name] = repo
+	}
+	var wtIdx []int
+	for _, i := range idx {
+		if repos[i].Worktree {
+			wtIdx = append(wtIdx, i)
+		}
+	}
+	parallel(wtIdx, func(i int) {
+		targetBranch := ""
+		if parent, ok := byName[repos[i].Parent]; ok {
+			targetBranch = parent.Branch
+		}
+		integration := c.integration(repos[i].Path, parents[i], targetBranch, global)
+		repos[i].Integration = &integration
+	})
 }
 
 // parallel runs fn for every index with at most gitParallelism calls in flight. The cap

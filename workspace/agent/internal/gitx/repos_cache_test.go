@@ -45,7 +45,7 @@ func mustGit(t *testing.T, dir string, args ...string) {
 // used to push from, so fetch/ahead/behind can be driven.
 type cacheFixture struct {
 	origin, copyDir, other string
-	global                 []string
+	global                 gitGlobals
 }
 
 func newCacheFixture(t *testing.T) *cacheFixture {
@@ -71,7 +71,8 @@ func (f *cacheFixture) fresh(t *testing.T, dir string) (RepoStatus, repoIdent) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return st, computeIdent(dir)
+	id, _ := computeIdent(dir)
+	return st, id
 }
 
 // check asserts the cached answer equals a from-scratch one.
@@ -290,12 +291,118 @@ func TestUpstreamRef(t *testing.T) {
 		{"local upstream", "[branch \"a\"]\n\tremote = .\n\tmerge = refs/heads/b\n", "a", "refs/heads/b", true},
 		{"include", cfg + "[include]\n\tpath = x\n", "main", "", false},
 		{"custom refspec", strings.Replace(cfg, "refs/remotes/origin/*", "refs/remotes/o/*", 1), "main", "", false},
+		{"other-case branch", strings.Replace(cfg, `branch "main"`, `branch "Main"`, 1), "main", "", true},
 		{"reftable", cfg + "[extensions]\n\trefStorage = reftable\n", "main", "", false},
 	}
 	for _, c := range cases {
 		got, ok := upstreamRef(c.cfg, c.branch)
 		if got != c.want || ok != c.ok {
 			t.Errorf("%s: upstreamRef = %q,%v want %q,%v", c.name, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+// Config that git reads but the fingerprint does not watch must not be cached: an include
+// file, a per-worktree config and a global [branch] section all change what git reports.
+func TestRepoCacheFollowsConfigTheFingerprintCannotWatch(t *testing.T) {
+	f := newCacheFixture(t)
+	d := f.copyDir
+	extra := filepath.Join(filepath.Dir(d), "extra.cfg")
+
+	mustGit(t, d, "remote", "set-url", "origin", "https://github.com/acme/one.git")
+	writeFile(t, extra, "[url \"https://gitlab.com/\"]\n\tinsteadOf = https://github.com/\n")
+	mustGit(t, d, "config", "include.path", extra)
+	f.check(t, d, "include, first")
+	writeFile(t, extra, "[url \"https://bitbucket.org/\"]\n\tinsteadOf = https://github.com/\n")
+	f.check(t, d, "include, changed only in the included file")
+	if _, id := listCache.inspect(d, f.global); id.provider != "bitbucket" {
+		t.Fatalf("ident = %+v after the included file changed", id)
+	}
+}
+
+func TestRepoCacheFollowsPerWorktreeConfig(t *testing.T) {
+	f := newCacheFixture(t)
+	wt := filepath.Join(filepath.Dir(f.copyDir), "copy@wt")
+	mustGit(t, f.copyDir, "config", "extensions.worktreeConfig", "true")
+	mustGit(t, f.copyDir, "worktree", "add", "-b", "temp/wt", wt)
+	mustGit(t, wt, "remote", "set-url", "origin", "https://github.com/acme/one.git")
+	mustGit(t, wt, "config", "--worktree", "url.https://gitlab.com/.insteadOf", "https://github.com/")
+	f.check(t, wt, "config.worktree insteadOf, first")
+	mustGit(t, wt, "config", "--worktree", "url.https://bitbucket.org/.insteadOf", "https://github.com/")
+	mustGit(t, wt, "config", "--worktree", "--unset", "url.https://gitlab.com/.insteadOf")
+	f.check(t, wt, "config.worktree insteadOf, changed")
+}
+
+func TestRepoCacheFollowsAGlobalUpstream(t *testing.T) {
+	f := newCacheFixture(t)
+	d := f.copyDir
+	// The upstream is named only in ~/.gitconfig; the repo config has no [branch] section.
+	mustGit(t, d, "config", "--remove-section", "branch.main")
+	writeFile(t, filepath.Join(os.Getenv("HOME"), ".gitconfig"), "[branch \"main\"]\n\tremote = origin\n\tmerge = refs/heads/main\n")
+	f.global = globalConfigPaths()
+	mustGit(t, d, "fetch", "origin")
+	f.check(t, d, "warm after the first fetch (FETCH_HEAD exists now)")
+	writeFile(t, filepath.Join(f.other, "n.txt"), "n\n")
+	mustGit(t, f.other, "add", ".")
+	mustGit(t, f.other, "commit", "-m", "n")
+	mustGit(t, f.other, "push", "origin", "HEAD:main")
+	mustGit(t, d, "fetch", "origin")
+	f.check(t, d, "fetch moved the globally named upstream")
+	if st, _ := listCache.inspect(d, f.global); st.Behind != 1 {
+		t.Fatalf("behind = %d, want 1", st.Behind)
+	}
+}
+
+// A git call that failed is not an answer: it must not be remembered for minutes.
+func TestRepoCacheDoesNotRememberAFailedGit(t *testing.T) {
+	real, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	f := newCacheFixture(t)
+	mustGit(t, f.copyDir, "remote", "set-url", "origin", "https://github.com/acme/one.git")
+	dir := t.TempDir()
+	flag := filepath.Join(dir, "failed")
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$*\" in *get-url*) if [ ! -e %q ]; then : > %q; exit 1; fi;; esac\nexec %q \"$@\"\n", flag, flag, real)
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if _, id := listCache.inspect(f.copyDir, f.global); id.provider != "" {
+		t.Fatalf("the shim did not fail the first get-url: %+v", id)
+	}
+	if _, id := listCache.inspect(f.copyDir, f.global); id.provider != "github" || id.remotePath != "acme/one" {
+		t.Fatalf("a failed get-url was cached: %+v", id)
+	}
+	// A remote that is simply not configured IS an answer and is remembered.
+	mustGit(t, f.copyDir, "remote", "remove", "origin")
+	f.check(t, f.copyDir, "no origin")
+}
+
+// The entry cap is a performance bound: with fewer slots than copies, evictions between the
+// two phases of a listing must not change any answer (a lost parent dir once became "").
+func TestFillGitFactsSurvivesEvictionBetweenPhases(t *testing.T) {
+	f := newCacheFixture(t)
+	root := filepath.Dir(f.copyDir)
+	repos := []Repo{{Name: "copy", Path: f.copyDir}}
+	for _, n := range []string{"a", "b", "c", "d"} {
+		wt := filepath.Join(root, "copy@"+n)
+		mustGit(t, f.copyDir, "worktree", "add", "-b", "temp/"+n, wt)
+		repos = append(repos, Repo{Name: "copy@" + n, Path: wt})
+	}
+	idx := []int{0, 1, 2, 3, 4}
+	c := &repoCache{entries: map[string]*copyEntry{}, sem: make(chan struct{}, 2), max: 2}
+	fillGitFacts(c, repos, idx, f.global)
+	if len(c.entries) > 2 {
+		t.Fatalf("%d entries, cap is 2", len(c.entries))
+	}
+	for _, r := range repos[1:] {
+		want := GitWorktreeIntegration(f.copyDir, r.Path, repos[0].Branch)
+		if r.Integration == nil || *r.Integration != want || want.Relation != "same" {
+			t.Errorf("%s: integration = %+v, want %+v", r.Name, r.Integration, want)
+		}
+		if r.Parent != "copy" {
+			t.Errorf("%s: parent = %q", r.Name, r.Parent)
 		}
 	}
 }
