@@ -15,6 +15,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/sessionsearch"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/sessionx"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -159,6 +160,11 @@ func trashSession(m session.Meta, stop bool) (string, string, error) {
 				_ = os.Remove(p)
 			}
 		}
+		// The Agent's backup of the log goes with the session; the archive above carries the
+		// conversation from here on (archiveSessionForDelete).
+		if err := claude.RemoveTranscriptBackup(session.UUID(m.Dir, m.Name)); err != nil {
+			log.Printf("trash %s: could not remove the transcript backup: %v", m.Name, err)
+		}
 	}
 	sessionx.ForgetRuntime(m)
 	sessionsearch.Forget(m.Name) // the trash bundle is now the only copy of its text (ADR 0110)
@@ -262,6 +268,19 @@ func archiveSessionForDelete(m session.Meta) (string, error) {
 				as.JSONLPaths = append(as.JSONLPaths, p)
 				as.JSONLNames = append(as.JSONLNames, entry)
 			}
+		} else if src, dest, ok, err := claude.ArchiveBackup(m); err != nil {
+			// The log is gone and the backup cannot be read: deleting now would lose the
+			// conversation, so the delete is refused.
+			return "", err
+		} else if ok {
+			b, err := os.ReadFile(src)
+			if err != nil {
+				return "", err
+			}
+			entry := "sessions/" + idSlug(m.Name) + "/" + jsonlEntryName(0, dest)
+			payloads[entry] = b
+			as.JSONLPaths = append(as.JSONLPaths, dest)
+			as.JSONLNames = append(as.JSONLNames, entry)
 		}
 	}
 	man := cleanupManifest{

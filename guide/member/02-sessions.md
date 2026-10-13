@@ -477,7 +477,19 @@ is added when it is missing, in new and existing workspaces alike; a value you s
 never overwritten (and a lower value brings the 30-day-style deletion back). Never set it to `0`:
 in claude that turns conversation saving off.
 
-If a log is gone anyway (deleted before this setting existed, or by a lower value of your own),
+On top of that, the Agent keeps its own copy of a stopped session's log under its data directory
+(`~/.local/share/agent-fleet/claude-transcripts/`, outside claude's reach). When you resume a
+session whose log is gone, the copy is put back and the conversation continues with its history
+(the Agent log records the restore); a log that exists is never replaced by the copy. Disk use is
+bounded: one extra copy of each session's current log, rewritten only when the log changed, and
+removed when you delete the session (a deleted session's conversation then lives in the cleanup
+archive, as before; if its log was already gone, the archive takes the copy). **"Start a new
+conversation"** keeps the copy aside (`claude-transcripts/<id>.superseded.<number>`) instead of
+restoring it; it is removed with the session too. The copy is made while the session is stopped, so
+a log that disappears before the first copy (a session stopped only seconds ago, or one that
+last ran before this feature) cannot be recovered this way.
+
+If there is no usable copy either (deleted before this setting existed, or by a lower value of your own),
 **"Resume"** does not silently start an empty conversation under the old session. It shows
 **"This session's conversation log was deleted…"** with a **"Start a new conversation"** button;
 pressing it starts a fresh conversation in the same session (for a forked session, without

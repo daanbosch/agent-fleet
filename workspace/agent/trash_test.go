@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/claude"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/gitx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
@@ -376,5 +377,64 @@ func TestPurgeKeepsTheLedgerAnotherArchiveNeeds(t *testing.T) {
 	dropPurgedLedgers([]cleanupManifest{man})
 	if _, err := os.Stat(ledgerFile); err == nil {
 		t.Fatal("the ledger stayed after the last archive holding the session was purged")
+	}
+}
+
+// The Agent's backup of a session's transcript (claude.BackupTranscript) is removed when the
+// session is deleted, and a session whose own log was already gone does not lose its
+// conversation in the same step: the cleanup archive carries the backup, and restoring it puts
+// the log back where claude looks for it.
+func TestTrashRemovesTranscriptBackupAndArchivesItWhenLogIsGone(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AF_SESSIONS_DIR", filepath.Join(home, "sessions"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
+	srv := httptest.NewServer(trashMux())
+	defer srv.Close()
+	dir := filepath.Join(home, "repos", "app")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	backupRoot := filepath.Join(paths.AgentDataDir(), "claude-transcripts")
+
+	for _, tc := range []struct {
+		name    string
+		logGone bool
+	}{{"bkplive", false}, {"bkpgone", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := session.Meta{Name: tc.name, Dir: dir, Kind: session.KindClaude, CreatedAt: time.Now().Format(time.RFC3339)}
+			session.WriteMeta(m)
+			sid := session.UUID(dir, m.Name)
+			jsonl := filepath.Join(home, "claude", "projects", claude.ProjectKey(dir), sid+".jsonl")
+			if err := os.MkdirAll(filepath.Dir(jsonl), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			body := `{"type":"user","message":"keep me"}` + "\n"
+			if err := os.WriteFile(jsonl, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := claude.BackupTranscript(m); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(backupRoot, sid)); err != nil {
+				t.Fatalf("no backup was made: %v", err)
+			}
+			if tc.logGone {
+				if err := os.Remove(jsonl); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var out struct{ Archive string }
+			do(t, srv, "DELETE", "/sessions/"+tc.name, nil, http.StatusOK, &out)
+			if left, _ := filepath.Glob(filepath.Join(backupRoot, sid+"*")); len(left) != 0 {
+				t.Fatalf("backup left after the delete: %v", left)
+			}
+			do(t, srv, "POST", "/cleanup/archives/"+out.Archive+"/restore", nil, http.StatusOK, nil)
+			got, err := os.ReadFile(jsonl)
+			if err != nil || string(got) != body {
+				t.Fatalf("restored transcript = %q, %v; want the conversation back", got, err)
+			}
+		})
 	}
 }

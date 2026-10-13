@@ -70,8 +70,12 @@ working folder is missing ([02](02-sessions.md)).
 
 claude deletes conversation logs older than `cleanupPeriodDays` (30 days by default) when it
 starts. The workspace sets that to 36500 so stopped sessions keep their logs, but a log deleted
-earlier, or a lower value in your own claude `settings.json`, still loses the conversation. The
-log cannot be brought back from the Console. Choose **"Start a new conversation"** to continue in
+earlier, or a lower value in your own claude `settings.json`, can still delete a log. The Agent
+keeps a copy of each stopped session's log and puts it back when you resume, so this message only
+appears when no copy exists (the log vanished before the first copy, or before the feature) — the
+copy cannot be brought back from the Console by hand. If resuming instead fails with "could not
+restore the conversation log from the backup", the copy exists but could not be read or written
+(check the Agent log and the free disk space); nothing was changed. Choose **"Start a new conversation"** to continue in
 the same session without the old context, and remove a low `cleanupPeriodDays` if you set one
 (see [02](02-sessions.md)).
 

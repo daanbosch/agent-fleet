@@ -100,6 +100,10 @@ func StartFresh(slot string) error {
 			return fmt.Errorf("conversation log still present: %s", rest[0])
 		}
 	}
+	// The Agent's backup of the log (backup.go) would be restored by the next launch otherwise.
+	if err := supersedeBackup(slot); err != nil {
+		return err
+	}
 	talked.Remove(slot)
 	status.Remove(slot)
 	status.RemoveCompletionKey(slot)
