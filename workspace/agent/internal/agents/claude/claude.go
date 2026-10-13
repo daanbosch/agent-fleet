@@ -106,7 +106,15 @@ func (agentImpl) BuildLaunch(m session.Meta, _ agents.LaunchOpts) (agents.Launch
 	// `--session-id` start under the old session (see ErrTranscriptLost). Checked before
 	// anything else so an older slot log cannot stand in for a deleted live one.
 	if lostTranscript(sid) {
-		return agents.LaunchPlan{}, ErrTranscriptLost
+		// The Agent's own copy of the log (backup.go) stands in for the deleted one. A restore
+		// that fails on I/O is returned as such: it is not evidence that there is no backup.
+		restored, err := RestoreTranscript(sid, m.CWD())
+		if err != nil {
+			return agents.LaunchPlan{}, fmt.Errorf("バックアップから会話ログを復元できませんでした: %w", err)
+		}
+		if !restored || lostTranscript(sid) {
+			return agents.LaunchPlan{}, ErrTranscriptLost
+		}
 	}
 	if JSONLResumable(sid) {
 		// Covers slots that talked before the marker existed.
@@ -225,10 +233,14 @@ func (agentImpl) WireLive(m session.Meta, alive bool) agents.LiveInfo {
 		if li.State == "idle" {
 			li.BackgroundBusy, li.BackgroundBusyReason = BackgroundWork(m.Name, sid)
 		}
-	} else if !session.DirExists(m.Dir) {
-		// A stopped claude whose working dir was removed (its repo deleted) can't be
-		// resumed there; the Console marks it non-resumable (archive only).
-		li.Resumable = false
+	} else {
+		// Keep the Agent's copy of a stopped session's log current (backup.go).
+		backupStopped(m)
+		if !session.DirExists(m.Dir) {
+			// A stopped claude whose working dir was removed (its repo deleted) can't be
+			// resumed there; the Console marks it non-resumable (archive only).
+			li.Resumable = false
+		}
 	}
 	return li
 }
