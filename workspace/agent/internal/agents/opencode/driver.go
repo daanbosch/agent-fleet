@@ -55,7 +55,7 @@ import (
 
 // turnClient runs the blocking /message calls: no timeout — a turn legitimately
 // runs for minutes/hours. Interrupt (abort) or daemon death unblocks it.
-var turnClient = &http.Client{}
+var turnClient = &http.Client{Transport: authTransport{}}
 
 // ledger is the persistent ClientMessageID ledger (§9.5, persisted across processes): an
 // in-memory ledger does not deduplicate a re-send that spans an Agent restart.
@@ -609,22 +609,7 @@ func (h *threadHandle) runTurn(t *agents.Taken) {
 	// existing one is never picked up and /message never returns — the same root cause
 	// behind prompt_async looking inert). ClientMessageID idempotency happens only in the
 	// driver's ledger (accept()).
-	body := map[string]any{"parts": buildParts(in)}
-	if ag := agentForMode(st.Mode); ag != "" {
-		body["agent"] = ag
-	}
-	if prov, model, ok := splitModel(st.Model); ok {
-		body["model"] = map[string]string{"providerID": prov, "modelID": model}
-	}
-	if st.Effort != "" {
-		body["variant"] = st.Effort
-	}
-	buf, err := json.Marshal(body)
-	if err != nil {
-		h.setState(agents.TurnFailed)
-		return
-	}
-	req, err := http.NewRequest("POST", dirQ(addr+"/session/"+url.PathEscape(ses)+"/message", h.dir), bytes.NewReader(buf))
+	req, err := newTurnRequest(addr, ses, h.dir, in, st)
 	if err != nil {
 		h.setState(agents.TurnFailed)
 		return
@@ -646,7 +631,7 @@ func (h *threadHandle) runTurn(t *agents.Taken) {
 		return
 	}
 	h.emit(agents.Event{Kind: "turn_state", TurnState: agents.TurnRunning})
-	res, err := turnClient.Do(req)
+	res, err := sendTurn(addr, ses, h.dir, req, st)
 	if err != nil {
 		// A transport break means the daemon is gone or the turn was interrupted: fall
 		// to unknown honestly and leave it to §6.
@@ -922,7 +907,7 @@ func dirQ(base, dir string) string {
 }
 
 func serveSessionExists(addr, ses, dir string) bool {
-	res, err := serveClient.Get(dirQ(addr+"/session/"+url.PathEscape(ses), dir))
+	res, err := serveClient.Get(sessionURL(addr, ses, dir))
 	if err != nil {
 		return false
 	}
@@ -931,19 +916,12 @@ func serveSessionExists(addr, ses, dir string) bool {
 }
 
 func serveSessionBusy(addr, ses, dir string) bool {
-	res, err := serveClient.Get(dirQ(addr+"/session/status", dir))
+	m, err := activeSessions(addr, dir)
 	if err != nil {
 		return false
 	}
-	defer res.Body.Close()
-	var m map[string]struct {
-		Type string `json:"type"`
-	}
-	if json.NewDecoder(res.Body).Decode(&m) != nil {
-		return false
-	}
 	st, ok := m[ses] // an idle session is not listed (measured)
-	return ok && st.Type != "idle"
+	return ok && st != "idle"
 }
 
 func waitIdle(addr, ses, dir string, timeout time.Duration) {
@@ -957,20 +935,17 @@ func waitIdle(addr, ses, dir string, timeout time.Duration) {
 }
 
 func serveCreateSession(addr, dir, title string) (string, error) {
-	body, _ := json.Marshal(map[string]string{"title": title})
-	u := addr + "/session?directory=" + url.QueryEscape(dir)
+	u, body := createSessionRequest(addr, dir, title)
 	res, err := serveClient.Post(u, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("opencode session の作成に失敗しました: %w", err)
 	}
 	defer res.Body.Close()
-	var s struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(res.Body).Decode(&s); err != nil || s.ID == "" {
+	id := sessionID(res.Body)
+	if id == "" {
 		return "", errors.New("opencode session の作成応答を解釈できません")
 	}
-	return s.ID, nil
+	return id, nil
 }
 
 // serveForkSession copies src into a NEW opencode session. at, when non-empty, is the
@@ -978,15 +953,11 @@ func serveCreateSession(addr, dir, title string) (string, error) {
 // id sorts >= it, so the anchored turn and everything after it stay out of the fork
 // (measured 1.18.14 — docs/log/55 §55.2). Empty at = the whole conversation.
 func serveForkSession(addr, src, dir, at string) (string, error) {
-	body := "{}"
-	if at != "" {
-		b, err := json.Marshal(map[string]string{"messageID": at})
-		if err != nil {
-			return "", fmt.Errorf("opencode session の分岐点を組み立てられません: %w", err)
-		}
-		body = string(b)
+	body, err := forkBody(at)
+	if err != nil {
+		return "", fmt.Errorf("opencode session の分岐点を組み立てられません: %w", err)
 	}
-	res, err := serveClient.Post(dirQ(addr+"/session/"+url.PathEscape(src)+"/fork", dir), "application/json", strings.NewReader(body))
+	res, err := serveClient.Post(forkURL(addr, src, dir), "application/json", strings.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("opencode session の分岐に失敗しました: %w", err)
 	}
@@ -1000,17 +971,15 @@ func serveForkSession(addr, src, dir, at string) (string, error) {
 		}
 		return "", fmt.Errorf("opencode session の分岐に失敗しました (HTTP %d)", res.StatusCode)
 	}
-	var s struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(res.Body).Decode(&s); err != nil || s.ID == "" {
+	id := sessionID(res.Body)
+	if id == "" {
 		return "", errors.New("opencode session の分岐応答を解釈できません")
 	}
-	return s.ID, nil
+	return id, nil
 }
 
 func serveAbort(addr, ses, dir string) error {
-	res, err := serveClient.Post(dirQ(addr+"/session/"+url.PathEscape(ses)+"/abort", dir), "application/json", strings.NewReader("{}"))
+	res, err := serveClient.Post(abortURL(addr, ses, dir), "application/json", strings.NewReader("{}"))
 	if err != nil {
 		return err
 	}
@@ -1051,7 +1020,13 @@ func (q *serveQuestion) toInteraction() *agents.Interaction {
 	return inter
 }
 
+// errQuestionsV2: the question endpoints do not exist on v2 (measured 2.0.28).
+var errQuestionsV2 = errors.New("opencode 2 の質問 API (form) にはまだ対応していません")
+
 func serveListQuestions(addr, dir string) []*serveQuestion {
+	if isV2() {
+		return nil // v2 has no /question: they became forms, which this driver does not map yet
+	}
 	res, err := serveClient.Get(dirQ(addr+"/question", dir))
 	if err != nil {
 		return nil
@@ -1065,6 +1040,9 @@ func serveListQuestions(addr, dir string) []*serveQuestion {
 }
 
 func serveQuestionReply(addr, id, dir string, answers [][]string) error {
+	if isV2() {
+		return errQuestionsV2
+	}
 	body, _ := json.Marshal(map[string]any{"answers": answers})
 	res, err := serveClient.Post(dirQ(addr+"/question/"+url.PathEscape(id)+"/reply", dir), "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -1078,6 +1056,9 @@ func serveQuestionReply(addr, id, dir string, answers [][]string) error {
 }
 
 func serveQuestionReject(addr, id, dir string) error {
+	if isV2() {
+		return errQuestionsV2
+	}
 	res, err := serveClient.Post(dirQ(addr+"/question/"+url.PathEscape(id)+"/reject", dir), "application/json", strings.NewReader("{}"))
 	if err != nil {
 		return err
@@ -1282,8 +1263,8 @@ func handleServeEvent(data []byte) {
 			h.mu.Lock()
 			addr, dir := h.addr, h.dir
 			h.mu.Unlock()
-			body := strings.NewReader(`{"reply":"always"}`)
-			if res, err := serveClient.Post(dirQ(addr+"/permission/"+url.PathEscape(p.ID)+"/reply", dir), "application/json", body); err == nil {
+			u, payload := permissionReplyRequest(addr, p.SessionID, p.ID, dir)
+			if res, err := serveClient.Post(u, "application/json", strings.NewReader(payload)); err == nil {
 				res.Body.Close()
 				log.Printf("opencode managed: auto-allowed permission %s (session %s)", p.ID, h.name)
 			}

@@ -879,3 +879,15 @@ Workspace Agent 内に Claude Session Manager を置き、各セッションを 
 
 thread ごとの会話状態・実行中ツールプロセスのメモリは別途乗る。`--remote` 時の TUI クライアント RSS は
 未実測（§12-3）。
+
+## 2026-10-14 note: serve auth and the v2 routes (#2102, part of #2101)
+
+The §12.2 "no auth" measurement no longer holds. The driver starts `opencode serve` with a
+random per-generation `OPENCODE_SERVER_PASSWORD` and sends Basic auth (user `opencode`) on every
+request, the SSE stream included; both 1.19.0 and 2.0.28 answer 401 without it. The client layer
+is `workspace/agent/internal/agents/opencode/serveapi.go`, which also detects the server's major
+version from a JSON health answer (v2 `/api/info`, v1 `/global/health`; each major answers the
+other's path with 200 HTML) and routes v1 or v2 paths. v1 stays the default until the image pin
+moves. Not mapped on v2: questions (they became forms), live provider config (`PATCH
+/api/experimental/config` takes `shell` only), provider errors and event semantics (#2103).
+The v2 turn path (`/prompt` then waiting on `/api/session/active`) was not run against a model.
