@@ -233,6 +233,10 @@ func registerTenantAdminRoutes(mux *http.ServeMux, cfg config) {
 	// outside it. The Agent's poll is the token-authenticated /internal/branch-rules.
 	mux.HandleFunc("GET /api/admin/tenants/{slug}/branch-rules", adm.tenantBranchRules)
 	mux.HandleFunc("PUT /api/admin/tenants/{slug}/branch-rules", adm.setTenantBranchRules)
+	// Defaults for the tenant's members' Console (ADR 0114 decision 8). Members read them through
+	// GET /api/me/ui-state; only this face writes them.
+	mux.HandleFunc("GET /api/admin/tenants/{slug}/member-defaults", adm.tenantMemberDefaults)
+	mux.HandleFunc("PUT /api/admin/tenants/{slug}/member-defaults", adm.setTenantMemberDefaults)
 	mux.HandleFunc("GET /internal/branch-rules", branchRulesBridgeAPI{cfg.mgr}.list)
 	// Tenant-defined sign-in methods (docs/log/61 §61.11). The rows are the tenant's, so
 	// these gate on tenant_admin mid-handler; ACTIVATION is checked inside setStatus,

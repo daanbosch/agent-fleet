@@ -1451,6 +1451,7 @@ func (s *SQL) DeleteTenant(ctx context.Context, tenantID string) error {
 		// has no membership left to cascade from; the tenant id still reaches it.
 		`DELETE FROM engine_access_grant WHERE tenant_id=?`,
 		`DELETE FROM tenant_branch_rules WHERE tenant_id=?`,
+		`DELETE FROM tenant_member_defaults WHERE tenant_id=?`,
 		`DELETE FROM limit_board_tenant WHERE tenant_id=?`,
 		// The login rules and allowed_cidrs are columns on tenant, so this one
 		// statement takes them with it.

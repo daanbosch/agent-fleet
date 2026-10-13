@@ -20,6 +20,7 @@ import { useChatStore } from "../chat/store.ts";
 import { chatList } from "../chat/api.ts";
 import { openAssistantDraft } from "../chat/open.ts";
 import { useUIStateStore } from "../../core/store/uiState.ts";
+import { agentOf } from "../../agents/registry.ts";
 import type { ConnectionsStatus } from "../../types/session.ts";
 
 // The flagship builtin assistant (workspace/agent/assistants.go: afAssistantID).
@@ -126,6 +127,12 @@ function GuideBody({ g, onNavigate }: { g: GuideState; onNavigate?: () => void }
   const tr = useT();
   const onboarding = useUIStateStore((s) => s.state.onboarding);
   const patchUIState = useUIStateStore((s) => s.patch);
+  // The tenant's default agent is named, not enforced: any connected agent completes the step,
+  // so a member who already uses another one is never stuck on it.
+  const defaultAgent = useUIStateStore((s) => s.state.defaults?.agent || "");
+  // agentOf falls back to claude for a kind it does not know; a default from a newer CP must not
+  // be named as claude, so an unknown one is simply not named.
+  const defaultLabel = defaultAgent && agentOf(defaultAgent).id === defaultAgent ? agentOf(defaultAgent).label : "";
   const track = onboarding?.track === "dev" ? "dev" : null;
   const chooseDev = (on: boolean) =>
     void patchUIState({ onboarding: { dismissed: onboarding?.dismissed ?? false, track: on ? "dev" : "" } });
@@ -152,7 +159,7 @@ function GuideBody({ g, onNavigate }: { g: GuideState; onNavigate?: () => void }
     {
       done: g.agentOk,
       label: tr("onb.connect_agent"),
-      hint: tr("onb.connect_agent_hint"),
+      hint: defaultLabel ? tr("onb.connect_agent_hint_default", { agent: defaultLabel }) : tr("onb.connect_agent_hint"),
       // Connecting runs through the in-container Agent, so it needs the workspace up.
       cta: g.agentOk
         ? null

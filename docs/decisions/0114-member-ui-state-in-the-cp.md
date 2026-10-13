@@ -4,7 +4,10 @@ English | [日本語](0114-member-ui-state-in-the-cp.ja.md)
 
 - Status: **accepted** (2026-10-13). P1 is built: the `member_ui_state` table,
   `GET`/`PATCH /api/me/ui-state` (`control-plane/member_ui_state.go`), and the Console store that
-  holds the first-run state and feeds the Home view. P2 and P3 are open.
+  holds the first-run state and feeds the Home view. P2 is built: `tenant_member_defaults`, the
+  admin's `GET`/`PUT /api/admin/tenants/{slug}/member-defaults` (`control-plane/tenant_member_defaults.go`),
+  `defaults` on the member's answer, and the default agent named by the first-run card. The role
+  moved to #2032, and P3 is open.
 - Tracking: #2027 (this record), #2028 (Home, the first reader). Related: #2026 (the first-day path
   for junior engineers), #2032 (role presets), #2033 (SRE Home and ops settings) /
   [0078](0078-sessions-overview-pane.md) (the overview, whose ordering Home reuses) /
@@ -59,15 +62,22 @@ the like. Tenants differ, so these are tenant configuration. They need the same 
 8. **Precedence for tenant defaults (P2).** From lowest to highest: built-in, tenant default,
    the admin's per-member setting, then the member's own choice. The CP computes the effective
    value and returns it next to the member's own `state`, so the rule lives in one place. The
-   Console never re-derives it.
+   Console never re-derives it. The default agent has no other layer: it only names an agent and
+   restricts nothing, so a member has nothing to override. The answer therefore carries it as
+   `defaults`, unchanged. `effective` arrives with the first key that does have layers, the role.
 
 ## Phases
 
 - **P1 (built):** `member_ui_state`, `GET`/`PATCH /api/me/ui-state`, the `onboarding` key
   (`dismissed`, `track`), the Console store, the one-time `localStorage` migration, and Home (#2028)
   as its first reader.
-- **P2:** tenant defaults for the role preset and the default agent, and the admin's per-member role,
-  with the tenant settings UI. `GET /api/me/ui-state` gains `defaults` / `effective` (decision 8).
+- **P2 (built):** `tenant_member_defaults` with one key, `agent`. The tenant admin sets it in
+  Tenant settings → Member defaults (audited as `tenant.member_defaults`). Members read it as
+  `defaults` on `GET /api/me/ui-state`, and the first-run card's connect step names it. Any agent
+  still completes the step.
+- **Moved to #2032:** the role preset's tenant default, the admin's per-member role, the member's
+  own choice and `effective` (decision 8). A role nobody can see the effect of would be a setting
+  that does nothing, so it is built together with the presets that read it.
 - **P3:** launch defaults, team repositories and non-secret ops settings, with #2032 and #2033.
   Open question: how tenant launch defaults reach the Agent, which enforces some of them
   (decision 1). They could prefill the dialog only, or seed `ui-prefs`.

@@ -1,7 +1,7 @@
 ---
 audience: "a tenant administrator — someone responsible for a team's members, limits and integrations"
 source_of_truth: "the Console's tenant settings — if a screen disagrees with this guide, the screen is right"
-updated: "2026-08"
+updated: "2026-10"
 ---
 
 # Administering a tenant
@@ -29,6 +29,7 @@ administrators are also working members: for everyday development read
 4. [Distributing integrations](04-mcp-egress.md): handing servers to the whole team
 5. [Who may sign in, and from where](05-access.md): sign-in methods, login rules, allowed networks, your own OAuth apps
 6. [Branch naming rules](06-branch-rules.md): the team's default branch names and where branches start
+7. [Member defaults](07-member-defaults.md): the agent new members are pointed at
 
 ## Getting in
 
@@ -48,7 +49,7 @@ effect crosses tenants, or that could lock people out, sits upstream of you.
 | Matter | Owner |
 |---|---|
 | Adding and removing members, per-member session limits, force-stopping a workspace, reviewing audit and usage, **the whole offboarding sequence** | **you** |
-| Distributing a shared integration server to the team, the team's default branch naming rules | **you** |
+| Distributing a shared integration server to the team, the team's default branch naming rules, the agent new members are pointed at | **you** |
 | Registering a sign-in method, login rules you can read, restricting where members connect from, your tenant's own OAuth apps | **you** (a sign-in method still needs approval) |
 | Creating tenants, tenant-wide limits and idle auto-stop, granting admin rights, changing the login rules, approving a sign-in method | deployment administrator |
 | Egress control, the speech engine, the shared dictionary | deployment administrator |

@@ -115,6 +115,19 @@ describe("Home", () => {
     expect(openAssistantDraft).toHaveBeenCalledWith("af");
   });
 
+  it("names the tenant's default agent in the connect step", async () => {
+    cpState = { defaults: { agent: "codex" } };
+    await mount();
+    expect(setupCard()?.textContent).toContain(t("onb.connect_agent_hint_default", { agent: "Codex" }));
+  });
+
+  it("does not name a default agent this Console does not know", async () => {
+    cpState = { defaults: { agent: "future-kind" } };
+    await mount();
+    expect(setupCard()?.textContent).toContain(t("onb.connect_agent_hint"));
+    expect(setupCard()?.textContent).not.toContain("Claude Code");
+  });
+
   it("uploads the old localStorage keys once and removes them", async () => {
     localStorage.setItem("af.onboarding.dismissed", "1");
     localStorage.setItem("af.onboarding.track", "dev");
