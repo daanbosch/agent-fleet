@@ -260,7 +260,15 @@ npm --prefix console run build
   | `secret-scan` | 全履歴に対する資格情報の混入検知（後述）|
   | `release-scan` | 追跡ツリーに対する禁止トークンのゲート——pre-commit フックがステージ内容にかけるのと同じスキャナ |
   | `model-id-lint` | 両 Go モジュールで `workspace/agent/internal/modelfallback` の外にモデル ID の形の文字列リテラルが無いこと。モデルを選ばないものは `// model-id-lint:allow <理由>` で印を付ける |
-| `migration-versions` | `develop` 向けの開いている PR すべてに `migration-version` コミットステータスを付ける。PR が足すマイグレーションのバージョンを `develop` が既に持っているか、同じ PR の別ファイルも同じバージョンを取っていれば failure。PR 自身のイベントで回り、`develop` への push のたびに開いている全 PR を検査し直す。fork の PR はトークンが読み取り専用なのでステータス無しで検査し、次の `develop` への push か `develop` での手動実行で付く。`scripts/migration-versions.sh` |
+  | `migration-versions` | `develop` 向けの開いている PR すべてに `migration-version` コミットステータスを付ける。PR が足すマイグレーションのバージョンを `develop` が既に持っている（ランナーと同じく数値で比べるので `95_x` と `0095_y` も衝突）、同じ PR の別ファイルも同じバージョンを取っている、または読めるバージョンが無い、のどれかなら failure。PR 自身のイベント（`develop` へ付け替えた PR は `migration-version.yml` 経由）で回り、`develop` への push のたびに開いている全 PR を検査し直す。`scripts/migration-versions.sh` |
+
+  `develop` の必須チェックにするなら、コンテキスト **`migration-version`**（ジョブの
+  `migration-versions` ではなくコミットステータス）を、ソース GitHub Actions で指定する。
+  各 PR は `develop` とだけ比べ、開いている他の PR とは比べない。同じ番号を取った 2 つの
+  PR は先の方がマージされるまで両方緑のままで、そのマージによる push で後の方が赤になる。
+  fork の PR はトークンが読み取り専用なのでステータス無しで検査され、次の `develop` への
+  push か、メンテナが `gh workflow run ci.yml --ref develop` を回すまでマージできない。
+  障害やジョブの故障の後に開いている全 PR のステータスを付け直すのも、同じ手動実行。
 
   PR では、変更したパスがすべて無関係なもの——`docs/` と `guide/`（テストが読む
   `guide/ref/agents{,.ja}.md` と `docs/decisions/0029-usage-accounting{,.ja}.md` を除く）・最上位の `*.md`・docs の検査スクリプト——なら、

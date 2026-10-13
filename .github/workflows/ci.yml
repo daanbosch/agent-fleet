@@ -111,7 +111,9 @@ jobs:
   # (success when it adds no colliding migration), so branch protection can require it: on
   # the PR's own events against the develop tip of that moment, and on every push to develop
   # for all open PRs, because nothing else re-runs a PR's checks when develop moves. The
-  # self-test runs on every event, and a failed self-test posts nothing.
+  # self-test runs on every event, and a failed self-test posts nothing. A PR retargeted from
+  # main to develop is picked up by migration-version.yml, since `edited` here would re-run
+  # every job on each title or body edit.
   #
   # A fork's pull_request token cannot write statuses and stays that way: no
   # pull_request_target, so no write token ever sits next to a fork's code. A fork PR is
@@ -134,15 +136,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
-          # Empty for a fork: check without posting.
-          SHA: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.sha || '' }}
-        run: ./scripts/migration-versions.sh --pr "$PR" ${SHA:+"$SHA"}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          # A fork's token cannot post: check without posting.
+          MODE: ${{ github.event.pull_request.head.repo.full_name != github.repository && '--report-only' || '' }}
+        run: ./scripts/migration-versions.sh --pr "$PR" "$SHA" ${MODE:+"$MODE"}
       - name: set the status on every open PR against the new develop
         # Not in a fork of this repository: its develop has no PRs of ours to mark.
         if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/develop' && github.repository == 'k-k1/agent-fleet'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: ./scripts/migration-versions.sh --open-prs HEAD
+        run: ./scripts/migration-versions.sh --open-prs
 
   # Core verification of the forbidden-token gate for shipped artifacts (docs/log/35
   # §35.7.5). The artifacts themselves are scanned by release-gate and publish-dist (both

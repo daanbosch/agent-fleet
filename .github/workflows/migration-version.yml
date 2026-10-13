@@ -1,0 +1,35 @@
+# The `migration-version` status for a PR whose base was just changed to develop (#2046).
+#
+# ci.yml's migration-versions job posts it on a PR's own events, but a PR opened against
+# main got none, and retargeting it is an `edited` event that ci.yml does not take: adding
+# `edited` there would re-run every job on each title or body edit. This entry point runs
+# only the status step, and only when the base changed. Same script, same fork rule as
+# ci.yml: a fork's token stays read-only and its PR is checked without posting.
+name: migration-version
+
+on:
+  pull_request:
+    types: [edited]
+    branches: [develop]
+
+permissions:
+  contents: read
+
+jobs:
+  retarget:
+    if: github.event.changes.base != null
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # merge-base of the PR's head with develop
+      - name: check this PR's new migrations against the develop tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          MODE: ${{ github.event.pull_request.head.repo.full_name != github.repository && '--report-only' || '' }}
+        run: ./scripts/migration-versions.sh --pr "$PR" "$SHA" ${MODE:+"$MODE"}
