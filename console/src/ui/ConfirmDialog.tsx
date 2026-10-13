@@ -6,6 +6,7 @@ import { useT } from "../lib/i18n/index.ts";
 import { useEscLayer } from "../lib/escLayer.ts";
 import { useBackClose } from "../lib/backClose.ts";
 import { useFocusTrap } from "../lib/focusTrap.ts";
+import { useBackdropClose } from "../lib/backdropClose.ts";
 
 // ConfirmDialog: a small modal for confirming destructive actions (old
 // components/ConfirmDialog). Renders a title, a body (string or nodes), and
@@ -44,12 +45,13 @@ export function ConfirmDialog({
   const ref = useRef<HTMLDivElement>(null);
   useFocusTrap(ref, true);
   const titleId = useId();
+  const backdrop = useBackdropClose(onCancel, !busy);
 
   // Portal to <body> + ui-confirm-backdrop (higher z-index): callers render this
   // from inside a settings/admin dialog, so an in-tree overlay at the modal
   // z-index could paint behind the dialog it should cover.
   return createPortal(
-    <div className="ui-modal-backdrop ui-confirm-backdrop" onClick={busy ? undefined : onCancel}>
+    <div className="ui-modal-backdrop ui-confirm-backdrop" {...backdrop}>
       <div className="confirm" ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} onClick={(e: MouseEvent) => e.stopPropagation()}>
         <h3 className="confirm-title" id={titleId}>{title}</h3>
         <div className="confirm-body">{children}</div>
