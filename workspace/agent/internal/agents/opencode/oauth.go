@@ -102,7 +102,7 @@ var oauthProbe = func() (string, bool) {
 
 // oauthClient is the short-timeout HTTP client for control calls (same character as
 // serveClient).
-var oauthClient = &http.Client{Timeout: 15 * time.Second}
+var oauthClient = &http.Client{Timeout: 15 * time.Second, Transport: authTransport{}}
 
 // --- daemon calls -----------------------------------------------------------
 
