@@ -94,8 +94,10 @@ WANT=ok;       v retain vault "$A/fs-1" "$A/fs-other$TAB$A/fs-1"
 WANT=no-plan;  v retain vault "$A/fs-1" "$A/fs-12"
 # another region/account/partition is another file system
 WANT=no-plan;  v retain vault "$A/fs-1" "arn:aws:elasticfilesystem:us-east-1:111122223333:file-system/fs-1"
-# a wildcard is not evaluated: not ok
-WANT=no-plan;  v retain vault "$A/fs-1" "arn:aws:elasticfilesystem:*:*:file-system/*"
+# a wildcard is not evaluated: unknown (it may cover the file system), never ok or missing
+WANT=unknown;  v retain vault "$A/fs-1" "arn:aws:elasticfilesystem:*:*:file-system/*"
+WANT=unknown;  v retain vault "$A/fs-1" "$A/*"
+WANT=ok;       v retain vault "$A/fs-1" "$A/* $A/fs-1"
 WANT=unknown;  v retain vault "$A/fs-1" "COMPLEX"
 WANT=ok;       v retain vault "$A/fs-1" "COMPLEX $A/fs-1"
 WANT=unknown;  v retain vault "$A/fs-1" UNREADABLE
@@ -143,6 +145,11 @@ STUB_VAULT=v STUB_PLAN=plan-1 STUB_SELECTIONS=sel-1 STUB_RESOURCES="$ARN" STUB_E
 says "could not confirm"
 STUB_VAULT=v STUB_PLAN=plan-1 STUB_SELECTIONS=sel-1 STUB_RESOURCES="$ARN" STUB_EXTRA='0\t0\t1' check 1
 says "could not confirm"
+
+echo "== case 7b: a wildcard Resources selection may cover the EFS -- unknown, no false alarm =="
+STUB_VAULT=v STUB_PLAN=plan-1 STUB_SELECTIONS=sel-1 \
+  STUB_RESOURCES="arn:aws:elasticfilesystem:ap-northeast-1:111122223333:file-system/*" check 1
+says "could not confirm"; saysnt "NO daily"; saysnt "has vault"
 
 echo "== case 8: the ingress stack is unreadable -- unknown, and no other stack is asked =="
 # The default name af-ecs-data may be a different deployment; the allowlist stub fails on any

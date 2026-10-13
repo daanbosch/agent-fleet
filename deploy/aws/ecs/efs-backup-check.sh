@@ -23,7 +23,7 @@
 #                         selection of the plan, plus the token COMPLEX for a selection that
 #                         has NotResources, Conditions or ListOfTags (not evaluated here);
 #                         "" when there is none; "UNREADABLE" when a read failed.
-# Only an exact ARN match counts. When in doubt this answers unknown, never ok: a missing
+# Only an exact ARN match counts; a wildcard resource is COMPLEX (unevaluated), not a miss. When in doubt this answers unknown, never ok: a missing
 # permission, or a selection this cannot evaluate, must not read as protected.
 af_efs_backup_verdict() {
   local persistence="$1" vault="$2" arn="$3" sel="$4" tok complex=0
@@ -34,7 +34,8 @@ af_efs_backup_verdict() {
   # shellcheck disable=SC2086  # word splitting on any whitespace is the tokenising
   for tok in $sel; do
     [ "$tok" = "$arn" ] && { echo ok; return 0; }
-    [ "$tok" = COMPLEX ] && complex=1
+    # A pattern is not evaluated, and it may well cover the file system: unknown, not "missing".
+    case "$tok" in COMPLEX|*[\*\?]*) complex=1 ;; esac
   done
   if [ "$complex" = 1 ]; then echo unknown; else echo no-plan; fi
 }
