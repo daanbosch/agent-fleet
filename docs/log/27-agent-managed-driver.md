@@ -891,3 +891,10 @@ other's path with 200 HTML) and routes v1 or v2 paths. v1 stays the default unti
 moves. Not mapped on v2: questions (they became forms), live provider config (`PATCH
 /api/experimental/config` takes `shell` only), provider errors and event semantics (#2103).
 The v2 turn path (`/prompt` then waiting on `/api/session/active`) was not run against a model.
+
+Follow-up to the note above (review of #2106). v2 sessions are created with an allow-all permission
+ruleset (measured: a later `POST /api/session/{id}/permission` answers `allow`); v2 events carry
+their body in `data`, which `handleServeEvent` now reads. A v2 turn that ends without being seen
+running is reported as unknown unless an assistant message newer than the input exists. The v2
+contract (`contract_serveapi_test.go`) runs by hand only: `opencode-contract.yml` covers the
+`opencode-ai` pins, not `@opencode/cli` (#2105 owns the drift side).

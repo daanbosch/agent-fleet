@@ -11,7 +11,8 @@ package opencode
 //     1.19.0 and 2.0.28: 401 without it, SSE included); serveapi.go's transport adds it to
 //     every client, and the file it is kept in lets a restarted Agent adopt the daemon. The
 //     TUI route never attaches to this daemon (buildProgram opens its own store), so no
-//     TUI path needs the password.
+//     TUI path needs the password. The password is not a boundary against the agent itself:
+//     the serve process environment and the file are readable by the same uid.
 //   - Major version: the pin is v1, but a probe also recognises v2 and the driver then
 //     routes to /api/* (serveapi.go holds the table and the measured differences).
 //   - Provider keys are env-injected (auth.go's env()), so a key change requires a
@@ -43,6 +44,9 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/status"
 )
+
+// serveStartTimeout bounds the wait for a spawned daemon to answer its probe.
+var serveStartTimeout = 20 * time.Second
 
 const serveAddrEnv = "AF_OPENCODE_SERVE_ADDR"
 
@@ -299,10 +303,26 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 	if err != nil {
 		return "", 0, err
 	}
-	password, err := newServePassword()
+	// Something already answers 401 on the port: a daemon whose password we lost. Spawning
+	// would only collide, and rotating the password would make the loss permanent.
+	if serveRejectsAuth(addr) {
+		return "", 0, fmt.Errorf("opencode serve が %s で認証を要求しています（パスワードが一致しません）。起動済みのデーモンを止めてください", addr)
+	}
+	// The candidate is only adopted for the probe below; the previous password comes back
+	// unless the new daemon proves it holds this one, so a failed start (or an Ensure that
+	// raced a slow-but-alive daemon) cannot lock the Agent out of it.
+	prevPassword := servePassword()
+	password, err := genServePassword()
 	if err != nil {
 		return "", 0, fmt.Errorf("opencode serve のパスワードを用意できません: %w", err)
 	}
+	useServePassword(password)
+	started := false
+	defer func() {
+		if !started {
+			useServePassword(prevPassword)
+		}
+	}()
 	cmd := exec.Command("opencode", "serve", "--hostname", host, "--port", port)
 	// Provider keys are env-injected (auth.go) — the same set a TUI launch gets, so
 	// managed turns authenticate identically. Re-keying requires a Restart (§7). The
@@ -315,10 +335,14 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 		return "", 0, fmt.Errorf("opencode serve の起動に失敗しました: %w", err)
 	}
 	defer tail.Settle() // after any failure snapshot; see StderrTail.Release
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(serveStartTimeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(200 * time.Millisecond)
 		if healthy(addr) {
+			started = true
+			if err := persistServePassword(password); err != nil {
+				log.Printf("opencode serve: password not saved, a restarted Agent cannot adopt this daemon: %v", err)
+			}
 			s.gen++
 			s.cmd = cmd
 			s.up = true

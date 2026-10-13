@@ -424,3 +424,164 @@ func TestV2TurnWaitsForActiveToClear(t *testing.T) {
 		t.Fatalf("agent body = %s", b)
 	}
 }
+
+// A daemon that misses one health probe must stay adoptable: the password a failed start
+// tried is forgotten, and the file keeps the one the live daemon holds.
+func TestFailedStartKeepsThePasswordOfTheLiveDaemon(t *testing.T) {
+	f := newFakeServe(t, 1, "P1")
+	if err := persistServePassword("P1"); err != nil {
+		t.Fatal(err)
+	}
+	var drop atomic.Bool
+	drop.Store(true)
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if drop.CompareAndSwap(true, false) {
+			http.Error(w, "busy", http.StatusServiceUnavailable) // one slow/failed probe
+			return
+		}
+		f.handle(w, r)
+	})
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "opencode"), []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	prev := serveStartTimeout
+	serveStartTimeout = time.Second
+	t.Cleanup(func() { serveStartTimeout = prev })
+
+	s := &Supervisor{}
+	if _, _, err := s.ensure(true); err == nil {
+		t.Fatal("the first Ensure should have failed on the dropped probe")
+	}
+	if got := servePassword(); got != "P1" {
+		t.Fatalf("password after the failed start = %q, want P1", got)
+	}
+	if b, _ := os.ReadFile(servePasswordFile()); strings.TrimSpace(string(b)) != "P1" {
+		t.Fatalf("password file = %q, want P1", b)
+	}
+	t.Cleanup(func() { s.mu.Lock(); s.up = false; s.mu.Unlock() })
+	if _, _, err := s.ensure(true); err != nil { // the daemon recovered: adopt it
+		t.Fatalf("second Ensure: %v", err)
+	}
+}
+
+func TestEnsureRefusesToSpawnOverADaemonItCannotAuthenticateTo(t *testing.T) {
+	newFakeServe(t, 1, "theirs")
+	resetServeAuth("ours")
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "spawned")
+	if err := os.WriteFile(filepath.Join(dir, "opencode"), []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if _, _, err := (&Supervisor{}).ensure(true); err == nil {
+		t.Fatal("ensure succeeded against a daemon that rejects our password")
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a second serve was spawned onto the occupied port")
+	}
+	if servePassword() != "ours" {
+		t.Fatal("the password was rotated")
+	}
+}
+
+func v2Fast(t *testing.T) {
+	t.Helper()
+	prev, prevStart := v2PollEvery, v2StartWithin
+	v2PollEvery, v2StartWithin = 2*time.Millisecond, 30*time.Millisecond
+	t.Cleanup(func() { v2PollEvery, v2StartWithin = prev, prevStart })
+}
+
+func v2Turn(t *testing.T, f *fakeServe) (*http.Response, error) {
+	t.Helper()
+	req, err := newTurnRequest(f.srv.URL, "ses_1", "/d", agents.TurnInput{Prompt: "x"}, agents.ThreadSettings{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sendTurn(f.srv.URL, "ses_1", "/d", req, agents.ThreadSettings{})
+}
+
+func TestV2TurnFailsWhenTheGenerationChanges(t *testing.T) {
+	f := newFakeServe(t, 2, "pw")
+	healthy(f.srv.URL)
+	v2Fast(t)
+	prev := supervisor
+	supervisor = &Supervisor{gen: 1}
+	t.Cleanup(func() { supervisor = prev })
+	var n atomic.Int32
+	f.active = func() string {
+		if n.Add(1) == 3 {
+			supervisor.mu.Lock()
+			supervisor.gen++
+			supervisor.mu.Unlock()
+		}
+		if n.Load() >= 3 {
+			return "" // the replacement daemon reports an empty list
+		}
+		return "ses_1"
+	}
+	if _, err := v2Turn(t, f); err == nil {
+		t.Fatal("a turn that outlived its daemon was reported as finished")
+	}
+}
+
+func TestV2TurnFailsAfterConsecutiveMisses(t *testing.T) {
+	f := newFakeServe(t, 2, "pw")
+	healthy(f.srv.URL)
+	v2Fast(t)
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/active") {
+			http.Error(w, "down", http.StatusBadGateway)
+			return
+		}
+		f.handle(w, r)
+	})
+	if _, err := v2Turn(t, f); err == nil {
+		t.Fatal("unreachable /active was reported as a finished turn")
+	}
+}
+
+func TestV2TurnNeverSeenRunningIsUnknownUnlessAnswered(t *testing.T) {
+	f := newFakeServe(t, 2, "pw")
+	healthy(f.srv.URL)
+	v2Fast(t)
+	answer := ""
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/prompt"):
+			_, _ = w.Write([]byte(`{"data":{"id":"msg_5"}}`))
+		case strings.HasSuffix(r.URL.Path, "/message"):
+			_, _ = w.Write([]byte(`{"data":[{"id":"` + answer + `","type":"assistant"}]}`))
+		default:
+			f.handle(w, r)
+		}
+	})
+	answer = "msg_4" // older than our input: not an answer to it
+	if _, err := v2Turn(t, f); err == nil {
+		t.Fatal("a turn that never ran was reported as completed")
+	}
+	answer = "msg_6"
+	res, err := v2Turn(t, f)
+	if err != nil {
+		t.Fatalf("a turn that finished before the first poll: %v", err)
+	}
+	res.Body.Close()
+}
+
+// v2 events carry their body in "data"; the permission auto-allow must still fire.
+func TestV2PermissionEventIsAutoAllowed(t *testing.T) {
+	f := newFakeServe(t, 2, "pw")
+	healthy(f.srv.URL)
+	h := &threadHandle{name: "perm-v2", addr: f.srv.URL, dir: "/d", ses: "ses_p", alive: true}
+	handlesMu.Lock()
+	prev := handles
+	handles = map[string]*threadHandle{"perm-v2": h}
+	handlesMu.Unlock()
+	t.Cleanup(func() { handlesMu.Lock(); handles = prev; handlesMu.Unlock() })
+	handleServeEvent([]byte(`{"id":"evt_1","type":"permission.asked","data":{"id":"per_1","sessionID":"ses_p"}}`))
+	k, ok := f.saw("POST", "/api/session/ses_p/permission/per_1/reply")
+	if !ok || f.bodies[k] != `{"decision":"always"}` {
+		t.Fatalf("no v2 permission reply: %v", f.reqs)
+	}
+}

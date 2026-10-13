@@ -76,24 +76,64 @@ func servePassword() string {
 	return pw
 }
 
-// newServePassword makes a fresh per-generation password and records it for requests and
-// for a later adopt. It is never logged.
-func newServePassword() (string, error) {
+// genServePassword makes a candidate password: 256 random bits, never logged.
+func genServePassword() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	p := hex.EncodeToString(b)
-	if err := os.MkdirAll(filepath.Dir(servePasswordFile()), 0o700); err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(servePasswordFile(), []byte(p+"\n"), 0o600); err != nil {
-		return "", err
-	}
+	return hex.EncodeToString(b), nil
+}
+
+// useServePassword switches the password requests carry, without touching the file.
+func useServePassword(p string) {
 	pwMu.Lock()
 	pw, pwLoaded = p, true
 	pwMu.Unlock()
+}
+
+// persistServePassword writes the file atomically (tmp + rename): a half-written file would
+// lock a restarted Agent out of the daemon exactly like a lost one.
+func persistServePassword(p string) error {
+	f := servePasswordFile()
+	if err := os.MkdirAll(filepath.Dir(f), 0o700); err != nil {
+		return err
+	}
+	tmp := f + ".tmp"
+	if err := os.WriteFile(tmp, []byte(p+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, f)
+}
+
+// newServePassword generates, adopts and persists a password in one step. ensure does not
+// use it: it must not forget the old password before the new daemon has proved itself.
+func newServePassword() (string, error) {
+	p, err := genServePassword()
+	if err != nil {
+		return "", err
+	}
+	if err := persistServePassword(p); err != nil {
+		return "", err
+	}
+	useServePassword(p)
 	return p, nil
+}
+
+// serveRejectsAuth reports that something on addr answers 401: a daemon is there and holds
+// a password this Agent does not have. Starting another one would only collide on the port.
+func serveRejectsAuth(addr string) bool {
+	for _, p := range []string{"/global/health", "/api/info"} {
+		res, err := serveClient.Get(addr + p)
+		if err != nil {
+			continue
+		}
+		res.Body.Close()
+		if res.StatusCode == http.StatusUnauthorized {
+			return true
+		}
+	}
+	return false
 }
 
 // authTransport adds Basic auth to every request that goes to the serve daemon. Wrapping
@@ -245,7 +285,12 @@ func forkBody(at string) (string, error) {
 // createSessionRequest returns the URL and body that create a session in dir.
 func createSessionRequest(addr, dir, title string) (string, []byte) {
 	if isV2() {
-		b, _ := json.Marshal(map[string]any{"title": title, "location": map[string]string{"directory": dir}})
+		// The allow-all ruleset is the --auto of the TUI: the container is the sandbox and
+		// nobody can answer a prompt from chat.
+		b, _ := json.Marshal(map[string]any{
+			"title": title, "location": map[string]string{"directory": dir},
+			"permissions": []map[string]string{{"action": "*", "resource": "*", "effect": "allow"}},
+		})
 		return addr + "/api/session", b
 	}
 	b, _ := json.Marshal(map[string]string{"title": title})
@@ -379,11 +424,25 @@ func sendTurn(addr, ses, dir string, req *http.Request, st agents.ThreadSettings
 	if err != nil || res.StatusCode >= 300 {
 		return res, err
 	}
+	promptBody, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	res.Body.Close()
+	var userMsg struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(promptBody, &userMsg)
+	gen := Serve().Generation()
 	seen, misses := false, 0
 	started := time.Now()
 	for {
 		m, err := activeSessions(addr, dir)
+		// A new generation means the daemon this turn ran on is gone, whatever the new one
+		// reports (v1 sees the same thing as a transport break). Checked after the read so
+		// that an empty list from the replacement is never taken for "finished".
+		if Serve().Generation() != gen {
+			return nil, errors.New("opencode serve was replaced during the turn")
+		}
 		switch {
 		case err != nil:
 			if misses++; misses >= v2PollMisses {
@@ -391,15 +450,51 @@ func sendTurn(addr, ses, dir string, req *http.Request, st agents.ThreadSettings
 			}
 		case m[ses] != "":
 			seen, misses = true, 0
-		case seen || time.Since(started) > v2StartWithin:
+		case seen:
 			// Provider failures are not visible here (v2 reports them on the event stream,
 			// #2103), so an ended turn reads as completed.
-			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(""))}, nil
+			return v2Done(), nil
+		case time.Since(started) > v2StartWithin:
+			// Never seen running: either it finished before the first poll or it never
+			// started. Only an assistant message newer than our input says which.
+			if v2Answered(addr, ses, userMsg.Data.ID) {
+				return v2Done(), nil
+			}
+			return nil, errors.New("opencode v2 turn state unknown: the session never ran")
 		default:
 			misses = 0
 		}
 		time.Sleep(v2PollEvery)
 	}
+}
+
+func v2Done() *http.Response {
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(""))}
+}
+
+// v2Answered reports whether the session holds an assistant message newer than after (the
+// id /prompt returned; message ids sort by time).
+func v2Answered(addr, ses, after string) bool {
+	res, err := serveClient.Get(addr + "/api/session/" + url.PathEscape(ses) + "/message?order=desc&limit=5")
+	if err != nil {
+		return false
+	}
+	defer res.Body.Close()
+	var w struct {
+		Data []struct {
+			ID   string `json:"id"`
+			Type string `json:"type"`
+		} `json:"data"`
+	}
+	if res.StatusCode != http.StatusOK || json.NewDecoder(res.Body).Decode(&w) != nil || after == "" {
+		return false
+	}
+	for _, m := range w.Data {
+		if m.Type == "assistant" && m.ID > after {
+			return true
+		}
+	}
+	return false
 }
 
 // applyV2Settings pushes the settings v1 carried in each message body: v2 keeps agent and

@@ -69,7 +69,8 @@ type managedDriver struct{ agentImpl }
 
 // Capabilities (§3.1). Steer here means "accepts a follow-up aimed at the running turn",
 // implemented as a driver-side queue (see the file comment). TUIAttach is an opencode
-// strength: `opencode attach` joins a running serve without stopping it (measured).
+// strength: `opencode attach` joins a running serve without stopping it (measured), given the
+// serve password (Basic auth, user `opencode`); nothing in this package attaches today.
 func (managedDriver) Capabilities() agents.Capabilities {
 	return agents.Capabilities{
 		ProcessModel:  "shared-daemon",
@@ -671,6 +672,10 @@ func (h *threadHandle) runTurn(t *agents.Taken) {
 		} else {
 			h.setState(agents.TurnFailed)
 		}
+	case !hasErr && asked && isV2():
+		// v2 ends an aborted turn without an error body, so the request we made is the only
+		// evidence; v1 reports it as an abort error (next case).
+		h.setState(agents.TurnCancelled)
 	case hasErr && turnErr.isAbort() && asked:
 		// We asked: a stop / halt / archive, or the drain before the daemon is swapped.
 		// The partial answer is in the parts and the user already knows why.
@@ -1177,9 +1182,14 @@ func handleServeEvent(data []byte) {
 		Payload    json.RawMessage `json:"payload"`
 		Type       string          `json:"type"`
 		Properties json.RawMessage `json:"properties"`
+		// v2 (/api/event) carries the body in "data" instead (measured 2.0.28).
+		Data json.RawMessage `json:"data"`
 	}
 	if json.Unmarshal(data, &ev) != nil {
 		return
+	}
+	if len(ev.Properties) == 0 && len(ev.Data) > 0 {
+		ev.Properties = ev.Data
 	}
 	if ev.Type == "" && len(ev.Payload) > 0 {
 		inner := ev
@@ -1254,9 +1264,16 @@ func handleServeEvent(data []byte) {
 	case "permission.asked":
 		var p struct {
 			ID        string `json:"id"`
+			RequestID string `json:"requestID"` // v2 may name it so (the spec's path parameter)
 			SessionID string `json:"sessionID"`
 		}
-		if json.Unmarshal(ev.Properties, &p) != nil || p.ID == "" {
+		if json.Unmarshal(ev.Properties, &p) != nil {
+			return
+		}
+		if p.ID == "" {
+			p.ID = p.RequestID
+		}
+		if p.ID == "" {
 			return
 		}
 		if h := handleBySes(p.SessionID); h != nil {
