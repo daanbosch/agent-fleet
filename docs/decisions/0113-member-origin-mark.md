@@ -139,3 +139,28 @@ Agent is therefore a key the session holds as well.
 - **A per-request token the Agent asks the CP to confirm.** Needs a CP round trip on every member write and a
   CP endpoint a session can also reach with its own credentials; the signature needs neither.
 - **An unsigned grace period for pin and revert.** Every legitimate caller is the CP, which signs.
+
+## Note 2026-10-13: the other Console memory writes, route by route (#2014)
+
+Decision 6 left the remaining Console-only memory writes unsigned. Each was traced to every caller
+(Console, the assistant's MCP tools in `mcpx`, the `af-memory` CLI, scripts, the Agent's own
+paths). The Agent's automatic import and write-back on the memory switch (#1972) is not built; when it
+is, it calls the importers in process, not through these routes.
+
+| Route | Callers | Decision |
+|---|---|---|
+| `POST /agents/memory/snapshots` | Console only; the automatic snapshot loop calls `memorySnapshot` in process | **Gated** (`memberOriginRoutes` + `memberorigin.Require`) |
+| `POST /agents/memory/import/apply` | Console only (`memoryTransfer.tsx`) | **Gated** |
+| `POST /agents/memory/restore` | Console and the assistant's `restore_memory_snapshot` MCP tool (`mcp_stdio.go`) | Open: a legitimate agent caller. Needs a separate Console-only path if it is to be gated |
+| `POST /agents/memory/import` | Console, a multipart upload | Open: the CP signs only `application/json` bodies up to 2 MiB, and changing the mark's coverage is out of scope here |
+| `POST /agents/memory/claude-import`, `/muse-import` | Console and `af-memory import` / `muse-import` (`afmemory.go`), documented for terminal use | Open: `af-memory` is a session caller. Whether it should lose the write is a product decision |
+| `POST /agents/memory/claude-export` | Console and `af-memory export` (`export.go`) | Open, same reason |
+
+Decision 8 therefore still holds for the imports: their `member` author is the route they came by.
+Gated routes are listed identically on both sides; `TestMemberOriginRoutesAgreeWithTheControlPlane`
+(Agent module) reads the CP's table and probes the real mux, so a one-sided change fails.
+
+`import/apply` buffers up to 2 MiB (the CP's own cap on a body it signs), not the save limit: its body lists
+every selected slug, and a large bundle can exceed the save limit.
+
+Follow-ups: #2076

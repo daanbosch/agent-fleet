@@ -129,3 +129,29 @@ AF メモリではこれが 3 か所で問題になる。`entries/pin` と `entr
 - **Agent が CP に確認する要求ごとのトークン。** メンバーの書き込みごとに CP への往復が要り、セッションも自分の
   資格情報で届く CP のエンドポイントが要る。署名はどちらも要らない。
 - **pin と revert の署名なし猶予期間。** 正当な呼び手はすべて CP で、CP は署名する。
+
+## 追記 2026-10-13: そのほかの Console 専用メモリ書き込みをルートごとに判定（#2014）
+
+決定 6 は、残りの Console 専用メモリ書き込みを署名なしのまま残した。各ルートの呼び出し元（Console、`mcpx` の
+アシスタント MCP ツール、`af-memory` CLI、スクリプト、Agent 自身の経路）をすべて洗い出した。メモリのスイッチに
+連動する Agent の自動インポート／書き戻し（#1972）は未実装で、実装されればこれらのルートではなく
+インポーターをプロセス内で呼ぶ。
+
+| ルート | 呼び出し元 | 判定 |
+|---|---|---|
+| `POST /agents/memory/snapshots` | Console のみ（自動スナップショットのループはプロセス内で `memorySnapshot` を呼ぶ） | **gate する**（`memberOriginRoutes` と `memberorigin.Require`） |
+| `POST /agents/memory/import/apply` | Console のみ（`memoryTransfer.tsx`） | **gate する** |
+| `POST /agents/memory/restore` | Console と、アシスタントの MCP ツール `restore_memory_snapshot`（`mcp_stdio.go`） | 開けたまま: 正当なエージェント側の呼び手がいる。gate するなら Console 専用の別パスが要る |
+| `POST /agents/memory/import` | Console（multipart アップロード） | 開けたまま: CP が署名するのは 2 MiB 以下の `application/json` 本文だけで、印の対象を変えるのは今回の範囲外 |
+| `POST /agents/memory/claude-import`、`/muse-import` | Console と、端末での利用が文書化されている `af-memory import` / `muse-import`（`afmemory.go`） | 開けたまま: `af-memory` はセッションからの呼び出し。書き込みを外すかは製品判断 |
+| `POST /agents/memory/claude-export` | Console と `af-memory export`（`export.go`） | 開けたまま（同じ理由） |
+
+したがってインポートについては決定 8 がそのまま成り立つ: インポートの作者 `member` は、来たルートを示すだけで
+検証済みの人ではない。gate したルートは CP と Agent で同一に並ぶ。
+`TestMemberOriginRoutesAgreeWithTheControlPlane`（Agent モジュール）は CP の表を構文木から読み、実際の mux を
+突いて確かめるので、片側だけの変更は失敗する。
+
+`import/apply` が読み込む本文は、保存の上限ではなく 2 MiB（CP が署名する本文の上限）まで。本文には選んだ slug が
+すべて並び、大きなバンドルでは保存の上限を超え得るため。
+
+Follow-ups: #2076

@@ -3,9 +3,12 @@ package memoryx
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin/memberorigintest"
 )
 
 // Drives the docs/log/39 P1 REST through the real route table (buildMux). A registration
@@ -70,14 +73,14 @@ func TestMemoryAPIRoundTrip(t *testing.T) {
 	// A manual snapshot appears in the listing. The second one changed nothing, so
 	// committed=false.
 	var created memorySnapshotResult
-	w = smokeDo(t, h, "POST", "/agents/memory/snapshots", "smoke-token", `{"trigger":"manual"}`)
+	w = markedDo(t, h, "POST", "/agents/memory/snapshots", `{"trigger":"manual"}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("manual snapshot: %d %s", w.Code, w.Body.String())
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil || !created.Committed || created.Rev == "" {
 		t.Fatalf("manual snapshot result: %+v err=%v", created, err)
 	}
-	w = smokeDo(t, h, "POST", "/agents/memory/snapshots", "smoke-token", `{}`)
+	w = markedDo(t, h, "POST", "/agents/memory/snapshots", `{}`)
 	var again memorySnapshotResult
 	if err := json.Unmarshal(w.Body.Bytes(), &again); err != nil || again.Committed {
 		t.Fatalf("unchanged manual snapshot committed: %+v err=%v", again, err)
@@ -111,7 +114,7 @@ func TestMemoryAPIRoundTrip(t *testing.T) {
 // path outside the declared roots are all refused.
 func TestMemoryAPIRejectsBadInput(t *testing.T) {
 	h := memoryAPIHandler(t)
-	if w := smokeDo(t, h, "POST", "/agents/memory/snapshots", "smoke-token", `{"trigger":"restore"}`); w.Code != http.StatusBadRequest {
+	if w := markedDo(t, h, "POST", "/agents/memory/snapshots", `{"trigger":"restore"}`); w.Code != http.StatusBadRequest {
 		t.Errorf("forged trigger: %d %s", w.Code, w.Body.String())
 	}
 	if w := smokeDo(t, h, "GET", "/agents/memory/snapshots?limit=-1", "smoke-token", ""); w.Code != http.StatusBadRequest {
@@ -121,7 +124,7 @@ func TestMemoryAPIRejectsBadInput(t *testing.T) {
 		t.Errorf("non-RFC3339 before: %d %s", w.Code, w.Body.String())
 	}
 	// From here on there is one snapshot in place, because without one the 404 comes first.
-	if w := smokeDo(t, h, "POST", "/agents/memory/snapshots", "smoke-token", ""); w.Code != http.StatusOK {
+	if w := markedDo(t, h, "POST", "/agents/memory/snapshots", ""); w.Code != http.StatusOK {
 		t.Fatalf("seed snapshot: %d %s", w.Code, w.Body.String())
 	}
 	for _, q := range []string{
@@ -141,6 +144,28 @@ func TestMemoryAPIRejectsBadInput(t *testing.T) {
 	} {
 		if w := smokeDo(t, h, "GET", "/agents/memory/diff"+q, "smoke-token", ""); w.Code != http.StatusBadRequest {
 			t.Errorf("diff%s: %d %s", q, w.Code, w.Body.String())
+		}
+	}
+}
+
+// The Console-only history writes answer a member-origin mark, and the routes an assistant tool or
+// the af-memory CLI calls stay open to AGENT_TOKEN alone (ADR 0113, 2026-10-13 note).
+func TestHistoryWritesGate(t *testing.T) {
+	memberorigintest.Install(t)
+	h := buildMux()
+	for _, p := range []string{"/agents/memory/snapshots", "/agents/memory/import/apply"} {
+		w := smokeDo(t, h, "POST", p, "smoke-token", `{}`)
+		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), memberorigin.CodeRequired) {
+			t.Errorf("POST %s without a mark: %d %s", p, w.Code, w.Body)
+		}
+	}
+	for _, p := range []string{
+		"/agents/memory/restore", "/agents/memory/import",
+		"/agents/memory/claude-import", "/agents/memory/muse-import", "/agents/memory/claude-export",
+	} {
+		w := smokeDo(t, h, "POST", p, "smoke-token", `not json`)
+		if strings.Contains(w.Body.String(), "member_origin") {
+			t.Errorf("POST %s is gated: %d %s", p, w.Code, w.Body)
 		}
 	}
 }

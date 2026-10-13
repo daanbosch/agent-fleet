@@ -23,6 +23,12 @@ import (
 // the largest of them is a save.
 const MemberWriteMaxRequest = agentMemSaveMaxRequest
 
+// HistoryApplyMaxRequest bounds the body memberorigin.Require buffers on import/apply. The body
+// names every selected slug, and a bundle may carry thousands of 255-byte ones, so the save limit
+// is too small; this is the CP's own cap on a body it will sign (memberOriginMaxBody), above which
+// nothing reaches the Agent anyway.
+const HistoryApplyMaxRequest = 2 << 20
+
 // agentMemMemberCaller is the Console as a caller for one scope. A project must already hold
 // memory: the Console cannot start a project, because it has no working copy to take the
 // project's root from.

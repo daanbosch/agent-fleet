@@ -456,9 +456,12 @@ func buildMux() *http.ServeMux {
 	// memory md into a bare repo, giving history, diffs, rollback to a chosen point and
 	// transfer between environments.
 	// control-plane/routes.go needs the same path registered: the CP is an explicit allowlist.
+	// Only the Console calls the manual snapshot and import/apply, so they answer only a
+	// member-origin mark (ADR 0113). restore stays open: the assistant's restore_memory_snapshot
+	// tool calls it. import takes a multipart upload the mark cannot cover.
 	mux.HandleFunc("GET /agents/memory/roots", memoryx.HandleMemoryRoots)
 	mux.HandleFunc("GET /agents/memory/snapshots", memoryx.HandleMemorySnapshots)
-	mux.HandleFunc("POST /agents/memory/snapshots", memoryx.HandleMemorySnapshotCreate)
+	mux.Handle("POST /agents/memory/snapshots", memberorigin.Require(memoryx.MemberWriteMaxRequest, http.HandlerFunc(memoryx.HandleMemorySnapshotCreate)))
 	mux.HandleFunc("GET /agents/memory/diff", memoryx.HandleMemoryDiff)
 	mux.HandleFunc("GET /agents/memory/tree", memoryx.HandleMemoryTree)
 	mux.HandleFunc("POST /agents/memory/restore", memoryx.HandleMemoryRestore)
@@ -467,7 +470,7 @@ func buildMux() *http.ServeMux {
 	// an independent lineage first, and only the selected range is then applied to live (P3).
 	mux.HandleFunc("GET /agents/memory/export", memoryx.HandleMemoryExport)
 	mux.HandleFunc("POST /agents/memory/import", memoryx.HandleMemoryImport)
-	mux.HandleFunc("POST /agents/memory/import/apply", memoryx.HandleMemoryImportApply)
+	mux.Handle("POST /agents/memory/import/apply", memberorigin.Require(memoryx.HistoryApplyMaxRequest, http.HandlerFunc(memoryx.HandleMemoryImportApply)))
 	// AF-owned agent memory (ADR 0108): what the af MCP memory tools call. Not proxied by the
 	// CP: agents reach it on loopback, and the Console's view of it is a separate set of routes.
 	mux.HandleFunc("GET /agents/memory/entries", memoryx.HandleAgentMemoryIndex)
