@@ -126,8 +126,8 @@ Terminal へ移せるのは停止後だけで（`409 codex_stop_first`）、共�
 - `GET /workspace/{stats,machine}`。
 - `GET /notifications` と `POST /notifications/ack` — CP が吸い上げる通知の送信箱。
 - `POST /work-items/fetch` — CP が持つ保存クエリの、タイマー駆動の取得。
-- `GET /sessions/catalog`・`GET /share-operations/{key}`・`GET /sessions/{name}/handoff-context`
-  — 共有と引き継ぎ。
+- `GET /sessions/catalog`・`GET /share-operations/{key}`・`GET /sessions/{name}/handoff-context`・
+  `POST /sessions/{name}/handoff-push` — 共有と引き継ぎ。
 - `POST /engine/usage` と `POST /engine/catalog-changed` — エンジンゲートウェイが数えたトークンと、
   モデルカタログの変更通知。
 - `POST /assistant-turns` — スケジュール実行のアシスタントのターン。

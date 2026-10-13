@@ -158,6 +158,11 @@ func (a sessionShareAPI) marksDelete(w http.ResponseWriter, r *http.Request, ide
 // authorization, the DTO and the rate limit; unlike it, an empty body is normal
 // (DELETE) and the decoded payload may be empty (204).
 func (a sessionShareAPI) ownerSend(ctx context.Context, res *resolved, method, path string, body []byte) (map[string]any, int, *apiError) {
+	return a.ownerSendWith(ctx, res, method, path, body, nil)
+}
+
+// ownerSendWith is ownerSend with extra request headers (a member-origin mark).
+func (a sessionShareAPI) ownerSendWith(ctx context.Context, res *resolved, method, path string, body []byte, hdr http.Header) (map[string]any, int, *apiError) {
 	var rdr io.Reader
 	if len(body) > 0 {
 		rdr = bytes.NewReader(body)
@@ -165,6 +170,11 @@ func (a sessionShareAPI) ownerSend(ctx context.Context, res *resolved, method, p
 	req, _ := http.NewRequestWithContext(ctx, method, res.rt.Endpoint()+path, rdr)
 	if len(body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for k, vs := range hdr {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
 	}
 	if res.rt.Token() != "" {
 		req.Header.Set("Authorization", "Bearer "+res.rt.Token())

@@ -76,6 +76,22 @@ type handoffOfferBody struct {
 	// AckWarning means "there are uncommitted changes and I am sending anyway". A blocked
 	// state cannot be overridden this way.
 	AckWarning bool `json:"ackWarning"`
+	// PushFirst is the owner's "push, then send" (#2072): when the gate blocks for a reason a
+	// push clears, the owner Agent pushes the current branch and the gate is asked again.
+	// It never overrides the gate; the offer goes only if the recomputed verdict passes.
+	PushFirst bool `json:"pushFirst"`
+	// PushExpect is what the owner was shown and confirmed: the push happens only while the
+	// working copy still matches it, and the offer only if the state after the push does too.
+	PushExpect *handoffPushExpect `json:"pushExpect,omitempty"`
+}
+
+// handoffPushExpect pins a push to the snapshot the owner confirmed. It is also the body of
+// the Agent's POST /sessions/{name}/handoff-push, which pushes exactly HeadSha to Branch on
+// PushRemote or refuses.
+type handoffPushExpect struct {
+	Branch     string `json:"branch"`
+	HeadSha    string `json:"headSha"`
+	PushRemote string `json:"pushRemote"`
 }
 
 func (a sessionHandoffAPI) seal(ctx context.Context, tenant string, body []byte) (string, string, error) {
@@ -340,6 +356,114 @@ func stripURLUserinfo(raw string) string {
 	return u.String()
 }
 
+// handoffPushClears mirrors the Agent's set of gate reasons a push can clear. It only
+// decides whether asking the Agent to push is worth a round trip; the Agent refuses any
+// other state itself and the verdict after the push is the Agent's again.
+func handoffPushClears(blocked string) bool {
+	return blocked == "unpushed_commits" || blocked == "no_upstream"
+}
+
+// pushThenRecheck is "push, then send": the owner Agent pushes the session's current branch
+// (POST /sessions/{name}/handoff-push) and the push gate is asked again, so the offer is
+// stored only on a verdict the Agent built after the push.
+//
+// The push is pinned to what the owner confirmed (exp): the Agent's state must still match it
+// before the push, the Agent pushes exactly that commit to that branch on that remote, and the
+// state after the push must match it again. Anything that would refuse the offer anyway is
+// checked BEFORE the push, so a click that cannot produce an offer publishes nothing. The
+// Agent call carries a member-origin mark (ADR 0113): AGENT_TOKEN is in every session's shell,
+// and the Agent accepts this route only on the CP's word that the owner asked. ok=false means
+// it has written the refusal.
+func (a sessionHandoffAPI) pushThenRecheck(w http.ResponseWriter, r *http.Request, res *resolved, c store.SharedSessionCatalog, hctx map[string]any, exp *handoffPushExpect, ack bool) (map[string]any, string, bool) {
+	fail := func(e *apiError) (map[string]any, string, bool) {
+		writeAPIErr(w, e)
+		return nil, "", false
+	}
+	changed := func(ctx map[string]any) (map[string]any, string, bool) {
+		writeHandoffErr(w, http.StatusConflict, "handoff_changed", "the working copy changed after it was shown; check it again", map[string]any{"context": ctx})
+		return nil, "", false
+	}
+	str := func(m map[string]any, k string) string { s, _ := m[k].(string); return s }
+	if exp == nil || exp.Branch == "" || exp.HeadSha == "" || exp.PushRemote == "" {
+		return fail(&apiError{http.StatusBadRequest, "bad_handoff", "pushFirst needs the branch, commit and remote that were confirmed"})
+	}
+	if str(hctx, "branch") != exp.Branch || str(hctx, "headSha") != exp.HeadSha || str(hctx, "pushRemote") != exp.PushRemote {
+		return changed(hctx)
+	}
+	if warn := str(hctx, "warning"); warn != "" && !ack {
+		writeHandoffErr(w, http.StatusConflict, "handoff_warning", "the working copy has uncommitted changes", map[string]any{"reason": warn, "context": hctx})
+		return nil, "", false
+	}
+	rows, err := a.mgr.store.ListSessionHandoffOffersByOwner(r.Context(), res.mv.MembershipID)
+	if err != nil {
+		return fail(internalErr(err))
+	}
+	for _, o := range rows {
+		if o.CatalogID == c.ID && o.Status == "pending" {
+			return fail(&apiError{http.StatusConflict, "handoff_already_pending", "this session already has a pending handoff"})
+		}
+	}
+	// The mark speaks for the workspace's own member; withResolved resolves the caller's own
+	// workspace, and this says so rather than relying on it.
+	if res.ws.MembershipID == "" || res.ws.MembershipID != res.mv.MembershipID {
+		return fail(&apiError{http.StatusForbidden, "forbidden", "only the workspace's own member can push from it"})
+	}
+	path := "/sessions/" + url.PathEscape(c.Name) + "/handoff-push"
+	body, _ := json.Marshal(exp)
+	mark, e := a.mgr.memberOriginSign(res, http.MethodPost, path, "", body, time.Now())
+	if e != nil {
+		return fail(e)
+	}
+	hdr := http.Header{}
+	if mark != "" {
+		hdr.Set(memberOriginHeader, mark)
+	}
+	payload, status, e := a.share.ownerSendWith(r.Context(), res, http.MethodPost, path, body, hdr)
+	if e != nil {
+		return fail(e)
+	}
+	audit := func(code int, detail string) {
+		_ = a.mgr.store.InsertAudit(context.Background(), store.AuditLog{ID: store.NewID(), TenantID: res.mv.TenantID,
+			ActorKind: "user", ActorID: res.ident.ID, Action: "session.handoff.push", Target: c.Name,
+			Detail: detail, HTTPStatus: code, At: store.NowTS()})
+	}
+	if status != http.StatusOK {
+		// The Agent's code and message pass through: the message is git's own report (a
+		// non-fast-forward, a protected branch, a pre-push hook), already scrubbed of
+		// credentials by the Agent, and it is what tells the owner what to do next.
+		pe, _ := payload["error"].(map[string]any)
+		code, msg := str(pe, "code"), str(pe, "message")
+		if status == http.StatusNotFound && code == "not_found" {
+			// Only the Agent's own "no such session"; an Agent without the route also answers
+			// 404, and that is a refused push, reported below with its code.
+			return fail(&apiError{http.StatusNotFound, "not_found", "no such session"})
+		}
+		if code == "" {
+			code = "push_failed"
+		}
+		if msg == "" {
+			msg = "the push failed"
+		}
+		audit(http.StatusConflict, "push refused: "+code)
+		writeHandoffErr(w, http.StatusConflict, "handoff_push_failed", msg, map[string]any{"reason": code, "context": hctx})
+		return nil, "", false
+	}
+	if pushed, _ := payload["pushed"].(bool); pushed {
+		audit(http.StatusOK, "pushed "+exp.HeadSha+" to "+exp.Branch+" on "+stripURLUserinfo(exp.PushRemote))
+	}
+	// The verdict the offer is judged on is asked for afresh, not taken from the push answer:
+	// the create path keeps exactly one source for it. It must still describe the commit that
+	// was pushed, on the branch and remote the offer will name.
+	fresh, blocked, e := a.handoffContext(r.Context(), res, c.Name)
+	if e != nil {
+		return fail(e)
+	}
+	if str(fresh, "branch") != exp.Branch || str(fresh, "headSha") != exp.HeadSha || str(fresh, "remote") != exp.PushRemote {
+		return changed(fresh)
+	}
+	return fresh, blocked, true
+}
+
 // create handles POST /api/session-handoff-offers.
 func (a sessionHandoffAPI) create(w http.ResponseWriter, r *http.Request, res *resolved) {
 	raw, err := io.ReadAll(io.LimitReader(r.Body, handoffPromptMaxBytes+handoffTitleMaxBytes+4096))
@@ -408,6 +532,21 @@ func (a sessionHandoffAPI) create(w http.ResponseWriter, r *http.Request, res *r
 	if e != nil {
 		writeAPIErr(w, e)
 		return
+	}
+	if in.PushFirst && in.PushExpect != nil && blocked == "" {
+		// The gate opened by itself since the modal was shown (someone else pushed). The owner
+		// still confirmed one branch and commit: an offer naming another is not what they sent.
+		str := func(k string) string { s, _ := hctx[k].(string); return s }
+		if str("branch") != in.PushExpect.Branch || str("headSha") != in.PushExpect.HeadSha || str("remote") != in.PushExpect.PushRemote {
+			writeHandoffErr(w, http.StatusConflict, "handoff_changed", "the working copy changed after it was shown; check it again", map[string]any{"context": hctx})
+			return
+		}
+	}
+	if blocked != "" && in.PushFirst && handoffPushClears(blocked) {
+		var ok bool
+		if hctx, blocked, ok = a.pushThenRecheck(w, r, res, c, hctx, in.PushExpect, in.AckWarning); !ok {
+			return
+		}
 	}
 	if blocked != "" {
 		writeHandoffErr(w, http.StatusConflict, "handoff_blocked", "the working copy is not in a handoff-able state", map[string]any{"reason": blocked, "context": hctx})

@@ -6,15 +6,18 @@
 // The session handed over is kind=claude, because only kinds with a transcript enter the
 // shared-session catalog, and a share or an offer needs a catalog row (a shell session is
 // refused with share_target_not_found). It is never driven, so no LLM credential is
-// needed: the git work happens in a shell session in the same working copy, and the
-// handoff proposal is posted to the session the way propose_session_handoff does.
+// needed: the commits are made in a shell session in the same working copy, the push is the
+// offer's own "push, then send", and the handoff proposal is posted to the session the way
+// propose_session_handoff does.
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMemberHandoff(t *testing.T) {
@@ -55,31 +58,62 @@ func TestMemberHandoff(t *testing.T) {
 	}, http.StatusCreated)
 	shareID, _ := share["id"].(string)
 
-	// --- the push gate (H-3, H-4) ---
+	// --- the push gate and "push, then send" (H-3, H-4, #2072) ---
+	// The owner never pushes from a shell: the offer's pushFirst has the owner's Agent push
+	// the branch and the gate is asked again before the offer is stored.
 	offerBody := map[string]any{"sessionName": src, "recipientUserKey": b.key, "title": title, "prompt": prompt}
 	rc := handoffRecipients(t, a, src)
 	if len(rc.members) != 1 || rc.members[0] != b.key {
 		t.Fatalf("handoff candidates = %v, want [%s]", rc.members, b.key)
 	}
 	requireGate(t, rc, "no_upstream", "") // a never-pushed branch has no upstream and ahead 0
-	requireOfferRefused(t, a, offerBody, "handoff_blocked", "no_upstream")
+	requirePushOffer(t, rc, repoURL, 1)
+	requireOfferRefused(t, a, offerBody, "handoff_blocked", "no_upstream") // the push is opt-in
+	remoteHead := func() string { return a.shell(aGit, "git ls-remote origin refs/heads/"+branch+" | cut -f1") }
 
-	a.shell(aGit, "git push -q -u origin HEAD")
-	requireGate(t, handoffRecipients(t, a, src), "", "")
-	a.shell(aGit, "echo two >> work.txt && git commit -q -am two")
-	requireGate(t, handoffRecipients(t, a, src), "unpushed_commits", "")
-	requireOfferRefused(t, a, offerBody, "handoff_blocked", "unpushed_commits")
-	a.shell(aGit, "git push -q")
+	// An offer the warning would refuse anyway publishes nothing.
+	a.shell(aGit, "echo dirty > scratch.txt")
+	rc = handoffRecipients(t, a, src)
+	requireOfferRefused(t, a, pushFirst(offerBody, rc), "handoff_warning", "uncommitted_changes")
+	if got := remoteHead(); got != "" {
+		t.Fatalf("origin has %s at %s after a refused offer; nothing may be pushed", branch, got)
+	}
+
+	// From a never-pushed branch: pushed, upstream recorded, offer carries the pushed head.
+	first := createPushOffer(t, a, pushFirst(offerBody, rc))
 	head := a.shell(aGit, "git rev-parse HEAD")
-	a.shell(aGit, "echo dirty >> work.txt")
-	requireGate(t, handoffRecipients(t, a, src), "", "uncommitted_changes")
-	requireOfferRefused(t, a, offerBody, "handoff_warning", "uncommitted_changes")
+	if first.HeadSha != head || remoteHead() != head {
+		t.Fatalf("first offer head %s, origin %s, want both at %s", first.HeadSha, remoteHead(), head)
+	}
+	if got := a.shell(aGit, "git rev-parse --abbrev-ref @{u}"); got != "origin/"+branch {
+		t.Fatalf("upstream after the push = %q, want origin/%s", got, branch)
+	}
+	a.call(http.MethodDelete, "/api/session-handoff-offers/"+first.ID, nil, http.StatusOK) // offer again below
+
+	// With unpushed commits on a tracked branch.
+	a.shell(aGit, "echo two >> work.txt && git commit -q -am two")
+	rc = handoffRecipients(t, a, src)
+	requireGate(t, rc, "unpushed_commits", "uncommitted_changes")
+	requirePushOffer(t, rc, repoURL, 1)
+	requireOfferRefused(t, a, withKey(offerBody, "ackWarning", true), "handoff_blocked", "unpushed_commits")
+	head = a.shell(aGit, "git rev-parse HEAD")
 
 	// --- the offer (H-5) ---
-	offer := createOffer(t, a, offerBody)
+	// A push for a snapshot that is no longer the working copy's publishes nothing.
+	stale := pushFirst(offerBody, rc)
+	stale["pushExpect"].(map[string]any)["headSha"] = first.HeadSha
+	requireOfferRefused(t, a, withKey(stale, "ackWarning", true), "handoff_changed", "")
+	if got := remoteHead(); got != first.HeadSha {
+		t.Fatalf("origin %s = %s after a stale push-then-send, want %s", branch, got, first.HeadSha)
+	}
+	offer := createPushOffer(t, a, pushFirst(offerBody, rc))
 	if offer.Status != "pending" || offer.Branch != branch || offer.HeadSha != head || offer.RepoRemote != repoURL {
 		t.Fatalf("offer = %+v, want pending %s@%s from %s", offer, branch, head, repoURL)
 	}
+	if got := remoteHead(); got != head {
+		t.Fatalf("origin %s = %s after push-then-send, want %s", branch, got, head)
+	}
+	requireGate(t, handoffRecipients(t, a, src), "", "uncommitted_changes")
 	a.stopWorkspace()
 
 	// --- B, workspace stopped, sees the offer and the notification (H-6, H-7) ---
@@ -221,6 +255,9 @@ func takeStateOf(v map[string]any) string {
 type recipientsView struct {
 	members          []string
 	blocked, warning string
+	pushRemote       string
+	pushCommits      int
+	branch, headSha  string
 }
 
 func handoffRecipients(t *testing.T, m *member, session string) recipientsView {
@@ -230,12 +267,18 @@ func handoffRecipients(t *testing.T, m *member, session string) recipientsView {
 			UserKey string `json:"userKey"`
 		} `json:"members"`
 		Context struct {
-			Blocked string `json:"blocked"`
-			Warning string `json:"warning"`
+			Blocked     string `json:"blocked"`
+			Warning     string `json:"warning"`
+			PushRemote  string `json:"pushRemote"`
+			PushCommits int    `json:"pushCommits"`
+			Branch      string `json:"branch"`
+			HeadSha     string `json:"headSha"`
 		} `json:"context"`
 	}
 	decode(t, m, http.MethodGet, "/api/sessions/"+session+"/handoff-recipients", nil, 200, &out)
-	v := recipientsView{blocked: out.Context.Blocked, warning: out.Context.Warning}
+	v := recipientsView{blocked: out.Context.Blocked, warning: out.Context.Warning,
+		pushRemote: out.Context.PushRemote, pushCommits: out.Context.PushCommits,
+		branch: out.Context.Branch, headSha: out.Context.HeadSha}
 	for _, c := range out.Members {
 		v.members = append(v.members, c.UserKey)
 	}
@@ -247,6 +290,31 @@ func requireGate(t *testing.T, v recipientsView, blocked, warning string) {
 	if v.blocked != blocked || v.warning != warning {
 		t.Fatalf("push gate = blocked %q warning %q, want blocked %q warning %q", v.blocked, v.warning, blocked, warning)
 	}
+}
+
+// requirePushOffer: what the modal's "push, then send" says it will publish.
+func requirePushOffer(t *testing.T, v recipientsView, remote string, commits int) {
+	t.Helper()
+	if v.pushRemote != remote || v.pushCommits != commits {
+		t.Fatalf("push offer = %q/%d, want %q/%d", v.pushRemote, v.pushCommits, remote, commits)
+	}
+}
+
+// pushFirst is body with the modal's "push, then send" ticked for the snapshot v shows.
+func pushFirst(body map[string]any, v recipientsView) map[string]any {
+	b := withKey(body, "pushFirst", true)
+	b["pushExpect"] = map[string]any{"branch": v.branch, "headSha": v.headSha, "pushRemote": v.pushRemote}
+	return b
+}
+
+// withKey is body with one more key, leaving body as it was.
+func withKey(body map[string]any, k string, v any) map[string]any {
+	out := map[string]any{}
+	for bk, bv := range body {
+		out[bk] = bv
+	}
+	out[k] = v
+	return out
 }
 
 // requireOfferRefused posts an offer and expects a 409 with code (and reason, when set).
@@ -271,6 +339,35 @@ func createOffer(t *testing.T, m *member, body map[string]any) handoffOffer {
 	if o.ID == "" {
 		t.Fatalf("offer created without an id")
 	}
+	return o
+}
+
+// createPushOffer is createOffer for a "push, then send". The Agent accepts the CP's
+// member-origin mark only once it has been up past its restart fence (about 30 s, ADR 0113),
+// and the scenario reaches the push seconds after starting the workspace; that refusal is
+// waited out, any other one fails with the Agent's own reason and message.
+func createPushOffer(t *testing.T, m *member, body map[string]any) handoffOffer {
+	t.Helper()
+	b := withKey(body, "ackWarning", true)
+	var o handoffOffer
+	waitFor(t, 90*time.Second, m.name+" push, then send", func() (bool, string) {
+		code, raw := m.do(http.MethodPost, "/api/session-handoff-offers", b)
+		if code == http.StatusCreated {
+			if err := json.Unmarshal(raw, &o); err != nil || o.ID == "" {
+				t.Fatalf("offer created without an id: %s", truncate(raw))
+			}
+			return true, ""
+		}
+		var env map[string]any
+		_ = json.Unmarshal(raw, &env)
+		c, reason := apiErr(env)
+		e, _ := env["error"].(map[string]any)
+		if c == "handoff_push_failed" && reason == "member_origin_unavailable" {
+			return false, fmt.Sprintf("%v", e["message"])
+		}
+		t.Fatalf("push, then send refused: %d %s/%s: %v", code, c, reason, e["message"])
+		return false, ""
+	})
 	return o
 }
 
