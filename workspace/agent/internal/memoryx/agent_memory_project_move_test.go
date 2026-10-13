@@ -40,17 +40,51 @@ func moveOrphan(t *testing.T, home string, names ...string) (orphan string, toID
 	return orphan, agentMemCallerT(t, "claude-main").Project.ID
 }
 
-func moveBody(from, to, policy string, names ...string) string {
-	b, _ := json.Marshal(agentMemMoveReq{From: from, To: to, Collision: policy, Names: names})
+// movePreviewItems reads the preview over HTTP, as the Console does, and returns the items for
+// names (a name the preview does not have is sent as a made-up item).
+func movePreviewItems(t *testing.T, from, to, policy string, names ...string) []agentMemMoveReqItem {
+	t.Helper()
+	q := "from=" + from + "&to=" + to
+	if policy != "" {
+		q += "&collision=" + policy
+	}
+	code, b := memberDo(t, http.MethodGet, "/agents/memory/entries/project-move-preview?"+q, nil)
+	var pv agentMemMovePreview
+	if code != http.StatusOK || json.Unmarshal(b, &pv) != nil {
+		// A refused preview: send made-up items so the apply's own refusal is what is tested.
+		pv = agentMemMovePreview{}
+	}
+	var out []agentMemMoveReqItem
+	for _, n := range names {
+		it := agentMemMoveReqItem{Name: n, Status: "move", Revision: 1}
+		for _, p := range pv.Items {
+			if p.Name == n {
+				it = agentMemMoveReqItem{Name: p.Name, NewName: p.NewName, Status: p.Status, Revision: p.Revision}
+			}
+		}
+		out = append(out, it)
+	}
+	return out
+}
+
+func moveBody(from, to, policy string, items []agentMemMoveReqItem) string {
+	b, _ := json.Marshal(agentMemMoveReq{From: from, To: to, Collision: policy, Items: items})
 	return string(b)
 }
 
-func moveDo(t *testing.T, from, to, policy string, names ...string) (int, agentMemMoveResult, []byte) {
+// moveDoItems posts a move built from items previewed earlier.
+func moveDoItems(t *testing.T, from, to, policy string, items []agentMemMoveReqItem) (int, agentMemMoveResult, []byte) {
 	t.Helper()
-	w := markedDo(t, buildMux(), http.MethodPost, "/agents/memory/entries/project-move?project="+from, moveBody(from, to, policy, names...))
+	w := markedDo(t, buildMux(), http.MethodPost, "/agents/memory/entries/project-move?project="+from, moveBody(from, to, policy, items))
 	var res agentMemMoveResult
 	_ = json.Unmarshal(w.Body.Bytes(), &res)
 	return w.Code, res, w.Body.Bytes()
+}
+
+// moveDo previews and then applies the named memories, as the Console does.
+func moveDo(t *testing.T, from, to, policy string, names ...string) (int, agentMemMoveResult, []byte) {
+	t.Helper()
+	return moveDoItems(t, from, to, policy, movePreviewItems(t, from, to, policy, names...))
 }
 
 func projectNames(t *testing.T, id string) map[string]agentMemEntry {
@@ -362,7 +396,7 @@ func TestAgentMemoryMoveRefusals(t *testing.T) {
 	if code, _, b := moveDo(t, orphan, to, "overwrite", "a"); code != http.StatusBadRequest {
 		t.Fatalf("unknown policy: %d %s", code, b)
 	}
-	if code, _, b := moveDo(t, orphan, to, ""); code != http.StatusBadRequest {
+	if code, _, b := moveDoItems(t, orphan, to, "", nil); code != http.StatusBadRequest {
 		t.Fatalf("no names: %d %s", code, b)
 	}
 	if code, _, b := moveDo(t, orphan, to, "", "../x"); code != http.StatusBadRequest {
@@ -377,9 +411,10 @@ func TestAgentMemoryMoveRefusals(t *testing.T) {
 
 	// A memory updated between plan and write is skipped by the per-memory check.
 	plan := func() (agentMemMovePlan, agentMemMoveItem) {
+		live, complete := agentMemLiveProjects()
 		agentMemMu.RLock()
 		defer agentMemMu.RUnlock()
-		p, err := agentMemMovePlanLocked(orphan, to, "", agentMemLiveProjects())
+		p, err := agentMemMovePlanLocked(orphan, to, "", live, complete)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -430,8 +465,9 @@ func TestAgentMemoryMoveLeavesWithheldFilesAlone(t *testing.T) {
 func TestAgentMemoryMoveNeverOverwritesALateArrival(t *testing.T) {
 	home, _, _ := agentMemTestEnv(t)
 	orphan, to := moveOrphan(t, home, "a")
+	live, complete := agentMemLiveProjects()
 	agentMemMu.RLock()
-	p, err := agentMemMovePlanLocked(orphan, to, "", agentMemLiveProjects())
+	p, err := agentMemMovePlanLocked(orphan, to, "", live, complete)
 	agentMemMu.RUnlock()
 	if err != nil || len(p.Items) != 1 || p.Items[0].Status != "move" {
 		t.Fatalf("plan: %+v %v", p, err)
@@ -446,5 +482,158 @@ func TestAgentMemoryMoveNeverOverwritesALateArrival(t *testing.T) {
 	}
 	if projectNames(t, to)["a"].Body != "late" || len(projectNames(t, orphan)) != 1 {
 		t.Fatal("the target's memory was overwritten or the source lost its copy")
+	}
+}
+
+// The apply is bound to the preview over HTTP: a memory updated after the preview is not moved
+// on the strength of the old screen. Without the revision in the request the apply planned from
+// the newest text and moved a revision nobody had seen.
+func TestAgentMemoryMoveApplyIsBoundToThePreview(t *testing.T) {
+	home, _, _ := agentMemTestEnv(t)
+	orphan, to := moveOrphan(t, home, "a")
+	items := movePreviewItems(t, orphan, to, "", "a")
+	oc := agentMemCallerT(t, "claude-main")
+	oc.Project = agentMemProjectInfo(orphan)
+	if _, err := agentMemSave(oc, agentMemSaveReq{Name: "a", Description: "newer", Type: "project", Body: "unseen", Revision: 1}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	code, res, b := moveDoItems(t, orphan, to, "", items)
+	if code != http.StatusOK || res.Results[0].Result != "skipped" || res.Results[0].Reason != "changed" {
+		t.Fatalf("apply of a stale preview: %d %s", code, b)
+	}
+	if src := projectNames(t, orphan); src["a"].Body != "unseen" || len(projectNames(t, to)) != 0 {
+		t.Fatalf("source %v, target %v", src, projectNames(t, to))
+	}
+}
+
+// A rename target the member confirmed is the one used: a name that was taken after the preview
+// does not make the apply pick another one.
+func TestAgentMemoryMoveRenameIsBoundToThePreview(t *testing.T) {
+	home, _, _ := agentMemTestEnv(t)
+	main := agentMemCallerT(t, "claude-main")
+	if _, err := agentMemSave(main, agentMemSaveReq{Name: "a", Description: "mine", Type: "project", Body: "mine"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	orphan, to := moveOrphan(t, home, "a")
+	items := movePreviewItems(t, orphan, to, "rename", "a")
+	if items[0].NewName != "a-moved" {
+		t.Fatalf("preview = %+v", items)
+	}
+	if _, err := agentMemSave(main, agentMemSaveReq{Name: "a-moved", Description: "late", Type: "project", Body: "late"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	code, res, b := moveDoItems(t, orphan, to, "rename", items)
+	if code != http.StatusOK || res.Results[0].Result != "skipped" {
+		t.Fatalf("apply: %d %s", code, b)
+	}
+	if _, ok := projectNames(t, to)["a-moved-2"]; ok || len(projectNames(t, orphan)) != 1 {
+		t.Fatal("the apply moved under a name the member did not confirm")
+	}
+}
+
+// The pin and the import provenance are part of what makes two copies the same. A pinned source
+// beside an unpinned target copy with the same text is a collision, and its rename keeps the pin.
+func TestAgentMemoryMovePinAndProvenanceAreNotLost(t *testing.T) {
+	home, _, _ := agentMemTestEnv(t)
+	main := agentMemCallerT(t, "claude-main")
+	now := time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC)
+	agentMemSaveN(t, main, "a", "project", now)
+	orphan, to := moveOrphan(t, home, "a")
+	if _, err := agentMemPin(agentMemPinReq{Scope: "project", Project: orphan, Name: "a", Pinned: true}, now); err != nil {
+		t.Fatal(err)
+	}
+	_, b := memberDo(t, http.MethodGet, "/agents/memory/entries/project-move-preview?from="+orphan+"&to="+to, nil)
+	var pv agentMemMovePreview
+	if json.Unmarshal(b, &pv) != nil || pv.Counts["collision"] != 1 || pv.Counts["same"] != 0 {
+		t.Fatalf("a pinned source is not the same as an unpinned copy: %s", b)
+	}
+	code, res, b := moveDo(t, orphan, to, "rename", "a")
+	if code != http.StatusOK || res.Results[0].Result != "renamed" {
+		t.Fatalf("rename: %d %s", code, b)
+	}
+	if dst := projectNames(t, to); !dst["a-moved"].Pinned || dst["a"].Pinned {
+		t.Fatalf("pin after the move: %+v", dst)
+	}
+
+	// Provenance: the same text with another import source is a collision too.
+	if !agentMemMoveSame(agentMemEntry{Body: "x", Source: "s", SourceHash: "h"}, agentMemEntry{Body: "x", Source: "s", SourceHash: "h"}) ||
+		agentMemMoveSame(agentMemEntry{Body: "x", Source: "s", SourceHash: "h"}, agentMemEntry{Body: "x"}) {
+		t.Fatal("import provenance must take part in the comparison")
+	}
+}
+
+// A live working copy nested below ~/repos, with its git metadata elsewhere, keeps its project
+// from being called orphaned. The search used to read only the first level, saw "group" as a
+// different project and let the move take the live project's memories out.
+func TestAgentMemoryMoveRefusesAProjectWithANestedLiveWorktree(t *testing.T) {
+	home, _, _ := agentMemTestEnv(t)
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	old := filepath.Join(home, "repos", "old")
+	memoryMkdirAll(t, old)
+	memoryMkdirAll(t, filepath.Join(home, "git-metadata"))
+	git(old, "init", "--quiet", "-b", "main", "--separate-git-dir="+filepath.Join(home, "git-metadata", "old"))
+	git(old, "commit", "--quiet", "--allow-empty", "-m", "init")
+	session.WriteMeta(session.Meta{Name: "claude-old", Dir: old, Kind: "claude"})
+	c := agentMemCallerT(t, "claude-old")
+	agentMemSaveN(t, c, "a", "project", time.Now())
+	nested := filepath.Join(home, "repos", "group", "live")
+	memoryMkdirAll(t, filepath.Dir(nested))
+	git(old, "worktree", "add", "--quiet", "-b", "nested", nested)
+	if err := os.RemoveAll(old); err != nil {
+		t.Fatal(err)
+	}
+	if p := agentMemProjectFor(nested); p == nil || p.ID != c.Project.ID {
+		t.Fatalf("setup: the nested worktree is not the same project: %+v", p)
+	}
+	_, to := c.Project.ID, agentMemCallerT(t, "claude-main").Project.ID
+	if code, _, b := moveDo(t, c.Project.ID, to, "", "a"); code != http.StatusConflict {
+		t.Fatalf("moving out of a project with a live nested worktree: %d %s", code, b)
+	}
+	out, _ := agentMemMemberProjects()
+	for _, r := range out.Projects {
+		if r.Project.ID == c.Project.ID && r.Orphaned {
+			t.Fatal("listed as orphaned")
+		}
+	}
+	// A directory deeper than the search reaches makes the answer incomplete: nothing is orphaned.
+	deep := filepath.Join(home, "repos", "d1", "d2", "d3", "d4")
+	memoryMkdirAll(t, deep)
+	if _, complete := agentMemLiveProjects(); complete {
+		t.Fatal("a search that did not reach everything must say so")
+	}
+}
+
+// A move that breaks off answers with what was done: the finished memory, the half-done one with
+// its create commit, and the ones not tried.
+func TestAgentMemoryMoveStoppedAnswerCarriesTheResults(t *testing.T) {
+	home, _, _ := agentMemTestEnv(t)
+	orphan, to := moveOrphan(t, home, "a", "b", "c")
+	calls := 0
+	old := agentMemMoveStep
+	agentMemMoveStep = func(string, string) error {
+		if calls++; calls == 2 {
+			return errors.New("injected stop")
+		}
+		return nil
+	}
+	t.Cleanup(func() { agentMemMoveStep = old })
+	code, res, b := moveDo(t, orphan, to, "", "a", "b", "c")
+	if code != http.StatusInternalServerError || res.Stopped != "b" || len(res.Pending) != 1 || res.Pending[0] != "c" {
+		t.Fatalf("stopped answer: %d %s", code, b)
+	}
+	if len(res.Results) != 2 || res.Results[0].Result != "moved" || res.Results[1].Result != "partial" || res.Results[1].Commit == "" {
+		t.Fatalf("results = %+v", res.Results)
+	}
+	if !strings.Contains(string(b), `"error"`) || !strings.Contains(string(b), "nothing was lost") {
+		t.Fatalf("the error is missing: %s", b)
 	}
 }

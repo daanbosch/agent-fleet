@@ -32,6 +32,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/gitx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 )
 
 const (
@@ -109,20 +110,76 @@ func agentMemRootGoneProbe(repos, rel string) bool {
 	return false
 }
 
-// agentMemLiveProjects maps the working copies under ~/repos to their projects, by id. A
-// project with a live working copy is never orphaned, whatever its recorded root says.
-func agentMemLiveProjects() map[string]*agentMemProject {
-	out := map[string]*agentMemProject{}
-	ents, _ := os.ReadDir(gitx.ReposRoot())
-	for _, e := range ents {
-		if !e.IsDir() {
-			continue
-		}
-		if p := agentMemProjectFor(filepath.Join(gitx.ReposRoot(), e.Name())); p != nil && out[p.ID] == nil {
-			out[p.ID] = p
+// Bounds of the search for live working copies: how deep under ~/repos a repository may sit and how
+// many directories one search reads. Past either, the answer is "incomplete" and nothing is
+// called orphaned, because a live working copy may have been missed.
+const (
+	agentMemLiveDepth  = 3
+	agentMemLiveBudget = 3000
+)
+
+// agentMemLiveProjects maps the working copies to their projects, by id: every directory under
+// ~/repos (nested ones and symlinked ones included, down to agentMemLiveDepth) that holds a
+// .git or .svn entry, and every session's working directory. A project with a live working
+// copy is never orphaned, whatever its recorded root says. complete=false says the search was cut
+// short by its bounds.
+func agentMemLiveProjects() (live map[string]*agentMemProject, complete bool) {
+	live = map[string]*agentMemProject{}
+	add := func(dir string) {
+		if p := agentMemProjectFor(dir); p != nil && live[p.ID] == nil {
+			live[p.ID] = p
 		}
 	}
-	return out
+	complete = true
+	type node struct {
+		dir   string
+		depth int
+	}
+	queue := []node{{gitx.ReposRoot(), 0}}
+	reads := 0
+	for len(queue) > 0 {
+		n := queue[0]
+		queue = queue[1:]
+		if reads++; reads > agentMemLiveBudget {
+			complete = false
+			break
+		}
+		ents, err := os.ReadDir(n.dir)
+		if err != nil {
+			if n.depth == 0 {
+				complete = false
+			}
+			continue
+		}
+		for _, e := range ents {
+			d := filepath.Join(n.dir, e.Name())
+			if st, err := os.Stat(d); err != nil || !st.IsDir() {
+				continue
+			}
+			if _, err := os.Lstat(filepath.Join(d, ".git")); err == nil {
+				add(d)
+				continue
+			}
+			if _, err := os.Lstat(filepath.Join(d, ".svn")); err == nil {
+				add(d)
+				continue
+			}
+			if n.depth+1 < agentMemLiveDepth {
+				queue = append(queue, node{d, n.depth + 1})
+			} else if sub, err := os.ReadDir(d); err != nil || len(sub) > 0 {
+				// A directory at the depth limit with content may hold a repository below it.
+				complete = false
+			}
+		}
+	}
+	for _, m := range session.ListMetas() {
+		if m.Dir != "" {
+			if _, err := os.Stat(m.Dir); err == nil {
+				add(m.Dir)
+			}
+		}
+	}
+	return live, complete
 }
 
 // agentMemProjectRow is one project of the store as the Console lists it.
@@ -143,15 +200,15 @@ type agentMemProjectsWire struct {
 }
 
 // agentMemOrphaned judges one stored project from its record.
-func agentMemOrphaned(p *agentMemProject, live map[string]*agentMemProject) bool {
-	return live[p.ID] == nil && agentMemRootGone(p.Root)
+func agentMemOrphaned(p *agentMemProject, live map[string]*agentMemProject, complete bool) bool {
+	return complete && live[p.ID] == nil && agentMemRootGone(p.Root)
 }
 
 // agentMemMemberProjects lists every project that holds memory or has a working copy, orphaned
 // ones flagged.
 func agentMemMemberProjects() (agentMemProjectsWire, error) {
 	out := agentMemProjectsWire{Projects: []agentMemProjectRow{}}
-	live := agentMemLiveProjects()
+	live, complete := agentMemLiveProjects()
 	seen := map[string]bool{}
 	agentMemMu.RLock()
 	if dir, err := agentMemCheckDir("projects", false); err == nil {
@@ -182,7 +239,7 @@ func agentMemMemberProjects() (agentMemProjectsWire, error) {
 	for i := range out.Projects {
 		r := &out.Projects[i]
 		// A project with nothing to move is not offered as an orphan.
-		r.Orphaned = (r.Count > 0 || r.Withheld > 0) && agentMemOrphaned(r.Project, live)
+		r.Orphaned = (r.Count > 0 || r.Withheld > 0) && agentMemOrphaned(r.Project, live, complete)
 	}
 	sort.Slice(out.Projects, func(i, j int) bool {
 		a, b := out.Projects[i], out.Projects[j]
@@ -253,7 +310,10 @@ func agentMemMoveBadReq(format string, args ...any) error {
 }
 
 func agentMemMoveSame(a, b agentMemEntry) bool {
-	if a.Description != b.Description || a.Type != b.Type || strings.TrimRight(a.Body, "\n") != strings.TrimRight(b.Body, "\n") {
+	// The pin and the import provenance are part of the memory: a copy that lacks them is not the
+	// same, or removing the source would drop the member's pin or the import's source hash.
+	if a.Description != b.Description || a.Type != b.Type || strings.TrimRight(a.Body, "\n") != strings.TrimRight(b.Body, "\n") ||
+		a.Pinned != b.Pinned || a.Source != b.Source || a.SourceHash != b.SourceHash {
 		return false
 	}
 	ka, kb := append([]string(nil), a.Kinds...), append([]string(nil), b.Kinds...)
@@ -274,7 +334,7 @@ func agentMemMoveRenamed(name string, n int) string {
 }
 
 // agentMemMovePlanLocked builds the plan with agentMemMu held (read or write).
-func agentMemMovePlanLocked(fromID, toID, policy string, live map[string]*agentMemProject) (agentMemMovePlan, error) {
+func agentMemMovePlanLocked(fromID, toID, policy string, live map[string]*agentMemProject, complete bool) (agentMemMovePlan, error) {
 	var plan agentMemMovePlan
 	switch policy {
 	case "", agentMemMoveSkip, agentMemMoveRename:
@@ -294,7 +354,7 @@ func agentMemMovePlanLocked(fromID, toID, policy string, live map[string]*agentM
 		return plan, err
 	}
 	from := agentMemProjectInfo(fromID)
-	if !agentMemOrphaned(from, live) {
+	if !agentMemOrphaned(from, live, complete) {
 		return plan, memoryErrf(http.StatusConflict, errCodeMemoryConflict,
 			"that project is not orphaned: its working copy still exists, or cannot be shown to be gone")
 	}
@@ -379,10 +439,10 @@ func agentMemMovePlanLocked(fromID, toID, policy string, live map[string]*agentM
 
 // agentMemMovePreviewFor is the read-only preview.
 func agentMemMovePreviewFor(fromID, toID, policy string) (agentMemMovePreview, error) {
-	live := agentMemLiveProjects()
+	live, complete := agentMemLiveProjects()
 	agentMemMu.RLock()
 	defer agentMemMu.RUnlock()
-	plan, err := agentMemMovePlanLocked(fromID, toID, policy, live)
+	plan, err := agentMemMovePlanLocked(fromID, toID, policy, live, complete)
 	return plan.agentMemMovePreview, err
 }
 
@@ -397,20 +457,32 @@ func HandleAgentMemoryMemberMovePreview(w http.ResponseWriter, r *http.Request) 
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
-// agentMemMoveReq moves the named memories of an orphaned project. Collision is required once a
-// name is taken: the member chooses, the server never does.
+// agentMemMoveReq moves the memories the member previewed. Collision is required once a name is
+// taken: the member chooses, the server never does. Each item carries what the preview showed
+// (the source revision, the status and the new name); the plan is made again at apply time and an
+// item whose plan differs stays in the source, so the apply is bound to the preview.
 type agentMemMoveReq struct {
-	From      string   `json:"from"`
-	To        string   `json:"to"`
-	Collision string   `json:"collision"`
-	Names     []string `json:"names"`
+	From      string                `json:"from"`
+	To        string                `json:"to"`
+	Collision string                `json:"collision"`
+	Items     []agentMemMoveReqItem `json:"items"`
+}
+
+// agentMemMoveReqItem is one previewed memory.
+type agentMemMoveReqItem struct {
+	Name     string `json:"name"`
+	NewName  string `json:"newName,omitempty"`
+	Status   string `json:"status"`
+	Revision int    `json:"revision"`
 }
 
 // agentMemMoveResultItem is what became of one requested memory.
 type agentMemMoveResultItem struct {
 	Name    string `json:"name"`
 	NewName string `json:"newName,omitempty"`
-	// Result is moved | merged (the target already held this text) | renamed | skipped.
+	// Result is moved | merged (the target already held this text) | renamed | skipped, or, for
+	// the memory a stopped move broke off at, partial (its copy is in the target, the source
+	// copy is still there; Commit is the create) | failed (nothing was written).
 	Result string `json:"result"`
 	// Reason says why a memory stayed: collision | changed | exists | secret.
 	Reason string `json:"reason,omitempty"`
@@ -419,17 +491,22 @@ type agentMemMoveResultItem struct {
 
 type agentMemMoveResult struct {
 	Results []agentMemMoveResultItem `json:"results"`
+	// Stopped names the memory a failure broke the move off at; Pending are the requested ones
+	// after it, not attempted. Both are empty when the request ran to the end.
+	Stopped string   `json:"stopped,omitempty"`
+	Pending []string `json:"pending,omitempty"`
 }
 
-// agentMemMove moves the requested memories, up to agentMemMoveBatch of them.
+// agentMemMove moves the requested memories, up to agentMemMoveBatch of them. When a memory fails
+// the result so far is returned with the error, so the caller can say what was done.
 func agentMemMove(req agentMemMoveReq, now time.Time) (agentMemMoveResult, error) {
 	out := agentMemMoveResult{Results: []agentMemMoveResultItem{}}
-	if len(req.Names) == 0 || len(req.Names) > agentMemMoveBatch {
-		return out, agentMemMoveBadReq("names must hold 1 to %d memory names", agentMemMoveBatch)
+	if len(req.Items) == 0 || len(req.Items) > agentMemMoveBatch {
+		return out, agentMemMoveBadReq("items must hold 1 to %d memories", agentMemMoveBatch)
 	}
-	for _, n := range req.Names {
-		if !agentMemValidName(n) {
-			return out, agentMemMoveBadReq("names holds a name that is not a memory name")
+	for _, n := range req.Items {
+		if !agentMemValidName(n.Name) || (n.NewName != "" && !agentMemValidName(n.NewName)) {
+			return out, agentMemMoveBadReq("items holds a name that is not a memory name")
 		}
 	}
 	if !agentMemMoveMu.TryLock() {
@@ -437,9 +514,9 @@ func agentMemMove(req agentMemMoveReq, now time.Time) (agentMemMoveResult, error
 	}
 	defer agentMemMoveMu.Unlock()
 
-	live := agentMemLiveProjects()
+	live, complete := agentMemLiveProjects()
 	agentMemMu.RLock()
-	plan, err := agentMemMovePlanLocked(req.From, req.To, req.Collision, live)
+	plan, err := agentMemMovePlanLocked(req.From, req.To, req.Collision, live, complete)
 	agentMemMu.RUnlock()
 	if err != nil {
 		return out, err
@@ -449,22 +526,33 @@ func agentMemMove(req agentMemMoveReq, now time.Time) (agentMemMoveResult, error
 		byName[it.Name] = it
 	}
 	var items []agentMemMoveItem
-	for _, n := range req.Names {
-		it, ok := byName[n]
-		if !ok {
-			out.Results = append(out.Results, agentMemMoveResultItem{Name: n, Result: "skipped", Reason: "changed"})
-			continue
-		}
-		if it.Status == agentMemMoveStatusCollision {
+	for _, r := range req.Items {
+		it, ok := byName[r.Name]
+		switch {
+		case ok && it.Status == agentMemMoveStatusCollision:
 			return out, agentMemMoveBadReq("a name is taken in the target; choose to skip or rename the collisions")
+		case !ok || it.Status != r.Status || it.NewName != r.NewName || it.Revision != r.Revision:
+			// Not what the member previewed: it stays where it is.
+			out.Results = append(out.Results, agentMemMoveResultItem{Name: r.Name, Result: "skipped", Reason: "changed"})
+		default:
+			items = append(items, it)
 		}
-		items = append(items, it)
 	}
 	for i, it := range items {
 		res, err := agentMemMoveOne(plan, it, now)
 		if err != nil {
+			res.Result = "failed"
+			if res.Commit != "" {
+				res.Result = "partial"
+			}
+			res.Reason = ""
+			out.Results = append(out.Results, res)
+			out.Stopped = it.Name
+			for _, rest := range items[i+1:] {
+				out.Pending = append(out.Pending, rest.Name)
+			}
 			return out, memoryErrf(http.StatusInternalServerError, errCodeMemorySnapshotFailed,
-				"the move stopped after %d of %d memories (%s); nothing was lost, preview and apply again to finish",
+				"the move stopped at one memory after %d of %d (%s); nothing was lost, preview and apply again to finish",
 				i, len(items), agentMemErrKind(err))
 		}
 		out.Results = append(out.Results, res)
@@ -586,6 +674,12 @@ func agentMemMoveOne(plan agentMemMovePlan, it agentMemMoveItem, now time.Time) 
 	return res, nil
 }
 
+// agentMemMoveStoppedWire is the answer to a move that broke off: the error and what was done.
+type agentMemMoveStoppedWire struct {
+	Error agentMemSecretWireErr `json:"error"`
+	agentMemMoveResult
+}
+
 // HandleAgentMemoryMemberMove moves memories between projects as the member.
 func HandleAgentMemoryMemberMove(w http.ResponseWriter, r *http.Request) {
 	if !memberorigin.RefuseUnverified(w, r) {
@@ -597,6 +691,13 @@ func HandleAgentMemoryMemberMove(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := agentMemMove(req, time.Now())
 	if err != nil {
+		var ue *memoryUserErr
+		if res.Stopped != "" && errors.As(err, &ue) {
+			httpx.WriteJSON(w, ue.Status, agentMemMoveStoppedWire{
+				Error: agentMemSecretWireErr{Code: ue.Code, Message: ue.Msg}, agentMemMoveResult: res,
+			})
+			return
+		}
 		agentMemWriteErr(w, err)
 		return
 	}

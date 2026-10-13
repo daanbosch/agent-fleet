@@ -294,7 +294,8 @@ export interface MovePreview {
 export interface MoveResultItem {
   name: string;
   newName?: string;
-  result: "moved" | "merged" | "renamed" | "skipped";
+  /** partial: the copy is in the target and the source copy is still there; failed: nothing was written. */
+  result: "moved" | "merged" | "renamed" | "skipped" | "partial" | "failed";
   reason?: string;
   commit?: string;
 }

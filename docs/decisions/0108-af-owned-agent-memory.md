@@ -599,23 +599,31 @@ moved or cloned again becomes a new project and the old one's memories stay unde
 The Console now lists such projects and the member moves or merges one into another.
 
 - **Orphaned means known to be gone, and in doubt it is not.** The Agent calls a project orphaned when the root
-  recorded in its `project.json` does not exist under `~/repos` and no working copy there belongs to the same
-  project. A root outside `~/repos`, an empty or unreadable `~/repos` (not mounted yet), a symlink anywhere on
+  recorded in its `project.json` does not exist under `~/repos` and no working copy belongs to the same
+  project. Working copies are found down to three levels under `~/repos` (nested and symlinked ones included) and
+  from the sessions' directories; if that search hits its bounds (3,000 directories, or a directory at the
+  depth limit that still has content) nothing is called orphaned. A root outside `~/repos`, an empty or unreadable `~/repos` (not mounted yet), a symlink anywhere on
   the way (a `/scratch` link dangles after a stop), any error but "does not exist" and a probe that does not
   answer in 3 s all read as "not orphaned". A worktree shares its parent's id, so it is never a separate
   orphan. A project with nothing readable to move is not offered. The move itself re-checks this, so the route
   cannot move a live project's memories out.
 - **Three routes, one of them a write.** `GET entries/projects` lists the projects with their counts and the
   orphaned flag; `GET entries/project-move-preview` shows, per memory, what would happen and writes nothing;
-  `POST entries/project-move` moves up to 50 named memories. The write answers only a request carrying the
+  `POST entries/project-move` moves up to 50 previewed memories, each sent with the revision, status and new
+  name the preview showed; the plan is made again and an item that differs stays in the source, so the apply is
+  bound to the screen the member confirmed. A move that breaks off answers 500 with the results so far, the
+  memory it stopped at (`partial` when its copy is already in the target, with the create commit) and the ones
+  not tried. The write answers only a request carrying the
   CP's member-origin mark ([0113](0113-member-origin-mark.md): `memberOriginRoutes` and `memberorigin.Require`),
   the CP audits it as `memory.project.move` with the source project id, and no MCP tool reaches it. The
   target is a project that holds memory or has a working copy under `~/repos`; the latter needs no memory yet,
   and its first memory brings the `project.json` along as a session's save does.
 - **Collisions are the member's call.** A name taken in the target is a collision. With no policy chosen the
   preview says so and the move is refused; `skip` leaves those memories in the source, `rename` moves them as
-  `<name>-moved`, `-moved-2`, … (names are chosen by the Agent and shown in the preview). A memory whose text
-  is identical to the target's copy is not a collision: only the source copy goes. Nothing in the target is
+  `<name>-moved`, `-moved-2`, … (names are chosen by the Agent and shown in the preview). A memory whose text,
+  pin and import provenance are identical to the target's copy is not a collision: only the source copy goes.
+  A pinned source beside an unpinned copy is a collision, so a move never drops the member's pin or the
+  import's source hash. Nothing in the target is
   ever overwritten, including a name that appeared after the preview. A memory changed since the preview, and
   a file withheld by the scan, stay where they are.
 - **Two published changes per memory, create first.** For each memory the target gets a `create` and then the

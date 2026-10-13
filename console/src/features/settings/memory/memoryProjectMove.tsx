@@ -85,20 +85,30 @@ export function ProjectMovePanel({ reload, onChanged }: { reload: number; onChan
     const counts = { moved: 0, skipped: 0 };
     try {
       for (let at = 0; at < todo.length; at += MOVE_BATCH) {
-        const names = todo.slice(at, at + MOVE_BATCH).map((i) => i.name);
+        // What the member previewed, so a memory that changed since stays where it is.
+        const items = todo
+          .slice(at, at + MOVE_BATCH)
+          .map((i) => ({ name: i.name, newName: i.newName, status: i.status, revision: i.revision }));
         const res = await apiJSON("api/agents/memory/entries/project-move?project=" + encodeURIComponent(from), "POST", {
           from,
           to,
           collision: policy,
-          names,
+          items,
         });
-        if (res?.error) {
-          toast(errDetail(res.error));
-          return;
-        }
         for (const r of (res?.results ?? []) as MoveResultItem[]) {
           if (r.result === "skipped") counts.skipped++;
-          else counts.moved++;
+          else if (r.result === "moved" || r.result === "merged" || r.result === "renamed") counts.moved++;
+        }
+        if (res?.error) {
+          // A move that broke off still says what it did: finished ones are counted, the one it
+          // stopped at has its copy in both projects, and the rest were not tried.
+          const pending = ((res.pending as string[] | undefined) ?? []).length;
+          toast(
+            res.stopped
+              ? tr("mem.pm_stopped", { n: counts.moved, name: res.stopped, pending, error: errDetail(res.error) })
+              : errDetail(res.error),
+          );
+          return;
         }
         setProgress({ done: Math.min(at + MOVE_BATCH, todo.length), total: todo.length });
       }

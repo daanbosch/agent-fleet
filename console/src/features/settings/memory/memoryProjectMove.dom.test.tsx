@@ -94,8 +94,8 @@ beforeEach(() => {
   api.mockImplementation((path: string) =>
     Promise.resolve(path.startsWith("api/agents/memory/entries/project-move-preview") ? previewFor(path) : { projects: rows }),
   );
-  apiJSON.mockImplementation((_p: string, _m: string, body: { names: string[] }) =>
-    Promise.resolve({ results: body.names.map((name) => ({ name, result: "moved" })) }),
+  apiJSON.mockImplementation((_p: string, _m: string, body: { items: { name: string }[] }) =>
+    Promise.resolve({ results: body.items.map((i) => ({ name: i.name, result: "moved" })) }),
   );
 });
 
@@ -136,10 +136,12 @@ describe("ProjectMovePanel", () => {
     for (const call of apiJSON.mock.calls) {
       expect(call[0]).toBe("api/agents/memory/entries/project-move?project=old-0123456789ab");
       expect(call[1]).toBe("POST");
-      expect(call[2].names.length).toBeLessThanOrEqual(MOVE_BATCH);
+      expect(call[2].items.length).toBeLessThanOrEqual(MOVE_BATCH);
       expect(call[2]).toMatchObject({ from: "old-0123456789ab", to: "new-0123456789ab", collision: "" });
     }
-    expect(apiJSON.mock.calls.flatMap((c) => c[2].names)).toHaveLength(120);
+    expect(apiJSON.mock.calls.flatMap((c) => c[2].items)).toHaveLength(120);
+    // Each item carries what was previewed.
+    expect(apiJSON.mock.calls[0][2].items[0]).toMatchObject({ name: "mem-0", status: "move", revision: 1 });
     // The preview is re-read afterwards.
     expect(api.mock.calls.filter(([p]) => String(p).startsWith("api/agents/memory/entries/project-move-preview")).length).toBe(2);
   });
@@ -159,7 +161,13 @@ describe("ProjectMovePanel", () => {
     await act(async () => applyButton().click());
     await flush();
     expect(apiJSON).toHaveBeenCalledTimes(1);
-    expect(apiJSON.mock.calls[0][2]).toMatchObject({ collision: "rename", names: ["free", "taken"] });
+    expect(apiJSON.mock.calls[0][2]).toMatchObject({
+      collision: "rename",
+      items: [
+        { name: "free", status: "move", revision: 1 },
+        { name: "taken", newName: "taken-moved", status: "rename", revision: 2 },
+      ],
+    });
   });
 
   it("stops at the first refused batch", async () => {
@@ -169,6 +177,27 @@ describe("ProjectMovePanel", () => {
     await act(async () => applyButton().click());
     await flush();
     expect(apiJSON).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports what a move that broke off did, and stops", async () => {
+    apiJSON.mockResolvedValueOnce({
+      error: { code: "snapshot_failed", message: "the move stopped" },
+      results: [
+        { name: "mem-0", result: "moved" },
+        { name: "mem-1", result: "partial", commit: "abc1234" },
+      ],
+      stopped: "mem-1",
+      pending: Array.from({ length: 48 }, (_, i) => `mem-${i + 2}`),
+    });
+    await mount();
+    await pickBoth();
+    await act(async () => applyButton().click());
+    await flush();
+    expect(apiJSON).toHaveBeenCalledTimes(1);
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("stopped at mem-1");
+    expect(text).toContain("moving 1 memories");
+    expect(text).toContain("48 were not tried");
   });
 
   it("ignores a slow preview for a choice that was replaced", async () => {
