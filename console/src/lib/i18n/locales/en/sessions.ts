@@ -319,6 +319,9 @@ export const sessions: Record<keyof typeof jaSessions, string> = {
   "srow.id_copied": "Copied the ID: {name}",
   "srow.cant_resume": "Can't resume — the working folder no longer exists",
   "srow.resume_failed": "Could not resume the session. Wait a moment and try again",
+  "srow.transcript_lost":
+    "This session's conversation log was deleted, so it can't be resumed. You can start a new conversation in the same session.",
+  "srow.transcript_lost_fresh": "Start a new conversation",
   "srow.history_only": "Folder missing — history only (can't resume / click to open)",
   "srow.stopped_hint": "Stopped (click to view history / Ctrl or middle-click for a new pane)",
   "srow.open_pane_suffix": " (Ctrl / middle-click to open in a new pane)",

@@ -771,6 +771,14 @@ fi
 #   skipDangerousModePermissionPrompt … prevents an accidental exit on the bypass warning
 #   remoteControlAtStartup            … Remote Control at start is OFF by default (new workspaces only; the Console setting rules after that)
 #   agentPushNotifEnabled             … enables push notifications
+#   cleanupPeriodDays                 … 36500: claude deletes projects/**/*.jsonl older than this on
+#                                       every start (default 30), which silently erases the
+#                                       conversation of a session left stopped for a month. Agent
+#                                       Fleet's own lifecycle (archive -> delete -> cleanup) decides
+#                                       when a log goes. Never 0: in claude that disables transcript
+#                                       persistence. Seeded here, not in the per-launch --settings,
+#                                       so a claude the user starts in their own shell is covered
+#                                       too, and an explicit value of theirs is never overridden.
 #   hooks(PreToolUse/Bash → rtk hook claude) … seeded when rtk is in the container (saves tokens)
 SETTINGS="$CCD/settings.json"
 mkdir -p "$CCD"
@@ -782,6 +790,7 @@ if [ ! -f "$SETTINGS" ]; then
       skipDangerousModePermissionPrompt: true,
       remoteControlAtStartup: false,
       agentPushNotifEnabled: true,
+      cleanupPeriodDays: 36500,
     };
     if (rtk) s.hooks = { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "rtk hook claude" }] }] };
     fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\n");
@@ -789,16 +798,22 @@ if [ ! -f "$SETTINGS" ]; then
     && echo "[entrypoint] seeded default $SETTINGS (rtk=$RTK)" \
     || echo "[entrypoint] WARN: failed to seed $SETTINGS"
 else
-  # Existing workspace: if remoteControlAtStartup is unset, add false once to match the OFF
-  # default. If the key exists (the user set true/false in the Console), respect it. Once
-  # added, the key exists on later starts, so this happens only once.
+  # Existing workspace: add each default below only when its key is unset, once. A key that
+  # exists (the user set it in the Console or by hand, including a lower cleanupPeriodDays)
+  # is respected; once added the key exists on later starts. remoteControlAtStartup=false
+  # matches the OFF default; cleanupPeriodDays=36500 keeps stopped sessions' transcripts.
   node -e '
     const fs = require("fs"), p = process.argv[1];
     let s; try { s = JSON.parse(fs.readFileSync(p, "utf8")); } catch { process.exit(0); }
-    if (s && typeof s === "object" && !Array.isArray(s) && !("remoteControlAtStartup" in s)) {
-      s.remoteControlAtStartup = false;
-      fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\n");
-      console.log("[entrypoint] defaulted remoteControlAtStartup=false in existing " + p);
+    if (s && typeof s === "object" && !Array.isArray(s)) {
+      const added = [];
+      for (const [k, v] of [["remoteControlAtStartup", false], ["cleanupPeriodDays", 36500]]) {
+        if (!(k in s)) { s[k] = v; added.push(k + "=" + v); }
+      }
+      if (added.length) {
+        fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\n");
+        console.log("[entrypoint] defaulted " + added.join(", ") + " in existing " + p);
+      }
     }
   ' "$SETTINGS" 2>/dev/null || true
 fi

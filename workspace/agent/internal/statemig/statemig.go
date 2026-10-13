@@ -85,6 +85,9 @@ var Entries = []string{
 	"plan-review",
 	// Per-agent id ledgers and message rings (agents.NewSidStore / NewMsgLedger).
 	"claude-sid",
+	// Slots whose claude conversation has had a finished turn (claude.NoteTalked). Introduced
+	// directly under AgentStateDir.
+	"claude-talked",
 	"codex-sid",
 	// An open PreCompact on a Terminal codex session (codex.MarkCompacting). Introduced
 	// directly under AgentStateDir; it never existed under .config.

@@ -66,6 +66,15 @@ If the state is **"Folder missing — can't resume"**, that session's **working 
 Start the same work over as a new session. shell falls back to home and resumes if the
 working folder is missing ([02](02-sessions.md)).
 
+### Resuming says "the conversation log was deleted"
+
+claude deletes conversation logs older than `cleanupPeriodDays` (30 days by default) when it
+starts. The workspace sets that to 36500 so stopped sessions keep their logs, but a log deleted
+earlier, or a lower value in your own claude `settings.json`, still loses the conversation. The
+log cannot be brought back from the Console. Choose **"Start a new conversation"** to continue in
+the same session without the old context, and remove a low `cleanupPeriodDays` if you set one
+(see [02](02-sessions.md)).
+
 ### I shared it, but the recipient sees nothing — or only old conversations
 
 - **Check the scope you shared.** A session share covers that one session. If you give each

@@ -313,8 +313,14 @@ func jsonNeedle(prompt string) []byte {
 // assistant turn) — not just bookkeeping lines (Remote Control "bridge-session",
 // a lone summary, …). claude --resume fails ("No conversation found") on a stub
 // log even though the file exists, so we gate resume on real content.
-func JSONLResumable(sid string) bool {
-	for _, p := range jsonlPaths(sid) {
+func JSONLResumable(sid string) bool { return resumablePaths(jsonlPaths(sid)) }
+
+// resumableAt is JSONLResumable for the log stored under exactly id, with no LiveSID
+// fall-back to the slot.
+func resumableAt(id, cwd string) bool { return resumablePaths(rawJSONLPathsIn(id, cwd)) }
+
+func resumablePaths(paths []string) bool {
+	for _, p := range paths {
 		b, err := os.ReadFile(p)
 		if err != nil {
 			continue

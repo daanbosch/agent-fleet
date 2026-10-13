@@ -327,6 +327,9 @@ export const sessions = {
   "srow.id_copied": "ID をコピーしました: {name}",
   "srow.cant_resume": "作業フォルダが存在しないため再開できません",
   "srow.resume_failed": "セッションを再開できませんでした。しばらく待ってからもう一度お試しください",
+  "srow.transcript_lost":
+    "このセッションの会話ログが削除されているため再開できません。同じセッションで新しい会話を始めることはできます。",
+  "srow.transcript_lost_fresh": "新しい会話を始める",
   "srow.history_only": "フォルダがありません。履歴だけ閲覧できます（再開不可 / クリックで開く）",
   "srow.stopped_hint": "停止中（クリックで履歴を閲覧 / Ctrl・中クリックで新ペイン）",
   "srow.open_pane_suffix": "（Ctrl/中クリックで新ペインに開く）",
