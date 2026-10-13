@@ -10,15 +10,18 @@ import { describe, expect, it } from "vitest";
 
 const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const stripComments = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "");
+// `//` to end of line, unless it follows a `:` (a URL inside a string).
+const stripLineComments = (src: string) => src.replace(/(^|[^:])\/\/.*$/gm, "$1");
 
 const ALLOWED = new Set(["none", "vertical", "block"]);
 
 /** Every `resize` value declared in `src`. In TS only a string literal counts (an inline style's
- *  `resize: "both"`): a bare `resize: x` there is a type or an unrelated config key. */
+ *  `resize: "both"` or `"resize": "both"`): a bare `resize: x` there is a type or an unrelated
+ *  config key. */
 const resizeValues = (src: string, ts = false) =>
-  [...stripComments(src).matchAll(ts ? /(?<![\w-])resize\s*:\s*["']([\w-]+)["']/gi : /(?<![\w-])resize\s*:\s*([\w-]+)/gi)].map(
-    (m) => m[1].toLowerCase(),
-  );
+  ts
+    ? [...stripLineComments(stripComments(src)).matchAll(/(?<![\w-])(["']?)resize\1\s*:\s*["']([\w-]+)["']/gi)].map((m) => m[2].toLowerCase())
+    : [...stripComments(src).matchAll(/(?<![\w-])resize\s*:\s*([\w-]+)/gi)].map((m) => m[1].toLowerCase());
 
 const sources = (dir: string): string[] =>
   fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
@@ -34,7 +37,10 @@ describe("textarea resizing", () => {
     expect(resizeValues("textarea{resize:revert}")).toEqual(["revert"]);
     expect(resizeValues(`<textarea style={{ resize: "horizontal" }} />`, true)).toEqual(["horizontal"]);
     expect(resizeValues("onResize: fit, max-resize: 2; /* resize: both */")).toEqual([]);
+    expect(resizeValues(`<textarea style={{ "resize": "both" }} />`, true)).toEqual(["both"]);
+    expect(resizeValues(`const u = "https://x"; const s = { resize: 'both' };`, true)).toEqual(["both"]);
     expect(resizeValues("{ resize: HomeResize | null } // on every resize: whatever", true)).toEqual([]);
+    expect(resizeValues(`// A retired example: resize: "both"`, true)).toEqual([]);
   });
 
   it("defaults every textarea to vertical resizing", () => {
