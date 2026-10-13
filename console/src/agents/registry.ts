@@ -752,6 +752,13 @@ export function availableKinds(ctx: AvailCtx): Record<SessionKind, boolean> {
 // Kinds a schedule may be pointed at, DERIVED from the cap rather than listed: the hand-kept
 // copy of this list in the schedule editor had already lost agy, and a derived one cannot drift.
 // The order is the registry's own.
+// The kinds a member connects with an account of their own: what a tenant may name as its
+// default agent (ADR 0114 decision 8), and what completes the first-run card's connect step.
+// control-plane/tenant_member_defaults.go accepts exactly these (memberDefaultAgents; a test
+// there reads this line). shell and ssm need no connection, lcpp is governed by engine access,
+// and agy is experimental.
+export const MEMBER_DEFAULT_AGENTS = ["claude", "codex", "opencode", "cursor", "copilot", "kiro", "muse"] as const;
+
 export const scheduledKinds: SessionKind[] = SESSION_KINDS.filter((k) => AGENTS[k].caps.scheduledRuns);
 
 // Kinds offered in a repo row's launch menu, in display order. Every entry must

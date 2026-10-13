@@ -14,6 +14,8 @@ type Session = import("../../types/session.ts").Session;
 // What the CP holds for this member, and every PATCH body it received.
 let cpState: Record<string, unknown> = {};
 let patches: unknown[] = [];
+// The agent connections GET /api/connections reports.
+let conns: Record<string, unknown> = { claude: { connected: true } };
 const json = (v: unknown) => new Response(JSON.stringify(v), { status: 200, headers: { "Content-Type": "application/json" } });
 vi.stubGlobal(
   "fetch",
@@ -27,7 +29,7 @@ vi.stubGlobal(
       }
       return json(cpState);
     }
-    if (url.includes("api/connections")) return json({ claude: { connected: true } });
+    if (url.includes("api/connections")) return json(conns);
     return json({});
   }),
 );
@@ -77,6 +79,7 @@ beforeEach(() => {
   localStorage.clear();
   cpState = {};
   patches = [];
+  conns = { claude: { connected: true } };
   openAssistantDraft.mockClear();
   useWorkspaceStore.setState({ state: "running" });
   host = document.createElement("div");
@@ -119,6 +122,16 @@ describe("Home", () => {
     cpState = { defaults: { agent: "codex" } };
     await mount();
     expect(setupCard()?.textContent).toContain(t("onb.connect_agent_hint_default", { agent: "Codex" }));
+  });
+
+  it("completes the connect step when only the named default (Cursor) is connected", async () => {
+    cpState = { defaults: { agent: "cursor" } };
+    conns = { cursor: { connected: true } };
+    await mount();
+    const steps = [...setupCard()!.querySelectorAll(".onboard-step")];
+    expect(steps[1].classList.contains("done")).toBe(true);
+    const chat = [...setupCard()!.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.includes(t("onb.start_chat")))!;
+    expect(chat.disabled).toBe(false);
   });
 
   it("does not name a default agent this Console does not know", async () => {
