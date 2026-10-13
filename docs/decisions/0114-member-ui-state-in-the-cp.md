@@ -58,10 +58,15 @@ the like. Tenants differ, so these are tenant configuration. They need the same 
    upload from a second tab cannot undo a value saved in the meantime. The old keys are removed
    only after the CP confirmed the upload. `localStorage` stays as a read cache for the first
    paint only, keyed per (user, tenant).
-   The CP answer wins once it arrives, with three guards: an answer is dropped when its
-   (user, tenant) is no longer current; PATCHes go one at a time, with unconfirmed keys shown on
-   top of every answer; and a GET that started before a confirmed PATCH does not replace that
-   PATCH's answer.
+   The upload waits while the tab holds an unconfirmed choice of its own.
+   The CP answer wins once it arrives, with these guards:
+   - Every owner switch starts a new epoch, and an answer is used only in the epoch its request
+     was made in. A key comparison alone would accept a stale answer after A, B, A.
+   - PATCHes go one at a time and carry the tenant they were made for. A PATCH still queued at a
+     switch is never sent; otherwise it would write into the other tenant's row.
+   - Unconfirmed keys are shown on top of every answer. A failed key stops overlaying, so the
+     next answer shows what the CP holds.
+   - A GET that started before a confirmed PATCH does not replace that PATCH's answer.
 7. **Lifecycle follows the membership.** The row is deleted in `deleteMembershipTx`, with the other
    per-membership tables. Like the inbox, it declares no foreign key: an older CP's hard delete has
    its own cascade list, and a key it does not know about would make that delete fail.

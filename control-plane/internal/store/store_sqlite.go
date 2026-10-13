@@ -147,7 +147,64 @@ func (s *SQL) Migrate(ctx context.Context) error {
 			return err
 		}
 	}
-	return s.repairWorkspaceColumns(ctx)
+	if err := s.repairWorkspaceColumns(ctx); err != nil {
+		return err
+	}
+	return s.repairHandoffTakeColumns(ctx)
+}
+
+// repairHandoffTakeColumns adds the session_handoff_offer columns of 0095_handoff_take
+// (pg 0080) to a database where that version is recorded but the file never ran.
+//
+// Two files once shared that version: 0095_member_ui_state (pg 0080, since renumbered to 0097 /
+// 0082) reached develop two minutes before 0095_handoff_take. A database that ran the version as
+// member_ui_state records it as applied and skips handoff_take forever. Migrate still succeeds,
+// and the missing columns surface later as query errors in the handoff paths (measured on both
+// dialects: "no such column: take_token" / SQLSTATE 42703). Checking the columns first keeps
+// this idempotent, so every other database is left as it is.
+func (s *SQL) repairHandoffTakeColumns(ctx context.Context) error {
+	cols := []string{"take_token", "taken_at", "take_confirmed_at"}
+	if s.dialect == "postgres" {
+		for _, c := range cols {
+			if _, err := s.db.ExecContext(ctx,
+				`ALTER TABLE session_handoff_offer ADD COLUMN IF NOT EXISTS `+c+` TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("repair session_handoff_offer.%s: %w", c, err)
+			}
+		}
+		return nil
+	}
+	have := map[string]bool{}
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(session_handoff_offer)`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		have[name] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(have) == 0 {
+		return nil // no handoff table (nothing migrated yet)
+	}
+	for _, c := range cols {
+		if have[c] {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`ALTER TABLE session_handoff_offer ADD COLUMN `+c+` TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("repair session_handoff_offer.%s: %w", c, err)
+		}
+	}
+	return nil
 }
 
 // repairWorkspaceColumns re-adds the workspace columns that the identity/membership
