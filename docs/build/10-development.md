@@ -287,6 +287,7 @@ npm --prefix console run build
   | `secret-scan` | credential leaks over the whole history (below) |
   | `release-scan` | the forbidden-token gate over the tracked tree — the same scanner the pre-commit hook runs over staged content |
   | `model-id-lint` | no model-id-shaped string literal in either Go module outside `workspace/agent/internal/modelfallback`; `// model-id-lint:allow <reason>` marks one that chooses no model |
+| `migration-versions` | sets the `migration-version` commit status on every open PR into `develop`: failure when a migration the PR adds takes a version `develop` already holds, or one another file of the same PR takes. Runs on the PR's own events and again for every open PR on each push to `develop`; a fork PR is checked without a status (its token is read-only) and gets one on the next `develop` push or a manual run on `develop`. `scripts/migration-versions.sh` |
 
   On a pull request, the `changes` job skips `control-plane`, `workspace-agent`,
   `deploy-scripts` and `console` when every changed path is inert — `docs/` and `guide/`

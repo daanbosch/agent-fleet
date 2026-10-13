@@ -260,6 +260,7 @@ npm --prefix console run build
   | `secret-scan` | 全履歴に対する資格情報の混入検知（後述）|
   | `release-scan` | 追跡ツリーに対する禁止トークンのゲート——pre-commit フックがステージ内容にかけるのと同じスキャナ |
   | `model-id-lint` | 両 Go モジュールで `workspace/agent/internal/modelfallback` の外にモデル ID の形の文字列リテラルが無いこと。モデルを選ばないものは `// model-id-lint:allow <理由>` で印を付ける |
+| `migration-versions` | `develop` 向けの開いている PR すべてに `migration-version` コミットステータスを付ける。PR が足すマイグレーションのバージョンを `develop` が既に持っているか、同じ PR の別ファイルも同じバージョンを取っていれば failure。PR 自身のイベントで回り、`develop` への push のたびに開いている全 PR を検査し直す。fork の PR はトークンが読み取り専用なのでステータス無しで検査し、次の `develop` への push か `develop` での手動実行で付く。`scripts/migration-versions.sh` |
 
   PR では、変更したパスがすべて無関係なもの——`docs/` と `guide/`（テストが読む
   `guide/ref/agents{,.ja}.md` と `docs/decisions/0029-usage-accounting{,.ja}.md` を除く）・最上位の `*.md`・docs の検査スクリプト——なら、
