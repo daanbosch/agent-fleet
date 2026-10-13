@@ -377,6 +377,28 @@ type Session struct {
 	GeneratedImagesPath string `json:"generatedImagesPath,omitempty"`
 }
 
+// CatalogEntry is one row of GET /sessions/catalog, the sharing inventory the Control Plane
+// mirrors into shared_session_catalog. It carries only what that sync stores. The catalog
+// lists archived sessions too, so it grows with the member's whole history; sending the full
+// Session (lastSay, context, display, …) took a real 1,174-session catalog past the CP's
+// read limit. A field added here must also be stored by the CP's syncCatalogLocked, which is
+// its only reader.
+type CatalogEntry struct {
+	Name          string `json:"name"`
+	Kind          string `json:"kind"`
+	Dir           string `json:"dir"`
+	Repo          string `json:"repo"`
+	WorkingCopyID string `json:"workingCopyId,omitempty"`
+	Title         string `json:"title,omitempty"`
+	Label         string `json:"label,omitempty"`
+	CreatedAt     string `json:"createdAt"`
+	// State is the live state (working | idle | question | …), sent only while Alive: the CP
+	// drops it for a stopped session, so computing it there would be wasted work.
+	State    string `json:"state,omitempty"`
+	Alive    bool   `json:"alive"`
+	Archived bool   `json:"archived,omitempty"`
+}
+
 // ContextUsage is a claude session's current context fill — the newest assistant
 // turn's prompt token breakdown. It is serialized into Session.Context so the
 // Console can render the /context-like gauge in BOTH the terminal and chat heads

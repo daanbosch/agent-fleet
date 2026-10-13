@@ -313,7 +313,7 @@ func HandleListSessions(w http.ResponseWriter, r *http.Request) {
 // includes archived rows, but only kinds with a structured transcript.
 func HandleSessionCatalog(w http.ResponseWriter, r *http.Request) {
 	live := tmuxx.LiveSessionNames()
-	items := []session.Session{}
+	items := []session.CatalogEntry{}
 	for _, m := range session.ListMetas() {
 		if !AgentOf(m.Kind).Caps().CanTranscript {
 			continue
@@ -322,10 +322,23 @@ func HandleSessionCatalog(w http.ResponseWriter, r *http.Request) {
 		if m.DriverKind() == session.DriverManaged {
 			alive = ManagedAlive(m)
 		}
-		items = append(items, wireSession(m, alive))
+		items = append(items, catalogEntry(m, alive))
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt > items[j].CreatedAt })
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"sessions": items})
+}
+
+// catalogEntry builds a catalog row. Only a live session pays for wireSession, whose State
+// (with the rate-limit reinterpretation) is the one field the catalog needs from it; a stopped
+// one, most of a long history, is read from its meta alone.
+func catalogEntry(m session.Meta, alive bool) session.CatalogEntry {
+	e := session.CatalogEntry{Name: m.Name, Kind: m.Kind, Dir: m.Dir, Repo: m.Repo,
+		WorkingCopyID: gitx.WorkingCopyID(m.Dir), Title: m.Title, Label: m.Label,
+		CreatedAt: m.CreatedAt, Alive: alive, Archived: m.Archived}
+	if alive {
+		e.State = wireSession(m, true).State
+	}
+	return e
 }
 
 type CreateReq struct {
