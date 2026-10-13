@@ -33,9 +33,6 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
-    # The defaults plus ready_for_review, so the migration-versions job re-checks a draft
-    # against the develop of the moment it is marked ready.
-    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 concurrency:
@@ -105,47 +102,18 @@ jobs:
       - name: scan full history
         run: /tmp/gitleaks --version && /tmp/gitleaks git --log-opts="--all --full-history -m" --redact --verbose
 
-  # Migration versions taken twice (#2046). Two PRs that each take the next free number are
-  # green on their own and collide only once both merge; the store tests then go red on
-  # develop. This job sets a `migration-version` commit status on every open PR into develop
-  # (success when it adds no colliding migration), so branch protection can require it: on
-  # the PR's own events against the develop tip of that moment, and on every push to develop
-  # for all open PRs, because nothing else re-runs a PR's checks when develop moves. The
-  # self-test runs on every event, and a failed self-test posts nothing. A PR retargeted from
-  # main to develop is picked up by migration-version.yml, since `edited` here would re-run
-  # every job on each title or body edit.
-  #
-  # A fork's pull_request token cannot write statuses and stays that way: no
-  # pull_request_target, so no write token ever sits next to a fork's code. A fork PR is
-  # checked report-only (the job fails on a collision) and gets its status from the next
-  # develop push, or at once from a manual run of this workflow on develop.
+  # Self-test of scripts/migration-versions.sh (#2046), on every event so a broken script
+  # fails on its own PR. The `migration-version` status itself is posted by
+  # migration-version.yml, not here: this workflow's cancel-in-progress could kill a
+  # publisher between its post and its re-check of develop and leave a stale success.
   migration-versions:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-      statuses: write
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # the self-test reads a pinned commit of develop
       - name: self-test
         run: ./scripts/migration-versions-test.sh
-      - name: check this PR's new migrations against the develop tip
-        if: github.event_name == 'pull_request' && github.base_ref == 'develop'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
-          SHA: ${{ github.event.pull_request.head.sha }}
-          # A fork's token cannot post: check without posting.
-          MODE: ${{ github.event.pull_request.head.repo.full_name != github.repository && '--report-only' || '' }}
-        run: ./scripts/migration-versions.sh --pr "$PR" "$SHA" ${MODE:+"$MODE"}
-      - name: set the status on every open PR against the new develop
-        # Not in a fork of this repository: its develop has no PRs of ours to mark.
-        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/develop' && github.repository == 'k-k1/agent-fleet'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: ./scripts/migration-versions.sh --open-prs
 
   # Core verification of the forbidden-token gate for shipped artifacts (docs/log/35
   # §35.7.5). The artifacts themselves are scanned by release-gate and publish-dist (both

@@ -3,8 +3,8 @@
 #
 # Two PRs that each take the next free migration number are green on their own: each one's
 # CI ran against a develop that did not have the other yet. Once both merge, the runner
-# (store_sqlite.go) refuses to migrate and develop goes red. ci.yml's `migration-versions`
-# job therefore sets a `migration-version` commit status on every open PR into develop:
+# (store_sqlite.go) refuses to migrate and develop goes red. migration-version.yml therefore
+# sets a `migration-version` commit status on every open PR into develop:
 # on the PR's own events, and again on every push to develop, because nothing else re-runs
 # a PR's checks when develop moves. Every PR gets the status, migration or not, so branch
 # protection can require it.
@@ -24,7 +24,8 @@
 # develop tip), never the PR's current file list or merge ref, either of which may already
 # be another commit. A verdict is posted against a freshly fetched develop and stands only
 # if develop has not moved by the time it is posted; otherwise it is redone, so an older
-# run can never leave the last word. When no verdict can be made (develop keeps moving, the
+# run does not leave the last word, provided it is not killed between posting and that
+# re-check (hence the workflow has no cancel-in-progress). When no verdict can be made (develop keeps moving, the
 # head cannot be fetched) the status is `error`, which replaces an earlier success. Exit 2
 # means that. The PR modes need gh, GITHUB_REPOSITORY and an `origin` remote.
 set -euo pipefail
@@ -44,50 +45,73 @@ version() {
   echo "$d"
 }
 
-# collisions <base-ref> < paths: one line per problem, "<kind>\t<path>\t<other path>", kind
-# being base (<other> is on <base-ref>), change (<other> is in the same change) or bad.
+# Names travel NUL-separated and live in arrays from git to here: git quotes any name with a
+# non-ASCII byte, quote or control character unless -z, and a quoted name no longer matches
+# MIG_RE, so 0001_日本.sql would pass unseen although the runner keys it as version 1.
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+# nul_list <array-name> <command...>: the command's NUL-separated output into the array;
+# fails when the command does.
+nul_list() {
+  local into="$1"
+  shift
+  "$@" > "$TMP/list" || return 1
+  mapfile -d '' -t "$into" < "$TMP/list"
+}
+
+# show <name>: the name as one log-safe token (control characters escaped).
+show() {
+  if [[ "$1" =~ [[:cntrl:]] ]]; then printf '%q' "$1"; else printf '%s' "$1"; fi
+}
+
+# collisions <base-ref> <path>...: fills KIND/PATH_/OTHER, one entry per problem, kind being
+# base (OTHER is on <base-ref>), change (OTHER is in the same change) or bad (no readable
+# version). 0 none, 1 some, 2 unknown base.
+KIND=() PATH_=() OTHER=()
 collisions() {
-  local base="$1" bad=0 p q dir v other
-  local -a paths=()
+  local base="$1" p q dir v other
+  local -a paths=() names=()
+  shift
+  KIND=() PATH_=() OTHER=()
   git rev-parse --verify -q "$base^{commit}" > /dev/null || {
     echo "unknown base $base" >&2
     return 2
   }
-  while IFS= read -r p; do
+  for p in "$@"; do
     if [[ "$p" =~ $MIG_RE ]]; then paths+=("$p"); fi
   done
   for p in "${paths[@]}"; do
     dir="${p%/*}"
-    v="$(version "$p")" || {
-      printf 'bad\t%s\t\n' "$p"
-      bad=1
+    if ! v="$(version "$p")"; then
+      KIND+=(bad) PATH_+=("$p") OTHER+=("")
       continue
-    }
-    while IFS= read -r other; do
-      [[ "$other" == *.sql ]] && [ "$other" != "${p##*/}" ] || continue
+    fi
+    nul_list names git ls-tree -z --name-only "$base" "$dir/" || return 2
+    for other in "${names[@]}"; do
+      [[ "$other" == "$dir/"*.sql ]] && [ "$other" != "$p" ] || continue
       if [ "$(version "$other" || true)" = "$v" ]; then
-        printf 'base\t%s\t%s\n' "$p" "$dir/$other"
-        bad=1
+        KIND+=(base) PATH_+=("$p") OTHER+=("$other")
       fi
-    done < <(git ls-tree --name-only "$base" "$dir/" | sed 's|.*/||')
+    done
     for q in "${paths[@]}"; do
       if [ "$q" != "$p" ] && [ "${q%/*}" = "$dir" ] && [ "$(version "$q" || true)" = "$v" ]; then
-        printf 'change\t%s\t%s\n' "$p" "$q"
-        bad=1
+        KIND+=(change) PATH_+=("$p") OTHER+=("$q")
       fi
     done
   done
-  return "$bad"
+  [ "${#KIND[@]}" = 0 ]
 }
 
-# explain <base-label>: collisions' lines as sentences.
+# explain <base-label> <prefix>: the problems collisions found, one sentence each.
 explain() {
-  local kind p other
-  while IFS=$'\t' read -r kind p other; do
-    case "$kind" in
-      base) echo "$p: version $(version "$p") is already $other on $1" ;;
-      change) echo "$p: version $(version "$p") is also $other in this change" ;;
-      bad) echo "$p: no version prefix the runner can read (want digits, then _)" ;;
+  local i p
+  for i in "${!KIND[@]}"; do
+    p="$(show "${PATH_[i]}")"
+    case "${KIND[i]}" in
+      base) echo "$2$p: version $(version "${PATH_[i]}") is already $(show "${OTHER[i]}") on $1" ;;
+      change) echo "$2$p: version $(version "${PATH_[i]}") is also $(show "${OTHER[i]}") in this change" ;;
+      bad) echo "$2$p: no version prefix the runner can read (want digits, then _)" ;;
     esac
   done
 }
@@ -105,10 +129,11 @@ have_commit() { # have_commit <n> <sha>: fetch a head this clone lacks (a fork's
 
 # check_pr <tip> <n> <sha> <post 0|1>: 0 clean, 1 collision, 2 could not check.
 check_pr() {
-  local tip="$1" n="$2" sha="$3" mb added out rc=0 state desc kind p other
+  local tip="$1" n="$2" sha="$3" mb rc=0 state desc p
+  local -a added=()
   if have_commit "$n" "$sha" && mb="$(git merge-base "$tip" "$sha")" &&
-    added="$(git diff --no-renames --name-only --diff-filter=A "$mb" "$sha")"; then
-    out="$(collisions "$tip" <<< "$added")" || rc=$?
+    nul_list added git diff -z --no-renames --name-only --diff-filter=A "$mb" "$sha"; then
+    collisions "$tip" "${added[@]}" || rc=$?
   else
     echo "#$n: cannot read $sha against develop $tip" >&2
     rc=2
@@ -117,17 +142,17 @@ check_pr() {
     0) state=success desc="no new migration's version collides with develop or within the PR" ;;
     1)
       state=failure
-      explain develop <<< "$out" | sed "s/^/#$n: /"
-      IFS=$'\t' read -r kind p other <<< "$out"
-      case "$kind" in
-        base) desc="${p#control-plane/internal/store/} collides with ${other##*/} on develop" ;;
-        change) desc="${p#control-plane/internal/store/} collides with ${other##*/} in this PR" ;;
-        *) desc="${p#control-plane/internal/store/} has no readable version" ;;
+      explain develop "#$n: "
+      p="$(show "${PATH_[0]#control-plane/internal/store/}")"
+      case "${KIND[0]}" in
+        base) desc="$p collides with $(show "${OTHER[0]##*/}") on develop" ;;
+        change) desc="$p collides with $(show "${OTHER[0]##*/}") in this PR" ;;
+        *) desc="$p has no readable version" ;;
       esac
-      [ "$(wc -l <<< "$out")" -le 1 ] || desc+=" (+$(($(wc -l <<< "$out") - 1)) more)"
+      [ "${#KIND[@]}" -le 1 ] || desc+=" (+$((${#KIND[@]} - 1)) more)"
       desc+="; renumber it"
       ;;
-    *) state=error desc="could not check this commit's migrations; see the migration-versions job" ;;
+    *) state=error desc="could not check this commit's migrations; see the migration-version workflow" ;;
   esac
   if [ "$4" = 1 ] && ! post "$sha" "$state" "$desc"; then
     echo "#$n: cannot set the status on $sha" >&2
@@ -160,7 +185,7 @@ settle() {
   done
   echo "#$n: no verdict against a develop that held still" >&2
   if [ "$3" = 1 ]; then
-    post "$sha" error "develop kept moving or could not be fetched; re-run the migration-versions job" || true
+    post "$sha" error "develop kept moving or could not be fetched; re-run the migration-version workflow" || true
   fi
   return 2
 }
@@ -188,6 +213,7 @@ case "${1:-}" in
 esac
 
 rc=0
-out="$(collisions "$1")" || rc=$?
-[ -z "$out" ] || explain "$1" <<< "$out"
+mapfile -t lines
+collisions "$1" "${lines[@]}" || rc=$?
+explain "$1" ""
 exit "$rc"

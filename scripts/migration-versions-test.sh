@@ -56,6 +56,9 @@ check 1 "$M/abc_x.sql\n"
 check 0 "$M/96_b.sql\n"
 check 0 "$M/sub/0095_x.sql\n"
 check 0 "$M/0095_x.txt\n"
+# A name git would quote without -z is still read as itself.
+check 1 "$M/0095_日本.sql\n"
+check 0 "$M/0096_日本.sql\n"
 check 2 "$M/0096_a.sql\n" no-such-ref
 
 # --- PR modes -----------------------------------------------------------------------------
@@ -66,7 +69,7 @@ g() { git -c core.hooksPath=/dev/null -c commit.gpgsign=false -c user.name=t -c 
 g init -q --bare -b develop "$T/origin.git"
 g clone -q "$T/origin.git" "$T/work" 2>/dev/null
 mkdir -p "$T/work/$M" "$T/work/$P" "$T/work/docs"
-touch "$T/work/$M/0001_a.sql" "$T/work/$P/0001_a.sql" "$T/work/docs/seed.sql"
+touch "$T/work/$M/0001_a.sql" "$T/work/$P/0001_a.sql" "$T/work/docs/seed.sql" "$T/work/$M/0004_データ.sql"
 g -C "$T/work" add -A
 g -C "$T/work" commit -qm base
 g -C "$T/work" push -q origin HEAD:develop
@@ -92,6 +95,17 @@ S9="$(mkpr 9 "$BASE" "touch $M/1_x.sql")"
 # PR 8's event was for A (colliding); the PR has since moved on to B, which drops the file.
 A8="$(mkpr 8 "$BASE" "touch $M/0001_c.sql")"
 B8="$(mkpr 8 "$A8" "git rm -q $M/0001_c.sql; touch docs/y.md")"
+# Names git quotes unless -z: non-ASCII, a double quote, a tab, a newline.
+# shellcheck disable=SC2034 # used by mkpr's eval
+nl=$'\n' tab=$'\t'
+# shellcheck disable=SC2016 # expanded by mkpr's eval
+{
+  S10="$(mkpr 10 "$BASE" 'touch "$M/0001_日本.sql"')"
+  S11="$(mkpr 11 "$BASE" 'touch "$M/0002_a\"b.sql" "$M/0002_x${tab}y.sql" "$M/0002_n${nl}l.sql"')"
+  S12="$(mkpr 12 "$BASE" 'touch "$M/0004_n.sql"')"
+  S13="$(mkpr 13 "$BASE" 'touch "$M/0001_x${nl}y.sql"')"
+  S14="$(mkpr 14 "$BASE" 'touch "$M/0005_日本.sql" "$M/0006_a\"b${tab}c.sql"')"
+}
 S7=0123456789abcdef0123456789abcdef01234567 # in no repository
 # The clone the script runs in has none of the PR heads: it must fetch them.
 rm -rf "$T/work"
@@ -178,6 +192,23 @@ run 0 --pr 6 "$S6"
 statuses "$S6 success"
 run 1 --pr 9 "$S9"
 statuses "$S9 failure"
+run 1 --pr 10 "$S10"
+statuses "$S10 failure"
+has "$T/out" "#10: $M/0001_日本.sql: version 1 is already $M/0001_a.sql on develop"
+has "$T/fx/statuses" "migrations/0001_日本.sql collides with 0001_a.sql on develop; renumber it"
+run 1 --pr 11 "$S11"
+statuses "$S11 failure"
+has "$T/fx/statuses" "(+5 more)"
+[ "$(grep -c '^#11: ' "$T/out")" = 6 ] || fail "want 6 one-line collisions for #11: $(cat "$T/out")"
+has "$T/out" "\$'control-plane/internal/store/migrations/0002_n\\nl.sql'"
+# develop's own non-ASCII name is read too.
+run 1 --pr 12 "$S12"
+statuses "$S12 failure"
+has "$T/fx/statuses" "migrations/0004_n.sql collides with 0004_データ.sql on develop; renumber it"
+run 1 --pr 13 "$S13"
+statuses "$S13 failure"
+run 0 --pr 14 "$S14"
+statuses "$S14 success"
 # The verdict belongs to the commit named, not to whatever the PR's head is now.
 run 1 --pr 8 "$A8"
 statuses "$A8 failure"
