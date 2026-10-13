@@ -34,26 +34,47 @@ const offer = (id: string): HandoffOffer => ({
   id, sessionId: "cat-1", sessionName: "session-1", recipientUserKey: "b", title: "Carry on", status: "pending",
 });
 
+const RECEIVED = "api/session-handoff-offers/received";
+const receivedCalls = () => vi.mocked(api).mock.calls.filter((c) => c[0] === RECEIVED).length;
+
+// A hand-released response, so the order in which concurrent reads finish is the test's choice.
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
 describe("a handoff-offer notification", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api).mockImplementation(async () => ({}));
-    useHandoffStore.setState({ owned: [], received: [] });
+    useHandoffStore.setState({ owned: [], received: [], receivedAt: 0 });
   });
 
-  it("opens the shared view of a pending offer the inbox already holds, without asking the CP", async () => {
-    useHandoffStore.setState({ received: [offer("o1")] });
+  it("opens the shared view of a pending offer a current inbox already holds, without asking the CP", async () => {
+    useHandoffStore.setState({ received: [offer("o1")], receivedAt: Date.now() });
     const r = await openNotificationTarget(offerNotification(), false);
     expect(r.opened).toBe(true);
     expect(openSharedSession).toHaveBeenCalledWith("cat-1", false);
     expect(api).not.toHaveBeenCalled();
   });
 
+  it("does not trust an inbox older than the poll interval: an unshare since then still reads as closed", async () => {
+    // The poll stops while the tab is hidden, which is when an OS notification gets clicked.
+    useHandoffStore.setState({ received: [offer("o1")], receivedAt: Date.now() - 60_000 });
+    vi.mocked(api).mockResolvedValue({ offers: [] });
+    const r = await openNotificationTarget(offerNotification(), false);
+    expect(receivedCalls()).toBe(1);
+    expect(r).toEqual({ opened: false, handoffClosed: true });
+    expect(openSharedSession).not.toHaveBeenCalled();
+    expect(useHandoffStore.getState().received).toEqual([]);
+  });
+
   it("re-reads the inbox once when the store predates the offer, and opens it when it is pending", async () => {
     vi.mocked(api).mockResolvedValue({ offers: [offer("o1")] });
     const r = await openNotificationTarget(offerNotification(), true);
     expect(api).toHaveBeenCalledTimes(1);
-    expect(api).toHaveBeenCalledWith("api/session-handoff-offers/received");
+    expect(api).toHaveBeenCalledWith(RECEIVED);
     expect(r.opened).toBe(true);
     expect(openSharedSession).toHaveBeenCalledWith("cat-1", true);
     expect(useHandoffStore.getState().received.map((o) => o.id)).toEqual(["o1"]);
@@ -71,11 +92,58 @@ describe("a handoff-offer notification", () => {
   it("falls back to the shared view when the inbox cannot be read, rather than calling it closed", async () => {
     for (const fail of [() => Promise.resolve({ error: { code: "internal" } }), () => Promise.reject(new Error("offline"))]) {
       vi.clearAllMocks();
+      useHandoffStore.setState({ received: [offer("o9")], receivedAt: 0 });
       vi.mocked(api).mockImplementation(fail);
       const r = await openNotificationTarget(offerNotification(), false);
       expect(r.opened).toBe(true);
       expect(openSharedSession).toHaveBeenCalledWith("cat-1", false);
       expect(toast).not.toHaveBeenCalled();
+      // A failed read is no proof the backlog is gone: the badge keeps what it had.
+      expect(useHandoffStore.getState().received.map((o) => o.id)).toEqual(["o9"]);
     }
+  });
+
+  it("shares one inbox read between clicks in quick succession, on the same offer or another", async () => {
+    const d = deferred<unknown>();
+    vi.mocked(api).mockImplementation(() => d.promise);
+    const o2 = { ...offerNotification(), id: "handoff-offer-o2-m2", payload: { offerId: "o2", catalogId: "cat-2" } };
+    const clicks = [openNotificationTarget(offerNotification(), false), openNotificationTarget(offerNotification(), false), openNotificationTarget(o2, false)];
+    d.resolve({ offers: [offer("o2")] });
+    const rs = await Promise.all(clicks);
+    expect(receivedCalls()).toBe(1);
+    expect(rs.map((r) => r.opened)).toEqual([false, false, true]);
+  });
+
+  it("reads again after a failed read instead of keeping the failure", async () => {
+    vi.mocked(api).mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce({ offers: [] });
+    expect((await openNotificationTarget(offerNotification(), false)).opened).toBe(true);
+    expect(await openNotificationTarget(offerNotification(), false)).toEqual({ opened: false, handoffClosed: true });
+    expect(receivedCalls()).toBe(2);
+  });
+
+  it("a poll that starts while a click reads joins it, so a late response cannot overwrite the newer list", async () => {
+    const click = deferred<unknown>();
+    vi.mocked(api).mockImplementation((path) => (path === RECEIVED ? click.promise : Promise.resolve({ offers: [] })) as never);
+    const clicked = openNotificationTarget(offerNotification(), false);
+    const polled = useHandoffStore.getState().refresh();
+    click.resolve({ offers: [offer("o1"), offer("new")] });
+    await Promise.all([clicked, polled]);
+    expect(receivedCalls()).toBe(1);
+    expect(useHandoffStore.getState().received.map((o) => o.id)).toEqual(["o1", "new"]);
+    expect(openSharedSession).toHaveBeenCalledWith("cat-1", false);
+  });
+
+  it("a click that joins a poll which predates its offer reads once more rather than calling it closed", async () => {
+    const poll = deferred<unknown>();
+    let n = 0;
+    vi.mocked(api).mockImplementation((path) =>
+      (path !== RECEIVED ? Promise.resolve({ offers: [] }) : ++n === 1 ? poll.promise : Promise.resolve({ offers: [offer("o1")] })) as never);
+    const polled = useHandoffStore.getState().refresh();
+    const clicked = openNotificationTarget(offerNotification(), false);
+    poll.resolve({ offers: [] });
+    const [r] = await Promise.all([clicked, polled]);
+    expect(receivedCalls()).toBe(2);
+    expect(r.opened).toBe(true);
+    expect(useHandoffStore.getState().received.map((o) => o.id)).toEqual(["o1"]);
   });
 });
