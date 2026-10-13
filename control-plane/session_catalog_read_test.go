@@ -94,10 +94,10 @@ func TestReadAgentCatalogDetectsTruncation(t *testing.T) {
 		t.Cleanup(srv.Close)
 		return stubRuntime{endpoint: srv.URL, token: "tok"}
 	}
-	if _, err := readAgentCatalog(context.Background(), serve(agentCatalogMaxBytes)); err != nil {
+	if _, err := readAgentCatalog(context.Background(), serve(agentCatalogMaxBytes), ""); err != nil {
 		t.Fatalf("a catalog of exactly the limit must be read: %v", err)
 	}
-	_, err := readAgentCatalog(context.Background(), serve(agentCatalogMaxBytes+1))
+	_, err := readAgentCatalog(context.Background(), serve(agentCatalogMaxBytes+1), "")
 	if !errors.Is(err, errCatalogTooLarge) {
 		t.Fatalf("err=%v, want errCatalogTooLarge", err)
 	}

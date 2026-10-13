@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/k-k1/agent-fleet/control-plane/internal/runtime"
@@ -47,39 +48,64 @@ func catalogSyncAPIError(err error) *apiError {
 	return &apiError{http.StatusBadGateway, errCodeCatalogSyncFailed, "owner workspace session catalog could not be read"}
 }
 
+// agentCatalog is one answer of GET /sessions/catalog.
+type agentCatalog struct {
+	sessions []sessionWire
+	// cursor is where the Agent's catalog stood when it answered; empty from an Agent that
+	// does not speak the delta protocol. Hand it back as `since` on the next read.
+	cursor string
+	// delta: sessions holds only the rows changed after the cursor we sent, and deleted the
+	// names that are gone. False means sessions is the whole catalog (an Agent from before
+	// deltas, or one that did not recognise our cursor: restarted, or forgot the history).
+	delta   bool
+	deleted []string
+}
+
+// agentCatalogWire is the Agent's GET /sessions/catalog body as the sync reads it
+// (workspace/agent session.CatalogResponse). Both modules pin their half in wire.golden.
+type agentCatalogWire struct {
+	Sessions []sessionWire `json:"sessions"`
+	Cursor   string        `json:"cursor"`
+	Delta    bool          `json:"delta"`
+	Deleted  []string      `json:"deleted"`
+}
+
 // readAgentCatalog fetches GET /sessions/catalog with its own size limit, reading one byte
-// past it so truncation is reported as such instead of as malformed JSON.
-func readAgentCatalog(ctx context.Context, rt runtime.Runtime) ([]sessionWire, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rt.Endpoint()+"/sessions/catalog", nil)
+// past it so truncation is reported as such instead of as malformed JSON. `since` is the
+// cursor of the last catalog applied ("" asks for the whole catalog plus a cursor). An Agent
+// that predates deltas ignores the parameter and answers the whole catalog without a cursor,
+// which is exactly the no-delta case.
+func readAgentCatalog(ctx context.Context, rt runtime.Runtime, since string) (agentCatalog, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rt.Endpoint()+"/sessions/catalog?since="+url.QueryEscape(since), nil)
 	if err != nil {
-		return nil, &catalogSyncError{err}
+		return agentCatalog{}, &catalogSyncError{err}
 	}
 	if rt.Token() != "" {
 		req.Header.Set("Authorization", "Bearer "+rt.Token())
 	}
 	resp, err := agentHTTPClient.Do(req)
 	if err != nil {
-		return nil, &catalogSyncError{fmt.Errorf("workspace agent unreachable: %w", err)}
+		return agentCatalog{}, &catalogSyncError{fmt.Errorf("workspace agent unreachable: %w", err)}
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, agentCatalogMaxBytes+1))
 	if err != nil {
-		return nil, &catalogSyncError{fmt.Errorf("read: %w", err)}
+		return agentCatalog{}, &catalogSyncError{fmt.Errorf("read: %w", err)}
 	}
 	if resp.StatusCode >= 400 {
 		if len(b) > 512 {
 			b = b[:512]
 		}
-		return nil, &catalogSyncError{&agentHTTPError{status: resp.StatusCode, body: strings.TrimSpace(string(b))}}
+		return agentCatalog{}, &catalogSyncError{&agentHTTPError{status: resp.StatusCode, body: strings.TrimSpace(string(b))}}
 	}
 	if len(b) > agentCatalogMaxBytes {
-		return nil, &catalogSyncError{errCatalogTooLarge}
+		return agentCatalog{}, &catalogSyncError{errCatalogTooLarge}
 	}
-	var wire struct {
-		Sessions []sessionWire `json:"sessions"`
-	}
+	var wire agentCatalogWire
 	if err := json.Unmarshal(b, &wire); err != nil {
-		return nil, &catalogSyncError{fmt.Errorf("decode: %w", err)}
+		return agentCatalog{}, &catalogSyncError{fmt.Errorf("decode: %w", err)}
 	}
-	return wire.Sessions, nil
+	// A delta answer is only meaningful to a caller that sent a cursor and got one back.
+	delta := wire.Delta && since != "" && wire.Cursor != ""
+	return agentCatalog{sessions: wire.Sessions, cursor: wire.Cursor, delta: delta, deleted: wire.Deleted}, nil
 }

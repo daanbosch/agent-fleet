@@ -1,7 +1,7 @@
 # JSON key sets of the DTOs the Console reads. Generated - do not edit by hand.
 # Update: cd control-plane && go test -run TestWireShapeGolden -update-wire-golden ./...
 # Format: <type>.<key path> <JSON type>[,omitempty] ([]=array / raw=passed-through JSON)
-# count: 316
+# count: 371
 adminSessionRow.alive bool
 adminSessionRow.dir string
 adminSessionRow.email string
@@ -15,6 +15,61 @@ adminSessionRow.state string
 adminSessionRow.tenant string
 adminSessionRow.user_key string
 adminSessionRow.workspace_state string
+agentCatalogWire.cursor string
+agentCatalogWire.deleted [string]
+agentCatalogWire.delta bool
+agentCatalogWire.sessions[].alive bool
+agentCatalogWire.sessions[].archived bool,omitempty
+agentCatalogWire.sessions[].authOkAt string,omitempty
+agentCatalogWire.sessions[].backgroundBusy bool
+agentCatalogWire.sessions[].backgroundBusyReason string,omitempty
+agentCatalogWire.sessions[].branch string,omitempty
+agentCatalogWire.sessions[].branchDrift bool,omitempty
+agentCatalogWire.sessions[].carried string,omitempty
+agentCatalogWire.sessions[].color string,omitempty
+agentCatalogWire.sessions[].context raw,omitempty
+agentCatalogWire.sessions[].createdAt string
+agentCatalogWire.sessions[].currentBranch string,omitempty
+agentCatalogWire.sessions[].dir string
+agentCatalogWire.sessions[].display string
+agentCatalogWire.sessions[].driver string,omitempty
+agentCatalogWire.sessions[].exitCode number,omitempty
+agentCatalogWire.sessions[].exitReason string,omitempty
+agentCatalogWire.sessions[].exitSignal number,omitempty
+agentCatalogWire.sessions[].generatedImages number,omitempty
+agentCatalogWire.sessions[].generatedImagesPath string,omitempty
+agentCatalogWire.sessions[].handoffPending bool,omitempty
+agentCatalogWire.sessions[].inboxOrigin raw,omitempty
+agentCatalogWire.sessions[].initialPromptState string,omitempty
+agentCatalogWire.sessions[].keepAwakeUntil string,omitempty
+agentCatalogWire.sessions[].kind string
+agentCatalogWire.sessions[].label string
+agentCatalogWire.sessions[].lastSay string,omitempty
+agentCatalogWire.sessions[].locked bool,omitempty
+agentCatalogWire.sessions[].name string
+agentCatalogWire.sessions[].origin string,omitempty
+agentCatalogWire.sessions[].originSession string,omitempty
+agentCatalogWire.sessions[].ports [number],omitempty
+agentCatalogWire.sessions[].pr raw,omitempty
+agentCatalogWire.sessions[].progressAgeSec number,omitempty
+agentCatalogWire.sessions[].progressAt string,omitempty
+agentCatalogWire.sessions[].rateLimitResumeAt string,omitempty
+agentCatalogWire.sessions[].remoteUrl string
+agentCatalogWire.sessions[].repo string
+agentCatalogWire.sessions[].resumable bool
+agentCatalogWire.sessions[].spendCapHitAt string,omitempty
+agentCatalogWire.sessions[].spendCapUsd number,omitempty
+agentCatalogWire.sessions[].started string
+agentCatalogWire.sessions[].state string
+agentCatalogWire.sessions[].stateSince string,omitempty
+agentCatalogWire.sessions[].stopAfterTurnAt string,omitempty
+agentCatalogWire.sessions[].studio string,omitempty
+agentCatalogWire.sessions[].subdir string,omitempty
+agentCatalogWire.sessions[].title string,omitempty
+agentCatalogWire.sessions[].titleSetBy string,omitempty
+agentCatalogWire.sessions[].tokenSpends [number],omitempty
+agentCatalogWire.sessions[].workingCopyId string,omitempty
+agentCatalogWire.sessions[].worktree bool,omitempty
 cliReleaseWire.fetchedAt string
 cliReleaseWire.tested object
 cliReleaseWire.watcherAt string

@@ -31,12 +31,22 @@ type syncBenchAgent struct {
 	mu             sync.Mutex
 	sessions       []map[string]any
 	repos          []map[string]any
+	// delta makes the fake speak the catalog delta protocol the Agent implements
+	// (workspace/agent/internal/sessionx/catalog_delta.go); off, it behaves like an Agent that
+	// predates it: whole catalog, no cursor.
+	delta     bool
+	epoch     string
+	rev       uint64
+	revs      map[string]uint64
+	tombs     map[string]uint64
+	sinceSeen []string // the `since` of each catalog request, in order
+	bytesSent atomic.Int64
 }
 
 func newSyncBenchAgent(t *testing.T, n int) *syncBenchAgent {
 	t.Helper()
 	a := &syncBenchAgent{catalogDelay: 120 * time.Millisecond, reposDelay: 1020 * time.Millisecond,
-		catalogEntered: make(chan struct{}, 64)}
+		catalogEntered: make(chan struct{}, 64), epoch: "e0", revs: map[string]uint64{}, tombs: map[string]uint64{}}
 	for i := 0; i < n; i++ {
 		a.sessions = append(a.sessions, map[string]any{"name": fmt.Sprintf("s-%04d", i), "kind": "claude",
 			"dir": "/home/dev/repos/app", "repo": "app", "workingCopyId": fmt.Sprintf("wc-%d", i%7),
@@ -57,7 +67,12 @@ func newSyncBenchAgent(t *testing.T, n int) *syncBenchAgent {
 			time.Sleep(a.catalogDelay)
 			a.mu.Lock()
 			body := map[string]any{"sessions": a.sessions}
-			_ = json.NewEncoder(w).Encode(body)
+			if a.delta {
+				body = a.deltaBody(r.URL.Query().Get("since"))
+			}
+			raw, _ := json.Marshal(body)
+			a.bytesSent.Add(int64(len(raw)))
+			_, _ = w.Write(raw)
 			a.mu.Unlock()
 		case "/repos":
 			a.reposHits.Add(1)
@@ -78,6 +93,68 @@ func newSyncBenchAgent(t *testing.T, n int) *syncBenchAgent {
 	}))
 	t.Cleanup(a.srv.Close)
 	return a
+}
+
+// deltaBody answers one catalog request the way the Agent does. Call with a.mu held.
+func (a *syncBenchAgent) deltaBody(since string) map[string]any {
+	a.sinceSeen = append(a.sinceSeen, since)
+	cursor := fmt.Sprintf("%s.%d", a.epoch, a.rev)
+	prefix := a.epoch + "."
+	if !strings.HasPrefix(since, prefix) {
+		return map[string]any{"sessions": a.sessions, "cursor": cursor}
+	}
+	var rev uint64
+	if _, err := fmt.Sscanf(strings.TrimPrefix(since, prefix), "%d", &rev); err != nil || rev > a.rev {
+		return map[string]any{"sessions": a.sessions, "cursor": cursor}
+	}
+	changed := []map[string]any{}
+	for _, s := range a.sessions {
+		if a.revs[s["name"].(string)] > rev {
+			changed = append(changed, s)
+		}
+	}
+	deleted := []string{}
+	for n, r := range a.tombs {
+		if r > rev {
+			deleted = append(deleted, n)
+		}
+	}
+	return map[string]any{"sessions": changed, "cursor": cursor, "delta": true, "deleted": deleted}
+}
+
+// change edits one session and gives it the next revision.
+func (a *syncBenchAgent) change(name string, edit func(map[string]any)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, s := range a.sessions {
+		if s["name"] == name {
+			edit(s)
+			a.rev++
+			a.revs[name] = a.rev
+			return
+		}
+	}
+}
+
+func (a *syncBenchAgent) remove(name string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i, s := range a.sessions {
+		if s["name"] == name {
+			a.sessions = append(a.sessions[:i:i], a.sessions[i+1:]...)
+			a.rev++
+			a.tombs[name] = a.rev
+			delete(a.revs, name)
+			return
+		}
+	}
+}
+
+// restart is an Agent process restart: a new epoch, the counter back at zero.
+func (a *syncBenchAgent) restart() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.epoch, a.rev, a.revs, a.tombs = fmt.Sprintf("e%d", time.Now().UnixNano()), 0, map[string]uint64{}, map[string]uint64{}
 }
 
 type syncBenchFixture struct {
