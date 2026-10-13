@@ -107,7 +107,13 @@ var errSourceChanged = errors.New("source changed while it was being copied")
 // complete JSON value (a half-written last line has no newline), and a real conversation in it.
 func completeTranscript(p string) bool {
 	b, err := os.ReadFile(p)
-	if err != nil || len(b) == 0 || b[len(b)-1] != '\n' {
+	return err == nil && CompleteBytes(b)
+}
+
+// CompleteBytes is completeTranscript for content already read, so the decision is made on
+// the very bytes that get kept.
+func CompleteBytes(b []byte) bool {
+	if len(b) == 0 || b[len(b)-1] != '\n' {
 		return false
 	}
 	for _, line := range bytes.Split(b, []byte{'\n'}) {
@@ -115,7 +121,7 @@ func completeTranscript(p string) bool {
 			return false
 		}
 	}
-	return resumablePaths([]string{p})
+	return bytes.Contains(b, []byte(`"type":"user"`)) || bytes.Contains(b, []byte(`"type":"assistant"`))
 }
 
 // copyPreserving copies src to a new file tmpDir/<pattern>*, with src's permission bits and
@@ -567,39 +573,37 @@ func placeStaged(tmp, dest string) (created bool, err error) {
 	return true, nil
 }
 
-// LiveBeatsBackup reports whether the log at live is a complete conversation strictly newer than
-// the backup file: the only case in which the archive may take the live log in the backup's
-// place. Anything else (a stub, a partial log, an older one) never justifies dropping the backup.
-func LiveBeatsBackup(live, backup string) bool {
-	li, err := os.Stat(live)
-	if err != nil {
-		return false
-	}
-	bi, err := os.Stat(backup)
-	if err != nil {
-		return true
-	}
-	return li.ModTime().After(bi.ModTime()) && completeTranscript(live)
-}
-
-// ArchiveBackup returns the backed-up log of a session whose own log is gone, for the cleanup
-// archive: the file to read and the path a restore of the archive should write it to. ok=false
-// when there is no backup. Deleting the session removes the backup, so without this a
-// conversation whose log vanished before the delete would be lost in the same step.
-func ArchiveBackup(m session.Meta) (src, dest string, ok bool, err error) {
+// ArchiveBackup returns the backed-up log of a session, read under the slot lock, for the
+// cleanup archive: its bytes (a snapshot, so later backups cannot pull it out from under the
+// caller), its mtime, and the path a restore of the archive should write it to. ok=false when
+// there is no backup. Deleting the session removes the backup, so the archive must hold it.
+func ArchiveBackup(m session.Meta) (data []byte, mtime time.Time, dest string, ok bool, err error) {
 	slot := session.UUID(m.Dir, m.Name)
 	slotDir, err := backupSlotDir(slot)
 	if err != nil {
-		return "", "", false, err
+		return nil, time.Time{}, "", false, err
 	}
 	unlock := lockBackup(slot)
 	defer unlock()
 	id := recordedLogID(slot)
 	have, project, err := backupFile(slotDir, id)
 	if err != nil || have == "" {
-		return "", "", false, err
+		return nil, time.Time{}, "", false, err
 	}
-	return have, logDest(m.CWD(), project, id), true, nil
+	f, err := os.Open(have)
+	if err != nil {
+		return nil, time.Time{}, "", false, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, time.Time{}, "", false, err
+	}
+	data, err = io.ReadAll(f)
+	if err != nil {
+		return nil, time.Time{}, "", false, err
+	}
+	return data, fi.ModTime(), logDest(m.CWD(), project, id), true, nil
 }
 
 // supersedeBackup is StartFresh's part for the backup: the user chose to leave the old

@@ -248,6 +248,10 @@ func removeSessionSideFiles(name string) {
 	}
 }
 
+// archiveAfterMatch is a test seam between listing the live logs and reading them, where claude's
+// sweep or the backup loop can change them. Nil in production.
+var archiveAfterMatch func(m session.Meta)
+
 // archiveSessionForDelete bundles a session's meta + jsonl(s) into a cleanup archive
 // and returns the archive id. Non-claude transcripts live in the agent's native store
 // (codex rollout / opencode sqlite), which we do not reclaim here — the meta is still
@@ -257,20 +261,14 @@ func archiveSessionForDelete(m session.Meta) (string, error) {
 	payloads := map[string][]byte{}
 	as := cleanupArchivedSession{Name: m.Name, Display: session.Display(m), Kind: m.Kind, Meta: metaJSON}
 	if m.Kind == session.KindClaude {
-		// Deleting the session removes the Agent's backup of the log, so the archive must hold
-		// whatever of it is not already held by a live log that is complete and newer. A live
-		// log that is a stub, partial or older is archived beside it (never in its place), and
-		// "a good log exists somewhere" is not a reason to drop the backup.
-		bkSrc, bkDest, hasBackup, err := claude.ArchiveBackup(m)
+		// Deleting the session removes the Agent's backup of the log, so the archive always holds
+		// its bytes (read once, under the backup lock). Where a live log sits at the very path the
+		// backup would restore to, the read bytes of both decide who takes that path: the live
+		// one only when it is complete and newer, otherwise the backup does and the live file is
+		// kept beside it. Nothing is ever dropped on the strength of a check made earlier.
+		bk, bkMod, bkDest, hasBackup, err := claude.ArchiveBackup(m)
 		if err != nil {
 			return "", err
-		}
-		_, _, matched := claude.TranscriptRead(session.UUID(m.Dir, m.Name))
-		useBackup := hasBackup
-		for _, p := range matched {
-			if hasBackup && p == bkDest && claude.LiveBeatsBackup(p, bkSrc) {
-				useBackup = false
-			}
 		}
 		add := func(i int, src, dest string, b []byte) {
 			entry := "sessions/" + idSlug(m.Name) + "/" + jsonlEntryName(i, src)
@@ -279,25 +277,39 @@ func archiveSessionForDelete(m session.Meta) (string, error) {
 			as.JSONLNames = append(as.JSONLNames, entry)
 		}
 		off := 0
-		if useBackup {
+		if hasBackup {
 			off = 1
-			b, err := os.ReadFile(bkSrc)
-			if err != nil {
-				return "", err
-			}
-			add(0, bkDest, bkDest, b)
+		}
+		liveWon := false
+		_, _, matched := claude.TranscriptRead(session.UUID(m.Dir, m.Name))
+		if archiveAfterMatch != nil {
+			archiveAfterMatch(m)
 		}
 		for i, p := range matched {
+			fi, serr := os.Stat(p)
 			b, err := os.ReadFile(p)
+			if errors.Is(err, os.ErrNotExist) {
+				continue // removed since it was listed (claude's sweep): the backup snapshot above is in
+			}
 			if err != nil {
-				continue
+				return "", err // an unreadable log is not an absent one: refuse the delete
 			}
 			dest := p
-			if useBackup && p == bkDest {
-				// The backup takes this path; the file that was here is kept under another name.
-				dest = p + ".superseded.archived"
+			if hasBackup && p == bkDest {
+				if serr == nil && fi.ModTime().After(bkMod) && claude.CompleteBytes(b) {
+					liveWon = true
+				} else {
+					dest = p + ".superseded.archived"
+				}
 			}
 			add(i+off, p, dest, b)
+		}
+		if hasBackup {
+			dest := bkDest
+			if liveWon {
+				dest = bkDest + ".backup.archived"
+			}
+			add(0, bkDest, dest, bk)
 		}
 	}
 	man := cleanupManifest{
