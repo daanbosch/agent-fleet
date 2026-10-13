@@ -100,6 +100,105 @@ describe("HandoffOfferModal", () => {
     expect(sendButton()?.disabled).toBe(false);
   });
 
+  // "Push, then send" (#2072). The opt-in exists only for the two reasons a push clears, says
+  // what it will publish, and sends pushFirst so the CP pushes and re-asks the Agent; the
+  // verdict after the push is never decided here.
+  describe("push, then send", () => {
+    const pushBox = () =>
+      [...document.querySelectorAll("label.handoff-push input")][0] as HTMLInputElement | undefined;
+
+    it.each([
+      ["no_upstream", { noUpstream: true, ahead: 0 }],
+      ["unpushed_commits", { ahead: 2 }],
+    ])("offers the push for %s, with branch, remote and commit count", async (reason, extra) => {
+      await render({
+        members: MEMBERS,
+        context: { vcs: "git", branch: "temp/x", blocked: reason, pushRemote: "origin", pushCommits: 2, ...extra },
+      });
+      expect(sendButton()?.disabled).toBe(true);
+      const box = pushBox();
+      expect(box).toBeTruthy();
+      const summary = find(".handoff-push-summary")?.textContent || "";
+      expect(summary).toContain("temp/x");
+      expect(summary).toContain("origin");
+      expect(summary).toContain("2");
+      await act(async () => {
+        box!.click();
+      });
+      expect(sendButton()?.disabled).toBe(false);
+      apiJSON.mockResolvedValueOnce({ id: "o1" });
+      await act(async () => {
+        sendButton()!.closest("form")!.requestSubmit();
+      });
+      expect(apiJSON).toHaveBeenCalledWith(
+        "api/session-handoff-offers",
+        "POST",
+        expect.objectContaining({ pushFirst: true }),
+      );
+    });
+
+    it("does not offer a push for a detached HEAD or an unknown state", async () => {
+      for (const blocked of ["detached_head", "something_new"]) {
+        await render({ members: MEMBERS, context: { vcs: "git", branch: "x", blocked, pushRemote: "origin" } });
+        expect(pushBox()).toBeUndefined();
+        expect(sendButton()?.disabled).toBe(true);
+        act(() => root?.unmount());
+        host?.remove();
+      }
+    });
+
+    it("does not offer a push when there is nowhere to push to", async () => {
+      await render({ members: MEMBERS, context: { vcs: "git", branch: "x", blocked: "no_upstream" } });
+      expect(pushBox()).toBeUndefined();
+    });
+
+    it("still asks for the uncommitted-changes acknowledgement when pushing", async () => {
+      await render({
+        members: MEMBERS,
+        context: { vcs: "git", branch: "x", blocked: "unpushed_commits", pushRemote: "origin", pushCommits: 1, dirty: true, warning: "uncommitted_changes" },
+      });
+      await act(async () => {
+        pushBox()!.click();
+      });
+      expect(sendButton()?.disabled).toBe(true);
+      const boxes = [...document.querySelectorAll('input[type="checkbox"]')] as HTMLInputElement[];
+      expect(boxes).toHaveLength(2);
+      await act(async () => {
+        boxes[1].click();
+      });
+      expect(sendButton()?.disabled).toBe(false);
+    });
+
+    it("shows git's refusal in the modal and does not close", async () => {
+      const onClose = vi.fn();
+      api.mockReset();
+      api.mockImplementation(async () => ({
+        members: MEMBERS,
+        context: { vcs: "git", branch: "x", blocked: "unpushed_commits", pushRemote: "origin", pushCommits: 1 },
+      }));
+      host = document.createElement("div");
+      document.body.appendChild(host);
+      await act(async () => {
+        root = createRoot(host!);
+        root.render(
+          <ToastProvider>
+            <HandoffOfferModal session="s1" initialTitle="t" initialPrompt="p" onClose={onClose} />
+          </ToastProvider>,
+        );
+      });
+      await act(async () => {
+        pushBox()!.click();
+      });
+      const gitSaid = " ! [rejected]        x -> x (non-fast-forward)";
+      apiJSON.mockResolvedValueOnce({ error: { code: "handoff_push_failed", message: gitSaid, reason: "push_rejected" } });
+      await act(async () => {
+        sendButton()!.closest("form")!.requestSubmit();
+      });
+      expect(find(".handoff-push-error pre")?.textContent).toBe(gitSaid);
+      expect(onClose).not.toHaveBeenCalled();
+    });
+  });
+
   // Not having shared the session yet is a normal state, so the CP answers 200 with an
   // empty candidate list. The screen has to say "share it first" and offer the way to do
   // so on the spot: a fetch-failed message, or a stuck loading state, leaves the member

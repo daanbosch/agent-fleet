@@ -37,6 +37,9 @@ type handoffLife struct {
 	mu       sync.Mutex
 	agentCtx map[string]any
 	hits     map[string]int
+	// push answers POST /sessions/session-1/handoff-push, called with f.mu held; nil
+	// answers 404 like an Agent without the route.
+	push func() (int, map[string]any)
 }
 
 func newHandoffLife(t *testing.T) *handoffLife {
@@ -100,6 +103,16 @@ func newHandoffLife(t *testing.T) *handoffLife {
 			_ = json.NewEncoder(w).Encode(map[string]any{"repos": []any{map[string]any{"workingCopyId": "wc-1"}}})
 		case "/sessions/session-1/handoff-context":
 			_ = json.NewEncoder(w).Encode(hctx)
+		case "/sessions/session-1/handoff-push":
+			f.mu.Lock()
+			push := f.push
+			code, body := http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found", "message": "no route"}}
+			if push != nil && r.Method == http.MethodPost {
+				code, body = push()
+			}
+			f.mu.Unlock()
+			w.WriteHeader(code)
+			_ = json.NewEncoder(w).Encode(body)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": "not_found", "message": "no such session"}})

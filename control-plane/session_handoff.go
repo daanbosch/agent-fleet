@@ -76,6 +76,10 @@ type handoffOfferBody struct {
 	// AckWarning means "there are uncommitted changes and I am sending anyway". A blocked
 	// state cannot be overridden this way.
 	AckWarning bool `json:"ackWarning"`
+	// PushFirst is the owner's "push, then send" (#2072): when the gate blocks for a reason a
+	// push clears, the owner Agent pushes the current branch and the gate is asked again.
+	// It never overrides the gate; the offer goes only if the recomputed verdict passes.
+	PushFirst bool `json:"pushFirst"`
 }
 
 func (a sessionHandoffAPI) seal(ctx context.Context, tenant string, body []byte) (string, string, error) {
@@ -332,6 +336,81 @@ func stripURLUserinfo(raw string) string {
 	return u.String()
 }
 
+// handoffPushClears mirrors the Agent's set of gate reasons a push can clear. It only
+// decides whether asking the Agent to push is worth a round trip; the Agent refuses any
+// other state itself and the verdict after the push is the Agent's again.
+func handoffPushClears(blocked string) bool {
+	return blocked == "unpushed_commits" || blocked == "no_upstream"
+}
+
+// pushThenRecheck is "push, then send": the owner Agent pushes the session's current branch
+// (POST /sessions/{name}/handoff-push) and the push gate is asked again, so the offer is
+// stored only on a verdict the Agent built after the push.
+//
+// Everything that would refuse the offer anyway is checked BEFORE the push, so a click that
+// cannot produce an offer publishes nothing: the uncommitted-changes acknowledgement and an
+// offer already pending on the session. ok=false means it has written the refusal.
+func (a sessionHandoffAPI) pushThenRecheck(w http.ResponseWriter, r *http.Request, res *resolved, c store.SharedSessionCatalog, hctx map[string]any, ack bool) (map[string]any, string, bool) {
+	fail := func(e *apiError) (map[string]any, string, bool) {
+		writeAPIErr(w, e)
+		return nil, "", false
+	}
+	if warn, _ := hctx["warning"].(string); warn != "" && !ack {
+		writeHandoffErr(w, http.StatusConflict, "handoff_warning", "the working copy has uncommitted changes", map[string]any{"reason": warn, "context": hctx})
+		return nil, "", false
+	}
+	rows, err := a.mgr.store.ListSessionHandoffOffersByOwner(r.Context(), res.mv.MembershipID)
+	if err != nil {
+		return fail(internalErr(err))
+	}
+	for _, o := range rows {
+		if o.CatalogID == c.ID && o.Status == "pending" {
+			return fail(&apiError{http.StatusConflict, "handoff_already_pending", "this session already has a pending handoff"})
+		}
+	}
+	payload, status, e := a.share.ownerSend(r.Context(), res, http.MethodPost, "/sessions/"+url.PathEscape(c.Name)+"/handoff-push", nil)
+	if e != nil {
+		return fail(e)
+	}
+	audit := func(code int, detail string) {
+		_ = a.mgr.store.InsertAudit(context.Background(), store.AuditLog{ID: store.NewID(), TenantID: res.mv.TenantID,
+			ActorKind: "user", ActorID: res.ident.ID, Action: "session.handoff.push", Target: c.Name,
+			Detail: detail, HTTPStatus: code, At: store.NowTS()})
+	}
+	if status != http.StatusOK {
+		// The Agent's code and message pass through: the message is git's own report (a
+		// non-fast-forward, a protected branch, a pre-push hook), already scrubbed of
+		// credentials by the Agent, and it is what tells the owner what to do next.
+		pe, _ := payload["error"].(map[string]any)
+		code, _ := pe["code"].(string)
+		msg, _ := pe["message"].(string)
+		if status == http.StatusNotFound {
+			return fail(&apiError{http.StatusNotFound, "not_found", "no such session"})
+		}
+		if code == "" {
+			code = "push_failed"
+		}
+		if msg == "" {
+			msg = "the push failed"
+		}
+		audit(http.StatusConflict, "push refused: "+code)
+		writeHandoffErr(w, http.StatusConflict, "handoff_push_failed", msg, map[string]any{"reason": code, "context": hctx})
+		return nil, "", false
+	}
+	if pushed, _ := payload["pushed"].(bool); pushed {
+		branch, _ := payload["branch"].(string)
+		remote, _ := payload["remote"].(string)
+		audit(http.StatusOK, "pushed "+branch+" to "+stripURLUserinfo(remote))
+	}
+	// The verdict the offer is judged on is asked for afresh, not taken from the push
+	// answer: the create path keeps exactly one source for it.
+	hctx, blocked, e := a.handoffContext(r.Context(), res, c.Name)
+	if e != nil {
+		return fail(e)
+	}
+	return hctx, blocked, true
+}
+
 // create handles POST /api/session-handoff-offers.
 func (a sessionHandoffAPI) create(w http.ResponseWriter, r *http.Request, res *resolved) {
 	raw, err := io.ReadAll(io.LimitReader(r.Body, handoffPromptMaxBytes+handoffTitleMaxBytes+4096))
@@ -400,6 +479,12 @@ func (a sessionHandoffAPI) create(w http.ResponseWriter, r *http.Request, res *r
 	if e != nil {
 		writeAPIErr(w, e)
 		return
+	}
+	if blocked != "" && in.PushFirst && handoffPushClears(blocked) {
+		var ok bool
+		if hctx, blocked, ok = a.pushThenRecheck(w, r, res, c, hctx, in.AckWarning); !ok {
+			return
+		}
 	}
 	if blocked != "" {
 		writeHandoffErr(w, http.StatusConflict, "handoff_blocked", "the working copy is not in a handoff-able state", map[string]any{"reason": blocked, "context": hctx})
