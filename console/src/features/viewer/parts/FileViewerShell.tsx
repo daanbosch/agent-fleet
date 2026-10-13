@@ -10,6 +10,7 @@ import { useT } from "../../../lib/i18n/index.ts";
 import { CodeView, type LineMarks } from "../CodeView.tsx";
 import { DocPreview } from "../DocPreview.tsx";
 import { ImageView } from "../ImageView.tsx";
+import { PathLinkMenuHost } from "../PathLinkMenu.tsx";
 import { FileMarkdownView } from "../FileMarkdownView.tsx";
 import { MarpView } from "../MarpView.tsx";
 import { PdfView } from "../PdfView.tsx";
@@ -69,15 +70,19 @@ export function FileViewerShell(props: FileViewerShellProps) {
         // source of truth.
         <PdfView src={downloadURL(filePath)} onMeta={props.onPdfMeta} scrollMemory={props.scrollMemory("pdf")} />
       ) : isDoc ? (
-        <DocPreview
-          src={downloadURL(filePath)}
-          format={props.docFmt}
-          size={props.size}
-          basePath={filePath}
-          onOpenFile={props.onOpenFile}
-          onOpenDir={props.onOpenDir}
-          scrollMemory={props.scrollMemory("doc")}
-        />
+        // The host lives here, not in DocPreview: doc:check bundles DocPreview alone, and the
+        // menu's imports (settings.ts reads import.meta.env) do not exist in that bundle.
+        <PathLinkMenuHost>
+          <DocPreview
+            src={downloadURL(filePath)}
+            format={props.docFmt}
+            size={props.size}
+            basePath={filePath}
+            onOpenFile={props.onOpenFile}
+            onOpenDir={props.onOpenDir}
+            scrollMemory={props.scrollMemory("doc")}
+          />
+        </PathLinkMenuHost>
       ) : props.binary ? (
         <pre className="filebody muted">({tr("view.binary")}, {humanSize(props.size)})</pre>
       ) : props.huge ? (

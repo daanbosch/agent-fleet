@@ -131,6 +131,49 @@ CP ネイティブ実装。フロー・許可リスト・プロバイダ・authG
 - リモート列挙は `GET /2.0/user/workspaces` → 各 workspace のリポジトリ（上限 500、更新の
   新しい順）。旧 `?role=member` の列挙は 410 を返す。
 
+### `bkt` を別ログインなしで動かす
+
+`bkt`（Bitbucket CLI、[avivsinai/bitbucket-cli](https://github.com/avivsinai/bitbucket-cli)）は
+`gh` の Bitbucket 版で、同じ形でラップしている。実体は `/usr/local/libexec/bkt`、
+`/usr/local/bin/bkt` は `workspace/bkt-auth-wrapper.sh`。コンテナにはログイン先の keychain が
+ないが、`bkt` は環境変数 `BKT_TOKEN` / `BKT_HOST` / `BKT_AUTH_METHOD` / `BKT_USERNAME` を
+読むので、ラッパーが実 `bkt` を exec する 1 回分だけそれを埋める:
+
+- **OAuth 接続**: `bitbucket.org` について `git credential fill` を実行する（有効期限まで
+  2 分を切っていればヘルパーが更新済み）。`x-token-auth` + アクセストークンが返るので、
+  `BKT_AUTH_METHOD=bearer` で渡す。
+- **貼付の API トークン**: これは git では運べない——ヘルパーは Atlassian の email を
+  `x-bitbucket-api-token-auth` に書き換えるが、REST API は email + トークンの Basic しか
+  受け付けない。ヘルパーがそのユーザー名を返したときだけ、ラッパーは
+  `workspace-agent bkt-cred`（`workspace/agent/bkt_cred.go`）に尋ねる。これは `bitbucket.org` の
+  API トークン接続の email とトークンだけを出力し（OAuth 接続・他ホスト・アプリパスワードでは
+  何も出さない）、`BKT_AUTH_METHOD=basic` と `BKT_USERNAME` で渡す。
+- **フェイルクローズ**: どちらかのヘルパーが失敗・無応答なら、認証を注入せずに `bkt` を
+  実行する。トークンは引数にならず、ファイルにも書かれず、その 1 回の `bkt` プロセスの
+  環境にだけ存在する。
+
+**知っておくべき制約:**
+
+- **スコープ**: トークンの権限はテナントの OAuth consumer（または貼付した API トークン）に
+  付与されたもので、`bkt` は広げられない。`bkt pr` と `bkt pipeline` を使うには、OAuth
+  consumer に `repository`、`pullrequest:write`（作成・マージ用。`pullrequest` は読み取りのみ）、
+  `pipeline`（読み取り）と `account` が要り、パイプラインの開始・停止にはさらに `pipeline:write` が要る。貼付の API トークンには同等の細粒度
+  スコープ（`read:repository:bitbucket`、`read:pullrequest:bitbucket` /
+  `write:pullrequest:bitbucket`、`read:pipeline:bitbucket`、`read:user:bitbucket`、パイプラインの開始・停止には `write:pipeline:bitbucket`。write は read を含まない）が要る。
+  PR のスコープが無いトークンはリポジトリやブランチの一覧は取れても `bkt pr list` が 403 になる。
+- **Data Center などの他ホストは利用者自身の設定**（GitHub Enterprise と同じ）。接続が
+  受け付けるのは `bitbucket.org` だけなので、それ以外には何も注入しない。`BKT_HOST` を
+  注入すると利用者の context を上書きしてしまうため、`BKT_TOKEN` か `BKT_HOST` が既にある、
+  **または** bkt 自身の `config.yml` がある（`bkt auth login`、`bkt context create`）ときは
+  ラッパーは何もせずに実行する。
+- **Cloud のみ**: 注入先は `https://bitbucket.org`。
+- **未検証**: Bitbucket Cloud が*ユーザーの* OAuth アクセストークンを bearer として
+  ユーザー系コマンドに受け付けるかは（`bkt` の README は resource access token の例しか
+  示さない）、実際の OAuth 接続では確かめていない。API トークン経路は確認済み。
+- **ピン**: Dockerfile の `BKT_VERSION`。tarball はリリースの `checksums.txt` と一致が必須。
+  `gh` と同じくエージェント CLI のドリフト/ピン更新の仕組みには載せていない。イメージ
+  スモーク（`deploy/local/e2e-smoke.sh`）がピンの版を確認する。
+
 ### 8.4.1 OAuth アプリの持ち主は**テナント**
 
 アプリは `tenant_git_oauth` の行——`github`・`bitbucket`・`jira` に 1 つずつ——で、テナント

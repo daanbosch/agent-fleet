@@ -54,6 +54,10 @@ var memberOriginRoutes = map[string]bool{
 	"POST /api/agents/memory/entries/pin":         true,
 	"POST /api/agents/memory/entries/revert":      true,
 	"POST /api/agents/memory/entries/member-save": true,
+	// The 0022 history routes only the Console calls (ADR 0113, 2026-10-13 note): a manual
+	// snapshot and the apply step of a bundle import.
+	"POST /api/agents/memory/snapshots":    true,
+	"POST /api/agents/memory/import/apply": true,
 }
 
 func memberOriginRoute(r *http.Request) bool { return memberOriginRoutes[r.Method+" "+r.URL.Path] }

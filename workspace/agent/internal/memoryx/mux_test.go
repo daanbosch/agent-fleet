@@ -80,13 +80,19 @@ var memberOnlyTestRoutes = map[string]bool{
 	"POST /agents/memory/entries/pin":         true,
 	"POST /agents/memory/entries/revert":      true,
 	"POST /agents/memory/entries/member-save": true,
+	"POST /agents/memory/snapshots":           true,
+	"POST /agents/memory/import/apply":        true,
 }
 
 func buildMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	for pattern, h := range memoryTestRoutes {
 		if memberOnlyTestRoutes[pattern] {
-			mux.Handle(pattern, memberorigin.Require(MemberWriteMaxRequest, h))
+			limit := int64(MemberWriteMaxRequest)
+			if pattern == "POST /agents/memory/import/apply" {
+				limit = HistoryApplyMaxRequest
+			}
+			mux.Handle(pattern, memberorigin.Require(limit, h))
 			continue
 		}
 		mux.HandleFunc(pattern, h)
@@ -94,13 +100,26 @@ func buildMux() *http.ServeMux {
 	return mux
 }
 
-// smokeDo is the same helper package main's routes_test.go has (docs/log/23 P0-2).
+// smokeDo is the same helper package main's routes_test.go has (docs/log/23 P0-2). It sends no
+// mark; markedDo is the same call with the one the CP would put on a member write.
 func smokeDo(t *testing.T, h http.Handler, method, path, token, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	r := httptest.NewRequest(method, path, strings.NewReader(body))
 	if token != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
 	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+
+// markedDo is smokeDo for a member write with a fresh signer installed.
+func markedDo(t *testing.T, h http.Handler, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	r := httptest.NewRequest(method, path, strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer smoke-token")
+	r.Header.Set("Content-Type", "application/json")
+	memberorigintest.Install(t).Sign(r, []byte(body))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	return w

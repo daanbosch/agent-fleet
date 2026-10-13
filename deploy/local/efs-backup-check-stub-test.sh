@@ -165,6 +165,30 @@ grep -q 'af_efs_backup_data_stack "\$STACK"' "$UPD" || fail "update.sh does not 
 grep -q 'af_efs_backup_check "\$DATA_STACK"' "$UPD" || fail "update.sh does not call af_efs_backup_check"
 grep -q 'REMINDER: ' "$UPD" || fail "update.sh has no end-of-run reminder"
 
+echo "== case 10: the verdict reaches the Console as the ingress EfsBackup parameter =="
+m() { [ "$(af_efs_backup_marker "$1" || true)" = "$2" ] || fail "marker($1) = $(af_efs_backup_marker "$1" || true), wanted $2"; }
+m ok present; m skip off; m no-vault missing; m no-plan missing
+# unknown passes nothing, so a failed read cannot raise or clear the warning
+m unknown ""; m "" ""
+af_efs_backup_marker unknown && fail "marker(unknown) returned 0"
+grep -q 'af_efs_backup_marker "\$AF_EFS_BACKUP_VERDICT"' "$UPD" || fail "update.sh does not derive the EfsBackup marker"
+grep -q '"EfsBackup=\$EFS_BACKUP_MARKER"' "$UPD" || fail "update.sh does not pass EfsBackup to the ingress deploy"
+grep -q 'af_param_override EfsBackup' "$ROOT/deploy/aws/ecs/standup.sh" || fail "standup.sh does not pass EfsBackup"
+ING="$ROOT/deploy/aws/ecs/cfn/30-ingress.yaml"
+grep -q 'AllowedValues: \[ "", "off", present, missing \]' "$ING" || fail "30-ingress EfsBackup values drifted from the CP's"
+grep -q 'Name: AF_EFS_BACKUP, Value: !Ref EfsBackup' "$ING" || fail "30-ingress does not hand EfsBackup to the CP"
+# CloudFormation parses YAML 1.1, where an unquoted off is the boolean false and the parameter
+# would then refuse the very value the scripts pass. Parse the way it does: all strings, all four.
+python3 - "$ING" <<'PY' || fail "30-ingress EfsBackup AllowedValues do not parse as the four strings"
+import sys, yaml
+class L(yaml.SafeLoader): pass
+L.add_multi_constructor("!", lambda l, s, n: None)
+v = yaml.load(open(sys.argv[1]), L)["Parameters"]["EfsBackup"]["AllowedValues"]
+sys.exit(0 if v == ["", "off", "present", "missing"] and all(type(x) is str for x in v) else 1)
+PY
+# A new parameter must not be mandatory for existing stacks.
+awk '/^  EfsBackup:/{f=1} f&&/Default: ""/{ok=1} f&&/^  CustodianKmsKeyArn:/{exit} END{exit !ok}' "$ING" || fail "EfsBackup has no empty default"
+
 echo "== negative controls: the harness itself must go red on a broken script =="
 # Each mutant is a copy of the real script with one defect; check 0 is wrong for all of them,
 # so a harness that cannot see the defect would let them through.

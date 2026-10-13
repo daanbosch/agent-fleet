@@ -148,7 +148,7 @@ How the image is built, and what is baked or installed on demand, is
 | `workspace-notes.md` | The operating policy every container gets: the short, always-loaded part (prohibitions and traps) |
 | `notes/` | Its topic files (`/usr/local/share/agent-fleet/notes/` in the image), the procedures the policy's index points at |
 | `af-db.sh`, `af-aws-exec.sh`, `af-scratch.sh`, `af-arch-repair.sh` | The `af-*` commands on `PATH`. The first two only exec `workspace-agent` |
-| `gh-auth-wrapper.sh`, `svn-auth-wrapper.sh` | Installed as `gh` and `svn` ahead of the real binaries, so both find the credentials saved through the Console |
+| `gh-auth-wrapper.sh`, `bkt-auth-wrapper.sh`, `svn-auth-wrapper.sh` | Installed as `gh`, `bkt` and `svn` ahead of the real binaries, so all three find the credentials saved through the Console (`bkt-auth-wrapper-test.sh` pins the wrapper) |
 | `jvm.Dockerfile` | Builds the shared JDK directory (`deploy/local/provision-jvm.sh`) |
 | `opencode-plugin/`, `tmux.conf` | The opencode plugin and the tmux configuration |
 | `.dockerignore` | ⚠️ It excludes `**/*.md` and then re-includes the ones the build needs. **Read it before adding a markdown file the image or the agent binary embeds** |

@@ -236,6 +236,10 @@ echo "      5. $STACK (30-ingress, ImageTag=$VERSION)"
 # deployment's data stack).
 DATA_STACK="$(af_efs_backup_data_stack "$STACK")" || DATA_STACK=""
 af_efs_backup_check "$DATA_STACK" "$PROFILE" "$REGION"
+# The same verdict goes to the Console: the ingress stack carries it to the Control Plane as
+# EfsBackup, so an operator who never reads this output still sees the warning. Empty = unknown,
+# in which case the parameter is not passed at all.
+EFS_BACKUP_MARKER="$(af_efs_backup_marker "$AF_EFS_BACKUP_VERDICT" || true)"
 # The pin only applies to the copy above. Said here, before anything runs, so a pin that would
 # otherwise do nothing is not mistaken for one that was checked.
 if [ -n "$COMFY_DIGEST" ] && { [ "$COMFY_REPAIR" != 1 ] || [ "$COMFY_PULLED" != 1 ]; }; then
@@ -620,11 +624,12 @@ fi
 
 # --- 2) CFN deploy: override ImageTag only (everything else keeps its previous value) -------
 # `cloudformation deploy` keeps parameters it was not given at UsePreviousValue, so never add
-# another parameter here — adding one overwrites that "previous value".
+# another parameter here — adding one overwrites that "previous value". EfsBackup is the one
+# exception: it is a fact read from the data stack just above, so overwriting is its job.
 echo "==> cloudformation deploy $STACK (ImageTag=$VERSION)"
 deploy_out=""
 if [ "$DRY" = 1 ]; then
-  echo "DRY: aws cloudformation deploy --stack-name $STACK --template-file $TEMPLATE --capabilities CAPABILITY_NAMED_IAM --parameter-overrides ImageTag=$VERSION"
+  echo "DRY: aws cloudformation deploy --stack-name $STACK --template-file $TEMPLATE --capabilities CAPABILITY_NAMED_IAM --parameter-overrides ImageTag=$VERSION${EFS_BACKUP_MARKER:+ EfsBackup=$EFS_BACKUP_MARKER}"
 else
   set +e
   # Always go through af_cfn_deploy (env.sh): it switches to S3 once a template passes 51,200
@@ -633,7 +638,7 @@ else
   # without it CreateChangeSet fails with InsufficientCapabilitiesException (#1576).
   deploy_out="$(af_cfn_deploy "$STACK" "$TEMPLATE" \
     --capabilities CAPABILITY_NAMED_IAM \
-    --parameter-overrides "ImageTag=$VERSION" \
+    --parameter-overrides "ImageTag=$VERSION" ${EFS_BACKUP_MARKER:+"EfsBackup=$EFS_BACKUP_MARKER"} \
     --no-fail-on-empty-changeset 2>&1)"
   rc=$?
   set -e

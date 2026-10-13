@@ -1905,6 +1905,15 @@ in particular no `Modify` of `FileSystem`. A stack update moves the live file sy
 whatever `EfsThroughputMode` says (see the warning in `10-data.yaml`), and any
 `Replacement` there is a new, empty file system.
 
+**The Console says so too.** `update.sh` and `standup.sh` write the data stack's state into
+the ingress stack's `EfsBackup` parameter (`present` / `missing` / `off`; empty = never
+filled), the CP receives it as `AF_EFS_BACKUP`, and on `ecs` / `ecs-ec2` a value of
+`missing` puts a banner on every section of the Admin screen for super_admins. No CP
+permission is involved: the CP reads an environment variable, never CloudFormation or AWS
+Backup. The banner is only as fresh as the last `update.sh`, so after executing the change set
+above run `update.sh` once more to clear it. An unreadable data stack leaves
+the parameter as it was, and an empty one shows nothing.
+
 **On demand** (before an upgrade, or before touching someone's home by hand):
 
 ```bash

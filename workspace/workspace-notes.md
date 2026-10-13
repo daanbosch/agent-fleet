@@ -139,7 +139,9 @@ directory belongs to someone else.
   `git -C <dir> …`, or a `cd ../other && …` is followed by a commit on the wrong branch.
 - `GIT_EDITOR=true` and `GIT_TERMINAL_PROMPT=0` are set: always pass `-m`/`-F`; credential
   failures fail fast. Interactive commands (`gh auth login`, `rebase -i`) are for the user's shell.
-- `gh` is pre-authenticated through a wrapper — use it freely, never run `gh auth login`. Other
+- `gh` is pre-authenticated through a wrapper — use it freely, never run `gh auth login`. So is
+  `bkt` (Bitbucket Cloud: PRs, pipelines) for a bitbucket.org connection — never `bkt auth login`;
+  a Data Center host is the user's own `BKT_HOST` / `BKT_TOKEN`. Other
   commands are shims too: when output looks impossible, check `type <cmd>` and re-run the real
   binary.
 - The clock is the workspace's local timezone (`date`), not UTC. Outbound network may be

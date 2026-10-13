@@ -78,3 +78,38 @@ func TestAdminTenantsCarriesDeploymentWarnings(t *testing.T) {
 		t.Errorf("super_admin with a master key: deployment_warnings = %s, want []", got)
 	}
 }
+
+// Only an ECS runtime told "missing" warns. Every other runtime, and an ECS one whose ingress
+// stack never filled the marker (an update that could not read the data stack), stays quiet.
+func TestEfsBackupMissing(t *testing.T) {
+	for _, c := range []struct {
+		runtime, marker string
+		want            bool
+	}{
+		{"ecs", "missing", true},
+		{"ecs-ec2", "missing", true},
+		{"ecs", "present", false},
+		{"ecs", "off", false},
+		{"ecs", "", false},
+		{"local", "missing", false},
+		{"docker", "missing", false},
+		{"k8s", "missing", false},
+		{"native", "missing", false},
+	} {
+		if got := efsBackupMissing(c.runtime, c.marker); got != c.want {
+			t.Errorf("runtime=%s marker=%q: %v, want %v", c.runtime, c.marker, got, c.want)
+		}
+	}
+}
+
+func TestDeploymentWarningsEfsBackup(t *testing.T) {
+	m := &manager{authMode: "dev", efsBackupMissing: true}
+	got := m.deploymentWarnings()
+	if len(got) != 1 || got[0] != deploymentWarnEfsBackupMissing {
+		t.Errorf("deploymentWarnings = %v, want [%s]", got, deploymentWarnEfsBackupMissing)
+	}
+	m.efsBackupMissing = false
+	if got := m.deploymentWarnings(); len(got) != 0 {
+		t.Errorf("deploymentWarnings = %v, want none", got)
+	}
+}

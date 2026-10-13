@@ -36,7 +36,7 @@ func TestMemoryExportBlocksSecretsUntilAcked(t *testing.T) {
 	h, cfg, slug := memoryTestAPI(t)
 	const fake = "AKIAQWERTYUIOPASDFGH"
 	memoryWrite(t, memoryProjectMemPath(cfg, slug, "keys.md"), "deploy key "+fake+"\n")
-	if w := smokeDo(t, h, "POST", "/agents/memory/snapshots", "smoke-token", ""); w.Code != http.StatusOK {
+	if w := markedDo(t, h, "POST", "/agents/memory/snapshots", ""); w.Code != http.StatusOK {
 		t.Fatalf("seed snapshot: %d %s", w.Code, w.Body.String())
 	}
 
@@ -90,7 +90,7 @@ func TestMemoryExportBlocksSecretsUntilAcked(t *testing.T) {
 // unconditionally.
 func TestMemoryExportTar(t *testing.T) {
 	h, _, slug := memoryTestAPI(t)
-	if w := smokeDo(t, h, "POST", "/agents/memory/snapshots", "smoke-token", ""); w.Code != http.StatusOK {
+	if w := markedDo(t, h, "POST", "/agents/memory/snapshots", ""); w.Code != http.StatusOK {
 		t.Fatalf("seed snapshot: %d %s", w.Code, w.Body.String())
 	}
 	w := smokeDo(t, h, "GET", "/agents/memory/export?format=tar", "smoke-token", "")

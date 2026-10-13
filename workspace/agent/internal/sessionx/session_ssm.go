@@ -79,11 +79,12 @@ func startFresh(name string) error {
 	sid := session.UUID(m.Dir, m.Name)
 	// Only while the log is still lost: a stale ?fresh=1 (a toast left open, a second tab) must
 	// not set aside a conversation that has since become resumable.
-	if !claude.LostTranscript(sid) {
-		return nil
-	}
-	if err := claude.StartFresh(sid); err != nil {
+	started, err := claude.StartFreshIfLost(sid)
+	if err != nil {
 		return err
+	}
+	if !started {
+		return nil
 	}
 	UpdateSessionMeta(name, func(cur *session.Meta) bool {
 		if cur.ForkFrom == "" && cur.ForkAt == "" {

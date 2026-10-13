@@ -255,6 +255,25 @@ RUN set -eux; \
     rm -rf /tmp/gh.tgz "/tmp/gh_${GH_VERSION}_linux_${gharch}"; \
     /usr/local/libexec/gh --version
 
+# Bitbucket CLI (bkt, avivsinai/bitbucket-cli): the Bitbucket counterpart of gh, same shape.
+# The real binary goes to /usr/local/libexec/bkt and /usr/local/bin/bkt is the transparent-auth
+# wrapper (bkt-auth-wrapper.sh, COPY'd with the other wrappers below). The tarball must match the
+# release's own checksums.txt, or the build fails. Bump BKT_VERSION to upgrade (docs/build/08 §8.3).
+ARG BKT_VERSION=0.33.1
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in amd64) bktarch=x86_64 ;; arm64) bktarch=arm64 ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac; \
+    base="https://github.com/avivsinai/bitbucket-cli/releases/download/v${BKT_VERSION}"; \
+    asset="bkt_${BKT_VERSION}_linux_${bktarch}.tar.gz"; \
+    mkdir /tmp/bkt; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "${base}/${asset}" -o "/tmp/bkt/${asset}"; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "${base}/checksums.txt" -o /tmp/bkt/checksums.txt; \
+    (cd /tmp/bkt && awk -v a="${asset}" '$2 == a { print; n++ } END { exit n != 1 }' checksums.txt >sum && sha256sum -c sum); \
+    tar -C /tmp/bkt -xzf "/tmp/bkt/${asset}" bkt; \
+    install -D -m 0755 /tmp/bkt/bkt /usr/local/libexec/bkt; \
+    rm -rf /tmp/bkt; \
+    /usr/local/libexec/bkt --version
+
 # rtk (token-saving claude Bash hook): fetched pinned at build time, but only when
 # both BAKE_RTK=1 and BAKE_AGENT_CLIS=1. In the default lean build (BAKE_AGENT_CLIS=0)
 # the entrypoint's boot-install puts the rtk pin from versions.json into ~/.local/bin
@@ -692,6 +711,8 @@ COPY --from=agentbuild /out/workspace-agent /usr/local/bin/workspace-agent
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 # gh 透過認証ラッパー（実体は /usr/local/libexec/gh）。§8.3 参照。
 COPY gh-auth-wrapper.sh /usr/local/bin/gh
+# bkt (Bitbucket CLI) transparent-auth wrapper, same idea (real binary in /usr/local/libexec/bkt).
+COPY bkt-auth-wrapper.sh /usr/local/bin/bkt
 # svn transparent-auth wrapper. Same shape as the gh one, except the real binary stays
 # where apt put it (/usr/bin/svn) and the shim only takes precedence through PATH order —
 # /usr/local/bin comes first. It resolves the credential from the encrypted store, so an
@@ -715,7 +736,7 @@ COPY af-aws-exec.sh /usr/local/bin/af-aws-exec
 # Runs one command with one Google Cloud profile's access token from the Agent's own gcloud
 # store, never the VM's or node's identity (ADR 0107 decision 2): `workspace-agent gcloud-exec`.
 COPY af-gcloud-exec.sh /usr/local/bin/af-gcloud-exec
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/gh /usr/local/bin/svn /usr/local/bin/af-scratch /usr/local/bin/af-db /usr/local/bin/af-memory /usr/local/bin/af-arch-repair /usr/local/bin/af-aws-exec /usr/local/bin/af-gcloud-exec
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/gh /usr/local/bin/bkt /usr/local/bin/svn /usr/local/bin/af-scratch /usr/local/bin/af-db /usr/local/bin/af-memory /usr/local/bin/af-arch-repair /usr/local/bin/af-aws-exec /usr/local/bin/af-gcloud-exec
 # opencode plugins source (seeded into ~/.config/opencode/plugin at runtime):
 # agent-fleet-status.js (session working/idle bridge — seeded by the entrypoint) +
 # agent-fleet-caller.js (stamps the calling opencode session on af's MCP tools so a

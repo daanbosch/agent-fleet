@@ -8,7 +8,7 @@
 import { createPortal } from "react-dom";
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as RMouseEvent, DragEvent as RDragEvent, KeyboardEvent as RKeyboardEvent } from "react";
-import { api, uploadFiles, downloadURL, fsMkdir, fsNewFile, fsRename, fsDelete, fsSearch, isTransientErr } from "../../core/api/client.ts";
+import { api, uploadFiles, fsMkdir, fsNewFile, fsRename, fsDelete, fsSearch, isTransientErr } from "../../core/api/client.ts";
 import { useRetryLoad } from "../../lib/retryLoad.ts";
 import FileIcon, { DirIcon } from "../../ui/FileIcon.tsx";
 import { Icon } from "../../ui/Icon.tsx";
@@ -19,7 +19,6 @@ import { useToast } from "../../ui/ToastProvider.tsx";
 import { placeFixed } from "../../lib/placeFixed.ts";
 import { useDismiss } from "../../lib/useDismiss.ts";
 import { useLongPressMenu } from "../../lib/useLongPressMenu.ts";
-import { downloadFolderZip } from "../files/folderZip.ts";
 import { useLayoutStore } from "../../layout/store.ts";
 import { activePane } from "../../layout/ops.ts";
 import { useWorkspaceStore } from "../../core/store/workspace.ts";
@@ -32,14 +31,11 @@ import { openRepoLog } from "../scm/open.ts";
 import { splitRepoPath } from "../scm/svnLog.ts";
 import { useFilesFilter } from "./filesFilter.ts";
 import { normQuery } from "./filter.ts";
-import { useActiveWorkingSet, folderBase, autoAddToActiveWorkingSet } from "../../lib/workingSetsStore.ts";
+import { useActiveWorkingSet, folderBase } from "../../lib/workingSetsStore.ts";
 import { WorkingCopyLabel } from "./WorkingCopyLabel.tsx";
 import { isContextMenuKey, menuAnchor } from "./contextMenuKey.ts";
 import { stickyAncestors } from "./stickyTree.ts";
-import { chatCreate } from "../chat/api.ts";
-import { openChat } from "../chat/open.ts";
-import { openGallery } from "../gallery/open.ts";
-import { imageFormat } from "../../lib/filemeta.ts";
+import { PathMenuItems } from "./PathMenuItems.tsx";
 
 interface Entry {
   name: string;
@@ -219,29 +215,6 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
 
   const showFile = useCallback((p: string) => openTarget({ content: { kind: "file", filePath: p } }), [openTarget]);
   const showFileSplit = useCallback((p: string) => openTargetInNew({ content: { kind: "file", filePath: p } }), [openTargetInNew]);
-
-  // Open an ad-hoc assistant chat for a Files verb (docs/log/30 ②): translate / summarize
-  // the file with the verb persona baked in — no standing assistant. The Agent attaches
-  // the file's dir as knowledge and returns a seed prompt; openChat prefills the composer
-  // (never auto-sent — the user reviews and hits Enter).
-  const openVerbChat = useCallback(
-    async (filePath: string, verb: "translate" | "summarize") => {
-      try {
-        const title =
-          verb === "translate"
-            ? t("proj.verb_title.translate", { name: baseName(filePath) })
-            : t("proj.verb_title.summarize", { name: baseName(filePath) });
-        const c = await chatCreate("", title, { attachPath: filePath, seedVerb: verb });
-        if (c && c.id) {
-          autoAddToActiveWorkingSet("convs", c.id); // docs/log/52 §1
-          openChat(c.id, c.seed);
-        } else toast(t("send.chat_create_failed"));
-      } catch {
-        toast(t("send.chat_create_failed"));
-      }
-    },
-    [toast],
-  );
 
   // Load (mount / manual refresh via files tick): fetch the root folder's children
   // and re-fetch every currently-open dir, preserving expansion + selection.
@@ -990,15 +963,6 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
     if (!(await refreshDir(parentOf(row.path), started))) return;
     setSelected(parentOf(row.path) || null);
   };
-  const copyText = (text: string, label: string) => {
-    if (navigator.clipboard?.writeText)
-      navigator.clipboard.writeText(text).then(
-        () => toast(t("proj.copied", { label }), { kind: "success" }),
-        () => toast(t("common.copy_failed")),
-      );
-    else toast(t("common.copy_failed"));
-  };
-
   // Context menu: open at the cursor; close on outside click / Escape / blur.
   useDismiss(menuRef, !!menu, () => setMenu(null));
   useEffect(() => {
@@ -1019,21 +983,10 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
     fn();
   };
   const menuDir = menu ? (menu.row.type === "dir" ? menu.row.path : parentOf(menu.row.path)) : root;
-  // "Open in gallery" is offered for a folder and for an image file — never for anything
-  // else, and `imageFormat` is the only thing allowed to decide that (ADR 0080 decision 3):
-  // a second extension table here would make a file the viewer shows as an image invisible
-  // in the gallery. A file row opens menuDir (already its parent) focused on itself.
-  const galleryRow = menu && (menu.row.type === "dir" || !!imageFormat(menu.row.path)) ? menu.row : null;
   // Show log for a folder or file inside an SVN working copy (#1705): the path becomes the
   // log's path filter. A row outside ~/repos, or in a git copy, offers nothing.
   const menuRepoPath = menu ? splitRepoPath(menu.row.path) : null;
   const svnLogTarget = menuRepoPath && repos.find((r) => r.name === menuRepoPath.repo)?.vcs === "svn" ? menuRepoPath : null;
-  const openGalleryFromMenu = (e: RMouseEvent) => {
-    // Modifier / middle click lands in another pane, the same rule the tree rows follow.
-    const newPane = e.ctrlKey || e.metaKey || e.button === 1;
-    const focus = galleryRow?.type === "file" ? galleryRow.path : undefined;
-    runMenu(() => openGallery(menuDir, { focus, newPane }));
-  };
 
   return (
     <div ref={wrapRef} className="proj-files fstree-wrap">
@@ -1232,84 +1185,25 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
                 <Icon name="new-folder" /> {tr("proj.new_folder")}
               </button>
             </li>
-            <li>
-              <button type="button" className="ui-menu-item" onClick={() => runMenu(() => copyText(baseName(menu.row.path), t("proj.name")))}>
-                <Icon name="copy" /> {tr("proj.copy_name")}
-              </button>
-            </li>
-            <li>
-              <button type="button" className="ui-menu-item" onClick={() => runMenu(() => copyText(menu.row.path, t("proj.rel_path")))}>
-                <Icon name="copy" /> {tr("proj.copy_rel_path")}
-              </button>
-            </li>
-            {svnLogTarget && (
-              <li>
-                <button
-                  type="button"
-                  className="ui-menu-item"
-                  onClick={() => runMenu(() => openRepoLog(svnLogTarget.repo, svnLogTarget.sub))}
-                >
-                  <Icon name="history" /> {tr("proj.svn_show_log")}
-                </button>
-              </li>
-            )}
-            {galleryRow && (
-              <li>
-                <button
-                  type="button"
-                  className="ui-menu-item"
-                  onMouseDown={(e) => e.button === 1 && e.preventDefault()}
-                  onAuxClick={(e) => e.button === 1 && openGalleryFromMenu(e)}
-                  onClick={openGalleryFromMenu}
-                >
-                  <Icon name="file-media" /> {tr("proj.open_gallery")}
-                </button>
-              </li>
-            )}
-            {menu.row.type === "file" && (
-              <li>
-                <button
-                  type="button"
-                  className="ui-menu-item"
-                  onClick={() => runMenu(() => openTarget({ content: { kind: "read", filePath: menu.row.path } }))}
-                >
-                  <Icon name="book" /> {tr("proj.open_reader")}
-                </button>
-              </li>
-            )}
-            {menu.row.type === "file" && (
-              <li>
-                <a className="ui-menu-item files-ctx-a" href={downloadURL(menu.row.path)} download onClick={() => setMenu(null)}>
-                  <Icon name="cloud-download" /> {tr("proj.download")}
-                </a>
-              </li>
-            )}
-            {menu.row.type === "dir" && (
-              <li>
-                <button
-                  type="button"
-                  className="ui-menu-item"
-                  title={tr("proj.download_zip_title")}
-                  onClick={() => runMenu(() => void downloadFolderZip(menu.row.path, toast))}
-                >
-                  <Icon name="cloud-download" /> {tr("proj.download_zip")}
-                </button>
-              </li>
-            )}
-            {menu.row.type === "file" && (
-              <li>
-                <button type="button" className="ui-menu-item" onClick={() => runMenu(() => void openVerbChat(menu.row.path, "translate"))}>
-                  <Icon name="globe" /> {tr("proj.translate")}
-                </button>
-              </li>
-            )}
-            {menu.row.type === "file" && (
-              <li>
-                <button type="button" className="ui-menu-item" onClick={() => runMenu(() => void openVerbChat(menu.row.path, "summarize"))}>
-                  <Icon name="list-selection" /> {tr("proj.summarize")}
-                </button>
-              </li>
-            )}
+            <PathMenuItems
+              path={menu.row.path}
+              type={menu.row.type === "dir" ? "dir" : "file"}
+              runMenu={runMenu}
+              closeMenu={() => setMenu(null)}
+              afterCopy={
+                svnLogTarget && (
+                  <li>
+                    <button
+                      type="button"
+                      className="ui-menu-item"
+                      onClick={() => runMenu(() => openRepoLog(svnLogTarget.repo, svnLogTarget.sub))}
+                    >
+                      <Icon name="history" /> {tr("proj.svn_show_log")}
+                    </button>
+                  </li>
+                )
+              }
+            />
             <li>
               <button type="button" className="ui-menu-item" onClick={() => runMenu(() => void renameRow(menu.row))}>
                 <Icon name="edit" /> {tr("proj.rename")}
