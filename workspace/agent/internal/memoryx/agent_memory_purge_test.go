@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -955,6 +956,34 @@ func TestAgentMemoryPurgeUnknownMainKeepsTheMarker(t *testing.T) {
 	}
 }
 
+// setMarkerPid records pid in the marker, as the purge does right after it starts update-ref.
+func setMarkerPid(t *testing.T, pid int) {
+	t.Helper()
+	b, err := os.ReadFile(agentMemPurgePendingPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p agentMemPurgePending
+	if err := json.Unmarshal(b, &p); err != nil {
+		t.Fatal(err)
+	}
+	p.Pid = pid
+	b, _ = json.Marshal(p)
+	if err := os.WriteFile(agentMemPurgePendingPath(), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// deadPid is the pid of a process that has already exited.
+func deadPid(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	return cmd.Process.Pid
+}
+
 // A crash after the purge's update-ref took its locks but before it moved anything leaves the
 // refs old and the locks behind. Those are the purge's own and are cleared; the purge then runs.
 func TestAgentMemoryPurgeClearsItsOwnStaleLocks(t *testing.T) {
@@ -975,6 +1004,7 @@ func TestAgentMemoryPurgeClearsItsOwnStaleLocks(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	setMarkerPid(t, deadPid(t))
 	ResumeMemoryPurge()
 	if _, err := os.Stat(memoryRepoDir() + "/refs/heads/main.lock"); err == nil {
 		t.Fatal("the purge's own stale lock was left")
@@ -1001,6 +1031,18 @@ func TestAgentMemoryPurgeNeverDeletesAnotherWritersLock(t *testing.T) {
 	_, _ = purgeDo(t, f, "a")
 	agentMemPurgeFault = nil
 	lock := memoryRepoDir() + "/refs/heads/main.lock"
+
+	// The recorded transaction process is alive: its locks are not stale.
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setMarkerPid(t, os.Getpid())
+	ResumeMemoryPurge()
+	if _, err := os.Stat(lock); err != nil {
+		t.Fatal("a lock was deleted while its recorded process is alive")
+	}
+	setMarkerPid(t, 0)
+	_ = os.Remove(lock)
 
 	// Held open by a live process (here, this one).
 	held, err := os.OpenFile(lock, os.O_CREATE|os.O_RDWR, 0o600)

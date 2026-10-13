@@ -445,6 +445,9 @@ type agentMemPurgePending struct {
 	// Refs are the ref moves, so a recovery can tell a transaction that never committed (a ref
 	// still at Old) from one that did; "" means absent.
 	Refs []agentMemPurgeRefMove `json:"refs"`
+	// Pid is the update-ref process of the transaction, recorded right after it starts. A dead
+	// recorded pid proves the lock files left on the recorded refs are this purge's own.
+	Pid int `json:"pid,omitempty"`
 }
 
 type agentMemPurgeRefMove struct {
@@ -463,7 +466,7 @@ func agentMemPurgeResume() error {
 	var p agentMemPurgePending
 	_ = json.Unmarshal(b, &p) // unreadable: still reset the index and collect
 	if len(p.Refs) > 0 {
-		moved, err := agentMemPurgeSettleRefs(p.Refs)
+		moved, err := agentMemPurgeSettleRefs(p.Refs, p.Pid)
 		if err != nil {
 			return err
 		}
@@ -783,9 +786,23 @@ func agentMemPurge(req agentMemPurgeReq) (agentMemPurgeResult, error) {
 	}
 	cmd := memoryGit("update-ref", "--stdin")
 	cmd.Stdin = &tx
-	if out, err := cmd.CombinedOutput(); err != nil {
+	var cmdOut bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &cmdOut, &cmdOut
+	if err := cmd.Start(); err != nil {
 		_ = os.Remove(agentMemPurgePendingPath())
-		return res, fmt.Errorf("move the refs: %v: %s", err, strings.TrimSpace(string(out)))
+		return res, fmt.Errorf("move the refs: %w", err)
+	}
+	// Name the process in the marker (replaced atomically) before waiting for it.
+	pending := agentMemPurgePending{Path: s.path, Blobs: s.purged, Refs: moves, Pid: cmd.Process.Pid}
+	if b, merr := json.Marshal(pending); merr == nil {
+		tmp := agentMemPurgePendingPath() + ".tmp"
+		if os.WriteFile(tmp, b, 0o600) == nil {
+			_ = os.Rename(tmp, agentMemPurgePendingPath())
+		}
+	}
+	if err := cmd.Wait(); err != nil {
+		_ = os.Remove(agentMemPurgePendingPath())
+		return res, fmt.Errorf("move the refs: %v: %s", err, strings.TrimSpace(cmdOut.String()))
 	}
 	if err := agentMemPurgeStage("refs"); err != nil {
 		return res, err
@@ -880,7 +897,7 @@ func agentMemPurgeRefState(m agentMemPurgeRefMove) int {
 // at neither keeps the marker with an error and nothing is touched. All old means nothing ran; a
 // mix is rolled forward to the recorded values, compare-and-set against the old ones. The dead
 // git's own stale locks on the refs still to move are cleared first (agentMemPurgeClearLocks).
-func agentMemPurgeSettleRefs(moves []agentMemPurgeRefMove) (bool, error) {
+func agentMemPurgeSettleRefs(moves []agentMemPurgeRefMove, pid int) (bool, error) {
 	var pending []agentMemPurgeRefMove
 	moved := false
 	for _, m := range moves {
@@ -897,7 +914,7 @@ func agentMemPurgeSettleRefs(moves []agentMemPurgeRefMove) (bool, error) {
 	if len(pending) == 0 {
 		return moved, nil
 	}
-	if err := agentMemPurgeClearLocks(pending); err != nil {
+	if err := agentMemPurgeClearLocks(pending, pid); err != nil {
 		return false, err
 	}
 	if !moved {
@@ -971,7 +988,7 @@ func purgeOtherUser(dir string) bool {
 // only if it is one of the recorded refs' (or packed-refs), it is not older than the marker (which
 // is written just before the transaction), and no process holds it open; any other lock belongs to
 // someone else and is never deleted — the recovery then fails and the marker stays.
-func agentMemPurgeClearLocks(moves []agentMemPurgeRefMove) error {
+func agentMemPurgeClearLocks(moves []agentMemPurgeRefMove, pid int) error {
 	st, err := os.Stat(agentMemPurgePendingPath())
 	if err != nil {
 		return err
@@ -979,6 +996,13 @@ func agentMemPurgeClearLocks(moves []agentMemPurgeRefMove) error {
 	locks := []string{filepath.Join(memoryRepoDir(), "packed-refs.lock")}
 	for _, m := range moves {
 		locks = append(locks, filepath.Join(memoryRepoDir(), filepath.FromSlash(m.Name)+".lock"))
+	}
+	refuse := memoryErrf(http.StatusInternalServerError, errCodeMemorySnapshotFailed,
+		"a ref is locked by something other than the interrupted purge; it was left as it is")
+	// With the transaction's pid recorded, a dead process is proof enough: nothing else is
+	// known to have taken these locks, and the recorded one cannot hold them.
+	if pid > 0 && agentMemPurgePidAlive(pid) {
+		return refuse
 	}
 	for _, l := range locks {
 		info, err := os.Lstat(l)
@@ -988,20 +1012,22 @@ func agentMemPurgeClearLocks(moves []agentMemPurgeRefMove) error {
 		if err != nil {
 			return err
 		}
-		held, herr := agentMemPurgeLockHeld(l)
-		if herr != nil {
-			log.Printf("agent memory: purge lock check: %v", herr) // /proc detail only, no memory text
-		}
-		if herr == nil && (held || info.ModTime().Before(st.ModTime().Add(-purgeLockSkew))) {
-			log.Printf("agent memory: purge lock check: held=%v lock mtime %s, marker mtime %s", held, info.ModTime().Format(time.RFC3339Nano), st.ModTime().Format(time.RFC3339Nano))
-		}
-		if herr != nil || held || info.ModTime().Before(st.ModTime().Add(-purgeLockSkew)) {
-			return memoryErrf(http.StatusInternalServerError, errCodeMemorySnapshotFailed,
-				"a ref is locked by something other than the interrupted purge; it was left as it is")
+		if pid <= 0 {
+			// No pid was recorded (the crash came before it): fall back to "made after the
+			// marker and open nowhere".
+			held, herr := agentMemPurgeLockHeld(l)
+			if herr != nil || held || info.ModTime().Before(st.ModTime().Add(-purgeLockSkew)) {
+				return refuse
+			}
 		}
 		if err := os.Remove(l); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func agentMemPurgePidAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
