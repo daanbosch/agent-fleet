@@ -2169,8 +2169,7 @@ func OneShotHeadlessRun(ctx context.Context, feature string, tier OneShotTier, p
 		if err != nil {
 			return "", "", "", fmt.Errorf("agy execution failed: %s", cliErr(err))
 		}
-		call.OK = true
-		return strings.TrimRight(strings.TrimSpace(string(out)), "\n"), "", "", nil
+		return agyOneShotReply(&call, out), "", "", nil
 	case session.KindMuse:
 		call.Kind, call.Measured = session.KindMuse, usagex.MeasuredNone
 		m := selected
@@ -2215,6 +2214,15 @@ func OneShotHeadlessRun(ctx context.Context, feature string, tier OneShotTier, p
 	}
 	call.OK = true
 	return strings.TrimRight(r.Result, "\n"), "", "", nil
+}
+
+// agyOneShotReply trims agy's stdout and records the call. agy exits 0 with an empty stdout when
+// the model declines a prompt, so an empty reply is not a success: OK stays false and the ledger
+// can tell "answered" from "returned nothing".
+func agyOneShotReply(call *usagex.Call, out []byte) string {
+	reply := strings.TrimRight(strings.TrimSpace(string(out)), "\n")
+	call.OK = reply != ""
+	return reply
 }
 
 // argValue returns the value following a flag in argv ("" when not found). It puts "which

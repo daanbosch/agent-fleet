@@ -133,7 +133,7 @@ func TestTitleSuggestionPathsKeepWorkItemKey(t *testing.T) {
 			}
 			session.WriteMeta(session.Meta{Name: name, Dir: t.TempDir(), Kind: session.KindClaude, WorkItem: c.item})
 
-			generateSessionTitle(name, turns)
+			generateSessionTitle(name, turns, len(turns))
 			m, _ := session.ReadMeta(name)
 			if m.SuggestedTitle != c.want {
 				t.Fatalf("auto suggestion = %q, want %q", m.SuggestedTitle, c.want)
