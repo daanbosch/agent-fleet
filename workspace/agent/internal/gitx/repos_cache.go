@@ -133,14 +133,14 @@ func globalConfigPaths() gitGlobals {
 }
 
 // configFollowable reports whether the fingerprint can follow what this config text says.
-// An include pulls in files it does not watch; a global [branch] section would name an
-// upstream the repo config does not; refstorage changes where refs live.
+// An include pulls in files it does not watch; a global [branch] or [remote] section would name an
+// upstream or fetch refspec the repo config does not; refstorage changes where refs live.
 func configFollowable(text string, global bool) bool {
 	lower := strings.ToLower(text)
 	if strings.Contains(lower, "[include") || strings.Contains(lower, "refstorage") || strings.Contains(lower, "worktreeconfig") {
 		return false
 	}
-	return !global || !strings.Contains(lower, "[branch")
+	return !global || !(strings.Contains(lower, "[branch") || strings.Contains(lower, "[remote"))
 }
 
 // gitLocation resolves where a working copy keeps its git data. gitDir holds HEAD and the

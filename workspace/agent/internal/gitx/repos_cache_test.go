@@ -406,3 +406,21 @@ func TestFillGitFactsSurvivesEvictionBetweenPhases(t *testing.T) {
 		}
 	}
 }
+
+// A fetch refspec in the global config remaps where the upstream lives; the fingerprint
+// would keep watching refs/remotes/origin/*.
+func TestRepoCacheFollowsAGlobalFetchRefspec(t *testing.T) {
+	f := newCacheFixture(t)
+	d := f.copyDir
+	writeFile(t, filepath.Join(os.Getenv("HOME"), ".gitconfig"), "[remote \"origin\"]\n\tfetch = +refs/heads/*:refs/remotes/custom/*\n")
+	f.global = globalConfigPaths()
+	mustGit(t, d, "fetch", "origin")
+	f.check(t, d, "warm after the first fetch")
+	writeFile(t, filepath.Join(f.other, "n.txt"), "n\n")
+	mustGit(t, f.other, "add", ".")
+	mustGit(t, f.other, "commit", "-m", "n")
+	mustGit(t, f.other, "push", "origin", "HEAD:main")
+	// --refmap= stops git's opportunistic update of origin/main, moving only the real upstream.
+	mustGit(t, d, "fetch", "--refmap=", "origin", "main:refs/remotes/custom/main")
+	f.check(t, d, "fetch moved the remapped upstream only")
+}
