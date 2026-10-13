@@ -108,7 +108,7 @@ func newHandoffLife(t *testing.T) *handoffLife {
 	t.Cleanup(agent.Close)
 	rt := stubRuntime{endpoint: agent.URL, token: "tok"}
 	mgr := &manager{store: st, rts: map[string]cachedRT{f.owner.mv.MembershipID: {rt: rt, ws: ws}}}
-	f.api = newSessionHandoffAPI(mgr, newSessionShareAPI(mgr))
+	f.api = newSessionHandoffAPI(mgr, newSessionShareAPI(mgr), false)
 	f.ownerRes = &resolved{ident: f.owner.ident, mv: f.owner.mv, ws: ws, rt: rt}
 	f.shareID = "share-1"
 	if err := st.PutSessionShare(ctx, store.SessionShare{ID: f.shareID, TenantID: tenant.ID,
@@ -476,12 +476,20 @@ func (f *handoffLife) recipientWorkspace() *recipientCreate {
 	f.t.Helper()
 	rc := &recipientCreate{}
 	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/reserve") {
+			w.Header().Set(createKeyHeader, strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/sessions-idempotency/"), "/reserve"))
+			return
+		}
 		if r.Method == http.MethodPost && r.URL.Path == "/sessions" {
 			var b map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&b)
 			f.mu.Lock()
 			rc.bodies = append(rc.bodies, b)
 			f.mu.Unlock()
+			if key, _ := b["idempotency_key"].(string); key != "" {
+				w.Header().Set(createKeyHeader, key)
+				w.Header().Set(createOutcomeHeader, "created")
+			}
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(map[string]any{"name": "taken-over"})
 			return
@@ -543,33 +551,63 @@ func TestHandoffCreateIsFencedByTheTake(t *testing.T) {
 	if len(rc.bodies) != 1 || rc.bodies[0]["handoff_take"] != nil || rc.bodies[0]["kind"] != "claude" {
 		t.Fatalf("the Agent received %v, want the create without handoff_take", rc.bodies)
 	}
-	if row := f.row(o.ID); row.TakeConfirmedAt == "" {
-		t.Fatalf("the create did not confirm the take: %+v", row)
+	// The CP saw the session created, so it settled the offer itself (#2040); the Console's
+	// own accept finds it done.
+	if row := f.row(o.ID); row.Status != "accepted" || row.AcceptedSessionName != "taken-over" {
+		t.Fatalf("the create did not settle the take: %+v", row)
 	}
-	backdate(o.ID) // the create was slow; the session exists
-	f.requireConflict(f.as(f.owner, f.api.withdraw, http.MethodDelete, o.ID, nil), "handoff_being_taken", "pending")
 	if rec := f.as(f.recipient, f.api.accept, http.MethodPost, o.ID, map[string]any{"sessionName": "taken-over", "token": token}); rec.Code != http.StatusOK {
+		t.Fatalf("accept after the create = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// A confirmed take whose create is slow, past the window: the session may exist, so
+	// the sender cannot withdraw under it.
+	slow := f.mustOffer(nil)
+	token = f.take(slow.ID)
+	if ok, err := f.st.ConfirmSessionHandoffTake(context.Background(), slow.ID, f.recipient.mv.MembershipID, token, store.NowTS()); err != nil || !ok {
+		t.Fatalf("confirm: ok=%v err=%v", ok, err)
+	}
+	backdate(slow.ID)
+	f.requireConflict(f.as(f.owner, f.api.withdraw, http.MethodDelete, slow.ID, nil), "handoff_being_taken", "pending")
+	if rec := f.as(f.recipient, f.api.accept, http.MethodPost, slow.ID, map[string]any{"sessionName": "slow", "token": token}); rec.Code != http.StatusOK {
 		t.Fatalf("accept after a slow create = %d %s", rec.Code, rec.Body.String())
 	}
 
-	// Unsharing during a confirmed launch keeps the take; giving it back then expires the
-	// offer, and the release answers with that status.
+	// Unsharing under an unconfirmed take expires the offer at once; the late release
+	// answers with that status.
+	o3 := f.mustOffer(nil)
+	token = f.take(o3.ID)
+	if err := f.st.DeleteSessionShare(context.Background(), f.shareID, f.owner.mv.MembershipID); err != nil {
+		t.Fatal(err)
+	}
+	f.requireConflict(f.as(f.recipient, f.api.release, http.MethodPost, o3.ID, map[string]any{"token": token}), "handoff_not_taken", "expired")
+
+	// Unsharing under a confirmed take keeps it, and the Console cannot give it back (its
+	// session may exist, #2040); it expires when the CP gives it back on the Agent's word.
+	if err := f.st.PutSessionShare(context.Background(), store.SessionShare{ID: f.shareID, TenantID: f.owner.mv.TenantID,
+		OwnerMembershipID: f.owner.mv.MembershipID, RecipientMembershipID: f.recipient.mv.MembershipID,
+		ScopeType: "session", ScopeKey: "session-1", Permission: "ro", CreatedAt: store.NowTS(), UpdatedAt: store.NowTS()}); err != nil {
+		t.Fatal(err)
+	}
 	o2 := f.mustOffer(nil)
 	token = f.take(o2.ID)
-	if rec := rc.create(t, map[string]any{"kind": "claude", "handoff_take": map[string]any{"offerId": o2.ID, "token": token}}); rec.Code != http.StatusCreated {
-		t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+	if ok, err := f.st.ConfirmSessionHandoffTake(context.Background(), o2.ID, f.recipient.mv.MembershipID, token, store.NowTS()); err != nil || !ok {
+		t.Fatalf("confirm: ok=%v err=%v", ok, err)
 	}
 	if err := f.st.DeleteSessionShare(context.Background(), f.shareID, f.owner.mv.MembershipID); err != nil {
 		t.Fatal(err)
 	}
 	f.requireConflict(f.as(f.owner, f.api.withdraw, http.MethodDelete, o2.ID, nil), "handoff_being_taken", "pending")
-	rec = f.as(f.recipient, f.api.release, http.MethodPost, o2.ID, map[string]any{"token": token})
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"expired"`) {
-		t.Fatalf("release after the unshare = %d %s, want 200 status expired", rec.Code, rec.Body.String())
+	f.requireConflict(f.as(f.recipient, f.api.release, http.MethodPost, o2.ID, map[string]any{"token": token}), "handoff_launch_unknown", "pending")
+	if ok, err := f.st.ReleaseSessionHandoffOffer(context.Background(), o2.ID, f.recipient.mv.MembershipID, token); err != nil || !ok {
+		t.Fatalf("release on the Agent's word: ok=%v err=%v", ok, err)
+	}
+	if row := f.row(o2.ID); row.Status != "expired" {
+		t.Fatalf("after the unshare and the release: %+v, want expired", row)
 	}
 
 	// A create without a take is passed through untouched.
-	if rec := rc.create(t, map[string]any{"kind": "shell"}); rec.Code != http.StatusCreated || len(rc.bodies) != 3 {
+	if rec := rc.create(t, map[string]any{"kind": "shell"}); rec.Code != http.StatusCreated || len(rc.bodies) != 2 || rc.bodies[1]["idempotency_key"] != nil {
 		t.Fatalf("plain create = %d (%d bodies)", rec.Code, len(rc.bodies))
 	}
 }

@@ -25,7 +25,7 @@ vi.mock("./LaunchModal.tsx", () => ({
       onClick={() =>
         void p
           .onLaunch({
-            kind: "claude", driver: "", model: "", effort: "", startMode: "normal", prompt: "carry on",
+            kind: "claude", driver: (globalThis as { __launchDriver?: string }).__launchDriver ?? "", model: "", effort: "", startMode: "normal", prompt: "carry on",
             title: "Carry on", images: [], subdir: "", base: "feature/x", newBranch: "take/x", worktree: true,
           } as LaunchOpts)
           .catch(() => undefined) // a thrown launch is the dialog's to show; here only the offer matters
@@ -45,7 +45,7 @@ let root: Root | null = null;
 let host: HTMLDivElement;
 const fetchMock = vi.fn();
 
-type Answer = { status: number; body: unknown } | "network-error";
+type Answer = { status: number; body: unknown } | { status: number; raw: string } | "network-error";
 
 /** Answers fetch per path suffix (POSTs only; the handoff store's GETs get empty lists). */
 function routes(answers: Record<string, Answer>) {
@@ -55,6 +55,7 @@ function routes(answers: Record<string, Answer>) {
     for (const [suffix, a] of Object.entries(answers)) {
       if (!path.endsWith(suffix)) continue;
       if (a === "network-error") throw new TypeError("Failed to fetch");
+      if ("raw" in a) return new Response(a.raw, { status: a.status, headers: { "Content-Type": "text/html" } });
       return new Response(JSON.stringify(a.body), { status: a.status, headers: { "Content-Type": "application/json" } });
     }
     throw new Error("unexpected call " + path);
@@ -168,15 +169,98 @@ describe("launching from a received handoff", () => {
     expect(document.body.textContent).toContain(t("err.handoff_take_lost"));
   });
 
-  it("gives the offer back when the launch request itself throws", async () => {
+  // #2040: the create's outcome is unknown, so the session may exist. Giving the offer back
+  // would let the sender withdraw it and start the same work.
+  it.each([
+    ["the request throws", "network-error" as Answer],
+    ["a gateway answers with its own page", { status: 504, raw: "<html>Gateway Timeout</html>" } as Answer],
+  ])("keeps the take when %s, and the next press accepts the session the lost launch created", async (_, lost) => {
+    routes({ "/offer-1/take": { status: 200, body: { status: "pending", token: "tok-3" } }, "/api/sessions": lost });
+    await pressLaunch();
+    expect(posts("/release")).toHaveLength(0);
+    expect(posts("/accept")).toHaveLength(0);
+    expect(document.body.textContent).toContain(t("handoff.launch_unknown"));
+    expect(host.querySelector("[data-testid=launch]")).not.toBeNull();
+
+    fetchMock.mockClear();
+    routes({ "/offer-1/take": { status: 200, body: { status: "accepted", sessionName: "s-lost" } } });
+    await pressLaunch();
+    expect(posts("/offer-1/take")[0]).toEqual({ token: "tok-3" });
+    expect(posts("/api/sessions")).toHaveLength(0);
+    expect(posts("/release")).toHaveLength(0);
+    expect(document.body.textContent).toContain(t("handoff.launch_recovered", { name: "s-lost" }));
+  });
+
+  it("launches under the fresh take the next press gets when nothing was created", async () => {
+    routes({ "/offer-1/take": { status: 200, body: { status: "pending", token: "tok-6" } }, "/api/sessions": "network-error" });
+    await pressLaunch();
+    fetchMock.mockClear();
     routes({
-      "/offer-1/take": { status: 200, body: { status: "pending", token: "tok-3" } },
-      "/api/sessions": "network-error",
-      "/offer-1/release": { status: 200, body: { status: "pending" } },
+      "/offer-1/take": { status: 200, body: { status: "pending", token: "tok-7" } },
+      "/api/sessions": { status: 201, body: { name: "s-again" } },
+      "/offer-1/accept": { status: 200, body: { status: "accepted" } },
     });
     await pressLaunch();
-    expect(posts("/offer-1/release")[0]).toEqual({ token: "tok-3" });
-    expect(posts("/accept")).toHaveLength(0);
+    expect(posts("/offer-1/take")[0]).toEqual({ token: "tok-6" });
+    expect(posts("/api/sessions")[0].handoff_take).toEqual({ offerId: "offer-1", token: "tok-7" });
+    expect(posts("/offer-1/accept")[0]).toEqual({ sessionName: "s-again", token: "tok-7" });
+  });
+
+  it("keeps the take when the CP refuses to release it because the create reached the Agent", async () => {
+    routes({
+      "/offer-1/take": { status: 200, body: { status: "pending", token: "tok-8" } },
+      "/api/sessions": { status: 504, body: { error: { code: "upstream_timeout", message: "gateway" } } },
+      "/offer-1/release": { status: 409, body: { error: { code: "handoff_launch_unknown", message: "x", status: "pending", offerStatus: "pending" } } },
+    });
+    await pressLaunch();
+    expect(document.body.textContent).toContain(t("handoff.launch_unknown"));
+    fetchMock.mockClear();
+    routes({ "/offer-1/take": { status: 200, body: { status: "accepted", sessionName: "s-proxied" } } });
+    await pressLaunch();
+    expect(posts("/offer-1/take")[0]).toEqual({ token: "tok-8" });
+    expect(document.body.textContent).toContain(t("handoff.launch_recovered", { name: "s-proxied" }));
+  });
+
+  it("starts the driver fallback over under a new take, since a take starts one create", async () => {
+    (globalThis as { __launchDriver?: string }).__launchDriver = "managed";
+    let takes = 0;
+    let creates = 0;
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const path = new URL(url, "http://console.test/").pathname;
+      const json = (status: number, body: unknown) =>
+        new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+      if ((init?.method ?? "GET") === "GET") return json(200, { offers: [] });
+      if (path.endsWith("/offer-1/take")) return json(200, { status: "pending", token: `tok-r${++takes}` });
+      if (path.endsWith("/offer-1/release")) return json(409, { error: { code: "handoff_not_taken", status: "pending", offerStatus: "pending" } });
+      if (path.endsWith("/offer-1/accept")) return json(200, { status: "accepted" });
+      if (path.endsWith("/api/sessions")) {
+        return ++creates === 1
+          ? json(400, { error: { code: "driver_unsupported", message: "no managed" } })
+          : json(201, { name: "s-tui" });
+      }
+      throw new Error("unexpected call " + path);
+    });
+    try {
+      await pressLaunch();
+    } finally {
+      delete (globalThis as { __launchDriver?: string }).__launchDriver;
+    }
+    const created = posts("/api/sessions");
+    expect(created.map((b) => b.handoff_take)).toEqual([
+      { offerId: "offer-1", token: "tok-r1" },
+      { offerId: "offer-1", token: "tok-r2" },
+    ]);
+    expect(created[1].driver).toBeUndefined();
+    expect(posts("/offer-1/accept")[0]).toEqual({ sessionName: "s-tui", token: "tok-r2" });
+  });
+
+  it("says the outcome is still unknown when the CP cannot ask the workspace", async () => {
+    routes({
+      "/offer-1/take": { status: 409, body: { error: { code: "handoff_launch_unknown", message: "x", status: "pending", offerStatus: "pending" } } },
+    });
+    await pressLaunch();
+    expect(posts("/api/sessions")).toHaveLength(0);
+    expect(document.body.textContent).toContain(t("handoff.take_unknown"));
   });
 
   it("tells the user when the session started but the acceptance could not be recorded", async () => {

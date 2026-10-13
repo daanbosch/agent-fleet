@@ -120,6 +120,12 @@ func TestMemberHandoff(t *testing.T) {
 	if got := b.shell(launched, "git branch --show-current"); got != branch {
 		t.Fatalf("launched session is on %q, want %s", got, branch)
 	}
+	// The CP saw the Agent create the session, so it has already accepted the offer: a
+	// Console that lost that answer does not leave the offer to its next press (#2040). The
+	// Console's own accept afterwards is answered as done.
+	if o := ownedOffer(t, a, offer.ID); o.Status != "accepted" || o.AcceptedSessionName != launched {
+		t.Fatalf("after the create: offer %s is %s/%q, want accepted/%q by the CP", o.ID, o.Status, o.AcceptedSessionName, launched)
+	}
 	acceptOffer(t, b, offer.ID, launched, token)
 
 	// --- A, workspace stopped, is told; the offer is accepted (H-11) ---

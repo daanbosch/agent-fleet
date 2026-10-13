@@ -738,6 +738,9 @@ export const sessions = {
   "handoff.take_declined": "この引き継ぎは辞退済みです。セッションは起動していません。",
   "handoff.take_accepted": "この引き継ぎは受領済みです。セッションは起動していません。",
   "handoff.take_busy": "この引き継ぎは別の画面で起動中です。セッションは起動していません。",
+  "handoff.take_unknown": "この引き継ぎからセッションがすでに起動している可能性があり、ワークスペースで確認できませんでした。セッション一覧を確認してください。もう一度起動を押すと再確認します。",
+  "handoff.launch_unknown": "起動の応答がなく、セッションが起動したか分かりません。引き継ぎはあなたのために確保したままです。もう一度起動を押すと確認します。",
+  "handoff.launch_recovered": "この引き継ぎからセッション {name} がすでに起動していました。受領済みにしました。",
   "handoff.take_failed": "引き継ぎを確保できなかったため、起動しませんでした（{err}）。",
   "handoff.accept_unrecorded": "セッションは起動しましたが、引き継ぎを受領済みにできませんでした（{err}）。送り手に知らせてください。",
   // --- sessions overview pane (ADR 0078) ---

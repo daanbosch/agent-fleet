@@ -369,3 +369,65 @@ func TestHandoffUnshareKeepsAConfirmedLaunchFenced(t *testing.T) {
 		})
 	}
 }
+
+// A take confirms once, so two creates can never share its Agent key (issue #2040); a Console
+// can give back only an unconfirmed take; the CP reads a confirmed take's token back to ask
+// the recipient's Agent about its create, and gives it back on the Agent's word.
+func TestHandoffConfirmOnceAndConfirmedToken(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range inboxStores(t) {
+		t.Run(name, func(t *testing.T) {
+			f := newHandoffFixtureOn(t, st)
+			must := func(want, ok bool, err error, what string) {
+				t.Helper()
+				if err != nil || ok != want {
+					t.Fatalf("%s: ok=%v err=%v, want %v", what, ok, err, want)
+				}
+			}
+			o := f.offer(t, "")
+			if _, err := st.CreateSessionHandoffOffer(ctx, o); err != nil {
+				t.Fatal(err)
+			}
+			_, held, err := st.ConfirmedSessionHandoffTake(ctx, o.ID, f.recipient.ID)
+			must(false, held, err, "token of an untaken offer")
+			ok, err := st.TakeSessionHandoffOffer(ctx, o.ID, f.recipient.ID, "tok", NowTS())
+			must(true, ok, err, "take")
+			_, held, err = st.ConfirmedSessionHandoffTake(ctx, o.ID, f.recipient.ID)
+			must(false, held, err, "token of an unconfirmed take")
+			ok, err = st.ConfirmSessionHandoffTake(ctx, o.ID, f.recipient.ID, "tok", NowTS())
+			must(true, ok, err, "confirm")
+			ok, err = st.ConfirmSessionHandoffTake(ctx, o.ID, f.recipient.ID, "tok", NowTS())
+			must(false, ok, err, "a second create under the same take")
+			token, held, err := st.ConfirmedSessionHandoffTake(ctx, o.ID, f.recipient.ID)
+			if err != nil || !held || token != "tok" {
+				t.Fatalf("confirmed token = %q held=%v err=%v", token, held, err)
+			}
+			_, held, err = st.ConfirmedSessionHandoffTake(ctx, o.ID, f.other.ID)
+			must(false, held, err, "another member reads the token")
+			ok, err = st.ReleaseUnconfirmedSessionHandoffTake(ctx, o.ID, f.recipient.ID, "tok")
+			must(false, ok, err, "a Console releases a confirmed take")
+			ok, err = st.TransitionSessionHandoffOffer(ctx, o.ID, "pending", "withdrawn", NowTS(), "")
+			must(false, ok, err, "withdraw under the confirmed take")
+			ok, err = st.ReleaseSessionHandoffOffer(ctx, o.ID, f.recipient.ID, "tok")
+			must(true, ok, err, "the Agent refused: the CP gives it back")
+			ok, err = st.ConfirmSessionHandoffTake(ctx, o.ID, f.recipient.ID, "tok", NowTS())
+			must(false, ok, err, "a retry under the released take")
+			ok, err = st.TransitionSessionHandoffOffer(ctx, o.ID, "pending", "withdrawn", NowTS(), "")
+			must(true, ok, err, "withdraw after the release")
+
+			// The Console's own release: unconfirmed only, and only with the take's token.
+			o2 := f.offer(t, "")
+			if _, err := st.CreateSessionHandoffOffer(ctx, o2); err != nil {
+				t.Fatal(err)
+			}
+			ok, err = st.TakeSessionHandoffOffer(ctx, o2.ID, f.recipient.ID, "early", NowTS())
+			must(true, ok, err, "take")
+			ok, err = st.ReleaseUnconfirmedSessionHandoffTake(ctx, o2.ID, f.recipient.ID, "other")
+			must(false, ok, err, "release with another token")
+			ok, err = st.ReleaseUnconfirmedSessionHandoffTake(ctx, o2.ID, f.recipient.ID, "early")
+			must(true, ok, err, "release the unconfirmed take")
+			ok, err = st.ConfirmSessionHandoffTake(ctx, o2.ID, f.recipient.ID, "early", NowTS())
+			must(false, ok, err, "the released take's late create")
+		})
+	}
+}

@@ -1012,9 +1012,28 @@ func (a workspaceAPI) sessionCreate(w http.ResponseWriter, r *http.Request, res 
 		a.sessionCreateThen(w, r, res, nil)
 		return
 	}
-	a.sessionCreateThen(w, r, res, func(ctx context.Context) *apiError {
-		return confirmHandoffTake(ctx, a.mgr.store, res.mv, *take)
+	confirmed := false
+	tw := &teeWriter{ResponseWriter: w}
+	a.sessionCreateThen(tw, r, res, func(ctx context.Context) *apiError {
+		// Confirm, then reserve: the confirm is the atomic claim that this take sends its one
+		// create, so a resend under a used take never reaches the Agent, not even to reserve
+		// (a reservation there would vouch for a key an older Agent created under).
+		if aerr := confirmHandoffTake(ctx, a.mgr.store, res.mv, *take); aerr != nil {
+			return aerr
+		}
+		if aerr := reserveHandoffCreate(ctx, res, *take); aerr != nil {
+			// No create was sent under the take, so it goes back.
+			if _, err := a.mgr.store.ReleaseSessionHandoffOffer(context.WithoutCancel(ctx), take.OfferID, res.mv.MembershipID, take.Token); err != nil {
+				log.Printf("handoff: offer %s: releasing the take after a failed reserve: %v", take.OfferID, err)
+			}
+			return aerr
+		}
+		confirmed = true
+		return nil
 	})
+	if confirmed {
+		settleHandoffCreate(r.Context(), a.mgr, res, *take, tw.status, tw.Header(), tw.buf)
+	}
 }
 
 // sessionCreateThen is sessionCreate with one last check, run once the workspace is ready and

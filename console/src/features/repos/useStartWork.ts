@@ -31,6 +31,9 @@ export interface StartTarget {
 export interface HandoffTake {
   offerId: string;
   token: string;
+  /** Gives this take up and takes the offer again, for a second create: the CP lets a take
+   *  start one create only (#2040). null when the offer could not be taken again. */
+  renew?: () => Promise<HandoffTake | null>;
 }
 
 export function useStartWork(): (target: StartTarget, opts: LaunchOpts, take?: HandoffTake) => Promise<LaunchResult> {
@@ -108,7 +111,16 @@ export function useStartWork(): (target: StartTarget, opts: LaunchOpts, take?: H
     // the origin itself, which the server alone sets.
     if (inboxMemoId) body.inbox_memo_id = inboxMemoId;
     const createPath = inboxItemId ? `api/inbox/items/${encodeURIComponent(inboxItemId)}/launch` : "api/sessions";
-    let res = await apiJSON(createPath, "POST", body);
+    // A launch from an offer must tell "nothing was created" from "nobody knows": the first
+    // gives the take back, the second keeps it so the next press can ask the Agent (#2040).
+    // No answer, or an answer that is not the server's own JSON error (a gateway page, the
+    // proxy's "unreachable"), is the second.
+    const post = () =>
+      apiJSON(createPath, "POST", body).catch((e: unknown) => {
+        if (take) return { lost: true };
+        throw e;
+      });
+    let res = await post();
     // Fleet rebuild lag: a P1.5-generation Agent rejects an explicit driver:"managed"
     // (driver_unsupported). If managed cannot be started, starting on tui is kinder than
     // failing — drop it once, resend, and say so in a toast.
@@ -117,10 +129,18 @@ export function useStartWork(): (target: StartTarget, opts: LaunchOpts, take?: H
       delete body.driver;
       if (!agentOf(kind).caps.tuiEffort) delete body.effort;
       if (!agentOf(kind).caps.tuiStartMode) delete body.mode;
-      res = await apiJSON(createPath, "POST", body);
+      if (take) {
+        const next = take.renew ? await take.renew() : null;
+        if (!next) return { ok: false };
+        take = next;
+        body.handoff_take = { offerId: next.offerId, token: next.token };
+      }
+      res = await post();
     }
+    if (res?.lost) return { ok: false, unknown: true };
     if (res && res.error) {
       const code = typeof res.error === "object" ? res.error.code : "";
+      if (take && (String(code).startsWith("http_") || code === "create_in_progress")) return { ok: false, unknown: true };
       if (code === "branch_exists") return { ok: false, conflict: "local" as const };
       if (code === "branch_exists_remote") return { ok: false, conflict: "remote" as const };
       // The branch is checked out in another working copy (git allows only one). The

@@ -728,6 +728,9 @@ export const sessions: Record<keyof typeof jaSessions, string> = {
   "handoff.take_declined": "This handoff was declined. No session was started.",
   "handoff.take_accepted": "This handoff was already taken over. No session was started.",
   "handoff.take_busy": "This handoff is being launched from another window. No session was started.",
+  "handoff.take_unknown": "A session may already have started from this handoff, and your workspace could not confirm it. Check your sessions; pressing launch again asks again.",
+  "handoff.launch_unknown": "The launch got no answer, so it is not known whether the session started. The handoff stays reserved for you: press launch again to check.",
+  "handoff.launch_recovered": "The session {name} had already started from this handoff. It is now marked as taken over.",
   "handoff.take_failed": "Could not secure the handoff, so nothing was launched ({err}).",
   "handoff.accept_unrecorded": "The session started, but the handoff could not be marked as taken over ({err}). Let the sender know.",
   // --- sessions overview pane (ADR 0078) ---

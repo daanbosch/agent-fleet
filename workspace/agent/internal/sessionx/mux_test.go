@@ -4,11 +4,11 @@ package sessionx
 // `buildMux` of package main that is no longer visible from here.
 //
 // routes.go is not visible from sessionx (that would be an import the wrong way round), so this
-// registers only the session family's 47 routes, under the same pattern strings. Reusing the
+// registers only the session family's 49 routes, under the same pattern strings. Reusing the
 // pattern strings verbatim keeps both the checks that read the pattern `mux.Handler(req)`
 // returns and the `r.PathValue` the handlers read identical to what they were.
 //
-// A copy rots silently, and these 47 lines are a copy of routes.go, so
+// A copy rots silently, and these 49 lines are a copy of routes.go, so
 // TestSessionRoutesMatchAgentRouteTable compares them against routes.golden, which is captured
 // from the real mux (the same shape browserx and memoryx use in their own mux_test.go).
 
@@ -23,12 +23,14 @@ import (
 )
 
 // sessionTestRoutes is the same (method, path) → handler map as the session section of
-// routes.go (47 routes).
+// routes.go (49 routes).
 var sessionTestRoutes = map[string]http.HandlerFunc{
 	"GET /sessions":                              HandleListSessions,
 	"GET /sessions/catalog":                      HandleSessionCatalog,
 	"POST /sessions":                             HandleCreateSession,
 	"GET /sessions-idempotency/{key}":            HandleIdempotencyLookup,
+	"POST /sessions-idempotency/{key}/abandon":   HandleIdempotencyAbandon,
+	"POST /sessions-idempotency/{key}/reserve":   HandleIdempotencyReserve,
 	"POST /sessions/{name}/fork":                 HandleForkSession,
 	"POST /sessions/{name}/stop":                 HandleStopSession,
 	"POST /sessions/{name}/halt":                 HandleHaltSession,
@@ -122,8 +124,8 @@ func TestSessionRoutesMatchAgentRouteTable(t *testing.T) {
 	if len(missing) > 0 {
 		t.Errorf("copied routes missing from the real route table (changed in routes.go?): %v", missing)
 	}
-	if len(sessionTestRoutes) != 47 {
-		t.Fatalf("copy has %d routes (want 47) = a thinning copy makes the subset check above measure nothing",
+	if len(sessionTestRoutes) != 49 {
+		t.Fatalf("copy has %d routes (want 49) = a thinning copy makes the subset check above measure nothing",
 			len(sessionTestRoutes))
 	}
 }
