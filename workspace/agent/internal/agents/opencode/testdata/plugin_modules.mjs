@@ -174,6 +174,29 @@ assert.equal(ids.size, 3, "plugin ids must be distinct");
     stop();
   }
 
+  // Unload while a lookup is in flight: the old bridge must not touch the slot or report once a
+  // new setup (a plugin reload) owns it.
+  {
+    let release;
+    const gate = new Promise((r) => (release = r));
+    const slow = v2Host();
+    slow.ctx.session.get = async () => (await gate, { id: "ses_old" });
+    const stopOld = mods.status.setup(slow.ctx);
+    slow.push(ev("session.execution.started", { sessionID: "ses_old" }));
+    await sleep(100); // the lookup is now pending
+    stopOld();
+    const fresh = v2Host();
+    const stopNew = mods.status.setup(fresh.ctx);
+    fresh.push(ev("session.created", { sessionID: "ses_new" }));
+    await sleep(100);
+    const before = states().length;
+    release();
+    await sleep(200);
+    assert.equal(ocid(), "ses_new", "a stale lookup must not move the slot back");
+    assert.equal(states().length, before, "an unloaded plugin must not report");
+    stopNew();
+  }
+
   // v1: idle on session.idle, working on message.*, a trailing message.* right after idle ignored.
   const before = states().length;
   const v1 = await mods.status.server();

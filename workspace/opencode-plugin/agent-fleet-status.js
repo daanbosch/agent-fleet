@@ -51,8 +51,11 @@ const bridge = () => {
   let cur = "";
   let idleAt = 0;
   let queue = Promise.resolve();
+  // Set when the plugin unloads. Whatever is still in flight (a session lookup, a queued report)
+  // must not write the slot or report a state after a reload's new bridge took over.
+  let stopped = false;
   const set = (state) => {
-    if (!sid || state === cur) return;
+    if (!sid || state === cur || stopped) return;
     cur = state;
     // Fire-and-forget, but one at a time: separate processes finish in any order, and a
     // working that lands after its idle leaves the badge stuck. Absolute path so it resolves
@@ -60,6 +63,7 @@ const bridge = () => {
     queue = queue.then(
       () =>
         new Promise((resolve) => {
+          if (stopped) return resolve();
           try {
             execFile(AGENT_BIN, ["session-status", state, sid], () => resolve());
           } catch {
@@ -69,7 +73,7 @@ const bridge = () => {
     );
   };
   const recordOcid = (ocid) => {
-    if (!sid || !ocid || !sidDir) return;
+    if (!sid || !ocid || !sidDir || stopped) return;
     try {
       mkdirSync(sidDir, { recursive: true });
       writeFileSync(join(sidDir, sid), ocid);
@@ -139,7 +143,8 @@ const bridge = () => {
       t === "session.execution.interrupted" ||
       t === "session.idle";
     if (!working && !done) return;
-    if ((await isChild(data.sessionID, lookup)) !== false) return;
+    const child = await isChild(data.sessionID, lookup);
+    if (stopped || child !== false) return;
     if (working) {
       recordOcid(data.sessionID);
       set("working");
@@ -147,14 +152,14 @@ const bridge = () => {
       idle();
     }
   };
-  return { onV1, onV2 };
+  return { onV1, onV2, stop: () => void (stopped = true) };
 };
 
 export default {
   id: "agent-fleet.status",
   // opencode 2: the subscription is an async iterator; the returned cleanup aborts it.
   setup(ctx) {
-    const { onV2 } = bridge();
+    const { onV2, stop } = bridge();
     const ac = new AbortController();
     void (async () => {
       try {
@@ -163,7 +168,10 @@ export default {
         /* aborted on unload, or the stream ended */
       }
     })();
-    return () => ac.abort();
+    return () => {
+      stop();
+      ac.abort();
+    };
   },
   // opencode 1.
   async server() {
