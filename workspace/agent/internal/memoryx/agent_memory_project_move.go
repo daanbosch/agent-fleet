@@ -114,15 +114,9 @@ func agentMemRootGoneProbe(repos, rel string) bool {
 var (
 	// agentMemLiveBudget bounds the directories one search reads, agentMemLiveTimeout its time.
 	// Past either the answer is "incomplete" and nothing is called orphaned.
-	agentMemLiveBudget  = 20000
-	agentMemLiveTimeout = 10 * time.Second
+	agentMemLiveBudget  = 100000
+	agentMemLiveTimeout = 20 * time.Second
 )
-
-// agentMemLiveSkip are directories whose content is never a working copy worth the reads.
-var agentMemLiveSkip = map[string]bool{
-	".git": true, "node_modules": true, "target": true, "dist": true, "build": true,
-	".venv": true, "__pycache__": true, ".cache": true,
-}
 
 // agentMemLiveProjects maps the working copies to their projects, by id: every directory under
 // ~/repos with a .git or .svn entry, found at any depth, inside other working copies and behind
@@ -189,8 +183,8 @@ func agentMemLiveSearch() (live map[string]*agentMemProject, complete bool) {
 			continue
 		}
 		for _, e := range ents {
-			if agentMemLiveSkip[e.Name()] {
-				continue
+			if e.Name() == ".git" {
+				continue // git's own directory holds no working copy; a .git entry is the marker below
 			}
 			d := filepath.Join(dir, e.Name())
 			st, err := os.Stat(d)

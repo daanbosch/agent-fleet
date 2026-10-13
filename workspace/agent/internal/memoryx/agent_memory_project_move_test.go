@@ -735,3 +735,19 @@ func TestAgentMemoryLiveSearchLimits(t *testing.T) {
 		t.Fatal("a search past its time must say so")
 	}
 }
+
+// A directory is never ruled out by its name: build/ is a fine repository name, and a worktree
+// can sit inside another directory called build or node_modules.
+func TestAgentMemoryMoveDoesNotSkipDirectoriesByName(t *testing.T) {
+	for _, rel := range []string{"build", "demo/build/live", "node_modules/x"} {
+		t.Run(rel, func(t *testing.T) {
+			home, _, _ := agentMemTestEnv(t)
+			orphan, to := nestedWorktreeFixture(t, home, rel)
+			live, _ := agentMemLiveProjects()
+			if live[orphan] == nil {
+				t.Fatalf("the working copy at %s was not found", rel)
+			}
+			assertNotOrphaned(t, orphan, to)
+		})
+	}
+}

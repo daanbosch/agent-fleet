@@ -601,9 +601,9 @@ The Console now lists such projects and the member moves or merges one into anot
 - **Orphaned means known to be gone, and in doubt it is not.** The Agent calls a project orphaned when the root
   recorded in its `project.json` does not exist under `~/repos` and no working copy belongs to the same
   project. Working copies are found at any depth under `~/repos`, inside other working copies and behind symlinks
-  included (a few heavy directories such as `node_modules` are skipped), and from the sessions' directories. A
+  included, and from the sessions' directories. A
   directory that cannot be read, a repository whose identity cannot be resolved, or a search past its budget
-  (20,000 directories) or time (10 s) makes the answer incomplete, and then nothing is called orphaned. A root outside `~/repos`, an empty or unreadable `~/repos` (not mounted yet), a symlink anywhere on
+  (100,000 directories) or time (20 s) makes the answer incomplete, and then nothing is called orphaned. A root outside `~/repos`, an empty or unreadable `~/repos` (not mounted yet), a symlink anywhere on
   the way (a `/scratch` link dangles after a stop), any error but "does not exist" and a probe that does not
   answer in 3 s all read as "not orphaned". A worktree shares its parent's id, so it is never a separate
   orphan. A project with nothing readable to move is not offered. The move itself re-checks this, so the route
