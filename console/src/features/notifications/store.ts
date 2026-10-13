@@ -199,8 +199,15 @@ export async function openNotificationTarget(n: FleetNotification, split: boolea
   // cannot be read the shared view is opened as before, since it re-checks for itself.
   if (n.kind === "handoff-offer" && typeof n.payload.catalogId === "string" && n.payload.catalogId) {
     const offerId = typeof n.payload.offerId === "string" ? n.payload.offerId : "";
-    if (offerId && (await receivedOfferState(offerId)) === "closed") {
+    const state = offerId ? await receivedOfferState(offerId) : "unknown";
+    if (state === "closed") {
       toast(tr("noti.handoff_closed"), { kind: "warn" });
+      return { opened: false, handoffClosed: true };
+    }
+    // Unshared or archived while the recipient's launch still holds it (#2058): the shared view
+    // has nothing to accept, and the give-back lives in the inbox.
+    if (state === "recovery") {
+      toast(tr("noti.handoff_recovery", { inbox: tr("handoff.inbox_title") }), { kind: "warn" });
       return { opened: false, handoffClosed: true };
     }
     openSharedSession(n.payload.catalogId, split);

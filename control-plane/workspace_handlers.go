@@ -1013,6 +1013,7 @@ func (a workspaceAPI) sessionCreate(w http.ResponseWriter, r *http.Request, res 
 		return
 	}
 	confirmed := false
+	var snap store.SessionHandoffOffer
 	tw := &teeWriter{ResponseWriter: w}
 	a.sessionCreateThen(tw, r, res, func(ctx context.Context) *apiError {
 		// Confirm, then reserve: the confirm is the atomic claim that this take sends its one
@@ -1020,6 +1021,11 @@ func (a workspaceAPI) sessionCreate(w http.ResponseWriter, r *http.Request, res 
 		// (a reservation there would vouch for a key an older Agent created under).
 		if aerr := confirmHandoffTake(ctx, a.mgr.store, res.mv, *take); aerr != nil {
 			return aerr
+		}
+		// What the late report falls back on if the offer is deleted before the Agent answers.
+		snap = store.SessionHandoffOffer{ID: take.OfferID, RecipientMembershipID: res.mv.MembershipID}
+		if o, ok, err := a.mgr.store.GetSessionHandoffOffer(ctx, take.OfferID); err == nil && ok {
+			snap = o
 		}
 		if aerr := reserveHandoffCreate(ctx, res, *take); aerr != nil {
 			// No create was sent under the take, so it goes back.
@@ -1032,7 +1038,7 @@ func (a workspaceAPI) sessionCreate(w http.ResponseWriter, r *http.Request, res 
 		return nil
 	})
 	if confirmed {
-		settleHandoffCreate(r.Context(), a.mgr, res, *take, tw.status, tw.Header(), tw.buf)
+		settleHandoffCreate(r.Context(), a.mgr, res, *take, snap, tw.status, tw.Header(), tw.buf)
 	}
 }
 

@@ -176,8 +176,12 @@ type handoffRecovery struct {
 // newHandoffRecovery has a offer b one session; b's workspace runs on the fake Agent.
 func newHandoffRecovery(t *testing.T) *handoffRecovery {
 	t.Helper()
+	return newHandoffRecoveryIn(t, newInboxEnv(t))
+}
+
+func newHandoffRecoveryIn(t *testing.T, e *inboxEnv) *handoffRecovery {
+	t.Helper()
 	ctx := context.Background()
-	e := newInboxEnv(t)
 	agent := newHandoffFakeAgent(t)
 	e.mgr.rtFactory = inboxPauseFactory{&sync.Once{}, make(chan struct{}), inboxClosedChan(), agent.srv.URL}
 	owner, recipient := e.members["a"], e.members["b"]

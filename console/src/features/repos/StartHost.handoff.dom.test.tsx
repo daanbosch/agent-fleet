@@ -263,6 +263,27 @@ describe("launching from a received handoff", () => {
     expect(document.body.textContent).toContain(t("handoff.take_unknown"));
   });
 
+  it("launches nothing from an offer that is no longer launchable (#2058 review F5)", async () => {
+    routes({
+      "/offer-1/take": { status: 409, body: { error: { code: "handoff_unavailable", message: "x", offerStatus: "pending" } } },
+    });
+    await pressLaunch();
+    expect(posts("/api/sessions")).toHaveLength(0);
+    expect(document.body.textContent).toContain(t("handoff.take_unavailable"));
+  });
+
+  it("shows a session the workspace reports after the handoff was given back (#2058)", async () => {
+    routes({
+      "/offer-1/take": {
+        status: 409,
+        body: { error: { code: "handoff_session_after_give_back", message: "x", offerStatus: "pending", sessionName: "s-late" } },
+      },
+    });
+    await pressLaunch();
+    expect(posts("/api/sessions")).toHaveLength(0);
+    expect(document.body.textContent).toContain(t("handoff.take_after_give_back", { name: "s-late" }));
+  });
+
   it("tells the user when the session started but the acceptance could not be recorded", async () => {
     routes({
       "/offer-1/take": { status: 200, body: { status: "pending", token: "tok-4" } },

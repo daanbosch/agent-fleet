@@ -11,6 +11,12 @@ import { api } from "../../core/api/client.ts";
 
 export type HandoffOfferStatus = "pending" | "accepted" | "declined" | "withdrawn" | "expired";
 
+/** Where the recipient's take of a pending offer stands (the CP's store.HandoffTakeState):
+ *  starting = they are launching; confirming = the launch was sent and may still be running;
+ *  unknown = it was sent longer ago than the take window and its result was never heard, which
+ *  only the recipient can settle (launch again, or give the offer back). Absent: no take holds it. */
+export type HandoffTakeState = "starting" | "confirming" | "unknown";
+
 export interface HandoffOffer {
   id: string;
   /** Share catalogue id (the key that opens the recipient's shared view). */
@@ -28,6 +34,13 @@ export interface HandoffOffer {
   expiresAt?: string;
   decidedAt?: string;
   acceptedSessionName?: string;
+  takeState?: HandoffTakeState;
+  /** The inbox only: an opaque name for the recipient's confirmed launch, sent back with a
+   *  give-back so the confirmation cannot release a later launch. */
+  takeRev?: string;
+  /** The inbox only: listed just so the recipient can give back a launch that still holds an
+   *  offer no longer shared with them, or whose session was archived. No body or coordinates. */
+  recoveryOnly?: boolean;
   /** Only the inbox carries the body: the recipient has to read it to decide whether to accept. */
   prompt?: string;
   sourceSessionKind?: string;
@@ -97,15 +110,19 @@ export function pendingHandoffCount(offers: HandoffOffer[]): number {
  *  may have been answered before the offer was created (the notification is pushed), so a click
  *  that joined one and does not find its offer reads once more; clicks doing so share that read
  *  too. A read this click started itself came after its notification, and its answer stands. */
-export async function receivedOfferState(offerId: string): Promise<"pending" | "closed" | "unknown"> {
+export async function receivedOfferState(offerId: string): Promise<"pending" | "recovery" | "closed" | "unknown"> {
   const listed = (offers: HandoffOffer[]) => offers.some((o) => o.id === offerId && o.status === "pending");
+  // A recovery row is pending only for the give-back: there is nothing in the shared view to open.
+  const recovery = (offers: HandoffOffer[]) => offers.some((o) => o.id === offerId && o.recoveryOnly);
   const s = useHandoffStore.getState();
-  if (s.receivedAt && Date.now() - s.receivedAt < RECEIVED_FRESH_MS && listed(s.received)) return "pending";
+  if (s.receivedAt && Date.now() - s.receivedAt < RECEIVED_FRESH_MS && listed(s.received))
+    return recovery(s.received) ? "recovery" : "pending";
   const joined = receivedFlight !== null;
   let offers = await loadReceived();
   if (offers && joined && !listed(offers)) offers = await loadReceived();
   if (!offers) return "unknown";
-  return listed(offers) ? "pending" : "closed";
+  if (!listed(offers)) return "closed";
+  return recovery(offers) ? "recovery" : "pending";
 }
 
 /** Where a session stands right now. A session has at most one undecided offer (ADR 0057

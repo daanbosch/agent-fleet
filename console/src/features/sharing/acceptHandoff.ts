@@ -43,12 +43,15 @@ interface HandoffErrorBody {
   code?: string;
   offerStatus?: string;
   message?: string;
+  sessionName?: string;
 }
 
 /** Why a take was refused, in the recipient's words. */
 function takeRefusal(e: HandoffErrorBody | undefined): string {
   if (e?.code === "handoff_being_taken") return t("handoff.take_busy");
   if (e?.code === "handoff_launch_unknown") return t("handoff.take_unknown");
+  if (e?.code === "handoff_unavailable") return t("handoff.take_unavailable");
+  if (e?.code === "handoff_session_after_give_back") return t("handoff.take_after_give_back", { name: e.sessionName || "" });
   if (e?.code === "handoff_already_decided") {
     switch (e.offerStatus) {
       case "withdrawn":
