@@ -591,3 +591,50 @@ until #2014. `entries/member-save` (create or edit, the tools' own revision chec
 limits, not gated by the switch, no new project) is back in Settings > Agent memory, and the CP audits it as
 `memory.entry.save`. What the mark does not change: a session with a shell can still write the store's files
 directly (decision 8's reasoning stands); the mark governs the Agent's routes, not the files.
+
+## Note (2026-10-14): moving the memories of an orphaned project (open question 5, #1984)
+
+A project is keyed by its repository's absolute `git-common-dir` (decision 2), so a repository renamed,
+moved or cloned again becomes a new project and the old one's memories stay under an id no session reaches.
+The Console now lists such projects and the member moves or merges one into another.
+
+- **Orphaned means known to be gone, and in doubt it is not.** The Agent calls a project orphaned when the root
+  recorded in its `project.json` does not exist under `~/repos` and no working copy belongs to the same
+  project. Working copies are found at any depth under `~/repos`, inside other working copies and behind symlinks
+  included, and from the sessions' directories. A
+  directory that cannot be read, a repository whose identity cannot be resolved, or a search past its budget
+  (100,000 directories) or time (20 s) makes the answer incomplete, and then nothing is called orphaned. A root outside `~/repos`, an empty or unreadable `~/repos` (not mounted yet), a symlink anywhere on
+  the way (a `/scratch` link dangles after a stop), any error but "does not exist" and a probe that does not
+  answer in 3 s all read as "not orphaned". A worktree shares its parent's id, so it is never a separate
+  orphan. A project with nothing readable to move is not offered. The move itself re-checks this, so the route
+  cannot move a live project's memories out.
+- **Three routes, one of them a write.** `GET entries/projects` lists the projects with their counts and the
+  orphaned flag; `GET entries/project-move-preview` shows, per memory, what would happen and writes nothing;
+  `POST entries/project-move` moves up to 50 previewed memories, each sent with the revision, status and new
+  name the preview showed; the plan is made again and an item that differs stays in the source, so the apply is
+  bound to the screen the member confirmed. A move that breaks off answers 500 with the results so far, the
+  memory it stopped at (`partial` when its copy is already in the target, with the create commit) and the ones
+  not tried. The write answers only a request carrying the
+  CP's member-origin mark ([0113](0113-member-origin-mark.md): `memberOriginRoutes` and `memberorigin.Require`),
+  the CP audits it as `memory.project.move` with the source project id, and no MCP tool reaches it. The
+  target is a project that holds memory or has a working copy under `~/repos`; the latter needs no memory yet,
+  and its first memory brings the `project.json` along as a session's save does.
+- **Collisions are the member's call.** A name taken in the target is a collision. With no policy chosen the
+  preview says so and the move is refused; `skip` leaves those memories in the source, `rename` moves them as
+  `<name>-moved`, `-moved-2`, … (names are chosen by the Agent and shown in the preview). A memory whose text,
+  pin and import provenance are identical to the target's copy is not a collision: only the source copy goes.
+  A pinned source beside an unpinned copy is a collision, so a move never drops the member's pin or the
+  import's source hash. Nothing in the target is
+  ever overwritten, including a name that appeared after the preview. A memory changed since the preview, and
+  a file withheld by the scan, stay where they are.
+- **Two published changes per memory, create first.** For each memory the target gets a `create` and then the
+  source gets a `forget` (trailers `AF-Moved-From` and `AF-Moved-To` name the other end), both authored by the
+  member through the same commit step as every write. That is two commits per memory rather than one per
+  operation, because the changes list and revert are per memory path: each row can be undone there (revert the
+  create to take the copy out of the target, revert the forget to bring the source copy back). A stop between the
+  two leaves the text in both projects; running the move again finds the identical copy in the target and
+  finishes with the forget, so the move is resumable and a failure halfway loses nothing. Moves are
+  serialized. The pin, kinds, author, creation time and import source travel with the memory; the use count
+  and the revision do not (the revision continues the target name's own).
+- **Not done:** suggesting the merge when a new project's remote URL matches an orphaned one. `project.json` records
+  no remote, so it would need a new field and a backfill; tracked in the follow-up named in the PR.

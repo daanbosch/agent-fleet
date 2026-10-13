@@ -352,7 +352,8 @@ L2（エージェントを誰として動かすか）はユーザー本人のサ
 
 メンバー自身の Console からの要求だけを受け付けるべきルートには、CP が印を付ける
 （[decisions/0113](../decisions/0113-member-origin-mark.ja.md)）。現在はメンバー専用のメモリ書き込み
-`entries/pin`・`entries/revert`（忘れさせるも含む）・`entries/member-save` が対象。
+`entries/pin`・`entries/revert`（忘れさせるも含む）・`entries/member-save`・`entries/project-move`（作業コピーを失った
+プロジェクトのメモリの移動、[decisions/0108](../decisions/0108-af-owned-agent-memory.ja.md) の 2026-10-14 の注）が対象。
 
 - **非対称にするのは、Agent がセッションに対して秘密を守れないから**（同じ uid、§7.2）。CP はトークン署名
   マスターから導出した Ed25519 鍵で署名し、Agent は公開鍵だけを持って起動する（`AF_MEMBER_ORIGIN_KEYS` と

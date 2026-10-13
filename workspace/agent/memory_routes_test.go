@@ -76,6 +76,7 @@ func TestMemberWriteRoutesRequireTheMark(t *testing.T) {
 		"/agents/memory/entries/pin",
 		"/agents/memory/entries/revert",
 		"/agents/memory/entries/member-save",
+		"/agents/memory/entries/project-move",
 		"/agents/memory/snapshots",
 		"/agents/memory/import/apply",
 	} {
@@ -100,6 +101,7 @@ func TestMemberWriteRoutesAdmitAMarkedRequest(t *testing.T) {
 		"/agents/memory/entries/pin",
 		"/agents/memory/entries/revert",
 		"/agents/memory/entries/member-save",
+		"/agents/memory/entries/project-move",
 		"/agents/memory/import/apply",
 		"/agents/memory/snapshots",
 	} {

@@ -17,7 +17,7 @@ const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.met
 // memoryTransfer (export and import), so the family is concatenated and read as one tab body.
 // Add any new file here: forget one and the check that is supposed to watch for unregistered
 // REST paths silently stops covering it.
-const tab = ["./MemoryTab.tsx", "./memoryTypes.ts", "./memoryRestore.tsx", "./memoryTransfer.tsx", "./memoryChanges.tsx", "./memoryClaudeImport.tsx", "./memoryMuseImport.tsx", "./memoryClaudeExport.tsx"]
+const tab = ["./MemoryTab.tsx", "./memoryTypes.ts", "./memoryRestore.tsx", "./memoryTransfer.tsx", "./memoryChanges.tsx", "./memoryClaudeImport.tsx", "./memoryMuseImport.tsx", "./memoryClaudeExport.tsx", "./memoryProjectMove.tsx"]
   .map(read)
   .join("\n");
 const dialog = read("../SettingsDialog.tsx");
@@ -100,6 +100,18 @@ describe("agent memory tab in the settings modal", () => {
     }
     expect(cpRoutes).toContain('"POST /api/agents/memory/claude-export"');
     expect(agentRoutes).toContain('"POST /agents/memory/claude-export"');
+  });
+
+  it("registers the project move (list, preview, apply) on both sides", () => {
+    const panel = tab;
+    for (const p of ["api/agents/memory/entries/projects", "api/agents/memory/entries/project-move-preview"]) {
+      expect(panel).toContain(p);
+      expect(cpRoutes).toContain("/" + p);
+      expect(agentRoutes).toContain(p.replace(/^api\//, "/"));
+    }
+    expect(panel).toContain("api/agents/memory/entries/project-move?project=");
+    expect(cpRoutes).toContain('"POST /api/agents/memory/entries/project-move"');
+    expect(agentRoutes).toContain('"POST /agents/memory/entries/project-move"');
   });
 
   it("registers import/apply on both sides too (it is the one path that goes missing alone)", () => {

@@ -51,9 +51,10 @@ const (
 // that is not here never carries a mark, so adding a member route to the Agent without adding it
 // here leaves it refused rather than open.
 var memberOriginRoutes = map[string]bool{
-	"POST /api/agents/memory/entries/pin":         true,
-	"POST /api/agents/memory/entries/revert":      true,
-	"POST /api/agents/memory/entries/member-save": true,
+	"POST /api/agents/memory/entries/pin":          true,
+	"POST /api/agents/memory/entries/revert":       true,
+	"POST /api/agents/memory/entries/member-save":  true,
+	"POST /api/agents/memory/entries/project-move": true,
 	// The 0022 history routes only the Console calls (ADR 0113, 2026-10-13 note): a manual
 	// snapshot and the apply step of a bundle import.
 	"POST /api/agents/memory/snapshots":    true,

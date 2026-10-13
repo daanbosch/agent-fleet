@@ -936,6 +936,10 @@ func registerAgentEnvRoutes(mux *http.ServeMux, cfg config) {
 	mux.HandleFunc("GET /api/agents/memory/entries/member-search", rest)
 	mux.HandleFunc("GET /api/agents/memory/entries/member-latest", rest)
 	mux.HandleFunc("GET /api/agents/memory/entries/member-forgotten", rest)
+	// Moving the memories of a project whose working copy is gone (#1984). The move is signed.
+	mux.HandleFunc("GET /api/agents/memory/entries/projects", rest)
+	mux.HandleFunc("GET /api/agents/memory/entries/project-move-preview", rest)
+	mux.HandleFunc("POST /api/agents/memory/entries/project-move", rest)
 	// The one-time import of claude's own memory: sources, a read-only preview, and the apply.
 	mux.HandleFunc("GET /api/agents/memory/claude-import", rest)
 	mux.HandleFunc("GET /api/agents/memory/claude-import/preview", rest)

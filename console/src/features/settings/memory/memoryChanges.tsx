@@ -17,6 +17,7 @@ import { setSetting, useSettings } from "../../../lib/settings.ts";
 import { useT, tMaybe } from "../../../lib/i18n/index.ts";
 import { fmtDateTime, DATETIME_FULL } from "../../../lib/intl.ts";
 import { ClaudeImportPanel } from "./memoryClaudeImport.tsx";
+import { ProjectMovePanel } from "./memoryProjectMove.tsx";
 import { MuseImportPanel } from "./memoryMuseImport.tsx";
 import { ClaudeExportPanel } from "./memoryClaudeExport.tsx";
 import { MemoryPinsPanel } from "./memoryPins.tsx";
@@ -248,6 +249,7 @@ export function AgentMemorySection({ reload, onChanged }: { reload: number; onCh
       <ClaudeImportPanel reload={reload} onChanged={() => setMine((n) => n + 1)} />
       <MuseImportPanel reload={reload} onChanged={() => setMine((n) => n + 1)} />
       <ClaudeExportPanel reload={reload} />
+      <ProjectMovePanel reload={reload} onChanged={() => setMine((n) => n + 1)} />
     </section>
   );
 }
