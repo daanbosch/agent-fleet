@@ -1,7 +1,8 @@
 // A drag that starts inside a dialog and ends over its backdrop (a text selection) produces a
 // click on the backdrop itself: the browser targets the common ancestor of mousedown and mouseup.
-// jsdom does not synthesise that click, so each case dispatches mousedown and mouseup where the
-// press began and ended, and the click on their common ancestor as the browser would.
+// jsdom does not synthesise that click, so each case dispatches pointerdown and pointerup where the
+// press began and ended, and the click on their common ancestor as the browser would. No
+// mousedown/mouseup is sent: a preventDefaulted pointerdown suppresses them, the click still comes.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -24,12 +25,15 @@ afterEach(async () => {
 
 const backdrop = () => document.querySelector(".ui-modal-backdrop") as HTMLElement;
 
+const pointer = (type: string, button = 0) =>
+  new PointerEvent(type, { bubbles: true, isPrimary: true, pointerId: 1, button });
+
 async function press(downOn: Element, upOn: Element) {
   let clickOn: Node = downOn;
   while (!clickOn.contains(upOn)) clickOn = clickOn.parentNode!;
   await act(async () => {
-    downOn.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-    upOn.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    downOn.dispatchEvent(pointer("pointerdown"));
+    upOn.dispatchEvent(pointer("pointerup"));
     clickOn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   });
 }
@@ -108,6 +112,18 @@ describe.each(cases)("$name backdrop", ({ mount, inner }) => {
     const onClose = vi.fn();
     await mount(onClose);
     await press(backdrop(), inner());
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("does not let a right-click on the backdrop arm a later bare click", async () => {
+    const onClose = vi.fn();
+    await mount(onClose);
+    // A right-click fires pointerdown/pointerup but no click, so nothing clears the state.
+    await act(async () => {
+      backdrop().dispatchEvent(pointer("pointerdown", 2));
+      backdrop().dispatchEvent(pointer("pointerup", 2));
+    });
+    await act(async () => backdrop().click());
     expect(onClose).not.toHaveBeenCalled();
   });
 });
