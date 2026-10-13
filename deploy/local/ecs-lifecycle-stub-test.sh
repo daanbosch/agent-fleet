@@ -841,8 +841,13 @@ efs_standup p2
 grep -q "deploy --stack-name t-ingress .*EfsBackup=missing" "$LOG" || fail "retain without a vault did not give EfsBackup=missing"
 efs_standup p2 STUB_VAULT=noplan
 grep -q "deploy --stack-name t-ingress .*EfsBackup=missing" "$LOG" || fail "a plan selecting another file system did not give EfsBackup=missing"
-efs_standup p2 STUB_VAULT=fail
-if grep -q "deploy --stack-name t-ingress .*EfsBackup=" "$LOG"; then fail "an unreadable data stack overrode EfsBackup"; fi
+# ...including a value the capture itself holds: it is a snapshot, and the live stack may have moved on.
+for stale in present missing; do
+  echo "EfsBackup=$stale" >> "$STATE2/params/30-ingress"
+  efs_standup p2 STUB_VAULT=fail
+  if grep -q "deploy --stack-name t-ingress .*EfsBackup=" "$LOG"; then fail "an unreadable data stack still passed the captured EfsBackup=$stale"; fi
+  sed -i '/^EfsBackup=/d' "$STATE2/params/30-ingress"
+done
 efs_standup p
 grep -q "deploy --stack-name t-ingress .*EfsBackup=off" "$LOG" || fail "Persistence=delete did not give EfsBackup=off"
 

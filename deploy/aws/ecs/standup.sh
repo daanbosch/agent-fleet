@@ -688,6 +688,9 @@ af_param_override ImageTag "$TAG"
 # plan selecting the file system), read from the data stack this run just deployed. A failed
 # or unevaluable read gives no marker and nothing is overridden, so it can neither raise nor
 # clear the warning.
+# The capture's EfsBackup is a snapshot of a derived fact, not an input: drop it, or an unknown
+# verdict would still pass the stale value and overwrite what update.sh recorded since.
+af_param_drop EfsBackup
 if [ "$AF_DRY" != 1 ]; then
   af_efs_backup_check "$AF_STACK_DATA" "$AF_PROFILE" "$AF_REGION"
   data_marker="$(af_efs_backup_marker "$AF_EFS_BACKUP_VERDICT" || true)"
