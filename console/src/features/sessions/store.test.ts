@@ -167,7 +167,7 @@ describe("sessions store", () => {
     // Back in alpha the same button works.
     setTenant("alpha");
     body.props.children[1].props.onClick();
-    await vi.waitFor(() => expect(String(fetchMock.mock.calls[before][0])).toContain("/start?fresh=1"));
+    await vi.waitFor(() => expect(String((fetchMock.mock.calls[before] as unknown[])[0])).toContain("/start?fresh=1"));
     setTenant("");
   });
 
@@ -191,7 +191,7 @@ describe("sessions store", () => {
     const toastBody = toastMock.mock.calls[0][0] as { props: { children: { props: { onClick: () => void } }[] } };
     toastBody.props.children[1].props.onClick();
     await vi.waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(4));
-    expect(String(fetchMock.mock.calls[2][0])).toContain("/start?fresh=1");
+    expect(String((fetchMock.mock.calls[2] as unknown[])[0])).toContain("/start?fresh=1");
   });
 
   // The accepted POST is authoritative (docs/log/85): the row has to say "stopping after
