@@ -96,6 +96,10 @@ air-gapped の各手順）は [deploy/compose/README.md](../../deploy/compose/RE
   `aws cloudformation deploy` のコマンドをそのまま印字します。実行したら `update.sh` をもう一度。
   **走っているワークスペースは自動では新しくなりません**（次の「起動」から新しい image）。
   該当する利用者の Console には「要再起動」バッジが出るので、停止のタイミングは本人に委ねます。
+  **データスタックと EFS バックアップ:** `update.sh` はデータスタックを更新しません。v0.26.0
+  より前に構築した `Persistence=retain` の環境は、そのスタックを手で更新するまで EFS の日次
+  バックアップがありません。`update.sh` はこれを（読み取りだけで）検出して警告し、change set
+  のコマンドを印字します。`deploy/aws/ecs/README.md`「Upgrade (runbook)」の手順 1a を参照。
 
 ### ecs-ec2: 起動テンプレートを変えたあとのスロットの入れ替え
 

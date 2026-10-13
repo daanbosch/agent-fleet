@@ -434,10 +434,27 @@ Both images are versioned together — `30-ingress.yaml` takes a single `ImageTa
 parameter (default `dev`) used for the CP image *and* the `AF_ECS_WORKSPACE_IMAGE`
 the adapter launches. To move a deployment to a new release:
 
-1. **Back up first** (production): under `Persistence=retain` RDS and EFS both have
-   daily backups, but the newest can be almost a day old. Take an RDS snapshot and an
-   on-demand EFS recovery point right before upgrading (§EFS backup and restore,
-   "On demand").
+1. **Back up first** (production): under `Persistence=retain` RDS has daily automated
+   backups, and the EFS has them **only if the data stack carries the 0.26.0 backup vault
+   and plan** (step 1a checks). The newest can be almost a day old. Take an RDS snapshot
+   and an on-demand EFS recovery point right before upgrading (§EFS backup and restore,
+   "On demand" — it needs the vault, so do 1a first on an older deployment).
+   1a. **Check the EFS backup exists** (`Persistence=retain` only; `update.sh` runs this
+   too and warns):
+   ```bash
+   ./efs-backup-check.sh --profile <p> --region <r> --stack af-ecs-ingress   # read-only
+   aws cloudformation describe-stacks --stack-name af-ecs-data \
+     --query "Stacks[0].Outputs[?OutputKey=='EfsBackupVaultName'].OutputValue" --output text
+   ```
+   No output / `None` for `EfsBackupVaultName` means the data stack predates 0.26.0 (or
+   was never updated since): **there is no EFS backup**, whatever `Persistence` says.
+   `update.sh` does not touch `10-data`, so turn it on by hand, with a change set and
+   not a direct deploy — §EFS backup and restore, "Turning it on for a deployment that
+   already runs" (`deploy --no-execute-changeset`, `describe-change-set`, then
+   `execute-change-set`). Execute only if it adds the four `EfsBackup*` resources and
+   nothing else; a `Modify` or `Replacement` on `FileSystem` or `Db` (both `Retain` /
+   `Snapshot` under `retain`, but a replacement is still a new, empty resource) means
+   stop and do not execute. Parameters keep their stored values when none are given.
 2. **Push the new tag**: `VERSION=<v> ./release-ecr.sh --profile <p> --region <r>`.
 3. **Re-deploy ingress with only the tag overridden** (all other parameters keep
    their previous values):
@@ -458,6 +475,13 @@ different image under an already-released version tag (the repos stay `MUTABLE`
 so the `:dev` sandbox flow can overwrite itself — release tags are write-once by
 discipline, not enforcement).
 
+**Upgrading across v0.26.0.** The EFS backup vault and plan arrived in `10-data` in
+v0.26.0, and no later release redeploys that stack. A `Persistence=retain` deployment
+stood up before it has had no EFS backup since, and nothing else says so. Run step 1a
+once after upgrading past 0.26.0; `EfsBackupVaultName` appearing in the data stack's
+outputs and a daily recovery point the next morning (`aws backup list-recovery-points-by-backup-vault`)
+close it.
+
 ### One command: `update.sh`
 
 `./update.sh` is the runbook above as a script — the ECS counterpart of compose's
@@ -472,6 +496,12 @@ VERSION=<v> ./update.sh --profile <p> --region <r> --dry-run
 
 It does the things the hand-typed sequence gets wrong:
 
+- **Warns about a missing EFS backup** (`Persistence=retain` only): `efs-backup-check.sh`
+  reads the data stack's `EfsBackupVaultName` output and the backup plan's selection
+  (read-only calls) and, when the file system is not covered, prints the change-set
+  command that fixes it, before the deploy and again at the end. It never blocks the
+  upgrade and never updates `10-data` itself. A read it cannot make (missing
+  `backup:List*`/`Get*`) is reported as unconfirmed, not as protected.
 - **Refuses a tag that is not in ECR.** CloudFormation only stores a string, so a
   forgotten (or wrong-region) push *succeeds* and the CP task then dies with
   `CannotPullContainerError`. The script checks both repositories first.

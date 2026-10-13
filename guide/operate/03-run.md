@@ -109,6 +109,10 @@ The commands are in the runbook's "Upgrade" section.
   **Running workspaces are not upgraded automatically**: each picks the new image up on its
   next Start. The users concerned see a "Restart needed" badge in the Console, so when to take the
   restart is their call, not yours.
+  **Data stack and the EFS backup:** `update.sh` does not update the data stack. A
+  `Persistence=retain` deployment stood up before v0.26.0 has no daily EFS backup until
+  that stack is updated by hand; `update.sh` warns when it finds this (read-only check) and
+  prints the change-set command. See `deploy/aws/ecs/README.md`, "Upgrade (runbook)" step 1a.
 
 ### ecs-ec2: replacing slots after a launch template change
 
