@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/claude"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/tmuxx"
@@ -52,6 +53,12 @@ func HandleStartSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	force := r.URL.Query().Get("force") == "1"
+	// ?fresh=1 is the user's answer to transcript_lost: start a new conversation in this slot.
+	if r.URL.Query().Get("fresh") == "1" {
+		if m, _ := session.ReadMeta(name); m.Kind == session.KindClaude {
+			claude.ForgetTalked(session.UUID(m.Dir, m.Name))
+		}
+	}
 	if err := ensureSessionTmux(name, force); err != nil {
 		if !writeCodexReleasingErr(w, err) {
 			httpx.WriteErr(w, http.StatusInternalServerError, "start_failed", err.Error())

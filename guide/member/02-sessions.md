@@ -466,6 +466,23 @@ itself, so the session resumes on its launch model.
 Even while the workspace is stopped, the list itself stays visible. You can't operate on the
 contents, but you can check "which sessions were there" even from a phone.
 
+### A claude session whose conversation log was deleted
+
+claude keeps each conversation as a log file in the workspace, and by default deletes logs older
+than 30 days every time it starts. Agent Fleet therefore sets claude's `cleanupPeriodDays` to
+36500 (about 100 years) in the workspace's claude `settings.json`, so a session you stopped (not
+archived, not deleted) keeps its conversation however long it sits. Which logs go is decided by
+Agent Fleet's own lifecycle (archive → delete → cleanup), not by claude's age sweep. The setting
+is added when it is missing, in new and existing workspaces alike; a value you set yourself is
+never overwritten (and a lower value brings the 30-day-style deletion back). Never set it to `0`:
+in claude that turns conversation saving off.
+
+If a log is gone anyway (deleted before this setting existed, or by a lower value of your own),
+**"Resume"** does not silently start an empty conversation under the old session. It shows
+**"This session's conversation log was deleted…"** with a **"Start a new conversation"** button;
+pressing it starts a fresh conversation in the same session. A session that never exchanged a
+message resumes as before.
+
 ### The warning when the branch has been swapped
 
 A session row can show a **warning icon and a branch name**. This is a sign that the session's

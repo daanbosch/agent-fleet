@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/claude"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/codex"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/kiro"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/fleetgraph"
@@ -211,6 +212,8 @@ func writeCodexReleasingErr(w http.ResponseWriter, err error) bool {
 	switch {
 	case errors.Is(err, codex.ErrThreadReleasing):
 		httpx.WriteErr(w, http.StatusConflict, "codex_releasing", err.Error())
+	case errors.Is(err, claude.ErrTranscriptLost):
+		httpx.WriteErr(w, http.StatusConflict, "transcript_lost", err.Error())
 	case errors.Is(err, errDriverSwitching):
 		httpx.WriteErr(w, http.StatusConflict, errCodeDriverSwitching, err.Error())
 	default:

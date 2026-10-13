@@ -188,6 +188,11 @@ func RunSessionStatusHook(args []string) {
 		// needs that call to arrive before its next tick to learn why.
 		notifyState, notifyText = turnEndLabel(sid, state, turnText)
 		status.PersistTurnEndFor(sid, state, turnEndReasonFor(notifyState), turnPromptID(sid, h))
+		if !codexMarker {
+			// A finished turn means the transcript has real content; a later missing jsonl is
+			// then a deletion, not a session that never talked (claude.ErrTranscriptLost).
+			claude.NoteTalked(sid)
+		}
 	} else if state == "working" {
 		// A heartbeat without its own prompt_id (a subagent's, or a hook that carries none)
 		// keeps the turn the record already names.
