@@ -54,7 +54,10 @@ func HandleStartSession(w http.ResponseWriter, r *http.Request) {
 	}
 	force := r.URL.Query().Get("force") == "1"
 	if r.URL.Query().Get("fresh") == "1" {
-		startFresh(name)
+		if err := startFresh(name); err != nil {
+			httpx.WriteErr(w, http.StatusInternalServerError, "fresh_failed", err.Error())
+			return
+		}
 	}
 	if err := ensureSessionTmux(name, force); err != nil {
 		if !writeCodexReleasingErr(w, err) {
@@ -68,18 +71,20 @@ func HandleStartSession(w http.ResponseWriter, r *http.Request) {
 // startFresh is the user's answer to transcript_lost: a new conversation in this slot, with no
 // old context. A fork's source is dropped too, or the "new" conversation would copy the parent
 // (or be unstartable once the parent's log is gone as well).
-func startFresh(name string) {
+func startFresh(name string) error {
 	m, ok := session.ReadMeta(name)
 	if !ok || m.Kind != session.KindClaude {
-		return
+		return nil
 	}
 	sid := session.UUID(m.Dir, m.Name)
 	// Only while the log is still lost: a stale ?fresh=1 (a toast left open, a second tab) must
 	// not set aside a conversation that has since become resumable.
 	if !claude.LostTranscript(sid) {
-		return
+		return nil
 	}
-	claude.StartFresh(sid)
+	if err := claude.StartFresh(sid); err != nil {
+		return err
+	}
 	UpdateSessionMeta(name, func(cur *session.Meta) bool {
 		if cur.ForkFrom == "" && cur.ForkAt == "" {
 			return false
@@ -87,6 +92,7 @@ func startFresh(name string) {
 		cur.ForkFrom, cur.ForkAt = "", ""
 		return true
 	})
+	return nil
 }
 
 func HandleSSMLoginStatus(w http.ResponseWriter, r *http.Request) {

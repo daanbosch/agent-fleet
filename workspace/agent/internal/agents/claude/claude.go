@@ -233,7 +233,7 @@ func (agentImpl) WireLive(m session.Meta, alive bool) agents.LiveInfo {
 	return li
 }
 
-func (agentImpl) ClearResume(sid string) { StartFresh(sid) }
+func (agentImpl) ClearResume(sid string) { _ = StartFresh(sid) }
 
 // RemoteSessionURL derives the claude.ai Remote Control page for sid from its
 // jsonl "bridge-session" line (written when RC connects). The web URL is

@@ -2,7 +2,10 @@ package claude
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
@@ -63,19 +66,53 @@ func talkedID(slot string) (string, bool) {
 // HadConversation reports whether slot is known to have held a conversation.
 func HadConversation(slot string) bool { _, ok := talkedID(slot); return ok }
 
-// StartFresh is the user's explicit choice to begin a new conversation in this slot: it drops
-// every trace that the old one existed, the marker and the pre-marker evidence alike. A log
-// still on disk under the slot id (the older half of a drifted conversation) would otherwise
-// be resumed by the very next launch, so it is set aside as <name>.jsonl.superseded — kept,
-// not deleted, and outside claude's *.jsonl lookup.
-func StartFresh(slot string) {
-	for _, p := range rawJSONLPathsIn(slot, session.CWDForUUID(slot)) {
-		_ = os.Rename(p, p+".superseded")
+// StartFresh is the user's explicit choice to begin a new conversation in this slot. Every log
+// still on disk under the slot id (the older half of a drifted conversation, in any project
+// directory) would be resumed by the very next launch, so each is set aside as
+// <name>.jsonl.superseded.<unixnano> — kept, never overwritten, outside claude's *.jsonl
+// lookup. Only when all of them are out of the way are the marker and the pre-marker evidence
+// dropped; on any error nothing is dropped, the conversation stays "lost", and the user can
+// press the button again.
+//
+// The logs are enumerated with an exact-id sweep of every project directory, not
+// rawJSONLPathsIn: that returns a single cwd-guessed hit or a memoized answer, and a second
+// copy under another project would survive and be resumed.
+func StartFresh(slot string) error {
+	ids := map[string]bool{slot: true}
+	if live := sids.Read(slot); live != "" {
+		ids[live] = true
+	}
+	for id := range ids {
+		paths, err := filepath.Glob(filepath.Join(ConfigDir(), "projects", "*", id+".jsonl"))
+		if err != nil {
+			return err
+		}
+		for _, p := range paths {
+			if err := setAside(p); err != nil {
+				return err
+			}
+		}
+		if rest, _ := filepath.Glob(filepath.Join(ConfigDir(), "projects", "*", id+".jsonl")); len(rest) > 0 {
+			return fmt.Errorf("conversation log still present: %s", rest[0])
+		}
 	}
 	talked.Remove(slot)
 	status.Remove(slot)
 	status.RemoveCompletionKey(slot)
 	sids.Remove(slot)
+	return nil
+}
+
+// setAside renames p to a name that does not exist yet.
+func setAside(p string) error {
+	for i := 0; i < 5; i++ {
+		dst := fmt.Sprintf("%s.superseded.%d", p, time.Now().UnixNano())
+		if _, err := os.Lstat(dst); err == nil {
+			continue
+		}
+		return os.Rename(p, dst)
+	}
+	return fmt.Errorf("no free name to set aside %s", p)
 }
 
 // LostTranscript is lostTranscript for callers outside the package: a fresh start may only be

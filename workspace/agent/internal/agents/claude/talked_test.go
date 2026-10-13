@@ -4,6 +4,7 @@ import (
 	"errors"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/status"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -137,12 +138,97 @@ func TestStartFreshSetsAsideStaleSlotLog(t *testing.T) {
 	if _, err := launchOf(t, m); !errors.Is(err, ErrTranscriptLost) {
 		t.Fatalf("positive control: err = %v", err)
 	}
-	StartFresh(sid)
+	if err := StartFresh(sid); err != nil {
+		t.Fatal(err)
+	}
 	plan, err := launchOf(t, m)
 	if err != nil || strings.Contains(plan.Program, "--resume") || !strings.Contains(plan.Program, "--session-id") {
 		t.Fatalf("plan %q err %v, want a fresh --session-id start", plan.Program, err)
 	}
-	if _, err := os.Stat(slotLog + ".superseded"); err != nil {
-		t.Fatalf("old slot log was not kept: %v", err)
+	if kept, _ := filepath.Glob(slotLog + ".superseded.*"); len(kept) != 1 {
+		t.Fatalf("old slot log was not kept: %v", kept)
+	}
+}
+
+// lostDrift builds a drifted conversation whose live log is gone and returns the slot log path.
+func lostDrift(t *testing.T, cfg string, m session.Meta) (sid, slotLog string) {
+	t.Helper()
+	sid = session.UUID(m.Dir, m.Name)
+	live := "47000000-0000-4000-8000-0000000live4"
+	slotLog = writeSlotJSONL(t, cfg, "p", sid)
+	liveLog := writeSlotJSONL(t, cfg, "p", live)
+	sids.Write(sid, live)
+	NoteTalked(sid)
+	if err := os.Remove(liveLog); err != nil {
+		t.Fatal(err)
+	}
+	if !lostTranscript(sid) {
+		t.Fatal("positive control: not lost")
+	}
+	return sid, slotLog
+}
+
+// A second fresh start on the same slot must not overwrite what the first one kept.
+func TestStartFreshNeverClobbersEarlierSetAside(t *testing.T) {
+	cfg := isolateSlot(t)
+	m := session.Meta{Kind: session.KindClaude, Name: "twice", Dir: t.TempDir()}
+	sid, slotLog := lostDrift(t, cfg, m)
+	if err := os.WriteFile(slotLog+".superseded", []byte("first"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := StartFresh(sid); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(slotLog + ".superseded"); string(b) != "first" {
+		t.Fatalf("earlier set-aside log was overwritten: %q", b)
+	}
+	if kept, _ := filepath.Glob(slotLog + ".superseded.*"); len(kept) != 1 {
+		t.Fatalf("new set-aside missing: %v", kept)
+	}
+}
+
+// If the log cannot be moved, nothing is forgotten and the next launch still refuses; once the
+// obstacle is gone the same call succeeds.
+func TestStartFreshFailureKeepsConversationLost(t *testing.T) {
+	cfg := isolateSlot(t)
+	m := session.Meta{Kind: session.KindClaude, Name: "stuck", Dir: t.TempDir()}
+	sid, slotLog := lostDrift(t, cfg, m)
+	dir := filepath.Dir(slotLog)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o700)
+	if err := StartFresh(sid); err == nil {
+		t.Skip("directory permissions not enforced here (running as root?)")
+	}
+	if _, err := launchOf(t, m); !errors.Is(err, ErrTranscriptLost) {
+		t.Fatalf("after failed StartFresh: err = %v, want ErrTranscriptLost", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := StartFresh(sid); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if _, err := launchOf(t, m); err != nil {
+		t.Fatalf("after retry: %v", err)
+	}
+}
+
+// The same slot id under two project directories (the cwd changed): both are set aside.
+func TestStartFreshSetsAsideEveryProjectCopy(t *testing.T) {
+	cfg := isolateSlot(t)
+	m := session.Meta{Kind: session.KindClaude, Name: "two-projects", Dir: t.TempDir()}
+	sid, _ := lostDrift(t, cfg, m)
+	writeSlotJSONL(t, cfg, "old-project", sid)
+	if err := StartFresh(sid); err != nil {
+		t.Fatal(err)
+	}
+	if rest, _ := filepath.Glob(filepath.Join(cfg, "projects", "*", sid+".jsonl")); len(rest) != 0 {
+		t.Fatalf("copies left: %v", rest)
+	}
+	plan, err := launchOf(t, m)
+	if err != nil || strings.Contains(plan.Program, "--resume") {
+		t.Fatalf("plan %q err %v, want a fresh start", plan.Program, err)
 	}
 }
