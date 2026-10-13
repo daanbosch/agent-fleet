@@ -533,8 +533,10 @@ function makePathLink(
   // so instead of opening a menu that acts on nothing.
   const menu = openMenu
     ? wireContextMenu(a, (x, y) => {
+        if (!a.isConnected) return; // the document was replaced since this link was built
         void (async () => {
           const fresh = (await resolvePathRefs(cwd, [ref.ref], { fresh: true })).get(ref.ref);
+          if (!a.isConnected) return; // replaced while the answer was in flight
           if (!fresh) return onError(t("view.file_not_found", { path: hit.path }));
           openMenu(
             {

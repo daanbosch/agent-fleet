@@ -13,10 +13,16 @@ vi.mock("../../ui/ToastProvider.tsx", () => ({
 
 // fs listing for `[text](path)` links and the resolver for inline-code paths.
 let listing: { name: string; type: string }[] = [];
+// When set, every fs answer waits for it (a slow response).
+let gate: Promise<void> | null = null;
 let resolved: Record<string, { path: string; type: string }> = {};
 vi.mock("../../core/api/client.ts", () => ({
-  api: vi.fn(async () => ({ entries: listing })),
+  api: vi.fn(async () => {
+    if (gate) await gate;
+    return { entries: listing };
+  }),
   apiJSON: vi.fn(async (_path: string, _method: string, body: { refs: string[] }) => {
+    if (gate) await gate;
     const out: Record<string, { path: string; type: string }> = {};
     for (const ref of body.refs) if (resolved[ref]) out[ref] = resolved[ref];
     return { resolved: out };
@@ -82,6 +88,7 @@ beforeEach(() => {
   opened.length = 0;
   revealed.length = 0;
   listing = [];
+  gate = null;
   resolved = {};
   clearPathRefCache();
   host = document.createElement("div");
@@ -199,5 +206,90 @@ describe("inline-code path link menu", () => {
     resolved["docs/a.md"] = { path: "repos/x/docs/a.md", type: "file" };
     await render("see `docs/a.md`", { menu: false });
     expect((await contextMenu(pathLink())).defaultPrevented).toBe(false);
+  });
+});
+
+describe("lifetime of a menu launch", () => {
+  const slow = () => {
+    let release!: () => void;
+    gate = new Promise<void>((r) => (release = r));
+    return release;
+  };
+
+  it("does not show a stale document's menu after the document changed (markdown link)", async () => {
+    listing = [{ name: "a.md", type: "file" }];
+    await render("[doc](docs/a.md)");
+    const release = slow();
+    await contextMenu(repoLink());
+    await render("plain text");
+    release();
+    await settle();
+    expect(menuEl()).toBeNull();
+  });
+
+  it("does not show a stale document's menu after the document changed (inline code)", async () => {
+    resolved["docs/a.md"] = { path: "repos/x/docs/a.md", type: "file" };
+    await render("see `docs/a.md`");
+    const link = pathLink();
+    const release = slow();
+    await act(async () => {
+      link.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    });
+    await render("plain text");
+    release();
+    await settle();
+    expect(menuEl()).toBeNull();
+  });
+
+  it("drops a pending long press whose link was replaced", async () => {
+    vi.useFakeTimers();
+    try {
+      listing = [{ name: "a.md", type: "file" }];
+      const press = async (replace: boolean) => {
+        await render("[doc](docs/a.md)");
+        const touches = [{ clientX: 5, clientY: 5 }] as unknown as Touch[];
+        await act(async () => {
+          const a = repoLink();
+          // A touch pointerdown precedes the touchstart; the long-press gate needs to have seen it.
+          a.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+          a.dispatchEvent(new TouchEvent("touchstart", { bubbles: true, touches }));
+        });
+        if (replace) await render("plain text");
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(800);
+        });
+      };
+      // Control: an untouched link does open the menu from a long press.
+      await press(false);
+      expect(menuEl()).not.toBeNull();
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      });
+      expect(menuEl()).toBeNull();
+      await press(true);
+      expect(menuEl()).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("focus after the menu closes", () => {
+  it("returns to the link when Escape closes a keyboard-opened menu", async () => {
+    listing = [{ name: "a.md", type: "file" }];
+    await render("[doc](docs/a.md)");
+    const link = repoLink();
+    link.focus();
+    await act(async () => {
+      link.dispatchEvent(new KeyboardEvent("keydown", { key: "F10", shiftKey: true, bubbles: true, cancelable: true }));
+    });
+    await settle();
+    // Roving focus skips items jsdom reports as not laid out; put focus on an item by hand.
+    menuEl()!.querySelector<HTMLElement>(".ui-menu-item")!.focus();
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(menuEl()).toBeNull();
+    expect(document.activeElement).toBe(link);
   });
 });

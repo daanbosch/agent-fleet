@@ -135,11 +135,13 @@ export function wireLinks(
     const menu =
       openMenu && onOpenFile
         ? wireContextMenu(a, (x, y) => {
+            // A link of a document that has since been replaced must not open a menu.
+            if (!a.isConnected) return;
             // Re-resolved on open: the link was built when the document rendered.
             const resolved = resolveMarkdownFileTarget(href, basePath, baseDir);
             if (!resolved) return onError?.(t("view.cannot_resolve_link", { href }));
             void statRepoTarget(resolved.path, onError).then((type) => {
-              if (!type) return;
+              if (!type || !a.isConnected) return;
               openMenu(
                 {
                   path: resolved.path,

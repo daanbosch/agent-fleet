@@ -69,9 +69,12 @@ function PathLinkMenu({ menu, onClose }: { menu: MenuState; onClose: () => void 
   useLayoutEffect(() => {
     const opener = document.activeElement as HTMLElement | null;
     if (!opener || opener === document.body) return;
+    const menuEl = ref.current;
     return () => {
+      // This cleanup runs before the menu is removed, so focus is still on the menu's own item.
       const now = document.activeElement;
-      if ((!now || now === document.body) && opener.isConnected) opener.focus();
+      const lost = !now || now === document.body || !!menuEl?.contains(now);
+      if (lost && opener.isConnected) opener.focus();
     };
   }, []);
 
