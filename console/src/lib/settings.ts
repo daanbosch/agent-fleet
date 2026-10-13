@@ -1861,6 +1861,27 @@ function scheduleServerSave(): void {
   }, 600);
 }
 
+/** Test hook: cancel the debounced save and the hydrate retry, drop the queued change, and
+ *  return what was still pending. A timer left running fires after its test, in another file's
+ *  module environment (a different `apiJSON` mock, or none). Never called in production. */
+export function cancelPrefsTimersForTest(): { save: boolean; hydrateRetry: boolean } {
+  const pending = { save: saveTimer !== null, hydrateRetry: hydrateRetry !== null };
+  if (saveTimer) clearTimeout(saveTimer);
+  if (hydrateRetry) clearTimeout(hydrateRetry);
+  saveTimer = null;
+  hydrateRetry = null;
+  savePending = false;
+  return pending;
+}
+
+// Registry for src/test/prefsTimersSetup.ts. It cannot import this module itself: a test's
+// vi.mock / vi.resetModules decides which instance (and which `api` binding) this file gets, so
+// each instance registers its own hook here.
+const prefsHooks = ((globalThis as any)[Symbol.for("af.prefsTimerHooks")] ??= new Set()) as Set<
+  typeof cancelPrefsTimersForTest
+>;
+prefsHooks.add(cancelPrefsTimersForTest);
+
 function warnPrefsSaveFailed(err: unknown): void {
   try {
     console.warn("[settings] failed to save ui-prefs to the server (kept locally)", err);

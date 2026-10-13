@@ -144,6 +144,7 @@ export default defineConfig({
           environment: "node",
           include: ["src/**/*.test.{ts,tsx}"],
           exclude: [...configDefaults.exclude, "src/**/*.dom.test.tsx"],
+          setupFiles: ["./src/test/prefsTimersSetup.ts"],
         },
       },
       {
@@ -155,7 +156,7 @@ export default defineConfig({
           name: "dom",
           environment: "jsdom",
           include: ["src/**/*.dom.test.tsx"],
-          setupFiles: ["./src/test/domSetup.ts"],
+          setupFiles: ["./src/test/domSetup.ts", "./src/test/prefsTimersSetup.ts"],
         },
       },
     ],
