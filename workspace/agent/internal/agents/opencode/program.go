@@ -83,9 +83,9 @@ func buildProgram(model, mode string, ocid string, fork bool) string {
 //     (measured), so a resume sets them through the API before the TUI attaches.
 //   - a fork is made through the API too, and the TUI then resumes the copy.
 //
-// The API calls use `opencode api --standalone`, a one-shot private server (~1 s each), run
-// in the pane so a failure is visible there. The line must stay a plain sequence whose exit
-// status is the TUI's: the caller appends the exit recorder after it.
+// The API calls use `opencode api --standalone`, a one-shot private server (~1 s each). Any
+// failure stops the launch, prints the reason in the pane and leaves a non-zero status; the
+// line's final status is the TUI's, because the caller appends the exit recorder after it.
 func buildProgramV2(model, mode, ocid string, fork bool) string {
 	agent := ""
 	switch mode {
@@ -103,15 +103,12 @@ func buildProgramV2(model, mode, ocid string, fork bool) string {
 	}
 
 	ses := session.ShellQuote(ocid)
-	var pre []string
 	target := `"$AF_OC_SES"`
-	if fork {
-		pre = append(pre, `AF_OC_SES=$(opencode api --standalone POST /api/session/`+ses+`/fork -d '{}' | grep -o '"id":"ses_[A-Za-z0-9]*"' | head -n 1 | cut -d'"' -f4)`)
-	} else {
-		pre = append(pre, "AF_OC_SES="+ses)
-	}
+	// Each switch is a step of the condition that gates the TUI, with its output captured and
+	// shown only when it fails: a plan agent that silently stayed on build would let the
+	// session edit when the member chose plan.
 	api := func(sub, body string) string {
-		return `opencode api --standalone POST /api/session/` + target + "/" + sub + " -d " + session.ShellQuote(body) + " >/dev/null 2>&1"
+		return `AF_OC_OUT=$(opencode api --standalone POST /api/session/` + target + "/" + sub + " -d " + session.ShellQuote(body) + " 2>&1)"
 	}
 	var switches []string
 	if prov, id, ok := splitModel(model); ok {
@@ -129,12 +126,21 @@ func buildProgramV2(model, mode, ocid string, fork bool) string {
 	if !fork && len(switches) == 0 {
 		return strings.Join(append(tui, "--session", ses), " ")
 	}
-	run := append(switches, strings.Join(append(tui, "--session", target), " "))
-	if !fork {
-		return strings.Join(append(pre, run...), "; ")
+	fail := func(what string) string {
+		return `echo "agent-fleet: opencode ` + what + `: $AF_OC_OUT" >&2; sleep 5; false`
 	}
-	return strings.Join(pre, "; ") + `; if [ -z "$AF_OC_SES" ]; then echo "agent-fleet: opencode fork failed" >&2; sleep 5; false; else ` +
-		strings.Join(run, "; ") + "; fi"
+	cond := "true"
+	if len(switches) > 0 {
+		cond = strings.Join(switches, " && ")
+	}
+	run := strings.Join(append(tui, "--session", target), " ")
+	if !fork {
+		return "AF_OC_SES=" + ses + "; if " + cond + "; then " + run + "; else " + fail("could not apply the model or agent") + "; fi"
+	}
+	return `AF_OC_OUT=$(opencode api --standalone POST /api/session/` + ses + `/fork -d '{}' 2>&1); ` +
+		`AF_OC_SES=$(printf '%s' "$AF_OC_OUT" | grep -o '"id":"ses_[A-Za-z0-9]*"' | head -n 1 | cut -d'"' -f4); ` +
+		`if [ -z "$AF_OC_SES" ]; then ` + fail("fork failed") + `; elif ` + cond + `; then ` + run +
+		`; else ` + fail("could not apply the model or agent") + `; fi`
 }
 
 // freshSessionConfig is the inline config that picks the model and primary agent of a

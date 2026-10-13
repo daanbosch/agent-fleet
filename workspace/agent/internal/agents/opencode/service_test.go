@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -65,5 +66,25 @@ func TestEnsureServiceDisabledNoopOnV1(t *testing.T) {
 	}
 	if _, err := os.Stat(ServiceConfigPath()); !os.IsNotExist(err) {
 		t.Fatalf("v1 must not get a service.json (stat err = %v)", err)
+	}
+}
+
+// `null` unmarshals into a nil map without an error; writing to it panicked the Agent at boot.
+func TestEnsureServiceDisabledNullFileIsUnreadableNotAPanic(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	useMajor(t, 2)
+	if err := os.MkdirAll(filepath.Dir(ServiceConfigPath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{"null", "[]", "3"} {
+		if err := os.WriteFile(ServiceConfigPath(), []byte(raw), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := EnsureServiceDisabled(); err != ErrUnreadableConfig {
+			t.Fatalf("%s: err = %v, want ErrUnreadableConfig", raw, err)
+		}
+		if b, _ := os.ReadFile(ServiceConfigPath()); string(b) != raw {
+			t.Fatalf("%s: file rewritten to %q", raw, b)
+		}
 	}
 }

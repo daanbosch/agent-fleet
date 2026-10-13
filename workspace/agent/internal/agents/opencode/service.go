@@ -31,7 +31,8 @@ func EnsureServiceDisabled() error {
 	path := ServiceConfigPath()
 	cfg := map[string]any{}
 	if b, err := os.ReadFile(path); err == nil {
-		if json.Unmarshal(b, &cfg) != nil {
+		// `null` unmarshals without error into a nil map; only a JSON object is a config.
+		if json.Unmarshal(b, &cfg) != nil || cfg == nil {
 			return ErrUnreadableConfig
 		}
 	} else if !os.IsNotExist(err) {

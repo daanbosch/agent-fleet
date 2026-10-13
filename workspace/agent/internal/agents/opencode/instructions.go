@@ -77,7 +77,7 @@ func UserInstructionsInAgentsMD() bool { return installedMajor() >= 2 }
 func ApplyUserInstructions(path, body string) error {
 	if UserInstructionsInAgentsMD() {
 		if err := mdblock.EditFile(AgentsPath(), 0o644, 0o755, false, func(s string) (string, error) {
-			return mdblock.Set(s, "user-notes", body), nil
+			return mdblock.SetSafe(s, "user-notes", body)
 		}); err != nil {
 			return err
 		}
@@ -91,7 +91,7 @@ func ApplyUserInstructions(path, body string) error {
 		return nil
 	}
 	if err := mdblock.EditFile(AgentsPath(), 0o644, 0o755, false, func(s string) (string, error) {
-		return mdblock.Set(s, "user-notes", ""), nil
+		return mdblock.SetSafe(s, "user-notes", "")
 	}); err != nil {
 		return err
 	}

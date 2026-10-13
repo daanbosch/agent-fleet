@@ -259,6 +259,22 @@ func TestOpencodeConfigEnvByMajor(t *testing.T) {
 	if perm, _ := cfg["permission"].(map[string]any); perm["edit"] != "deny" || perm["bash"] != "deny" {
 		t.Fatalf("inline config lost the read-only policy: %v", cfg)
 	}
+	// A permission deny loses to a later agent-level allow (measured on 2.0.28), so the inline
+	// config also carries policies a project or agent cannot lift.
+	exp, _ := cfg["experimental"].(map[string]any)
+	pols, _ := exp["policies"].([]any)
+	got := map[string]bool{}
+	for _, p := range pols {
+		m, _ := p.(map[string]any)
+		if m["action"] == "tool.use" && m["effect"] == "deny" {
+			got[m["resource"].(string)] = true
+		}
+	}
+	for _, want := range []string{"shell:*", "edit:*", "write:*", "subagent:*"} {
+		if !got[want] {
+			t.Fatalf("no hard deny for %s in %v", want, pols)
+		}
+	}
 
 	if got := opencodeConfigEnv(""); got != nil {
 		t.Fatalf("no config must add no variables, got %q", got)

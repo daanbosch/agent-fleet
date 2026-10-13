@@ -212,3 +212,11 @@ uninstalls the other package first. The auto-updater is `update: "disable"` in t
 by the entrypoint when the installed major is 2.
 
 Nothing was run against a real provider. The pin stays 1.19.0.
+
+Review round 1 (#2118): a top-level `permission` deny is only a rule, and a later project or agent
+rule (`agents.build.permissions` allow) brings shell/edit/write back (a shell call created a file).
+`experimental.policies` entries (`tool.use`, resource `<action>:*`, deny) are evaluated after every
+rule and held (`Blocked by configuration policy`) with the same agent allow in place; a bare tool
+name as the resource matched nothing. Chat and one-shot runs on v2 now carry `shell:*`, `edit:*`,
+`write:*` and `subagent:*` denies inline. Code Mode's `execute` did not reach the built-in shell
+even without a policy (control run), so it has no entry of its own.

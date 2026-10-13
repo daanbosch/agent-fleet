@@ -895,10 +895,51 @@ func opencodeConfigEnv(path string) []string {
 	if opencode.InstalledMajor() < 2 {
 		return env
 	}
-	if b, err := os.ReadFile(path); err == nil {
-		env = append(env, "OPENCODE_CONFIG_CONTENT="+strings.TrimSpace(string(b)))
+	if inline := opencodeInlineConfig(path); inline != "" {
+		env = append(env, "OPENCODE_CONFIG_CONTENT="+inline)
 	}
 	return env
+}
+
+// opencodeHardDenyPolicies are the opencode 2 `experimental.policies` that keep a chat or
+// one-shot from editing or running a shell. The `permission` deny of the file is a plain
+// permission rule, and a project or agent rule (`agents.build.permissions`) that comes later
+// wins over it: measured on 2.0.28, an agent-level allow brought shell/edit/write back and a
+// shell call created a file. A policy is evaluated after every permission rule and cannot be
+// lifted by a project, agent or session. `tool.use` matches `<action>:<resource>`; a bare
+// tool name matches nothing, `<action>:*` does (measured). Code Mode cannot reach the
+// built-in shell in this build (measured), so it needs no entry of its own.
+func opencodeHardDenyPolicies() []any {
+	var out []any
+	for _, action := range []string{"shell", "edit", "write", "subagent"} {
+		out = append(out, map[string]any{"action": "tool.use", "resource": action + ":*", "effect": "deny"})
+	}
+	return out
+}
+
+// opencodeInlineConfig is the config file's JSON for OPENCODE_CONFIG_CONTENT with the hard
+// deny policies added to its experimental block; "" when the file cannot be read as an object.
+func opencodeInlineConfig(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var cfg map[string]any
+	if json.Unmarshal(b, &cfg) != nil || cfg == nil {
+		return ""
+	}
+	exp, _ := cfg["experimental"].(map[string]any)
+	if exp == nil {
+		exp = map[string]any{}
+	}
+	pol, _ := exp["policies"].([]any)
+	exp["policies"] = append(pol, opencodeHardDenyPolicies()...)
+	cfg["experimental"] = exp
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		return ""
+	}
+	return string(out)
 }
 
 // opencodeChatDir prepares the working dir for a chat's opencode run, with an
