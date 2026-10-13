@@ -183,11 +183,21 @@ kind to `KINDS` in `deploy/local/cli-pin-bump.sh` (plus a `resolve_<kind>` that 
 and checks its checksums, if it pins any) and its contract's `name:` to the
 `workflow_run` list of `cli-pin-bump.yml`.
 
+For the kind to get an update issue when a person is needed (10 §10.2.2), add it to
+`ALL_KINDS` in `deploy/local/cli-update-issues.sh`, to the kind list of `prune` in
+`deploy/local/cli-contract-report.sh` (and to its `RED_KINDS` when the watcher dispatches it
+unattended), and its contract to the streak loop of `cli-drift.yml`. If the contract file is
+not `<kind>-contract.yml` or takes no `cli_version` input, extend `workflow_of` and
+`dispatch_cmd` in `cli-update-issues.sh`. Without these the kind falls into the `waiting`
+state forever and never opens an issue.
+
 Dispatch unattended only when the credential can be supplied unattended. **A credential
-that rotates through an interactive refresh is recorded as "seen" and dispatched by
-hand**, and so is a release that arrives while its credential is not configured.
-"seen" never advances "tested": conflating "we noticed a new version" with "we tested it"
-is how a regression ships.
+that rotates through an interactive refresh is dispatched by hand**, and so is a release
+that arrives while its credential is not configured: add the kind to the `dispatch` or
+`credential` state of `deploy/local/cli-update-issues.sh`, so its update issue asks a
+person to run it ([10 §10.2.2](10-development.md#1022-automated-agent-cli-bumps-cli-pin-bumpyml)).
+Noticing a release never advances "tested": conflating "we noticed a new version" with
+"we tested it" is how a regression ships.
 
 ## 20.6 Finishing
 

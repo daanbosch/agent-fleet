@@ -69,7 +69,7 @@ jobs:
           deploy/local/cli-release-state.sh set tested copilot "$version"
           deploy/local/cli-contract-report.sh success copilot || echo "::warning::could not clear the red-contract row"
 
-      # A red run of `latest` is written into the drift tracking issue and, for kinds the
+      # A red run of `latest` is written into that CLI's update issue and, for kinds the
       # watcher dispatches by itself, stops it re-dispatching this version every 2 hours
       # (deploy/local/cli-contract-report.sh). A cancelled or timed-out run is not
       # `failure()`, so it leaves no marker and the version is retried. Only a failed contract

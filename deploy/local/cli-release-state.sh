@@ -12,7 +12,8 @@
 #
 # Namespaces:
 #   tested   a successful automated contract, appended as a comment (one per version)
-#   seen     a fleet-probe issue was emitted, likewise
+#   seen     a fleet-probe issue was emitted, likewise (no longer written; older markers
+#            remain in the issue and are still readable)
 #   red      a dispatched contract for this version finished red, written by the contract
 #            itself on `failure()`. cli-release-edges.sh skips re-dispatching that version;
 #            see its header for how the brake is released.

@@ -15,7 +15,7 @@
 # ran this exact version and passed". Anything short of that stays at its pin and is
 # listed in the PR body with the reason. For claude, `tested` comes from
 # claude-tui-contract.yml, which drives the real TUI against internal/tmuxx's footer and
-# spinner detection — the check the drift issue's footer-corpus step asks for.
+# spinner detection, which internal/tmuxx/testdata/footers/SOURCE.txt documents.
 #
 # The gate is deliberately equality, never a version comparison (cursor's dates and
 # muse's build ids do not order like semver). The cost: when a kind publishes again
@@ -368,8 +368,8 @@ if [ -n "$BODY_FILE" ]; then
     fi
     echo
     echo "Opened by \`cli-pin-bump.yml\` (\`deploy/local/cli-pin-bump.sh\`). Nothing merges it"
-    echo "automatically. Once it is merged, \`cli-drift.yml\` closes the drift issue on its next"
-    echo "run if no other pin is behind. Closing it without merging declines this exact edit;"
+    echo "automatically. Merging it closes the update issue of each bumped CLI that has one"
+    echo "(the \`Closes\` lines below). Closing it without merging declines this exact edit;"
     echo "it is proposed again only when a version changes."
     echo
     echo "<!-- cli-pin-bump edit=$edit_id -->"

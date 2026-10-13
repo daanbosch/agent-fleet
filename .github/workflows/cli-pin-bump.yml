@@ -69,6 +69,21 @@ jobs:
           echo "::notice::A release source could not be read; the bump branch and PR are left as they are until a complete run."
           cat "$RUNNER_TEMP/body.md" >> "$GITHUB_STEP_SUMMARY"
 
+      # Each bumped CLI's update issue (deploy/local/cli-update-issues.sh) is closed by this
+      # PR. Looked up with GITHUB_TOKEN: CLI_PIN_BUMP_TOKEN carries no issue permission.
+      - name: link the update issues it closes
+        if: steps.bump.outputs.incomplete != 'true' && steps.bump.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUMPED: ${{ steps.bump.outputs.bumped }}
+          BODY_FILE: ${{ runner.temp }}/body.md
+        run: |
+          set -euo pipefail
+          for kind in ${BUMPED//,/ }; do
+            num="$(deploy/local/cli-update-issues.sh number "$kind")" || { echo "::warning::could not look up the $kind issue"; continue; }
+            [ -z "$num" ] || printf '\nCloses #%s\n' "$num" >> "$BODY_FILE"
+          done
+
       - name: open or update the bump PR
         if: steps.bump.outputs.incomplete != 'true' && steps.bump.outputs.count != '0'
         env:
