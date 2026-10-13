@@ -6,6 +6,11 @@
 // and whether this member can still take a request. The buttons map one to one onto the
 // state table of decision 2; a refusal answers with the current state, and the card simply
 // re-reads and shows it.
+//
+// Handoffs other members sent (ADR 0057) get a section of their own on the received tab. They
+// are not inbox items: they come from the handoff store (GET /api/session-handoff-offers/received)
+// and expanding one renders the same HandoffOfferRow the shared view and the handoff dialog use,
+// so taking it over, declining and giving back behave exactly as there.
 import { useEffect, useMemo, useState } from "react";
 import { Modal } from "../../ui/Modal.tsx";
 import { Button } from "../../ui/Button.tsx";
@@ -15,6 +20,8 @@ import { api, apiJSON, errText, type ApiError } from "../../core/api/client.ts";
 import { useT, type MsgKey } from "../../lib/i18n/index.ts";
 import { relTime } from "../../lib/intl.ts";
 import { useLaunchSeed, useLaunchTarget, useReposStore } from "../repos/store.ts";
+import { HandoffOfferRow } from "../sharing/HandoffOfferRow.tsx";
+import { refreshReceivedIfStale, senderLabel, useHandoffStore, type HandoffOffer } from "../sharing/handoffStore.ts";
 import {
   assignedItems,
   receivedItems,
@@ -89,6 +96,7 @@ export function InboxModal({ onClose }: { onClose: () => void }) {
   }, [mailbox?.lastSeq]);
   useEffect(() => {
     void useInboxStore.getState().refresh();
+    refreshReceivedIfStale();
   }, []);
   const received = receivedItems(items);
   const sent = sentItems(items);
@@ -110,7 +118,7 @@ export function InboxModal({ onClose }: { onClose: () => void }) {
           ))}
         </div>
         {loadError && <p className="ui-field-hint inbox-warn">{tr("inbox.load_failed")}</p>}
-        {tab === "received" && <ReceivedList items={received} />}
+        {tab === "received" && <ReceivedList items={received} onClose={onClose} />}
         {tab === "sent" &&
           (sent.length === 0 ? (
             <p className="ui-field-hint">{tr("inbox.empty_sent")}</p>
@@ -128,12 +136,14 @@ export function InboxModal({ onClose }: { onClose: () => void }) {
   );
 }
 
-function ReceivedList({ items }: { items: InboxItem[] }) {
+function ReceivedList({ items, onClose }: { items: InboxItem[]; onClose: () => void }) {
   const tr = useT();
+  // The route lists only offers still pending; the filter keeps a decided one out between reads.
+  const offers = useHandoffStore((s) => s.received).filter((o) => o.status === "pending");
   const waiting = waitingItems(items);
   const mine = assignedItems(items);
   const rest = items.filter((i) => !waiting.includes(i) && !mine.includes(i));
-  if (items.length === 0) return <p className="ui-field-hint">{tr("inbox.empty_received")}</p>;
+  if (items.length === 0 && offers.length === 0) return <p className="ui-field-hint">{tr("inbox.empty_received")}</p>;
   const group = (key: MsgKey, list: InboxItem[]) =>
     list.length > 0 && (
       <section className="inbox-group">
@@ -147,10 +157,44 @@ function ReceivedList({ items }: { items: InboxItem[] }) {
     );
   return (
     <>
+      {offers.length > 0 && (
+        <section className="inbox-group inbox-handoffs">
+          <h4>{tr("inbox.handoffs")}</h4>
+          <ul className="inbox-list">
+            {offers.map((o) => (
+              <HandoffItem key={o.id} offer={o} onClose={onClose} />
+            ))}
+          </ul>
+        </section>
+      )}
       {group("inbox.waiting", waiting)}
       {group("inbox.assigned", mine)}
       {group("inbox.others", rest)}
     </>
+  );
+}
+
+/** A handoff summarised like an inbox card. Taking it over opens the launch dialog, so the
+ *  inbox closes rather than stay over it, as the handoff dialog does. */
+function HandoffItem({ offer, onClose }: { offer: HandoffOffer; onClose: () => void }) {
+  const tr = useT();
+  const [open, setOpen] = useState(false);
+  return (
+    <li className="inbox-card" data-state="handoff">
+      <button type="button" className="inbox-card-head" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        <span className="inbox-kind inbox-kind-handoff">{tr("inbox.kind_handoff")}</span>
+        <span className="inbox-who">{tr("inbox.from", { who: senderLabel(offer) })}</span>
+        {offer.createdAt && <span className="inbox-when muted">{relTime(offer.createdAt)}</span>}
+        {!open && <span className="inbox-preview">{offer.title}</span>}
+      </button>
+      {open && (
+        <div className="inbox-card-body">
+          <ul className="handoff-inbox">
+            <HandoffOfferRow offer={offer} onDone={onClose} />
+          </ul>
+        </div>
+      )}
+    </li>
   );
 }
 
@@ -529,6 +573,7 @@ function SettingsPane() {
         <input type="checkbox" checked={s.dnd} onChange={(e) => setS({ ...s, dnd: e.target.checked })} />
         <span>{tr("inbox.settings_dnd")}</span>
       </label>
+      <p className="ui-field-hint">{tr("inbox.settings_handoff_note")}</p>
       <div className="inbox-actions">
         <Button variant="primary" onClick={() => void save()}>
           {tr("inbox.settings_save")}

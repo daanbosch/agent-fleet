@@ -24,7 +24,12 @@ export interface HandoffOffer {
   /** Name of the source session (what the owner side displays and navigates to). */
   sessionName: string;
   recipientUserKey: string;
+  /** The sender's routes only: the recipient's address as the picker showed it. Absent from an
+   *  older CP, or for a member with no address or one who left; use recipientLabel. */
+  recipientEmail?: string;
   ownerUserKey?: string;
+  /** The inbox only: the sender's address, absent as recipientEmail is; use senderLabel. */
+  ownerEmail?: string;
   title: string;
   status: HandoffOfferStatus;
   branch?: string;
@@ -95,6 +100,25 @@ function loadReceived(): Promise<HandoffOffer[] | null> {
  *  The poll stops while the tab is hidden, which is exactly when an OS notification is clicked,
  *  so an older list is read again rather than trusted. */
 const RECEIVED_FRESH_MS = 15000;
+
+/** The recipient as the sender's picker named them: the e-mail, the user key when there is none. */
+export function recipientLabel(o: HandoffOffer): string {
+  return o.recipientEmail || o.recipientUserKey;
+}
+
+/** The sender as the recipient's shared-sessions list names them (ownerLabel in ./store.ts). */
+export function senderLabel(o: HandoffOffer): string {
+  return o.ownerEmail || o.ownerUserKey || "";
+}
+
+/** Reads the inbox unless a read within the poll interval already answered, joining one in
+ *  flight. For a surface that opens on demand (the top-bar inbox): the poll keeps the list
+ *  current, and opening must not add a second request beside it. */
+export function refreshReceivedIfStale(): void {
+  const at = useHandoffStore.getState().receivedAt;
+  if (at && Date.now() - at < RECEIVED_FRESH_MS) return;
+  void loadReceived();
+}
 
 /** The backlog is not cleared by "read" (docs/log/77 §77.10), so the raw count is the badge. */
 export function pendingHandoffCount(offers: HandoffOffer[]): number {

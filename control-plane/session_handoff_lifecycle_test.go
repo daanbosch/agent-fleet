@@ -611,3 +611,44 @@ func TestHandoffCreateIsFencedByTheTake(t *testing.T) {
 		t.Fatalf("plain create = %d (%d bodies)", rec.Code, len(rc.bodies))
 	}
 }
+
+// The sender's card and ledger and the recipient's band name the other participant by the
+// e-mail the share picker showed, not by the internal user key (#2075). Each side gets only the
+// other participant's address: the recipient's inbox must not echo the reader's own.
+func TestHandoffWireNamesTheOtherParticipantByEmail(t *testing.T) {
+	f := newHandoffLife(t)
+	o := f.mustOffer(nil)
+	if o.RecipientUserKey != "recipient" || o.RecipientEmail != "recipient@example.com" {
+		t.Fatalf("create = %q / %q, want recipient / recipient@example.com", o.RecipientUserKey, o.RecipientEmail)
+	}
+
+	rec := httptest.NewRecorder()
+	f.api.listOwned(rec, httptest.NewRequest(http.MethodGet, "/api/session-handoff-offers", nil), f.owner.ident, f.owner.mv)
+	var owned struct {
+		Offers []map[string]any `json:"offers"`
+	}
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &owned) != nil || len(owned.Offers) != 1 {
+		t.Fatalf("ledger = %d %s", rec.Code, rec.Body.String())
+	}
+	if got := owned.Offers[0]["recipientEmail"]; got != "recipient@example.com" {
+		t.Fatalf("ledger recipientEmail = %v, want recipient@example.com", got)
+	}
+	if _, ok := owned.Offers[0]["ownerEmail"]; ok {
+		t.Fatalf("ledger carries ownerEmail: %v", owned.Offers[0])
+	}
+
+	rec = httptest.NewRecorder()
+	f.api.listReceived(rec, httptest.NewRequest(http.MethodGet, "/api/session-handoff-offers/received", nil), f.recipient.ident, f.recipient.mv)
+	var inbox struct {
+		Offers []map[string]any `json:"offers"`
+	}
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &inbox) != nil || len(inbox.Offers) != 1 {
+		t.Fatalf("inbox = %d %s", rec.Code, rec.Body.String())
+	}
+	if got := inbox.Offers[0]["ownerEmail"]; got != "owner@example.com" {
+		t.Fatalf("inbox ownerEmail = %v, want owner@example.com", got)
+	}
+	if v, ok := inbox.Offers[0]["recipientEmail"]; ok {
+		t.Fatalf("inbox echoes the reader's own address: recipientEmail = %v", v)
+	}
+}

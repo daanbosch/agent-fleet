@@ -19,7 +19,7 @@ import { useStableBlockIds } from "../mirror/transcript/blockIdentity.ts";
 import { patchAnswers } from "../mirror/interactionAnswers.ts";
 import { ownerLabel, useSharedSessionsStore } from "./store.ts";
 import { HandoffInboxModal } from "./HandoffInboxModal.tsx";
-import { startHandoffPolling, useHandoffStore } from "./handoffStore.ts";
+import { senderLabel, startHandoffPolling, useHandoffStore } from "./handoffStore.ts";
 import { useTenantStore } from "../../core/store/tenant.ts";
 import { useMarksController } from "../mirror/transcript/useMarks.ts";
 import { MarkStrip } from "../mirror/transcript/MarkStrip.tsx";
@@ -107,7 +107,10 @@ export function SharedSessionView({ sharedSessionId, headerActions }: { sharedSe
   // name: returning the offer itself yields a new object on every 15-second refetch and repaints
   // the whole surface the reader is on.
   const offerId = useHandoffStore((st) => st.received.find((o) => o.sessionId === sharedSessionId)?.id ?? "");
-  const offerFrom = useHandoffStore((st) => st.received.find((o) => o.sessionId === sharedSessionId)?.ownerUserKey ?? "");
+  const offerFrom = useHandoffStore((st) => {
+    const o = st.received.find((x) => x.sessionId === sharedSessionId);
+    return o ? senderLabel(o) : "";
+  });
   const [offerOpen, setOfferOpen] = useState(false);
   // This surface subscribes to the backlog itself so the band also appears in a detached tab with
   // no rail. The polling is refcounted down to a single timer.

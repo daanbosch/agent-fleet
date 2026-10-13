@@ -129,12 +129,17 @@ type handoffOfferWire struct {
 	DecidedAt           string `json:"decidedAt"`
 	AcceptedSessionName string `json:"acceptedSessionName"`
 	// TakeState is store.HandoffTakeState: "" when no take holds the offer, which is also
-	// every decided offer, so it is the one key that may be absent.
+	// every decided offer, so it may be absent.
 	TakeState string `json:"takeState,omitempty"`
+	// RecipientEmail is what the sender's picker showed for the recipient, so the ledger and
+	// the source session's card name them the same way. Only the sender's routes set it: on the
+	// recipient's inbox it would be the reader's own address. Absent when the member has no
+	// e-mail or has left the tenant; the Console then falls back to the key.
+	RecipientEmail string `json:"recipientEmail,omitempty"`
 }
 
 // handoffOfferInboxWire is one entry of the recipient's inbox: the base form plus three
-// keys, 19 in all with every optional key. The three cannot be optional fields on the base type —
+// keys, 21 in all with every optional key. The three cannot be optional fields on the base type —
 // ownerUserKey is "" when the member is unknown and prompt is "" when the ciphertext cannot be
 // opened, and both still have to appear — so they are added by embedding, which JSON flattens.
 //
@@ -142,7 +147,7 @@ type handoffOfferWire struct {
 //
 // The effective JSON names of the base and the three additions must not collide:
 // encoding/json emits neither side of a collision, so a key would vanish silently. The
-// equivalence test catches that, and the counts 14 / 19 (optional keys set) are pinned
+// equivalence test catches that, and the counts 15 / 21 (optional keys set) are pinned
 // separately.
 type handoffOfferInboxWire struct {
 	handoffOfferWire
@@ -157,6 +162,9 @@ type handoffOfferInboxWire struct {
 	// still holds it after an unshare or archive (ListReceivedSessionHandoffOffers): it
 	// carries no body or coordinates, and nothing launches from it.
 	RecoveryOnly bool `json:"recoveryOnly,omitempty"`
+	// OwnerEmail names the sender the way the recipient's shared-sessions list does (ownerEmail
+	// there too), absent when unknown; the Console falls back to ownerUserKey.
+	OwnerEmail string `json:"ownerEmail,omitempty"`
 }
 
 // handoffTakeRev is an opaque name for a take, safe to hand to the recipient's Console: a one-way
@@ -437,7 +445,9 @@ func (a sessionHandoffAPI) create(w http.ResponseWriter, r *http.Request, res *r
 	_ = a.mgr.store.InsertAudit(context.Background(), store.AuditLog{ID: store.NewID(), TenantID: res.mv.TenantID,
 		ActorKind: "user", ActorID: res.ident.ID, Action: "session.handoff.offer", Target: c.Name,
 		Detail: "recipient=" + recipient.UserKey, HTTPStatus: http.StatusCreated, At: store.NowTS()})
-	writeJSON(w, http.StatusCreated, handoffOfferDTO(o, recipient.UserKey))
+	dto := handoffOfferDTO(o, recipient.UserKey)
+	dto.RecipientEmail = recipient.Email
+	writeJSON(w, http.StatusCreated, dto)
 }
 
 // listOwned (GET /api/session-handoff-offers) is A's ledger. Notifications scroll away, so
@@ -449,10 +459,12 @@ func (a sessionHandoffAPI) listOwned(w http.ResponseWriter, r *http.Request, _ s
 		writeAPIErr(w, internalErr(err))
 		return
 	}
-	keys := a.userKeys(r.Context(), mv.TenantID)
+	members := a.members(r.Context(), mv.TenantID)
 	out := []any{}
 	for _, o := range rows {
-		out = append(out, handoffOfferDTO(o, keys[o.RecipientMembershipID]))
+		dto := handoffOfferDTO(o, members[o.RecipientMembershipID].UserKey)
+		dto.RecipientEmail = members[o.RecipientMembershipID].Email
+		out = append(out, dto)
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	writeJSON(w, http.StatusOK, map[string]any{"offers": out})
@@ -470,7 +482,7 @@ func (a sessionHandoffAPI) listReceived(w http.ResponseWriter, r *http.Request, 
 		writeAPIErr(w, internalErr(err))
 		return
 	}
-	keys := a.userKeys(r.Context(), mv.TenantID)
+	members := a.members(r.Context(), mv.TenantID)
 	out := []any{}
 	for _, row := range rows {
 		o := row.SessionHandoffOffer
@@ -479,11 +491,12 @@ func (a sessionHandoffAPI) listReceived(w http.ResponseWriter, r *http.Request, 
 			rev = handoffTakeRev(row.ConfirmedTakeToken)
 		}
 		wire := handoffOfferInboxWire{
-			handoffOfferWire:  handoffOfferDTO(o, keys[o.RecipientMembershipID]),
-			OwnerUserKey:      keys[o.OwnerMembershipID],
+			handoffOfferWire:  handoffOfferDTO(o, members[o.RecipientMembershipID].UserKey),
+			OwnerUserKey:      members[o.OwnerMembershipID].UserKey,
 			SourceSessionKind: o.SourceSessionKind,
 			TakeRev:           rev,
 			RecoveryOnly:      row.RecoveryOnly,
+			OwnerEmail:        members[o.OwnerMembershipID].Email,
 		}
 		if row.RecoveryOnly {
 			// A take whose offer the inbox no longer lists (unshared or archived) would otherwise
@@ -499,14 +512,16 @@ func (a sessionHandoffAPI) listReceived(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, http.StatusOK, map[string]any{"offers": out})
 }
 
-func (a sessionHandoffAPI) userKeys(ctx context.Context, tenantID string) map[string]string {
-	out := map[string]string{}
+// members maps the tenant's active members by membership ID. A member who left reads as the
+// zero value, so their key and e-mail go out as "" rather than failing the list.
+func (a sessionHandoffAPI) members(ctx context.Context, tenantID string) map[string]store.MemberInfo {
+	out := map[string]store.MemberInfo{}
 	rows, err := a.mgr.store.ListMembersByTenant(ctx, tenantID)
 	if err != nil {
 		return out
 	}
 	for _, m := range rows {
-		out[m.MembershipID] = m.UserKey
+		out[m.MembershipID] = m
 	}
 	return out
 }
