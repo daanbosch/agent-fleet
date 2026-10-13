@@ -182,13 +182,22 @@ sync_kind() { # sync_kind <kind> <pin> <latest>
     printf '<!-- cli-update kind=%s -->\n' "$kind"
   } > "$WORK/body.md"
 
-  gh label create "$LABEL" --color FBCA04 --description "upstream CLI version drift" 2>/dev/null || true
+  # A contract job's sync and cli-drift's can both have found no issue: look again right
+  # before creating, or the kind ends up with two and `number` only ever sees one of them.
+  [ -n "$num" ] || num="$(number "$kind")"
   if [ -n "$num" ]; then
     # `carry` keeps the Red contracts section the contract workflows write.
     "$REPORT" carry "$num" "$WORK/body.md"
+    # Every 2 hours with nothing new: an unchanged issue is not edited.
+    if [ "$(gh issue view "$num" --json title --jq .title)" = "$title" ] &&
+       [ "$(gh issue view "$num" --json body --jq .body)" = "$(cat "$WORK/body.md")" ]; then
+      echo "$kind: #$num unchanged ($state)"
+      return 0
+    fi
     gh issue edit "$num" --title "$title" --body-file "$WORK/body.md" >/dev/null
     echo "$kind: updated #$num ($state)"
   else
+    gh label create "$LABEL" --color FBCA04 --description "upstream CLI version drift" 2>/dev/null || true
     gh issue create --title "$title" --body-file "$WORK/body.md" --label "$LABEL" >/dev/null
     echo "$kind: opened ($state)"
   fi

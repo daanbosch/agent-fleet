@@ -168,6 +168,13 @@ lcpp は例外です。ベンダーの CLI を動かさず、話し相手の lla
 照合する `resolve_<kind>` も）、`cli-pin-bump.yml` の `workflow_run` の一覧に contract の
 `name:` を足します。
 
+人が要るときに更新 issue が開くように（10 §10.2.2）、`deploy/local/cli-update-issues.sh` の
+`ALL_KINDS`、`deploy/local/cli-contract-report.sh` の `prune` の種別一覧（watcher が無人で
+dispatch するなら `RED_KINDS` も）に種別を足し、`cli-drift.yml` の streak のループに contract を
+足します。contract のファイル名が `<kind>-contract.yml` でない、または `cli_version` 入力を
+取らないなら、`cli-update-issues.sh` の `workflow_of` と `dispatch_cmd` も広げます。これが無いと
+その種別はずっと `waiting` のままで、issue は開きません。
+
 無人で dispatch するのは、資格情報を無人で供給できる場合だけです。**対話的な refresh で回転する
 資格情報のものは手で dispatch**します。資格情報が未設定のうちに来たリリースも同じ扱いです。
 `deploy/local/cli-update-issues.sh` の `dispatch` か `credential` の状態に種別を足し、更新 issue が

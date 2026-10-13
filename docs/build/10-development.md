@@ -187,7 +187,9 @@ repository only, works too, but its tokens last an hour, so it needs a token-min
 
 Save it under **Settings → Secrets and variables → Actions → New repository secret** as
 `CLI_PIN_BUMP_TOKEN`. A PAT expires; when it does, the job goes red with the same
-message, and an open update issue keeps waiting for a bump PR that does not come.
+message. A CLI that passed its contract opens no update issue (the bump PR is meant to be
+the whole interaction), so while the token is broken that red `cli-pin-bump` run is the
+only signal; an update issue that was already open keeps waiting for the PR.
 
 ## 10.3 What the start scripts do (`deploy/local/`)
 

@@ -166,7 +166,9 @@ App でもよいが、トークンの寿命が 1 時間なので、保存した 
 
 **Settings → Secrets and variables → Actions → New repository secret** に
 `CLI_PIN_BUMP_TOKEN` として保存する。PAT には期限があり、切れると同じメッセージでジョブが
-red になる（開いている更新 issue は来ない版上げ PR を待ち続ける）。
+red になる。contract が通った CLI は更新 issue を開かない（版上げ PR だけで済ませる設計）ので、
+トークンが壊れている間はこの red の `cli-pin-bump` 実行が唯一の合図になる。すでに開いていた
+更新 issue は、来ない PR を待ち続ける。
 
 ## 10.3 起動スクリプトの責務（`deploy/local/`）
 

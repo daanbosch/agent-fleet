@@ -71,7 +71,7 @@ render() { # render <body-file> <rows-file>  -> stdout
 }
 
 # mutate <kind> <rows-transform-function> [<title for a new issue>]: read the kind's issue,
-# transform its rows, write back, verify.
+# transform its rows, write back, verify. A title of `-` never creates an issue.
 #
 # Verification is of the INTENT, not of the bytes written: after the write the rows are read
 # again and the transform is applied to them once more; the write counts only when that
@@ -95,6 +95,7 @@ mutate() {
     if [ -z "$num" ]; then
       # Nothing to remove from an issue that does not exist.
       [ -s "$tmp.rows.new" ] || return 0
+      [ "$title" != - ] || return 0
       # Another reporter may have created it since the lookup above: re-read instead of
       # opening a second issue for the kind.
       if [ -n "$(issue_number "$kind")" ]; then continue; fi
@@ -136,7 +137,10 @@ case "$cmd" in
     if [ -n "$steps" ]; then steps="failing step: \`$steps\`"; else steps="failing step not captured"; fi
     row="- \`$kind\` \`$version\` — $steps — [run]($RUN_URL) <!-- cli-contract-failure $kind -->"
     add_row() { grep -v "<!-- cli-contract-failure $kind -->" "$1" || true; printf '%s\n' "$row"; }
-    mutate "$kind" add_row
+    # A job that died before it read the version cannot be matched against latest, so the
+    # sync would close a new issue right after opening it. Such a row goes only into an
+    # issue that is already open; a harness that keeps dying is the streak check's to report.
+    if [ "$version" = unknown ]; then mutate "$kind" add_row -; else mutate "$kind" add_row; fi
     # The brake for the watcher. Only a real version can be matched against `latest`.
     if [ "$version" != unknown ] && case " $RED_KINDS " in *" $kind "*) true ;; *) false ;; esac; then
       "$HERE/cli-release-state.sh" set red "$kind" "$version"

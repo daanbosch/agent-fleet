@@ -437,6 +437,14 @@ case "$1 $2" in
     case "$*" in
       *"--label cli-drift"*)
         kind="$(printf '%s' "$*" | sed -n 's/.*startswith("\([a-z0-9-]*\) CLI: ").*/\1/p')"
+        if [ -e "$STUB_RUNS/race-$kind" ]; then
+          # Another writer opens the kind's issue just after this lookup answered "none".
+          rm "$STUB_RUNS/race-$kind"
+          n=100; while [ -e "$I/$n" ]; do n=$((n + 1)); done
+          mkdir "$I/$n"; printf '%s CLI: opened elsewhere' "$kind" > "$I/$n/title"; echo open > "$I/$n/state"
+          : > "$I/$n/comments"; echo 'placeholder' > "$I/$n/body"
+          exit 0
+        fi
         for d in "$I"/1[0-9][0-9]; do
           [ -d "$d" ] && [ "$(cat "$d/state")" = open ] || continue
           case "$(cat "$d/title")" in "$kind CLI: "*) basename "$d"; break ;; esac
@@ -453,7 +461,11 @@ case "$1 $2" in
     cp "$(arg_after --body-file "$@")" "$I/$n/body"
     echo "https://github.com/k-k1/agent-fleet/issues/$n" ;;
   "issue view")
-    case "$*" in *"body,comments"*) cat "$I/$3/body" "$I/$3/comments" 2>/dev/null ;; *) cat "$I/$3/body" ;; esac ;;
+    case "$*" in
+      *"body,comments"*) cat "$I/$3/body" "$I/$3/comments" 2>/dev/null ;;
+      *"--json title"*)  cat "$I/$3/title"; echo ;;
+      *) cat "$I/$3/body" ;;
+    esac ;;
   "issue edit")
     if [ -e "$STUB_RUNS/clobber" ]; then
       # A concurrent writer holding a stale copy overwrites this edit with the old body.
@@ -588,6 +600,14 @@ touch "$STUB_RUNS/clobber"
 [ ! -e "$STUB_RUNS/clobber" ] || fail "the clobber hook never fired; the case proves nothing"
 has kiro '`kiro-contract` failed its last 2 runs'
 has kiro '`kiro` `0.3.0`'
+
+echo "== case 23b: a failure whose version is unknown never opens an issue, but lands in an open one =="
+"$REPORT" failure copilot unknown
+no_issue copilot
+"$REPORT" failure copilot 1.0.97      # control: a real version does open it
+"$REPORT" failure copilot unknown
+has copilot '`copilot` `unknown`'
+"$REPORT" success copilot
 
 echo "== case 24: success clears the red marker as well as the row =="
 "$REPORT" failure opencode 1.2.0
@@ -726,6 +746,25 @@ rm "$STUB_TESTED/red-muse"
 for d in "$STUB_ISSUES"/1[0-9][0-9]; do echo closed > "$d/state"; done
 sync_ok muse   # control: the same release without the marker is the watcher's to run
 no_issue muse
+
+echo "== case 33c: a writer that opened the issue between lookup and create is reused, not doubled =="
+for d in "$STUB_ISSUES"/1[0-9][0-9]; do echo closed > "$d/state"; done
+releases rtk=0.51.0:0.52.0
+touch "$STUB_RUNS/race-rtk"
+sync_ok rtk
+[ ! -e "$STUB_RUNS/race-rtk" ] || fail "the race hook never fired; the case proves nothing"
+n=0; for d in "$STUB_ISSUES"/1[0-9][0-9]; do
+  [ "$(cat "$d/state")" = open ] && case "$(cat "$d/title")" in "rtk CLI: "*) n=$((n + 1)) ;; esac
+done
+[ "$n" = 1 ] || fail "expected 1 open rtk issue, got $n"
+title_is rtk "rtk CLI: bump the pin to 0.52.0"
+
+echo "== case 33d: a sync with nothing new does not edit the issue =="
+grep -q "^gh issue edit $(issue_of rtk) " "$STUB_LOG" || fail "control: case 33c never edited the issue"
+: > "$STUB_LOG"
+sync_ok rtk
+grep -qF 'unchanged' "$WORK/out" || fail "the unchanged issue was not reported as such"
+if grep -q '^gh issue edit' "$STUB_LOG"; then fail "an unchanged issue was edited"; fi
 
 echo "== case 34: a streak keeps the issue open even when the pin is current =="
 releases agy=1.3.4:1.3.4
