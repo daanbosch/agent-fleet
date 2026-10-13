@@ -517,7 +517,7 @@ func TestImportApplyAcceptsALargeSelection(t *testing.T) {
 	if len(body) <= MemberWriteMaxRequest {
 		t.Fatalf("body %d does not exceed the save limit", len(body))
 	}
-	if w := markedDo(t, h, "POST", "/agents/memory/import/apply", body); w.Code == http.StatusRequestEntityTooLarge {
-		t.Fatalf("large selection refused: %d %s", w.Code, w.Body)
+	if w := markedDo(t, h, "POST", "/agents/memory/import/apply", body); w.Code != http.StatusBadRequest || strings.Contains(w.Body.String(), "member_origin") {
+		t.Fatalf("large selection: %d %s, want the handler's 400", w.Code, w.Body)
 	}
 }

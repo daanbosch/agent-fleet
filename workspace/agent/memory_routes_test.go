@@ -13,6 +13,7 @@ package main
 // TestMemoryRoutesMatchAgentRouteTable in internal/memoryx/mux_test.go.
 
 import (
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin/memberorigintest"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memoryx"
 )
 
 func TestMemoryRoutesRegistered(t *testing.T) {
@@ -189,5 +191,30 @@ func TestMemberOriginRoutesAgreeWithTheControlPlane(t *testing.T) {
 	sort.Strings(agent)
 	if strings.Join(cp, "\n") != strings.Join(agent, "\n") {
 		t.Fatalf("the CP signs\n%s\nthe Agent requires a mark on\n%s", strings.Join(cp, "\n"), strings.Join(agent, "\n"))
+	}
+}
+
+// import/apply names every selected slug, so its body can pass the save limit. Through the real
+// route table a marked body above that limit and within the CP's 2 MiB cap must reach the handler,
+// which refuses the unknown import with a 400.
+func TestImportApplyTakesALargeMarkedSelection(t *testing.T) {
+	s := memberorigintest.Install(t)
+	slugs := make([]string, 5300)
+	for i := range slugs {
+		slugs[i] = strings.Repeat("a", 255)
+	}
+	list, _ := json.Marshal(slugs)
+	body := `{"importId":"x","scope":{"projects":` + string(list) + `}}`
+	if len(body) <= memoryx.MemberWriteMaxRequest || len(body) > 2<<20 {
+		t.Fatalf("body %d is not between the save limit and 2 MiB", len(body))
+	}
+	req := httptest.NewRequest(http.MethodPost, "/agents/memory/import/apply", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer agent-token")
+	req.Header.Set("Content-Type", "application/json")
+	s.Sign(req, []byte(body))
+	w := httptest.NewRecorder()
+	buildMux().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest || strings.Contains(w.Body.String(), "member_origin") {
+		t.Fatalf("large marked apply: %d %.200s, want the handler's 400", w.Code, w.Body)
 	}
 }
