@@ -484,7 +484,10 @@ session whose log is gone, the copy is put back and the conversation continues w
 (its current log, rewritten only when the log changed and is complete), removed when you delete the
 session. Copies set aside by "Start a new conversation" stay until the session is deleted, and
 copies of sessions deleted while the Agent was not running are not cleaned up automatically. (A deleted session's conversation then lives in the cleanup
-archive, as before; if its log was already gone, the archive takes the copy). **"Start a new
+archive, as before, and the archive always takes a snapshot of the copy too. Restoring the archive
+puts the live log at the log's path only if it is complete and newer than the copy, otherwise the
+copy; the other is kept next to it as `.backup.archived` or `.superseded.archived`. If a log
+cannot be read, other than because it just vanished, the delete is refused.) **"Start a new
 conversation"** keeps the copy aside (`claude-transcripts/<id>.superseded.<number>`) instead of
 restoring it. The copy is made while the session is stopped, so
 a log that disappears before the first copy (a session stopped only seconds ago, or one that
