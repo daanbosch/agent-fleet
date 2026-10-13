@@ -105,3 +105,31 @@ describe("the sender's handoff card while the recipient holds the offer", () => 
     expect(document.body.textContent).toContain(t("handoff.withdraw_lost"));
   });
 });
+
+// The picker named the recipient by e-mail, so the card must too; the internal key is the
+// fallback for a recipient with no address (#2075).
+describe("the sender's handoff card names the recipient as the picker did", () => {
+  const withEmail = { ...base, recipientUserKey: "bob-example-com", recipientEmail: "bob@example.com" };
+
+  it("shows the e-mail on the status line, not the user key", async () => {
+    await render(withEmail);
+    expect(host.textContent).toContain(t("handoff.state_pending", { who: "bob@example.com" }));
+    expect(host.textContent).not.toContain("bob-example-com");
+  });
+
+  it("asks the withdraw question with the e-mail", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await render(withEmail);
+    await act(async () => launchButton().click());
+    expect(confirm).toHaveBeenCalledWith(t("handoff.withdraw_confirm", { who: "bob@example.com" }));
+    expect(apiJSON).not.toHaveBeenCalled();
+  });
+
+  it("words a refused withdraw with the e-mail", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    apiJSON.mockResolvedValue({ error: { code: "handoff_being_taken", takeState: "starting", status: 409 } });
+    await render({ ...withEmail, takeState: "starting" });
+    await act(async () => launchButton().click());
+    expect(document.body.textContent).toContain(t("handoff.withdraw_starting", { who: "bob@example.com" }));
+  });
+});

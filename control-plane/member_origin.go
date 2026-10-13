@@ -141,23 +141,35 @@ func (m *manager) memberOriginMark(r *http.Request, res *resolved, now time.Time
 	if len(body) > memberOriginMaxBody {
 		return nil, "", &apiError{http.StatusRequestEntityTooLarge, "too_large", "request body is too large"}
 	}
+	mark, aerr := m.memberOriginSign(res, r.Method, strings.TrimPrefix(r.URL.Path, "/api"), r.URL.RawQuery, body, now)
+	if aerr != nil {
+		return nil, "", aerr
+	}
+	return body, mark, nil
+}
+
+// memberOriginSign marks one request to res's Agent: method, Agent-side path, raw query and the
+// exact body. "" with no error means signing is off, and the Agent then refuses the route. The
+// relay above uses it for a member's Console request; a CP handler uses it directly for an Agent
+// call it makes on the member's own request (the handoff push), after checking that the workspace
+// is the caller's own.
+func (m *manager) memberOriginSign(res *resolved, method, path, query string, body []byte, now time.Time) (string, *apiError) {
 	v := memberOriginKeyVersion()
 	if v <= 0 {
-		// Unsigned: the Agent refuses it, which is the "off" this setting means.
-		return body, "", nil
+		return "", nil
 	}
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
-		return nil, "", &apiError{http.StatusInternalServerError, "internal", "could not sign the request"}
+		return "", &apiError{http.StatusInternalServerError, "internal", "could not sign the request"}
 	}
 	sum := sha256.Sum256(body)
 	c := memberOriginClaims{
-		Method: r.Method, Path: strings.TrimPrefix(r.URL.Path, "/api"), Query: r.URL.RawQuery,
+		Method: method, Path: path, Query: query,
 		BodySHA256: hex.EncodeToString(sum[:]), Workspace: res.ws.ID, Membership: res.ws.MembershipID,
 		Subject: res.ident.ID, IssuedAt: now.Unix(), Expires: now.Add(memberOriginTTL).Unix(),
 		Nonce: base64.RawURLEncoding.EncodeToString(nonce),
 	}
-	return body, signMemberOrigin(memberOriginKey(m.tokenSignMaster(), v), memberOriginKID(v), c), nil
+	return signMemberOrigin(memberOriginKey(m.tokenSignMaster(), v), memberOriginKID(v), c), nil
 }
 
 // relayBody is the body and mark a relayed request goes out with: the member routes are buffered

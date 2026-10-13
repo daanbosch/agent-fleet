@@ -132,19 +132,28 @@ contract ワークフローが終わったとき、保険として2 時間ごと
 - **PR** には証拠表が載る — kind ごとの `ピン → latest`、`tested` を記録した contract 実行への
   リンク（`cli-release-state.sh` が実行 URL をマーカーのコメントに書く）、チェックサムの出どころ。
   ブランチの force-push は Dockerfile の書き換えが変わったときだけ。自動ではマージしない。
-  レビューして CI を待ち、§10.2.1 の手順 4 から進める。マージ後、他にピンの遅れが無ければ
-  `cli-drift.yml` が次の実行で drift issue を閉じる。マージせずに閉じると、その書き換えそのものを
+  レビューして CI を待ち、§10.2.1 の手順 4 から進める。本文には上げた CLI ごとにその更新 issue
+  （下記）があれば `Closes #N` が入り、マージでそれらが閉じる。マージせずに閉じると、その書き換えそのものを
   断ったことになり（本文の id で見分けるので、ブランチを消しても効く）、版が変わるまで再提案しない。
 
-**手作業で残るもの:**
+**更新 issue: CLI ごとに 1 本、人が何かすべきときだけ開く。** `cli-drift.yml` が
+`deploy/local/cli-update-issues.sh` で保つ（ラベル `cli-drift`、タイトル `<kind> CLI: <次の一手>`）。
+タイトルと本文の 1 行目が次の一手で、コマンドがあればそれを載せる。どの道も issue を閉じる PR で
+終わる。普段は何も開かない: CLI が進み、watcher が contract を回し、上の版上げ PR だけで済む。
+issue が開くのは次のときだけ:
 
-- **cursor と kiro** は資格情報がローテートするので、watcher は contract を dispatch しない。
-  secret を更新してから `gh workflow run cursor-contract.yml -f cli_version=latest`
-  （または `kiro-contract.yml`）。通れば版上げが続く。
-- **claude・copilot・agy** は contract の secret があるときだけ dispatch される。無ければ
-  付随 issue のフリート確認を回し、secret が戻ってから contract を dispatch する。
-- **rtk** は取得元はあるが contract が無く、`tested` で門番できない。ドリフトとして一覧に
-  出るだけで、版上げは手で行う（§10.2.1）。
+| タイトル | 人が要る理由 | 閉じるもの |
+|---|---|---|
+| `kiro CLI: run the contract on <v>`（cursor も） | 資格情報が回転するので watcher は contract を回さない。サインインで落ちたら secret を更新する | 通過後に続く版上げ PR |
+| `<kind> CLI: verify <v> (no CI credential)` | claude・copilot・agy で contract の secret が無い。登録して contract を回すか、ターミナル（CLI）で手で確かめる | 版上げ PR か手での版上げ |
+| `<kind> CLI: contract failed on <v>` | latest で contract が赤（行と実行は issue の `Red contracts` 欄。`deploy/local/cli-contract-report.sh`） | 直した contract が通ったあとの版上げ PR |
+| `<kind> CLI: contract fails on develop` | 版に関係なく `develop` で直近 2 回落ちた: ハーネスか secret が壊れている | contract が通りピンが最新になれば自分で閉じる |
+| `rtk CLI: bump the pin to <v>` | rtk は取得元はあるが contract が無く `tested` で門番できない。手で上げる（§10.2.1） | 手での版上げ PR |
+
+開いた issue は CLI に付いていく: latest が通れば同じ issue が `<kind> CLI: merge the pin bump to <v>`
+に改題され、版上げ PR を名指す。ピンが latest に等しく赤い contract も無いとき、または watcher が
+無人で回す CLI で赤い版を新しい版が置き換えたとき、理由をコメントして自分で閉じる。
+`deploy/local/cli-drift-stub-test.sh` がこの判断を固定している。
 
 **トークン（リポジトリ管理者が一度だけ設定する）。** `GITHUB_TOKEN` による push や PR は他の
 ワークフローを起動しないので、そのままでは版上げ PR の CI が走らない。そこでジョブは Actions
@@ -157,7 +166,9 @@ App でもよいが、トークンの寿命が 1 時間なので、保存した 
 
 **Settings → Secrets and variables → Actions → New repository secret** に
 `CLI_PIN_BUMP_TOKEN` として保存する。PAT には期限があり、切れると同じメッセージでジョブが
-red になる（drift issue はピンの遅れを報告し続ける）。
+red になる。contract が通った CLI は更新 issue を開かない（版上げ PR だけで済ませる設計）ので、
+トークンが壊れている間はこの red の `cli-pin-bump` 実行が唯一の合図になる。すでに開いていた
+更新 issue は、来ない PR を待ち続ける。
 
 ## 10.3 起動スクリプトの責務（`deploy/local/`）
 
@@ -333,7 +344,7 @@ cd console-e2e && npm ci && npx playwright test
 | 赤くなる時 | 検査自体が失敗したときだけ | 契約が破れたとき（外部サービスに依存するステップは報告のみのことがある。例: opencode の live な Tier B ターン）|
 
 ドリフトは**常態**（数日で版が進む CLI もある）なので、ドリフトのワークフローは赤くならない。
-追跡 issue を 1 本だけ最新に保ち、ドリフトが解消すれば閉じる。検査する行は
+その大半は人の手も要らない。人が何かすべき CLI にだけ issue を開き（§10.2.2）、済めば閉じる。検査する行は
 `deploy/local/cli-drift-check.sh` の `TARGETS`: 版をピンしている全エージェント CLI と `rtk`。
 lcpp は入らない——セルフホストのエンジンに対してプロセス内で動き、上流の CLI を持たない。
 
@@ -348,18 +359,17 @@ trixie・trixie-updates・trixie-security のどれかに載っていること�
 
 もう 1 本の `cli-release-watch.yml` は 2 時間ごとに（drift が :00、watcher が :30、版上げの保険が次の奇数時）公開版を比べ、**版が実際に変わった CLI だけ**
 contract を dispatch する（対象の kind は `deploy/local/cli-release-edges.sh` の `KINDS`）。
-状態は 1 本の issue に置く: `tested` と `seen` の印はコメントとして追記する。repository
+状態は 1 本の issue に置く: `tested` の印はコメントとして追記する。repository
 variables は既定のトークンで書けないためである（`deploy/local/cli-release-state.sh`）。
-`tested` を記録するのは contract が成功したときだけなので、`latest` に対して contract が赤で終わると、その版に `red` の印を書き（drift 追跡 issue の
+`tested` を記録するのは contract が成功したときだけなので、`latest` に対して contract が赤で終わると、その版に `red` の印を書き（その CLI の更新 issue の
 `Red contracts` 欄にも行が出る。この欄は `develop` で直近 2 回続けて落ちた contract
 ワークフローも示す: `deploy/local/cli-contract-report.sh`）、watcher は同じ版を再度
 dispatch しない。赤い版が contract の枠を 1 日 12 回使うのを防ぐためである。新しい版・
 成功した実行（`tested == latest` が優先）・手動 dispatch で解除される。キャンセルや
 タイムアウトは印を残さないので再試行される。
 クレデンシャルを無人で供給できない CLI は dispatch しない。secret が無い場合と、
-クレデンシャルが回転する cursor・kiro がこれに当たる。それらは `seen` を記録し、secret を
-更新したあとで contract を手動 dispatch する——「検出した」を「テストした」として記録する
-ことはない。muse の contract はクレデンシャルが要らないので無人で dispatch される。
+クレデンシャルが回転する cursor・kiro がこれに当たる。それらは CLI の更新 issue が人に
+contract の実行を頼む——「検出した」を「テストした」として記録することはない。muse の contract はクレデンシャルが要らないので無人で dispatch される。
 
 **取得元 1 つが読めなくても watcher は止まらない。** 行ごとに取得し、読めなかった行は
 latest 不明として報告して、その行の dispatch と状態更新だけを飛ばし、残りはそのまま進む。

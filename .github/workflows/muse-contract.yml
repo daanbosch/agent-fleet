@@ -199,7 +199,7 @@ jobs:
           deploy/local/cli-release-state.sh set tested muse "$VER"
           deploy/local/cli-contract-report.sh success muse || echo "::warning::could not clear the red-contract row"
 
-      # Red `latest`: tracking-issue row plus the watcher's brake (cli-contract-report.sh). The
+      # Red `latest`: a row in the muse update issue plus the watcher's brake (cli-contract-report.sh). The
       # version is empty when the job died before reading the channel; the report then names the
       # run only and writes no brake.
       - name: report failed contract for latest

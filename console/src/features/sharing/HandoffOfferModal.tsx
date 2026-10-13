@@ -7,7 +7,9 @@
 //
 // The push gate is a fact the CP obtained from the owner's Agent and is only displayed
 // here. Recomputing the decision client-side would split the condition across two places
-// and it would drift from the server's check at send time (docs/log/77 §77.5).
+// and it would drift from the server's check at send time (docs/log/77 §77.5). The same holds
+// for "push, then send" (#2072): the CP asks the Agent to push and then for a fresh verdict;
+// this surface only asks for it.
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { Modal } from "../../ui/Modal.tsx";
@@ -15,11 +17,11 @@ import { Button } from "../../ui/Button.tsx";
 import { Icon } from "../../ui/Icon.tsx";
 import { useToast } from "../../ui/ToastProvider.tsx";
 import { api, errText } from "../../core/api/client.ts";
-import { useT } from "../../lib/i18n/index.ts";
+import { tCount, useT } from "../../lib/i18n/index.ts";
 import { SESSION_TITLE_MAX, clampSessionTitle } from "../../lib/sessionTitle.ts";
 import { ShareCreateModal } from "./ShareCreateModal.tsx";
 import { useHandoffStore } from "./handoffStore.ts";
-import { boundedRequest, type BoundedRequest } from "./boundedRequest.ts";
+import { SHARE_REQUEST_TIMEOUT_MS, boundedRequest, type BoundedRequest } from "./boundedRequest.ts";
 import "./sharing.css";
 
 interface RecipientCandidate {
@@ -39,6 +41,10 @@ interface HandoffContext {
   dirty?: boolean;
   blocked?: string;
   warning?: string;
+  /** Where "push, then send" would publish (the push URL, credentials removed) and how many
+   *  commits; set only when a push can clear the gate and lands where the offer points. */
+  pushRemote?: string;
+  pushCommits?: number;
 }
 
 /** The gate reason arrives as a machine token; the wording is resolved here so the server
@@ -49,9 +55,19 @@ const BLOCKED_KEYS = {
   detached_head: "handoff.blocked_detached",
 } as const;
 
+/** The gate reasons a push clears. The Agent sets pushRemote only for these, so this guards an
+ *  older Agent rather than deciding anything. */
+const PUSHABLE = new Set(["unpushed_commits", "no_upstream"]);
+
 function blockedKey(reason: string): (typeof BLOCKED_KEYS)[keyof typeof BLOCKED_KEYS] | "handoff.blocked_unknown" {
   return BLOCKED_KEYS[reason as keyof typeof BLOCKED_KEYS] ?? "handoff.blocked_unknown";
 }
+
+// HANDOFF_PUSH_BOUND_MS is the Agent's own bound on "push, then send" (handoffPushTimeout
+// 60 s plus handoffPushWaitDelay 2 s, workspace/agent/internal/sessionx/session_handoff_push.go).
+// A send that pushes gets it on top of the ordinary deadline, so the Console never abandons
+// a push the Agent is still allowed to finish.
+const HANDOFF_PUSH_BOUND_MS = 62_000;
 
 export function HandoffOfferModal({
   session,
@@ -79,11 +95,15 @@ export function HandoffOfferModal({
   const [title, setTitle] = useState(() => clampSessionTitle(initialTitle || ""));
   const [prompt, setPrompt] = useState(initialPrompt);
   const [ackWarning, setAckWarning] = useState(false);
+  const [pushFirst, setPushFirst] = useState(false);
+  // git's own report of a refused push. Multi-line and the thing to act on, so it stays in
+  // the modal rather than in a toast that fades.
+  const [pushErr, setPushErr] = useState("");
   const [sending, setSending] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
 
   // The recipient lookup and the send both wait on the owner's Workspace (catalog sync,
-  // handoff-context), so each is bounded and abandoned when superseded or closed.
+  // handoff-context, the push), so each is bounded and abandoned when superseded or closed.
   const loadReq = useRef<BoundedRequest | null>(null);
   const sendReq = useRef<BoundedRequest | null>(null);
   const load = () => {
@@ -105,6 +125,9 @@ export function HandoffOfferModal({
         setLoadErr("");
         setMembers(Array.isArray(d.members) ? d.members : []);
         setCtx((d.context || null) as HandoffContext | null);
+        // A refreshed verdict is a new snapshot: the push the owner confirmed was for the
+        // previous one, so the box starts unticked again.
+        setPushFirst(false);
         setRecipient((prev) => prev || (d.members?.[0]?.userKey ?? ""));
       })
       .catch(() => {
@@ -126,24 +149,43 @@ export function HandoffOfferModal({
 
   const blocked = ctx?.blocked || "";
   const warning = ctx?.warning || "";
-  const canSubmit = !!recipient && !!title.trim() && !!prompt.trim() && !blocked && (!warning || ackWarning);
+  const pushable = PUSHABLE.has(blocked) && !!ctx?.pushRemote;
+  const pushing = pushable && pushFirst;
+  const canSubmit =
+    !!recipient && !!title.trim() && !!prompt.trim() && (!blocked || pushing) && (!warning || ackWarning);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (!canSubmit || sending) return;
     setSending(true);
-    const req = boundedRequest();
+    const req = boundedRequest(SHARE_REQUEST_TIMEOUT_MS + (pushing ? HANDOFF_PUSH_BOUND_MS : 0));
     sendReq.current = req;
     const d = await api("api/session-handoff-offers", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionName: session, recipientUserKey: recipient, title: title.trim(), prompt, ackWarning }),
+      body: JSON.stringify({
+        sessionName: session,
+        recipientUserKey: recipient,
+        title: title.trim(),
+        prompt,
+        ackWarning,
+        pushFirst: pushing,
+        // What the owner saw next to the box. The CP pushes only while the working copy still
+        // matches it, exactly that commit, and sends only if the state after the push does too.
+        ...(pushing && { pushExpect: { branch: ctx?.branch, headSha: ctx?.headSha, pushRemote: ctx?.pushRemote } }),
+      }),
       signal: req.signal,
     }).catch(() => (req.signal.aborted && !req.timedOut() ? null : { error: { message: tr(req.timedOut() ? "handoff.send_timeout" : "handoff.send_failed") } }));
     req.settle();
     if (sendReq.current !== req || d === null) return; // closed meanwhile
     sendReq.current = null;
     setSending(false);
+    if (d?.error?.code === "handoff_push_failed") {
+      setPushErr(String(d.error.message || ""));
+      load();
+      return;
+    }
+    setPushErr("");
     if (d?.error) {
       toast(errText(d.error));
       // A timed-out send may still have created the offer; resending is safe (an offer
@@ -219,7 +261,27 @@ export function HandoffOfferModal({
                 </p>
               )}
               {blocked && <p className="ui-field-hint handoff-blocked">{tr(blockedKey(blocked))}</p>}
-              {!blocked && warning && (
+              {pushable && (
+                <label className="ui-field-inline handoff-push">
+                  <input type="checkbox" checked={pushFirst} onChange={(e) => setPushFirst(e.target.checked)} />
+                  <span>
+                    {tr("handoff.push_then_send")}
+                    <span className="ui-field-hint handoff-push-summary">
+                      {tCount("handoff.push_summary", ctx?.pushCommits ?? 0, {
+                        branch: ctx?.branch || "-",
+                        remote: ctx?.pushRemote || "-",
+                      })}
+                    </span>
+                  </span>
+                </label>
+              )}
+              {pushErr && (
+                <div className="handoff-blocked handoff-push-error" role="alert">
+                  <p className="ui-field-hint">{tr("handoff.push_failed")}</p>
+                  <pre>{pushErr}</pre>
+                </div>
+              )}
+              {(!blocked || pushing) && warning && (
                 <label className="ui-field-inline">
                   <input type="checkbox" checked={ackWarning} onChange={(e) => setAckWarning(e.target.checked)} />
                   {tr("handoff.ack_dirty")}
@@ -249,7 +311,7 @@ export function HandoffOfferModal({
             {tr("common.cancel")}
           </Button>
           <Button type="submit" variant="primary" disabled={!canSubmit || sending}>
-            {tr("handoff.send")}
+            {sending && pushing ? tr("handoff.pushing") : tr("handoff.send")}
           </Button>
         </div>
       </Modal>

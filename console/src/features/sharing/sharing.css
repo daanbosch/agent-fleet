@@ -155,6 +155,19 @@
 .handoff-blocked {
   color: var(--err);
 }
+.handoff-push-summary {
+  display: block;
+  margin: 0.15rem 0 0;
+}
+.handoff-push-error pre {
+  margin: 0.25rem 0 0;
+  max-height: 10rem;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 0.8em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .handoff-prompt-edit {
   min-height: 12rem;
   font-family: var(--mono);

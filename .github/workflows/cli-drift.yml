@@ -12,10 +12,11 @@
 # tests that run the real CLIs = P1). It only says "time to go look" — still better
 # than today, where nobody notices new releases.
 #
-# Noise design: drift is the **steady state** (claude moves ahead within days).
-# Going red every night would get ignored immediately, so on drift the job stays
-# green and we **upsert a single tracking issue** (auto-closed once resolved). The
-# job goes red only when the check itself breaks (npm fetch failure etc.).
+# Noise design: drift is the **steady state** (claude moves ahead within days), and
+# most of it needs no person: the watcher runs the contract and cli-pin-bump.yml opens
+# the PR. So the job stays green on drift and keeps **one issue per CLI, open only while
+# a person has something to do** (deploy/local/cli-update-issues.sh): its title is the
+# next step and a PR closes it. The job goes red only when the check itself breaks.
 #
 # Note: schedule runs on the workflow definition of the default branch (develop).
 name: cli-drift
@@ -33,6 +34,7 @@ permissions:
   actions: read # contract-health lists the contract workflows' recent runs
   contents: read
   issues: write
+  pull-requests: read # the update issues link the open pin-bump PR
 
 concurrency:
   group: cli-drift
@@ -44,7 +46,6 @@ jobs:
     timeout-minutes: 10
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      TITLE: "CLI version drift: Dockerfile pins are behind public latest"
     steps:
       - uses: actions/checkout@v7
 
@@ -63,10 +64,9 @@ jobs:
           # 1 = drift (= steady state). Handled via the issue; keep the job green.
           if [ "$code" = 2 ]; then exit 2; fi
 
-      # Red contracts live in one section of the tracking issue body (a failing contract
+      # Red contracts live in one section of each CLI's update issue (a failing contract
       # writes its own row; see deploy/local/cli-contract-report.sh). Refreshed before the
-      # issue is looked up, because a streak can create the issue and the steps below must
-      # then find it instead of opening a second one.
+      # issues are synced, because the rows decide what the next step is.
       #
       # N = 2. Contract runs are rare (a release edge, plus a weekly cron for three of them),
       # so waiting for 3 would take weeks to notice a harness regression, while one run alone
@@ -90,68 +90,14 @@ jobs:
             deploy/local/cli-contract-report.sh streak "$wf" 2 || echo "::warning::streak check failed for $wf"
           done
 
-      - name: find tracking issue
-        id: issue
-        run: |
-          # `first` inside jq, not `| head -1`: the default shell here is `bash -eo
-          # pipefail`, so a SIGPIPE'd gh fails the step for a lookup that worked.
-          num="$(gh issue list --state open --search "in:title CLI version drift" --json number,title \
-                 --jq '[.[] | select(.title | startswith("CLI version drift:")) | .number] | first // empty')"
-          echo "num=$num" >> "$GITHUB_OUTPUT"
-
-      - name: open / update tracking issue
-        if: steps.check.outputs.code == '1'
-        run: |
-          # Build the body with quoted heredocs (don't let the shell interpret the report text).
-          {
-            cat <<'HEAD'
-          The ARG pins in `workspace/Dockerfile` are behind their public release sources.
-
-          ```
-          HEAD
-            cat /tmp/drift.txt
-            cat <<'TAIL'
-          ```
-
-          **Self-update-enabled workspaces may be running these latest versions** while the
-          baked fallback remains pinned. Check that no upstream breakage has slipped in:
-
-          1. Inspect the corresponding `cli-release-watch` dispatch/result.
-          2. For a CLI without an unattended contract, run its signed-in fleet TUI/mirror
-             probe from the companion issue.
-          3. A `Red contracts` section below (when present) lists the contracts that failed
-             for the current latest or keep failing on `develop`. The watcher does not
-             re-dispatch a version whose contract failed; fix the cause, then dispatch it.
-          4. Kinds whose latest passed its contract are bumped by `cli-pin-bump.yml` in one
-             PR (`automation/cli-pin-bump`); cursor and kiro need their contract dispatched
-             by hand first, and rtk is bumped by hand.
-
-          <sub>Auto-updated by cli-drift.yml. Closes automatically once the pins catch up
-          to latest.</sub>
-          TAIL
-          } > /tmp/body.md
-          # `rewrite` keeps the `Red contracts` section: this step replaces the whole body.
-          gh label create cli-drift --color FBCA04 --description "upstream CLI version drift" 2>/dev/null || true
-          if [ -n "${{ steps.issue.outputs.num }}" ]; then
-            deploy/local/cli-contract-report.sh rewrite "${{ steps.issue.outputs.num }}" /tmp/body.md
-            echo "updated issue #${{ steps.issue.outputs.num }}"
-          else
-            gh issue create --title "$TITLE" --body-file /tmp/body.md --label cli-drift
-          fi
-
-      # `failed` must be empty: "every row I could read is in sync" is not the same
-      # claim as "the pins are in sync", and closing on the first would hide a pin that
-      # has been drifting for as long as its source has been unreadable.
-      - name: close tracking issue when back in sync
-        if: steps.check.outputs.code == '0' && steps.check.outputs.failed == '' && steps.issue.outputs.num != ''
-        run: |
-          # A red-contract row keeps the issue open: it is the only place that reports it.
-          if deploy/local/cli-contract-report.sh active; then
-            echo "red contracts are still reported; leaving the issue open"
-            exit 0
-          fi
-          gh issue close "${{ steps.issue.outputs.num }}" \
-            --comment "Pins have caught up to npm latest (cli-drift.yml)."
+      # One issue per CLI, open only while a person has something to do; the title is the
+      # next step. `false` marks a contract the watcher cannot run for want of its secret.
+      - name: sync the per-CLI update issues
+        env:
+          CRED_CLAUDE: ${{ secrets.E2E_ANTHROPIC_API_KEY != '' || secrets.E2E_CLAUDE_OAUTH_TOKEN != '' }}
+          CRED_COPILOT: ${{ secrets.E2E_COPILOT_GITHUB_TOKEN != '' }}
+          CRED_AGY: ${{ secrets.E2E_AGY_OAUTH_TOKEN != '' }}
+        run: deploy/local/cli-update-issues.sh sync
 
   # Debian package pins (workspace/Dockerfile `ARG CHROMIUM_VERSION`). trixie-security
   # keeps only the current build, so a pin vanishes the day Debian ships the next update,

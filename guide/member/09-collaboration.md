@@ -107,6 +107,12 @@ appear in the notification centre, and an open request never expires there.
   see an attached session gets an empty placeholder, decided again on every read: if the
   share is removed later, the card turns into the placeholder. Withdrawing the message
   removes no share.
+- **Handoffs from members** are listed at the top of **Received** while they wait for your
+  answer, and they count on the inbox badge until you take them over or decline them;
+  opening the inbox does not clear them. Open one to take it over or decline it, exactly
+  as from its notification or the shared session. They are not inbox items: the
+  **Receiving** settings, blocking and *do not disturb* do not apply to them — a handoff
+  can only come from a member who shares that session with you.
 - **Agents never see the inbox.** Nothing in it reaches your agents before you take it in,
   and agents cannot send. To have an agent write a request, let it draft a memo and paste
   it into **New**.

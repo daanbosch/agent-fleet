@@ -17,7 +17,7 @@
 # expired token turns the scheduled job red, it gets left alone, and eventually
 # ignored. Run it manually first, and decide about always-on after seeing a track
 # record. The operational signal comes from cli-drift.yml (daily, no credentials,
-# issue notification), so "a drift issue arrives → trigger this job" captures most of
+# issue notification), so "an update issue arrives → trigger this job" captures most of
 # the value.
 #
 # Billing: 2 real turns (manual / bypass). One short essay each, a few hundred tokens.
@@ -159,7 +159,7 @@ jobs:
           deploy/local/cli-release-state.sh set tested claude "$version"
           deploy/local/cli-contract-report.sh success claude || echo "::warning::could not clear the red-contract row"
 
-      # A red run of `latest` is written into the drift tracking issue and, for kinds the
+      # A red run of `latest` is written into that CLI's update issue and, for kinds the
       # watcher dispatches by itself, stops it re-dispatching this version every 2 hours
       # (deploy/local/cli-contract-report.sh). A cancelled or timed-out run is not
       # `failure()`, so it leaves no marker and the version is retried. Only a failed contract

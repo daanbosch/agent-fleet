@@ -225,6 +225,33 @@ describe("HandoffOfferModal", () => {
     expect(post.opts?.signal?.aborted).toBe(true);
   });
 
+  // "Push, then send" may legitimately run as long as the Agent's push bound; the Console
+  // must not abandon it at the ordinary deadline.
+  it("waits for the push bound on top of the deadline when the send pushes first", async () => {
+    handler = async (path, opts) => {
+      if (path.endsWith("/handoff-recipients")) {
+        return {
+          members: [{ userKey: "b-example-com", email: "b@example.com" }],
+          context: { vcs: "git", branch: "x", headSha: "abc", blocked: "unpushed_commits", pushRemote: "origin", pushCommits: 1 },
+        };
+      }
+      if (path === "api/session-handoff-offers" && opts?.method === "POST") return hang(opts);
+      return {};
+    };
+    await mount(<HandoffOfferModal session="s1" initialTitle="next" initialPrompt="continue" onClose={() => {}} />);
+    const box = document.querySelector("label.handoff-push input") as HTMLInputElement;
+    await act(async () => box.click());
+    await act(async () => buttons().find((b) => b.type === "submit")!.click());
+    await flush();
+    const post = calls.find((c) => c.path === "api/session-handoff-offers")!;
+    expect(JSON.parse(String(post.opts?.body)).pushFirst).toBe(true);
+    await flush(SHARE_REQUEST_TIMEOUT_MS + 10);
+    expect(post.opts?.signal?.aborted).toBe(false);
+    await flush(62_000);
+    expect(post.opts?.signal?.aborted).toBe(true);
+    expect(document.body.textContent || "").toContain("引き継ぎの応答がありません");
+  });
+
   it("gives up on a send that never answers and says so", async () => {
     await openAndSend(() => {});
     await flush(SHARE_REQUEST_TIMEOUT_MS + 10);

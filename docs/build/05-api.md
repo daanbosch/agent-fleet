@@ -139,8 +139,9 @@ the shared app-server still has loaded, by `/driver` or `/start`, is refused wit
 - `GET /notifications` and `POST /notifications/ack` — the notification outbox, drained by
   the CP.
 - `POST /work-items/fetch` — the timer-driven fetch of the saved queries the CP owns.
-- `GET /sessions/catalog`, `GET /share-operations/{key}` and
-  `GET /sessions/{name}/handoff-context` — sharing and handoff.
+- `GET /sessions/catalog`, `GET /share-operations/{key}`,
+  `GET /sessions/{name}/handoff-context` and `POST /sessions/{name}/handoff-push` — sharing
+  and handoff.
 - `POST /engine/usage` and `POST /engine/catalog-changed` — the engine gateway's token count,
   and the model catalogue's change notice.
 - `POST /assistant-turns` — scheduled assistant runs.

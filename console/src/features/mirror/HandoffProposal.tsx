@@ -17,7 +17,7 @@ import { useToast } from "../../ui/ToastProvider.tsx";
 import { useLaunchSeed, useLaunchTarget, useReposStore } from "../repos/store.ts";
 import { handoffLaunchTarget } from "./handoffLaunch.ts";
 import { HandoffOfferModal } from "../sharing/HandoffOfferModal.tsx";
-import { offerForSession, useHandoffStore } from "../sharing/handoffStore.ts";
+import { offerForSession, recipientLabel, useHandoffStore } from "../sharing/handoffStore.ts";
 import type { Session } from "../../types/session.ts";
 
 export interface Proposal {
@@ -177,7 +177,7 @@ export function HandoffProposal({
     // conditionally *before* launching and abandon the launch if that race is lost (the
     // recipient already accepted) — ADR 0057 decision 6.
     if (offer?.status === "pending") {
-      if (!window.confirm(tr("handoff.withdraw_confirm", { who: offer.recipientUserKey }))) return;
+      if (!window.confirm(tr("handoff.withdraw_confirm", { who: recipientLabel(offer) }))) return;
       const d = await apiJSON(`api/session-handoff-offers/${encodeURIComponent(offer.id)}`, "DELETE");
       void useHandoffStore.getState().refresh();
       if (d?.error) {
@@ -186,9 +186,9 @@ export function HandoffProposal({
         const take = d.error.code === "handoff_being_taken" ? d.error.takeState : "";
         toast(
           take === "confirming" || take === "unknown"
-            ? tr("handoff.withdraw_confirming", { who: offer.recipientUserKey })
+            ? tr("handoff.withdraw_confirming", { who: recipientLabel(offer) })
             : take === "starting"
-              ? tr("handoff.withdraw_starting", { who: offer.recipientUserKey })
+              ? tr("handoff.withdraw_starting", { who: recipientLabel(offer) })
               : tr("handoff.withdraw_lost"),
         );
         return;
@@ -297,5 +297,5 @@ function HandoffOfferStatus({ offer }: { offer: ReturnType<typeof offerForSessio
           : offer.status === "withdrawn"
             ? "handoff.state_withdrawn"
             : "handoff.state_expired";
-  return <p className={"mirror-handoff-offer" + (offer.status === "pending" ? " is-pending" : "")}>{tr(key, { who: offer.recipientUserKey })}</p>;
+  return <p className={"mirror-handoff-offer" + (offer.status === "pending" ? " is-pending" : "")}>{tr(key, { who: recipientLabel(offer) })}</p>;
 }

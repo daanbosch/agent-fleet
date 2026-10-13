@@ -174,6 +174,14 @@ describe("SharedSessionView received handoffs", () => {
     expect(modal!.querySelectorAll(".handoff-inbox-actions button").length).toBe(2);
   });
 
+  it("names the sender on the banner by e-mail, not by the internal key (#2075)", async () => {
+    withOffer({ ...OFFER, ownerUserKey: "a-example-com", ownerEmail: "a@example.com" });
+    const el = await renderWithToast();
+    const banner = el.querySelector(".shared-view-handoff");
+    expect(banner!.textContent).toContain("a@example.com");
+    expect(banner!.textContent).not.toContain("a-example-com");
+  });
+
   it("shows nothing for a handoff addressed to another session", async () => {
     withOffer({ ...OFFER, sessionId: "catalog-2" });
     const el = await renderWithToast();
