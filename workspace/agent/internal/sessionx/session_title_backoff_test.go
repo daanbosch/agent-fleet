@@ -1,10 +1,13 @@
 package sessionx
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -55,15 +58,15 @@ func TestManualTitleBypassesAutoBackoff(t *testing.T) {
 		return "Real title", nil
 	})
 	turns := titleTurns(4)
-	generateSessionTitle(name, turns) // auto fails -> backoff
-	if titleGenReady(name) {
+	generateSessionTitle(name, turns, 4) // auto fails -> backoff
+	if titleGenReady(name, 4) {
 		t.Fatal("precondition: the automatic trigger should be backing off")
 	}
 	got, err := generateTitleNow(context.Background(), name, turns, nil)
 	if err != nil || got != "Real title" || calls != 2 {
 		t.Fatalf("got %q err=%v calls=%d, want the manual press to reach the model", got, err, calls)
 	}
-	if !titleGenReady(name) {
+	if !titleGenReady(name, 4) {
 		t.Error("a successful manual generation should clear the backoff")
 	}
 }
@@ -154,5 +157,65 @@ func TestAutoTitleBackoffGrowsCapsAndResetsOnNewTurns(t *testing.T) {
 	titleGenDone(name, false, 6)
 	if w := wait(); w > titleGenBackoff {
 		t.Errorf("wait after growth = %v, want the base %v", w, titleGenBackoff)
+	}
+}
+
+// Growth must lift a deadline that is still in the future (not only shorten the next one), and
+// polling the same input again must keep the wait.
+func TestAutoTitleGrowthLiftsTheRunningDeadline(t *testing.T) {
+	const name = "backoff-grow-deadline"
+	resetTitleGen(t, name)
+	for i := 0; i < 8; i++ { // same 4-turn input, failing: wait climbs to the cap
+		titleGenMu.Lock()
+		e := titleGenState[name]
+		e.nextAttempt = time.Time{}
+		titleGenState[name] = e
+		titleGenMu.Unlock()
+		if !titleGenClaim(name, 4) {
+			t.Fatalf("attempt %d refused", i)
+		}
+		titleGenDone(name, false, 4)
+	}
+	for i := 0; i < 3; i++ { // repeated polls of the unchanged input stay refused
+		if titleGenReady(name, 4) || titleGenClaim(name, 4) {
+			t.Fatal("unchanged input must stay inside the backoff")
+		}
+	}
+	if !titleGenReady(name, 6) {
+		t.Fatal("a grown transcript must pass the cheap pre-check inside the deadline")
+	}
+	if !titleGenClaim(name, 6) {
+		t.Fatal("a grown transcript must be claimable inside the deadline")
+	}
+	titleGenDone(name, false, 6)
+	titleGenMu.Lock()
+	w := time.Until(titleGenState[name].nextAttempt)
+	titleGenMu.Unlock()
+	if w > titleGenBackoff {
+		t.Errorf("wait after growth = %v, want the base %v", w, titleGenBackoff)
+	}
+	if titleGenReady(name, 6) {
+		t.Error("the same grown input must not reset again")
+	}
+}
+
+// Provider errors can carry the model's reply or CLI stderr; the log must name only a class.
+func TestAutoTitleFailureLogCarriesNoErrorText(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AF_SESSIONS_DIR", t.TempDir())
+	const name = "backoff-log"
+	resetTitleGen(t, name)
+	stubTitleFn(t, func(context.Context, []transcript.Turn) (string, error) {
+		return "", errors.New("cursor execution failed: PRIVATE_REPLY_SENTINEL")
+	})
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	generateSessionTitle(name, titleTurns(4), 4)
+	if !strings.Contains(buf.String(), "failed") {
+		t.Fatalf("expected a failure log line, got %q", buf.String())
+	}
+	if strings.Contains(buf.String(), "PRIVATE_REPLY_SENTINEL") {
+		t.Errorf("log leaked provider error text: %q", buf.String())
 	}
 }
