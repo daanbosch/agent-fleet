@@ -635,8 +635,10 @@ What it does, and what it decided:
   happened and the purge runs again; a mix is rolled forward to the recorded values (compare-and-set, stale
   `.lock` files of the dead git removed); every ref is checked against both recorded values before anything is decided, and a value the purge cannot
   account for (a ref at neither) keeps the marker and an error. The dead git's own lock files are removed only if
-  they belong to a recorded ref and the update-ref pid recorded in the marker is dead; with no pid recorded, only if
-  they are not older than the marker and no process has them open (unreadable /proc counts as open).
+  they belong to a recorded ref, the update-ref pid recorded in the marker is dead (a dead past producer proves
+  nothing about a same-named lock a live writer holds now), the lock is older than this Agent process and no
+  process has it open (unreadable /proc counts as open). Otherwise the marker stays and the recovery is refused;
+  the member can retry after the Agent restarts.
 
 What it does not do: it cannot reach copies outside the repo (exports, a session's own files), and a session
 with a shell can still read the store's files directly, as in decision 8.

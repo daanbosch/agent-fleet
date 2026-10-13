@@ -969,11 +969,6 @@ var agentMemPurgeLockHeld = func(path string) (bool, error) {
 	return false, nil
 }
 
-// purgeLockSkew absorbs filesystem timestamp granularity: a lock made right after the marker can
-// carry a slightly earlier mtime on a coarse-clock filesystem (seen on CI). A lock made by someone
-// else long before the purge is still far outside it.
-const purgeLockSkew = 2 * time.Second
-
 // purgeOtherUser says whether the process directory belongs to a different uid than ours.
 func purgeOtherUser(dir string) bool {
 	st, err := os.Stat(dir)
@@ -984,23 +979,18 @@ func purgeOtherUser(dir string) bool {
 	return ok && int(sys.Uid) != os.Getuid()
 }
 
-// agentMemPurgeClearLocks removes the lock files this purge's own update-ref left. A lock is ours
-// only if it is one of the recorded refs' (or packed-refs), it is not older than the marker (which
-// is written just before the transaction), and no process holds it open; any other lock belongs to
-// someone else and is never deleted — the recovery then fails and the marker stays.
+// agentMemPurgeClearLocks removes lock files left on the recorded refs (and packed-refs) by a dead
+// git. It deletes one only when it is provably stale: the recorded transaction pid is not alive,
+// the lock is older than this Agent process, and no process has it open (unreadable /proc counts as
+// open). Anything else may belong to a live writer and is never deleted — the recovery then fails
+// and the marker stays, to be retried later.
 func agentMemPurgeClearLocks(moves []agentMemPurgeRefMove, pid int) error {
-	st, err := os.Stat(agentMemPurgePendingPath())
-	if err != nil {
-		return err
-	}
 	locks := []string{filepath.Join(memoryRepoDir(), "packed-refs.lock")}
 	for _, m := range moves {
 		locks = append(locks, filepath.Join(memoryRepoDir(), filepath.FromSlash(m.Name)+".lock"))
 	}
 	refuse := memoryErrf(http.StatusInternalServerError, errCodeMemorySnapshotFailed,
-		"a ref is locked by something other than the interrupted purge; it was left as it is")
-	// With the transaction's pid recorded, a dead process is proof enough: nothing else is
-	// known to have taken these locks, and the recorded one cannot hold them.
+		"a ref is locked and the lock cannot be shown to be left by the interrupted purge; it was left as it is. Try again after the Agent restarts")
 	if pid > 0 && agentMemPurgePidAlive(pid) {
 		return refuse
 	}
@@ -1012,13 +1002,16 @@ func agentMemPurgeClearLocks(moves []agentMemPurgeRefMove, pid int) error {
 		if err != nil {
 			return err
 		}
-		if pid <= 0 {
-			// No pid was recorded (the crash came before it): fall back to "made after the
-			// marker and open nowhere".
-			held, herr := agentMemPurgeLockHeld(l)
-			if herr != nil || held || info.ModTime().Before(st.ModTime().Add(-purgeLockSkew)) {
-				return refuse
-			}
+		// A dead recorded pid says nothing about a lock of the same name taken since by another
+		// writer. A lock made after this Agent started may belong to a live writer, and one made
+		// before it cannot: git holds a lock for milliseconds, so a writer that predates this
+		// process and still holds it is found by the open-file scan.
+		if info.ModTime().After(agentMemPurgeProcStart) {
+			return refuse
+		}
+		held, herr := agentMemPurgeLockHeld(l)
+		if herr != nil || held {
+			return refuse
 		}
 		if err := os.Remove(l); err != nil {
 			return err
@@ -1026,6 +1019,9 @@ func agentMemPurgeClearLocks(moves []agentMemPurgeRefMove, pid int) error {
 	}
 	return nil
 }
+
+// agentMemPurgeProcStart is when this Agent process began (package initialisation).
+var agentMemPurgeProcStart = time.Now()
 
 func agentMemPurgePidAlive(pid int) bool {
 	err := syscall.Kill(pid, 0)

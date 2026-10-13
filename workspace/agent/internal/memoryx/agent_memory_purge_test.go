@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -826,6 +827,7 @@ func partialRefFixture(t *testing.T) (purgeFixture, map[string]string) {
 
 func TestAgentMemoryPurgeRollsForwardAPartialRefUpdate(t *testing.T) {
 	f, before := partialRefFixture(t)
+	staleLocksProvable(t)
 	// The crash state: main already moved, the import ref is back at its old value.
 	imp := "refs/imports/20261004T090000Z/main"
 	if _, err := memoryGitRun("update-ref", imp, before[imp]); err != nil {
@@ -911,6 +913,16 @@ func TestAgentMemoryUploadIsNeverSweptBetweenCreateAndRegister(t *testing.T) {
 	}
 	close(stop)
 	wg.Wait()
+}
+
+// staleLocksProvable makes locks created during the test count as older than the Agent and not
+// held by anyone: in a real recovery that is a restart, and /proc is readable.
+func staleLocksProvable(t *testing.T) {
+	t.Helper()
+	oldStart, oldHeld := agentMemPurgeProcStart, agentMemPurgeLockHeld
+	agentMemPurgeProcStart = time.Now().Add(time.Hour)
+	agentMemPurgeLockHeld = func(string) (bool, error) { return false, nil }
+	t.Cleanup(func() { agentMemPurgeProcStart, agentMemPurgeLockHeld = oldStart, oldHeld })
 }
 
 func strangerCommit(t *testing.T) string {
@@ -1005,6 +1017,7 @@ func TestAgentMemoryPurgeClearsItsOwnStaleLocks(t *testing.T) {
 		}
 	}
 	setMarkerPid(t, deadPid(t))
+	staleLocksProvable(t)
 	ResumeMemoryPurge()
 	if _, err := os.Stat(memoryRepoDir() + "/refs/heads/main.lock"); err == nil {
 		t.Fatal("the purge's own stale lock was left")
@@ -1018,8 +1031,62 @@ func TestAgentMemoryPurgeClearsItsOwnStaleLocks(t *testing.T) {
 	fsckClean(t)
 }
 
-// A lock someone else holds, or one older than the marker, is never deleted.
-func TestAgentMemoryPurgeNeverDeletesAnotherWritersLock(t *testing.T) {
+// A dead recorded pid proves nothing about a lock of the same name that a live writer holds now.
+// The repro: the purge's marker names a dead update-ref, every ref is back at its old value, and a
+// separate live `git update-ref --stdin` has started, updated and prepared (it holds main.lock).
+func TestAgentMemoryPurgeNeverDeletesALiveWritersLock(t *testing.T) {
+	f, before := partialRefFixture(t)
+	_ = f
+	for r, sha := range before {
+		if _, err := memoryGitRun("update-ref", r, sha); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Refs older than the purge also have to be old again after the fixture's rewrite.
+	cur, _ := memoryGitRun("rev-parse", memoryBranch)
+	next := strangerCommit(t)
+	w := memoryGit("update-ref", "--stdin")
+	in, _ := w.StdinPipe()
+	if err := w.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = in.Close(); _ = w.Wait() })
+	fmt.Fprintf(in, "start\nupdate refs/heads/%s %s %s\nprepare\n", memoryBranch, next, cur)
+	lock := memoryRepoDir() + "/refs/heads/" + memoryBranch + ".lock"
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(lock); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the foreign writer never took the lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// The marker's own process is long dead.
+	setMarkerPid(t, deadPid(t))
+	ResumeMemoryPurge()
+	if _, err := os.Stat(lock); err != nil {
+		t.Fatal("a live writer's lock was deleted")
+	}
+	if _, err := os.Stat(agentMemPurgePendingPath()); err != nil {
+		t.Fatal("the marker was dropped while a live writer holds a lock")
+	}
+	if _, err := purgeDo(t, f, "a"); err == nil {
+		t.Fatal("a purge ran over a lock it does not own")
+	}
+	// Once the writer is gone and the lock with it, the recovery works again.
+	_ = in.Close()
+	_ = w.Wait()
+	_ = os.Remove(lock)
+	ResumeMemoryPurge()
+	if _, err := os.Stat(agentMemPurgePendingPath()); err == nil {
+		t.Fatal("marker left after the lock went away")
+	}
+}
+
+// A live recorded pid, an open lock, and a lock made after the Agent started are all refused.
+func TestAgentMemoryPurgeRefusesLocksItCannotShowAreStale(t *testing.T) {
 	f := purgeSetup(t)
 	agentMemPurgeFault = func(s string) error {
 		if s == "marker" {
@@ -1031,43 +1098,35 @@ func TestAgentMemoryPurgeNeverDeletesAnotherWritersLock(t *testing.T) {
 	_, _ = purgeDo(t, f, "a")
 	agentMemPurgeFault = nil
 	lock := memoryRepoDir() + "/refs/heads/main.lock"
-
-	// The recorded transaction process is alive: its locks are not stale.
 	if err := os.WriteFile(lock, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	setMarkerPid(t, os.Getpid())
-	ResumeMemoryPurge()
-	if _, err := os.Stat(lock); err != nil {
-		t.Fatal("a lock was deleted while its recorded process is alive")
+	check := func(what string) {
+		t.Helper()
+		ResumeMemoryPurge()
+		if _, err := os.Stat(lock); err != nil {
+			t.Fatalf("%s: the lock was deleted", what)
+		}
+		if _, err := os.Stat(agentMemPurgePendingPath()); err != nil {
+			t.Fatalf("%s: the marker was dropped", what)
+		}
 	}
-	setMarkerPid(t, 0)
-	_ = os.Remove(lock)
+	// Made after this Agent started: may be a live writer's.
+	setMarkerPid(t, deadPid(t))
+	check("lock newer than the Agent")
 
-	// Held open by a live process (here, this one).
-	held, err := os.OpenFile(lock, os.O_CREATE|os.O_RDWR, 0o600)
+	// Older than the Agent, but a process has it open (here, this one).
+	oldStart := agentMemPurgeProcStart
+	agentMemPurgeProcStart = time.Now().Add(time.Hour)
+	t.Cleanup(func() { agentMemPurgeProcStart = oldStart })
+	held, err := os.OpenFile(lock, os.O_RDWR, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ResumeMemoryPurge()
-	if _, err := os.Stat(lock); err != nil {
-		t.Fatal("a lock with a live holder was deleted")
-	}
-	if _, err := os.Stat(agentMemPurgePendingPath()); err != nil {
-		t.Fatal("marker dropped while a foreign lock stands")
-	}
+	check("lock held open")
 	_ = held.Close()
 
-	// Closed, but older than the marker: not made by this purge.
-	old := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(lock, old, old); err != nil {
-		t.Fatal(err)
-	}
-	ResumeMemoryPurge()
-	if _, err := os.Stat(lock); err != nil {
-		t.Fatal("a lock older than the marker was deleted")
-	}
-	if _, err := os.Stat(agentMemPurgePendingPath()); err != nil {
-		t.Fatal("marker dropped while a foreign lock stands")
-	}
+	// The recorded transaction process is alive.
+	setMarkerPid(t, os.Getpid())
+	check("recorded pid alive")
 }
