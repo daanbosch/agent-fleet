@@ -232,8 +232,9 @@ echo "      5. $STACK (30-ingress, ImageTag=$VERSION)"
 # in the deploy output. Never blocks: the upgrade itself does not touch the data stack.
 # shellcheck source=deploy/aws/ecs/efs-backup-check.sh
 . "$HERE/efs-backup-check.sh"
-DATA_STACK="$(af_stack_param "$STACK" DataStackName)"
-: "${DATA_STACK:=af-ecs-data}"
+# A failed read of the ingress stack is "unknown", never the default name (that could be another
+# deployment's data stack).
+DATA_STACK="$(af_efs_backup_data_stack "$STACK")" || DATA_STACK=""
 af_efs_backup_check "$DATA_STACK" "$PROFILE" "$REGION"
 # The pin only applies to the copy above. Said here, before anything runs, so a pin that would
 # otherwise do nothing is not mistaken for one that was checked.
@@ -725,7 +726,7 @@ fi
 case "${AF_EFS_BACKUP_VERDICT:-}" in
   ok|skip|"") ;;
   *) echo
-     echo "REMINDER: $DATA_STACK still has no confirmed daily EFS backup (see the warning at the top;"
+     echo "REMINDER: ${DATA_STACK:-the data stack} still has no confirmed daily EFS backup (see the warning at the top;"
      echo "          README \"EFS backup and restore\", \"Turning it on\")." >&2 ;;
 esac
 

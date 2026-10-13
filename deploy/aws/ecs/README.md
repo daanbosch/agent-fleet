@@ -500,8 +500,9 @@ It does the things the hand-typed sequence gets wrong:
   reads the data stack's `EfsBackupVaultName` output and the backup plan's selection
   (read-only calls) and, when the file system is not covered, prints the change-set
   command that fixes it, before the deploy and again at the end. It never blocks the
-  upgrade and never updates `10-data` itself. A read it cannot make (missing
-  `backup:List*`/`Get*`) is reported as unconfirmed, not as protected.
+  upgrade and never updates `10-data` itself. Only a plain selection naming the file system's exact ARN counts; a read it cannot make (missing
+  `backup:List*`/`Get*`, an unreadable ingress stack) or a selection with `NotResources`,
+  `Conditions` or tags is reported as unconfirmed, not as protected.
 - **Refuses a tag that is not in ECR.** CloudFormation only stores a string, so a
   forgotten (or wrong-region) push *succeeds* and the CP task then dies with
   `CannotPullContainerError`. The script checks both repositories first.
