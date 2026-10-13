@@ -149,21 +149,31 @@ backstop, and on dispatch. The decision and the edit are `deploy/local/cli-pin-b
   contract run that recorded `tested` (`cli-release-state.sh` writes the run URL into the
   marker comment), and where the checksums came from. The branch is force-updated only
   when the Dockerfile edit changes. Nothing merges it: review it, wait for CI and follow
-  §10.2.1 from step 4. Once it is merged, `cli-drift.yml` closes the drift issue on its
-  next run if no other pin is behind. Closing it without merging declines that exact edit
-  (recognised by an id in the body, even after the branch is deleted) until a version
-  changes.
+  §10.2.1 from step 4. The body carries `Closes #N` for the update issue of each bumped
+  CLI that has one (below), so merging it closes them. Closing it without merging declines
+  that exact edit (recognised by an id in the body, even after the branch is deleted) until
+  a version changes.
 
-**What stays manual:**
+**The update issues: one per CLI, open only while a person has something to do.**
+`cli-drift.yml` keeps them with `deploy/local/cli-update-issues.sh` (label `cli-drift`,
+title `<kind> CLI: <next step>`). The title and the first line of the body are the next
+step, as a command where there is one, and every path ends in a PR that closes the issue.
+The usual case opens nothing: a CLI moves, the watcher runs its contract, and the bump PR
+above is the whole interaction. An issue opens only for:
 
-- **cursor and kiro** credentials rotate, so the watcher never dispatches their
-  contracts. Refresh the secret, then `gh workflow run cursor-contract.yml -f
-  cli_version=latest` (or `kiro-contract.yml`); the bump follows when it passes.
-- **claude, copilot and agy** are dispatched only while their contract secrets are set;
-  without one, run the fleet probe from the companion issue and dispatch the contract
-  once the secret is back.
-- **rtk** has a release source but no contract, so there is no `tested` to gate on. It
-  is listed as drifting and bumped by hand (§10.2.1).
+| Title | Why a person is needed | Closed by |
+|---|---|---|
+| `kiro CLI: run the contract on <v>` (cursor too) | the credential rotates, so the watcher never runs the contract; refresh the secret if it fails at sign-in | the bump PR that follows a pass |
+| `<kind> CLI: verify <v> (no CI credential)` | claude, copilot or agy with no contract secret: register it and run the contract, or probe the release by hand in Terminal (CLI) | the bump PR, or a hand bump |
+| `<kind> CLI: contract failed on <v>` | the contract is red on latest (its row and run are in the issue's `Red contracts` section; `deploy/local/cli-contract-report.sh`) | the bump PR once the fixed contract passes |
+| `<kind> CLI: contract fails on develop` | the contract failed its last 2 runs on `develop` whatever the version: the harness or its secret is broken | itself, once the contract passes and the pin is current |
+| `rtk CLI: bump the pin to <v>` | rtk has a release source but no contract, so no `tested` to gate on; bump it by hand (§10.2.1) | the hand-bump PR |
+
+An open issue follows its CLI: once latest passes, the same issue is retitled
+`<kind> CLI: merge the pin bump to <v>` and names the bump PR. It closes itself, with a
+comment, when the pin equals latest and no contract is red, or when a newer release
+replaced a red one on a CLI the watcher runs unattended. `deploy/local/cli-drift-stub-test.sh`
+pins these decisions.
 
 **The token (one-time setup, by a repository admin).** A push or PR made with
 `GITHUB_TOKEN` starts no other workflow, so the bump PR's CI would never run. The job
@@ -177,7 +187,7 @@ repository only, works too, but its tokens last an hour, so it needs a token-min
 
 Save it under **Settings → Secrets and variables → Actions → New repository secret** as
 `CLI_PIN_BUMP_TOKEN`. A PAT expires; when it does, the job goes red with the same
-message, and the drift issue keeps reporting the pins as behind.
+message, and an open update issue keeps waiting for a bump PR that does not come.
 
 ## 10.3 What the start scripts do (`deploy/local/`)
 
@@ -393,8 +403,8 @@ Two complementary systems close it — neither works alone:
 | Goes red | only if the check itself fails | when a contract breaks (a step that depends on an outside service can be report-only, e.g. opencode's live Tier B turn) |
 
 Drift is **the normal state** — some CLIs move every few days — so the drift workflow
-does not go red. It keeps a single tracking issue up to date and closes it when the
-drift clears. The rows it checks are `TARGETS` in `deploy/local/cli-drift-check.sh`:
+does not go red, and most of it needs no person. It opens an issue for a CLI only when
+a person has something to do (§10.2.2) and closes it when that is done. The rows it checks are `TARGETS` in `deploy/local/cli-drift-check.sh`:
 every agent CLI whose version is pinned, plus `rtk`. lcpp is not among them: it runs
 in-process against a self-hosted engine and has no upstream CLI.
 
@@ -412,19 +422,18 @@ A second workflow, `cli-release-watch.yml`, compares the published versions ever
 pin-bump backstop at the next odd hour) and
 dispatches a contract **only for the CLIs whose version actually changed** (the kinds
 are `KINDS` in `deploy/local/cli-release-edges.sh`). Its state lives in one issue:
-`tested` and `seen` markers are appended as comments, because repository variables
+`tested` markers are appended as comments, because repository variables
 cannot be written with the default token (`deploy/local/cli-release-state.sh`). It
 records `tested` only when the contract succeeds. A contract that finishes red for
 `latest` writes a `red` marker for that version (and a row in the `Red contracts` section
-of the drift tracking issue, which also flags a contract workflow that failed its last 2
+of that CLI's update issue, which also flags a contract workflow that failed its last 2
 runs on `develop`; `deploy/local/cli-contract-report.sh`), and the watcher does not
 dispatch that version again, so a failing release does not spend the contract's quota
 12 times a day. A new release, a passing run (`tested == latest` wins) or a manual dispatch
 releases it; a cancelled or timed-out run leaves no marker and is retried.
 A CLI whose credential cannot be supplied unattended is not dispatched. This covers a
-missing secret, and cursor and kiro, whose credentials rotate. For those it records
-`seen`, and the contract is dispatched by hand once the secret is refreshed — "detected"
-is never recorded as "tested". muse needs no credential for its contract, so it is
+missing secret, and cursor and kiro, whose credentials rotate. For those the CLI's update
+issue asks a person to run the contract — "detected" is never recorded as "tested". muse needs no credential for its contract, so it is
 dispatched unattended.
 
 **One unreadable release source does not stop the watcher.** Each row is fetched

@@ -40,10 +40,11 @@
 # marker is written by the
 # contract on `failure()` and not by the watcher at dispatch, so a run that was cancelled
 # or timed out leaves no marker and the version is retried. Kinds without an unattended
-# contract (cursor, kiro) ignore it: their edge feeds the `seen` report, not a dispatch.
+# contract (cursor, kiro) ignore it: their edge is never dispatched, and cli-update-issues.sh
+# asks a person to run it.
 #
 # `FAILED` may name rows that are not dispatch kinds at all — rtk is baked and
-# self-updated like a CLI but has no contract and no `seen`/`tested` state, so its
+# self-updated like a CLI but has no contract and no `tested` state, so its
 # failure must hold nothing back. That asymmetry is the whole point of listing rows and
 # kinds separately instead of failing the job.
 set -euo pipefail
@@ -133,7 +134,7 @@ fi
     echo
     for row in "${held[@]-}"; do
       [ -n "$row" ] || continue
-      echo "- \`$row\` — dispatch and its \`seen\` / \`tested\` update are skipped this run."
+      echo "- \`$row\` — dispatch and its \`tested\` update are skipped this run."
     done
     for row in "${other[@]-}"; do
       [ -n "$row" ] || continue

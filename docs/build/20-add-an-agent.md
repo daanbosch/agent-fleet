@@ -184,10 +184,12 @@ and checks its checksums, if it pins any) and its contract's `name:` to the
 `workflow_run` list of `cli-pin-bump.yml`.
 
 Dispatch unattended only when the credential can be supplied unattended. **A credential
-that rotates through an interactive refresh is recorded as "seen" and dispatched by
-hand**, and so is a release that arrives while its credential is not configured.
-"seen" never advances "tested": conflating "we noticed a new version" with "we tested it"
-is how a regression ships.
+that rotates through an interactive refresh is dispatched by hand**, and so is a release
+that arrives while its credential is not configured: add the kind to the `dispatch` or
+`credential` state of `deploy/local/cli-update-issues.sh`, so its update issue asks a
+person to run it ([10 §10.2.2](10-development.md#1022-automated-agent-cli-bumps-cli-pin-bumpyml)).
+Noticing a release never advances "tested": conflating "we noticed a new version" with
+"we tested it" is how a regression ships.
 
 ## 20.6 Finishing
 

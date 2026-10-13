@@ -1,43 +1,44 @@
 #!/usr/bin/env bash
-# Red contracts, written into the CLI drift tracking issue.
+# Red contracts, written into the CLI's own update issue (cli-update-issues.sh).
 #
 #   cli-contract-report.sh failure <kind> <version>                 a contract finished red
 #   cli-contract-report.sh success <kind>                           it passed again
 #   cli-contract-report.sh streak <workflow> <n>                    N red runs in a row?
 #   cli-contract-report.sh prune                                    drop rows for old versions
 #   cli-contract-report.sh carry <issue-number> <body-file>         re-append the section
-#   cli-contract-report.sh rewrite <issue-number> <body-file>       carry, then edit the issue
-#   cli-contract-report.sh active                                   exit 0 when any row is set
+#   cli-contract-report.sh active <kind>                            exit 0 when any row is set
 #
 # ## Why one section in the body
 #
-# The issue `cli-drift.yml` maintains is the one a person opens to ask "why have the pins not
-# moved?". The report lives there, as a single `Red contracts` section between two HTML
-# comment fences, rewritten in place: one comment per run would bury it, and a red contract
-# can fire every 2 hours. cli-drift.yml rewrites the whole body on every drift run, so it
-# calls `carry` to keep the section instead of dropping it.
+# Each CLI has at most one open issue, titled with the next step, and a red contract is the
+# reason it says "fix this". The report lives there, as a single `Red contracts` section
+# between two HTML comment fences, rewritten in place: one comment per run would bury it,
+# and a red contract can fire every 2 hours. cli-update-issues.sh rewrites the rest of the
+# body whenever the state moves, so it calls `carry` to keep the section.
 #
 # Rows are one list line each, keyed by a trailing HTML comment:
-#   `failure` rows: `<!-- cli-contract-failure <kind> -->`, one per kind, replaced by the
-#                   newest failure; removed by `success` or when `latest` moves (`prune`).
+#   `failure` rows: `<!-- cli-contract-failure <kind> -->`, replaced by the newest failure;
+#                   removed by `success` or when `latest` moves (`prune`).
 #   `streak` rows:  `<!-- cli-contract-streak <workflow> -->`, removed once the workflow's
 #                   newest run is no longer red.
 #
 # ## Failure modes
 #
-# - Several contracts can fail at the same moment and each does a read-modify-write of the
-#   body. Every write is read back and re-applied (4 attempts) until the intended change
-#   holds in what the issue now says. There is no compare-and-swap on an issue body: a
-#   cli-drift.yml rewrite landing in the seconds between its `carry` and its edit can still
-#   drop a row written in that window, which the next failure or streak run restores.
+# - Several writers can touch the same issue at once (a contract and the cli-drift run), and
+#   each does a read-modify-write of the body. Every write is read back and re-applied (4
+#   attempts) until the intended change holds in what the issue now says. There is no
+#   compare-and-swap on an issue body: a rewrite landing in the seconds between its `carry`
+#   and its edit can still drop a row written in that window, which the next failure or
+#   streak run restores.
 # - A streak row is only kept while the newest of its runs is under 14 days old.
-# - No tracking issue yet (the pins are in sync but a contract failed): one is created, with
-#   only this section. cli-drift.yml neither closes nor rewrites it away while a row remains.
+# - No issue for the kind yet: one is created with only this section, and `failure` /
+#   `success` then ask cli-update-issues.sh to write the title and next step for that kind
+#   (best effort; cli-drift.yml does it on its next run anyway). An issue is never closed
+#   while a row remains.
 # - `failure` also writes the `red` marker (see cli-release-edges.sh) for kinds the watcher
 #   dispatches unattended; cursor and kiro get the report but no marker.
 set -euo pipefail
 
-TITLE="CLI version drift: Dockerfile pins are behind public latest"
 BEGIN='<!-- cli-contract-failures:begin -->'
 END='<!-- cli-contract-failures:end -->'
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,10 +48,13 @@ RUN_URL="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions
 tmp="$(mktemp)"
 trap 'rm -f "$tmp" "$tmp".*' EXIT
 
-issue_number() {
-  gh issue list --state open --search "in:title CLI version drift" --json number,title \
-    --jq '[.[] | select(.title | startswith("CLI version drift:")) | .number] | first // empty'
-}
+ISSUES="${ISSUES:-$HERE/cli-update-issues.sh}"
+# Brings the kind's title and next step up to date after a row changed. `true` in tests.
+SYNC="${SYNC:-$HERE/cli-update-issues.sh}"
+
+issue_number() { "$ISSUES" number "$1"; }
+
+kind_of_workflow() { case "$1" in claude-tui-contract) echo claude ;; *) echo "${1%-contract}" ;; esac; }
 
 # The rows (list lines) of the section in a body, one per line.
 rows_of() { sed -n "\\|^$BEGIN\$|,\\|^$END\$|{/^- /p}"; }
@@ -66,7 +70,8 @@ render() { # render <body-file> <rows-file>  -> stdout
   fi
 }
 
-# mutate <rows-transform-function>: read the issue, transform its rows, write back, verify.
+# mutate <kind> <rows-transform-function> [<title for a new issue>]: read the kind's issue,
+# transform its rows, write back, verify.
 #
 # Verification is of the INTENT, not of the bytes written: after the write the rows are read
 # again and the transform is applied to them once more; the write counts only when that
@@ -75,13 +80,13 @@ render() { # render <body-file> <rows-file>  -> stdout
 # loop re-reads and re-applies. Comparing against our own output would pass in exactly the
 # case that loses a row.
 mutate() {
-  local fn="$1" num attempt
+  local kind="$1" fn="$2" title="${3:-$1 CLI: contract failed}" num attempt
   for attempt in 1 2 3 4; do
-    num="$(issue_number)"
+    num="$(issue_number "$kind")"
     if [ -n "$num" ]; then
       gh issue view "$num" --json body --jq .body > "$tmp"
     else
-      printf 'Contract results for the public CLI releases (see below). The pin-drift report is added by `cli-drift.yml`.\n' > "$tmp"
+      printf 'Contract results for `%s` (see below). The next step is added by `cli-update-issues.sh`.\n' "$kind" > "$tmp"
     fi
     rows_of < "$tmp" > "$tmp.rows"
     "$fn" "$tmp.rows" > "$tmp.rows.new"
@@ -91,14 +96,14 @@ mutate() {
       # Nothing to remove from an issue that does not exist.
       [ -s "$tmp.rows.new" ] || return 0
       # Another reporter may have created it since the lookup above: re-read instead of
-      # opening a second tracking issue.
-      if [ -n "$(issue_number)" ]; then continue; fi
+      # opening a second issue for the kind.
+      if [ -n "$(issue_number "$kind")" ]; then continue; fi
       gh label create cli-drift --color FBCA04 --description "upstream CLI version drift" 2>/dev/null || true
-      gh issue create --title "$TITLE" --body-file "$tmp.new" --label cli-drift >/dev/null
+      gh issue create --title "$title" --body-file "$tmp.new" --label cli-drift >/dev/null
     else
       gh issue edit "$num" --body-file "$tmp.new" >/dev/null
     fi
-    num="$(issue_number)"
+    num="$(issue_number "$kind")"
     gh issue view "$num" --json body --jq .body | rows_of > "$tmp.check"
     "$fn" "$tmp.check" | sort > "$tmp.check.applied"
     sort "$tmp.check" > "$tmp.check.sorted"
@@ -131,33 +136,32 @@ case "$cmd" in
     if [ -n "$steps" ]; then steps="failing step: \`$steps\`"; else steps="failing step not captured"; fi
     row="- \`$kind\` \`$version\` — $steps — [run]($RUN_URL) <!-- cli-contract-failure $kind -->"
     add_row() { grep -v "<!-- cli-contract-failure $kind -->" "$1" || true; printf '%s\n' "$row"; }
-    mutate add_row
+    mutate "$kind" add_row
     # The brake for the watcher. Only a real version can be matched against `latest`.
     if [ "$version" != unknown ] && case " $RED_KINDS " in *" $kind "*) true ;; *) false ;; esac; then
       "$HERE/cli-release-state.sh" set red "$kind" "$version"
     fi
+    "$SYNC" sync "$kind" || echo "::warning::could not update the $kind issue's next step"
     ;;
   success)
     kind="${2:?kind}"
     drop_row() { grep -v "<!-- cli-contract-failure $kind -->" "$1" || true; }
-    mutate drop_row
+    mutate "$kind" drop_row
     # Release the watcher's brake too, so `get red` never reports a version that has since
     # passed. `none` is the cleared value: the state script has no delete.
     if [ -n "$("$HERE/cli-release-state.sh" get red "$kind")" ] &&
        [ "$("$HERE/cli-release-state.sh" get red "$kind")" != none ]; then
       "$HERE/cli-release-state.sh" set red "$kind" none
     fi
-    ;;
-  rewrite)
-    # rewrite <issue> <file>: replace the whole body with <file> but keep the section as it
-    # is NOW (read immediately before the edit, to keep the window small).
-    num="${2:?issue}"; file="${3:?body file}"
-    "$0" carry "$num" "$file"
-    gh issue edit "$num" --body-file "$file" >/dev/null
+    # Only when an issue exists: a pass with nothing to report must not cost a sync.
+    if [ -n "$(issue_number "$kind")" ]; then
+      "$SYNC" sync "$kind" || echo "::warning::could not update the $kind issue's next step"
+    fi
     ;;
   streak)
     wf="${2:?workflow}"; n="${3:?n}"
     [[ "$wf" =~ ^[a-z0-9-]+$ ]] || { echo "invalid workflow: $wf" >&2; exit 2; }
+    kind="$(kind_of_workflow "$wf")"
     # Newest first. Cancelled and skipped runs say nothing about the harness, so they are
     # neither red nor green: only the newest N that finished decide.
     conclusions="$(gh run list --workflow "$wf.yml" --branch develop --status completed --limit 30 \
@@ -172,10 +176,10 @@ case "$cmd" in
     if [ "$total" -ge "$n" ] && [ "$reds" -eq "$n" ] && [ "$fresh" = true ]; then
       row="- \`$wf\` failed its last $n runs on \`develop\`, whatever the version — [latest run]($url) <!-- cli-contract-streak $wf -->"
       set_row() { grep -v "<!-- cli-contract-streak $wf -->" "$1" || true; printf '%s\n' "$row"; }
-      mutate set_row
+      mutate "$kind" set_row "$kind CLI: contract fails on develop"
     else
       clear_row() { grep -v "<!-- cli-contract-streak $wf -->" "$1" || true; }
-      mutate clear_row
+      mutate "$kind" clear_row
     fi
     ;;
   prune)
@@ -195,7 +199,9 @@ case "$cmd" in
         printf '%s\n' "$line"
       done < "$1"
     }
-    mutate prune_rows
+    for kind in claude codex opencode copilot agy cursor kiro muse; do
+      mutate "$kind" prune_rows
+    done
     ;;
   carry)
     num="${2:?issue}"; file="${3:?body file}"
@@ -205,12 +211,13 @@ case "$cmd" in
     render "$tmp.body" "$tmp.rows" > "$file"
     ;;
   active)
-    num="$(issue_number)"
+    kind="${2:?kind}"
+    num="$(issue_number "$kind")"
     [ -n "$num" ] || exit 1
     gh issue view "$num" --json body --jq .body | rows_of | grep -q .
     ;;
   *)
-    echo "usage: $0 failure <kind> <version> | success <kind> | rewrite <issue> <file> | streak <workflow> <n> | prune | carry <issue> <file> | active" >&2
+    echo "usage: $0 failure <kind> <version> | success <kind> | streak <workflow> <n> | prune | carry <issue> <file> | active <kind>" >&2
     exit 2
     ;;
 esac
