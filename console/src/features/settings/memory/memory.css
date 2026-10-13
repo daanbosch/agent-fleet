@@ -403,3 +403,17 @@
   display: flex;
   gap: 8px;
 }
+
+/* Move memories of a project that no longer exists (#1984). */
+.mem-pm-policy {
+  margin: 6px 0;
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mem-badge.pm-collision {
+  color: var(--warn);
+  border-color: var(--warn);
+}

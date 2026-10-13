@@ -1,0 +1,222 @@
+// ProjectMovePanel — moves or merges the memories of a project whose working copy is gone into
+// another project (#1984, ADR 0108 decision 2). The Agent lists the projects and flags the
+// orphaned ones; picking one and a target previews what would happen without writing anything.
+// A name already taken in the target is the member's call (skip or rename), never decided here.
+// The move is sent in batches of 50 memories (two published changes each), with the source
+// project id in the query for the audit ledger; each change can be undone in the list above.
+
+import { useCallback, useRef, useState } from "react";
+import { api, apiJSON, errDetail, errText, isTransientErr } from "../../../core/api/client.ts";
+import { useRetryLoad } from "../../../lib/retryLoad.ts";
+import { useToast } from "../../../ui/ToastProvider.tsx";
+import { Button } from "../../../ui/Button.tsx";
+import { useT } from "../../../lib/i18n/index.ts";
+import type { MoveCollision, MoveItem, MovePreview, MoveResultItem, MoveStatus, ProjectRow } from "./memoryTypes.ts";
+
+/** The Agent's per-request cap (agentMemMoveBatch). */
+export const MOVE_BATCH = 50;
+
+const POLICIES: ["skip" | "rename", "mem.pm_policy_skip" | "mem.pm_policy_rename"][] = [
+  ["skip", "mem.pm_policy_skip"],
+  ["rename", "mem.pm_policy_rename"],
+];
+const STATUSES: MoveStatus[] = ["move", "same", "rename", "collision", "skip"];
+
+export function ProjectMovePanel({ reload, onChanged }: { reload: number; onChanged: () => void }) {
+  const tr = useT();
+  const toast = useToast();
+  const [rows, setRows] = useState<ProjectRow[] | null>(null);
+  const [loadErr, setLoadErr] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [policy, setPolicy] = useState<MoveCollision | "">("");
+  const [preview, setPreview] = useState<MovePreview | null>(null);
+  const [previewErr, setPreviewErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [again, setAgain] = useState(0);
+
+  const load = useCallback(async (signal: AbortSignal) => {
+    const res = await api("api/agents/memory/entries/projects");
+    if (signal.aborted) return true;
+    if (isTransientErr(res)) return false;
+    setLoadErr(res?.error ? errText(res.error) : "");
+    setRows(res?.error ? [] : (res?.projects ?? []));
+    return true;
+  }, []);
+  useRetryLoad(load, [reload, again]);
+
+  // Only the latest request may answer: a slow preview for an earlier choice must not replace the
+  // one shown, or the confirm would pair one project with another's names.
+  const seq = useRef(0);
+  const loadPreview = useCallback(async (f: string, t: string, p: string) => {
+    const n = ++seq.current;
+    setPreview(null);
+    setPreviewErr("");
+    if (!f || !t) return;
+    const q = `from=${encodeURIComponent(f)}&to=${encodeURIComponent(t)}` + (p ? `&collision=${p}` : "");
+    const res = await api("api/agents/memory/entries/project-move-preview?" + q);
+    if (n !== seq.current) return;
+    if (res?.error) {
+      setPreviewErr(errDetail(res.error));
+      return;
+    }
+    setPreview(res as MovePreview);
+  }, []);
+
+  const choose = (f: string, t: string, p: MoveCollision | "") => {
+    setFrom(f);
+    setTo(t);
+    setPolicy(p);
+    void loadPreview(f, t, p);
+  };
+
+  const orphans = (rows ?? []).filter((r) => r.orphaned);
+  const targets = (rows ?? []).filter((r) => !r.orphaned && r.project.id !== from);
+  const label = (r: ProjectRow) => `${r.project.display} (${r.count})`;
+  const todo: MoveItem[] = (preview?.items ?? []).filter(
+    (i) => i.status === "move" || i.status === "same" || i.status === "rename",
+  );
+
+  const run = async () => {
+    if (!preview || todo.length === 0 || preview.needsPolicy) return;
+    setBusy(true);
+    setProgress({ done: 0, total: todo.length });
+    const counts = { moved: 0, skipped: 0 };
+    try {
+      for (let at = 0; at < todo.length; at += MOVE_BATCH) {
+        const names = todo.slice(at, at + MOVE_BATCH).map((i) => i.name);
+        const res = await apiJSON("api/agents/memory/entries/project-move?project=" + encodeURIComponent(from), "POST", {
+          from,
+          to,
+          collision: policy,
+          names,
+        });
+        if (res?.error) {
+          toast(errDetail(res.error));
+          return;
+        }
+        for (const r of (res?.results ?? []) as MoveResultItem[]) {
+          if (r.result === "skipped") counts.skipped++;
+          else counts.moved++;
+        }
+        setProgress({ done: Math.min(at + MOVE_BATCH, todo.length), total: todo.length });
+      }
+      toast(tr(counts.skipped ? "mem.pm_done_skipped" : "mem.pm_done", { n: counts.moved, skipped: counts.skipped }), {
+        kind: counts.skipped ? undefined : "success",
+      });
+    } catch {
+      // The request may or may not have reached the Agent: re-read what is there now.
+      toast(tr("mem.pm_failed"));
+    } finally {
+      setBusy(false);
+      setProgress(null);
+      setAgain((n) => n + 1);
+      onChanged();
+      void loadPreview(from, to, policy);
+    }
+  };
+
+  const statusLabel: Record<MoveStatus, string> = {
+    move: tr("mem.pm_status_move"),
+    same: tr("mem.pm_status_same"),
+    rename: tr("mem.pm_status_rename"),
+    collision: tr("mem.pm_status_collision"),
+    skip: tr("mem.pm_status_skip"),
+  };
+  const group = (st: MoveStatus) => {
+    const items = (preview?.items ?? []).filter((i) => i.status === st);
+    if (items.length === 0) return null;
+    return (
+      <details key={st} open={st !== "same"} className="mem-ci-group">
+        <summary>
+          <span className={"mem-badge pm-" + st}>{statusLabel[st]}</span> {items.length}
+        </summary>
+        <ul className="mem-ci-items">
+          {items.map((i) => (
+            <li key={i.name}>
+              <span className="mem-af-name">{i.name}</span>
+              {i.newName && (
+                <span className="muted">
+                  {" → "}
+                  <span className="mem-af-name">{i.newName}</span>
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      </details>
+    );
+  };
+
+  return (
+    <div className="mem-ci">
+      <h4>{tr("mem.pm_title")}</h4>
+      <p className="muted ds-hint">{tr("mem.pm_intro")}</p>
+      {loadErr && <p className="mem-warn">{loadErr}</p>}
+      {rows === null ? (
+        <p className="muted">{tr("common.loading")}</p>
+      ) : orphans.length === 0 ? (
+        !loadErr && <p className="muted">{tr("mem.pm_none")}</p>
+      ) : (
+        <>
+          <label className="mem-scope">
+            <span className="muted">{tr("mem.pm_from")}</span>
+            <select value={from} disabled={busy} onChange={(e) => choose(e.target.value, to === e.target.value ? "" : to, "")}>
+              <option value="">{tr("mem.pm_pick")}</option>
+              {orphans.map((r) => (
+                <option key={r.project.id} value={r.project.id}>
+                  {label(r)}
+                </option>
+              ))}
+            </select>
+          </label>
+          {from && (
+            <label className="mem-scope">
+              <span className="muted">{tr("mem.pm_to")}</span>
+              <select value={to} disabled={busy} onChange={(e) => choose(from, e.target.value, "")}>
+                <option value="">{tr("mem.pm_pick")}</option>
+                {targets.map((r) => (
+                  <option key={r.project.id} value={r.project.id}>
+                    {label(r)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </>
+      )}
+      {previewErr && <p className="mem-warn">{previewErr}</p>}
+      {from && to && !preview && !previewErr && <p className="muted">{tr("common.loading")}</p>}
+      {preview && (
+        <>
+          <p className="muted ds-hint">{tr("mem.pm_plan", { from: preview.from.display, to: preview.to.display })}</p>
+          {(preview.needsPolicy || policy) && (
+            <fieldset className="mem-pm-policy" disabled={busy}>
+              <legend className="mem-warn">{tr("mem.pm_policy")}</legend>
+              {POLICIES.map(([p, text]) => (
+                <label key={p}>
+                  <input type="radio" name="mem-pm-policy" value={p} checked={policy === p} onChange={() => choose(from, to, p)} />{" "}
+                  {tr(text)}
+                </label>
+              ))}
+            </fieldset>
+          )}
+          {STATUSES.map(group)}
+          {(preview.withheld ?? 0) > 0 && <p className="mem-warn">{tr("mem.pm_withheld", { n: preview.withheld ?? 0 })}</p>}
+          <p className="muted ds-hint">{tr("mem.pm_undo")}</p>
+          <div className="mem-ci-actions">
+            <Button variant="primary" disabled={busy || preview.needsPolicy || todo.length === 0} onClick={() => void run()}>
+              {tr("mem.pm_apply", { n: todo.length })}
+            </Button>
+            {progress && (
+              <span className="muted" role="status">
+                {tr("mem.ci_progress", { done: progress.done, total: progress.total })}
+              </span>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}

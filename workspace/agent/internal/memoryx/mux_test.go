@@ -63,6 +63,10 @@ var memoryTestRoutes = map[string]http.HandlerFunc{
 	"GET /agents/memory/entries/member-latest":    HandleAgentMemoryMemberLatest,
 	"GET /agents/memory/entries/member-forgotten": HandleAgentMemoryMemberForgotten,
 
+	"GET /agents/memory/entries/projects":             HandleAgentMemoryMemberProjects,
+	"GET /agents/memory/entries/project-move-preview": HandleAgentMemoryMemberMovePreview,
+	"POST /agents/memory/entries/project-move":        HandleAgentMemoryMemberMove,
+
 	"GET /agents/memory/claude-import":         HandleAgentMemoryClaudeSources,
 	"GET /agents/memory/claude-import/preview": HandleAgentMemoryClaudePreview,
 	"POST /agents/memory/claude-import":        HandleAgentMemoryClaudeApply,
@@ -77,11 +81,12 @@ var memoryTestRoutes = map[string]http.HandlerFunc{
 
 // memberOnlyTestRoutes are wrapped in memberorigin.Require, as routes.go wraps them.
 var memberOnlyTestRoutes = map[string]bool{
-	"POST /agents/memory/entries/pin":         true,
-	"POST /agents/memory/entries/revert":      true,
-	"POST /agents/memory/entries/member-save": true,
-	"POST /agents/memory/snapshots":           true,
-	"POST /agents/memory/import/apply":        true,
+	"POST /agents/memory/entries/pin":          true,
+	"POST /agents/memory/entries/revert":       true,
+	"POST /agents/memory/entries/member-save":  true,
+	"POST /agents/memory/entries/project-move": true,
+	"POST /agents/memory/snapshots":            true,
+	"POST /agents/memory/import/apply":         true,
 }
 
 func buildMux() *http.ServeMux {
