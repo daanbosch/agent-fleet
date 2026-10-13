@@ -354,9 +354,13 @@ type CreateReq struct {
 	// same key. Empty => the server falls back to a report_to-scoped intent fingerprint
 	// (createIdempotencyKey); interactive Console launches send neither and aren't deduped.
 	IdempotencyKey string `json:"idempotency_key"`
-	Model          string `json:"model"`
-	Effort         string `json:"effort"`
-	Mode           string `json:"mode"` // "plan" | "normal"
+	// IdempotencyDurable keeps the key's outcome on disk until it is looked up or abandoned
+	// (session_idempotency.go): the Control Plane's launch from a handoff offer, whose outcome
+	// may be asked about days later (issue #2040). Ignored without IdempotencyKey.
+	IdempotencyDurable bool   `json:"idempotency_durable"`
+	Model              string `json:"model"`
+	Effort             string `json:"effort"`
+	Mode               string `json:"mode"` // "plan" | "normal"
 	// SkipPermissions asks whether to skip tool approvals (docs/log/76). It is three-valued:
 	// unset (null) means "follow the per-kind default in Settings > Agents", and the Console
 	// only sends it when the user touched the toggle. Folding unset into false would launch
@@ -729,13 +733,22 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 	idemKey := createIdempotencyKey(&req)
 	committed := false
 	if idemKey != "" {
-		if prev, dup := createLedger.begin(idemKey); dup {
-			if prev.state == createDone {
+		durable := req.IdempotencyDurable && strings.TrimSpace(req.IdempotencyKey) != ""
+		if prev, dup := createLedger.begin(idemKey, durable); dup {
+			switch prev.state {
+			case createDone:
 				// The identical create already succeeded — replay that session verbatim.
 				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set(createKeyHeader, idemKey)
+				w.Header().Set(createOutcomeHeader, "created")
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write(prev.body)
-			} else {
+			case createAbandoned:
+				// The caller gave this key up (abandon) and may have started over.
+				httpx.WriteErr(w, http.StatusConflict, "create_abandoned", "this create was abandoned by its caller")
+			case createUnknown:
+				httpx.WriteErr(w, http.StatusServiceUnavailable, "create_outcome_unknown", "the outcome of an earlier create under this key is unknown")
+			default:
 				// The first create is still launching (the timed-out client's retry, or a
 				// genuine double-fire). Refuse with a distinct code the MCP tool reconciles
 				// into the eventual session rather than surfacing as a retryable failure.
@@ -744,6 +757,9 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		// This request owns the key, so its answer is the outcome under it: say so in headers
+		// a proxy in between would not write (createOutcomeWriter).
+		w = &createOutcomeWriter{ResponseWriter: w, key: idemKey}
 		// We own the inflight entry: clear it on any non-committed exit so a real failure
 		// doesn't wedge the key (a completed entry is kept for replay by ledger.fail).
 		defer func() {
@@ -1143,7 +1159,6 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: time.Now().Format(time.RFC3339), SSM: ssm,
 		Origin: origin, OriginConv: originConv, OriginSession: originSession,
 		Studio: studio, WorkItem: cleanWorkItemRef(req.WorkItem),
-		CreateKey: strings.TrimSpace(req.IdempotencyKey),
 	}
 	// pending from the first write of the meta: the pane must not offer a resend while the
 	// delivery below may still be typing (ADR 0100 decision 2).
@@ -1313,33 +1328,84 @@ func noteCreateOrigin(name string, req *CreateReq, spawnParent, origin string) {
 // create is (or is still) on record. The stdio MCP create_session tool polls this to
 // reconcile a timed-out POST instead of retrying it. GET /sessions-idempotency/{key}.
 //
-// Past the ledger's TTL, or after a restart, a session whose create carried the key
-// explicitly is still found through its meta (Meta.CreateKey). The 404 then says
-// not_created: no create under this key is running and no session carries it, so the
-// caller may treat the create as failed. An Agent from before that answers not_found,
-// which a caller must keep reading as "unknown".
+// A durable key (session_idempotency.go) is also answered from its record on disk: 404
+// not_created once it was abandoned, 503 create_outcome_unknown when the record cannot be
+// read or its create was cut off by a restart. A plain miss stays not_found, which proves
+// nothing: a create may not have begun yet. Only abandon turns a miss into a guarantee.
 func HandleIdempotencyLookup(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	e, ok := createLedger.lookup(key)
 	if !ok {
-		if key != "" {
-			for _, m := range session.ListMetas() {
-				if m.CreateKey == key {
-					httpx.WriteJSON(w, http.StatusOK, wireSession(m, SessionAlive(m)))
-					return
-				}
-			}
-		}
-		httpx.WriteErr(w, http.StatusNotFound, "not_created", "no create on record for this key")
+		httpx.WriteErr(w, http.StatusNotFound, "not_found", "no create on record for this key")
 		return
 	}
-	if e.state == createDone {
+	writeCreateState(w, key, e)
+}
+
+// HandleIdempotencyAbandon is the lookup that settles a miss (issue #2040): when no create
+// under the key is running or recorded, it records the key as abandoned, so a create under it
+// that arrives later is refused (create_abandoned) and the 404 not_created it answers is a
+// guarantee. A create that already began is reported as the lookup would.
+// POST /sessions-idempotency/{key}/abandon.
+func HandleIdempotencyAbandon(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("key")
+	if strings.TrimSpace(key) == "" {
+		httpx.WriteErr(w, http.StatusBadRequest, "bad_key", "an idempotency key is required")
+		return
+	}
+	writeCreateState(w, key, createLedger.abandon(key))
+}
+
+func writeCreateState(w http.ResponseWriter, key string, e createLedgerEntry) {
+	w.Header().Set(createKeyHeader, key)
+	switch e.state {
+	case createDone:
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(e.body)
-		return
+	case createInflight:
+		httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"status": "creating"})
+	case createAbandoned:
+		httpx.WriteErr(w, http.StatusNotFound, "not_created", "no session was or will be created under this key")
+	default:
+		httpx.WriteErr(w, http.StatusServiceUnavailable, "create_outcome_unknown", "the outcome of the create under this key is unknown")
 	}
-	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"status": "creating"})
+}
+
+// createKeyHeader and createOutcomeHeader are how a create's own answer names its key and
+// outcome. A gateway or proxy between the caller and the Agent answers errors of its own
+// (a 504 with a JSON body, say), and those must not read as "nothing was created".
+const (
+	createKeyHeader     = "X-AF-Create-Key"
+	createOutcomeHeader = "X-AF-Create-Outcome"
+)
+
+// createOutcomeWriter stamps the answer of a create that owns its key: created for a 2xx,
+// refused for anything else — the handler wrote an error and the ledger drops the key.
+type createOutcomeWriter struct {
+	http.ResponseWriter
+	key   string
+	wrote bool
+}
+
+func (c *createOutcomeWriter) WriteHeader(status int) {
+	if !c.wrote {
+		c.wrote = true
+		outcome := "refused"
+		if status >= 200 && status < 300 {
+			outcome = "created"
+		}
+		c.Header().Set(createKeyHeader, c.key)
+		c.Header().Set(createOutcomeHeader, outcome)
+	}
+	c.ResponseWriter.WriteHeader(status)
+}
+
+func (c *createOutcomeWriter) Write(b []byte) (int, error) {
+	if !c.wrote {
+		c.WriteHeader(http.StatusOK)
+	}
+	return c.ResponseWriter.Write(b)
 }
 
 // HandleForkSession forks a session's conversation into a NEW session of the same

@@ -12,7 +12,6 @@ package main
 // on this surface: only prose and coordinates cross the boundary (ADR 0057 decisions 1/3).
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -564,6 +563,7 @@ func takeHandoffFence(r *http.Request) (*handoffTakeRef, *apiError) {
 	}
 	delete(fields, "handoff_take")
 	fields["idempotency_key"], _ = json.Marshal(handoffCreateKey(take.OfferID, take.Token))
+	fields["idempotency_durable"] = json.RawMessage("true")
 	stripped, err := json.Marshal(fields)
 	if err != nil {
 		restoreBody(r, body)
@@ -590,19 +590,26 @@ func confirmHandoffTake(ctx context.Context, st store.Store, mv store.Membership
 }
 
 // settleHandoffCreate settles a confirmed take from the Agent's answer to its create, so the
-// offer no longer depends on the Console hearing that answer (issue #2040): a created session
-// accepts the offer, a refusal makes the take an unconfirmed one again (it lapses after the
-// take window if the Console never releases or retries it). A refusal is any answer that
-// carries the Agent's own error code, whatever its status (worktree_failed is a 502): the
-// Agent wrote it at the end of a create that made nothing. No answer, a body without an
-// error code (the proxy's "unreachable", a gateway's page) or a create still in progress
-// is an unknown outcome: the take stays confirmed and the recipient's next take press asks
-// their Agent (reconcileTake). Releasing there would hand the offer back while the session
-// may exist (ADR 0057 decision 6).
-func settleHandoffCreate(ctx context.Context, mgr *manager, res *resolved, take handoffTakeRef, status int, body []byte) {
+// offer no longer depends on the Console hearing that answer (issue #2040). Only the Agent's
+// own word moves it, and that word is the answer's create headers naming this take's key
+// (createKeyHeader / createOutcomeHeader, which a proxy in between does not write):
+//   - created with a session name: the offer is accepted with that session;
+//   - refused: no session came of it, and the take becomes an unconfirmed one again, which
+//     lapses after the take window if the Console never releases or retries it.
+//
+// Anything else — no answer, a gateway's or proxy's own error, JSON or not, an Agent too old
+// to write the headers, a create still in progress — is an unknown outcome: the take stays
+// confirmed and the recipient's next take press asks their Agent (reconcileTake). Releasing
+// there would hand the offer back while the session may exist (ADR 0057 decision 6).
+func settleHandoffCreate(ctx context.Context, mgr *manager, res *resolved, take handoffTakeRef, status int, h http.Header, body []byte) {
 	ctx = context.WithoutCancel(ctx)
+	key := handoffCreateKey(take.OfferID, take.Token)
+	outcome := ""
+	if h.Get(createKeyHeader) == key {
+		outcome = h.Get(createOutcomeHeader)
+	}
 	switch {
-	case status >= 200 && status < 300:
+	case outcome == "created" && status >= 200 && status < 300:
 		var s struct {
 			Name string `json:"name"`
 		}
@@ -610,29 +617,26 @@ func settleHandoffCreate(ctx context.Context, mgr *manager, res *resolved, take 
 			log.Printf("handoff: offer %s left taken: the Agent answered %d without a session name", take.OfferID, status)
 			return
 		}
-		h := sessionHandoffAPI{memberAuth: memberAuth{mgr}}
-		if _, err := h.acceptTake(ctx, res.ident, res.mv, take.OfferID, take.Token, s.Name); err != nil {
+		api := sessionHandoffAPI{memberAuth: memberAuth{mgr}}
+		if _, err := api.acceptTake(ctx, res.ident, res.mv, take.OfferID, take.Token, s.Name); err != nil {
 			log.Printf("handoff: offer %s left taken: accepting %s failed: %v", take.OfferID, s.Name, err)
 		}
-	case status >= 400 && agentErrCode(body) != "" && agentErrCode(body) != "create_in_progress":
+	case outcome == "refused" && (status < 200 || status >= 300):
 		if _, err := mgr.store.UnconfirmSessionHandoffTake(ctx, take.OfferID, res.mv.MembershipID, take.Token, store.NowTS()); err != nil {
 			log.Printf("handoff: offer %s: unconfirming the take after a refused create failed: %v", take.OfferID, err)
 		}
 	default:
-		log.Printf("handoff: offer %s left taken after create status %d", take.OfferID, status)
+		log.Printf("handoff: offer %s left taken after create status %d (outcome %q)", take.OfferID, status, outcome)
 	}
 }
 
-// agentErrCode is the error code of an Agent's JSON error answer, "" for anything else.
-func agentErrCode(body []byte) string {
-	var e struct {
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
-	}
-	_ = json.Unmarshal(body, &e)
-	return e.Error.Code
-}
+// createKeyHeader and createOutcomeHeader are the Agent's create headers
+// (workspace/agent sessionx createOutcomeWriter): the key the answer is about, and created or
+// refused.
+const (
+	createKeyHeader     = "X-AF-Create-Key"
+	createOutcomeHeader = "X-AF-Create-Outcome"
+)
 
 // acceptTake settles a take as accepted by the session it created and records the decision.
 // accepted=false means the offer is no longer held by this take.
@@ -718,13 +722,15 @@ func (a sessionHandoffAPI) writeTaken(w http.ResponseWriter, ident store.Identit
 // previous launch's answer sends that take's token (prev): when the take is still
 // unconfirmed, nothing reached the Agent under it or the Agent refused it, so it is released
 // and this press takes the offer afresh. When the hold is this recipient's own confirmed take — an earlier launch whose create reached their Agent and
-// whose outcome nobody learnt (settleHandoffCreate) — it asks their Agent about that create
-// under its idempotency key, and never creates anything itself:
+// whose outcome nobody learnt (settleHandoffCreate) — it asks their Agent to abandon that
+// create's idempotency key, which reports a create that began and otherwise records the key
+// so that a create arriving late is refused. It never creates anything itself:
 //   - the session exists: the offer is accepted with it, and the answer names it;
 //   - still being created: busy, as for any held offer;
-//   - the Agent answers not_created (no create under the key is running and no session
-//     carries it): the stale take is released and this press takes the offer afresh;
-//   - anything else (the Agent is unreachable, or too old to say not_created):
+//   - the Agent answers not_created (the key is now recorded as abandoned): the stale take
+//     is released and this press takes the offer afresh;
+//   - anything else (the Agent is unreachable, its record unreadable, or too old to abandon;
+//     every answer must name the key in createKeyHeader):
 //     handoff_launch_unknown, and the take stays.
 //
 // The Agent is asked only on the recipient's own press, in their own workspace (ADR 0057
@@ -769,8 +775,9 @@ func (a sessionHandoffAPI) reconcileTake(w http.ResponseWriter, r *http.Request,
 		unknown()
 		return
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		res.rt.Endpoint()+"/sessions-idempotency/"+url.PathEscape(handoffCreateKey(o.ID, token)), nil)
+	key := handoffCreateKey(o.ID, token)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		res.rt.Endpoint()+"/sessions-idempotency/"+url.PathEscape(key)+"/abandon", nil)
 	if err != nil {
 		unknown()
 		return
@@ -785,6 +792,12 @@ func (a sessionHandoffAPI) reconcileTake(w http.ResponseWriter, r *http.Request,
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.Header.Get(createKeyHeader) != key {
+		// Not the Agent's answer about this key (an Agent from before abandon, or something
+		// in between): it proves nothing either way.
+		unknown()
+		return
+	}
 	switch {
 	case resp.StatusCode == http.StatusOK:
 		var s struct {
@@ -806,7 +819,9 @@ func (a sessionHandoffAPI) reconcileTake(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusOK, map[string]any{"status": "accepted", "sessionName": s.Name})
 	case resp.StatusCode == http.StatusAccepted:
 		writeHandoffErr(w, http.StatusConflict, "handoff_being_taken", "the recipient is starting a session from this handoff", offerStatusDetail("pending"))
-	case resp.StatusCode == http.StatusNotFound && bytes.Contains(b, []byte(`"not_created"`)):
+	case resp.StatusCode == http.StatusNotFound && agentErrCode(b) == "not_created":
+		// The Agent recorded the key as abandoned: the confirmed create never ran and never
+		// will (a late one is refused), so the take can go.
 		if _, err := a.mgr.store.ReleaseSessionHandoffOffer(ctx, o.ID, mv.MembershipID, token); err != nil {
 			writeAPIErr(w, internalErr(err))
 			return
@@ -815,6 +830,17 @@ func (a sessionHandoffAPI) reconcileTake(w http.ResponseWriter, r *http.Request,
 	default:
 		unknown()
 	}
+}
+
+// agentErrCode is the error code of an Agent's JSON error answer, "" for anything else.
+func agentErrCode(body []byte) string {
+	var e struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(body, &e)
+	return e.Error.Code
 }
 
 // retake takes the offer under a new token after reconcileTake gave a stale take back.
@@ -832,9 +858,9 @@ func (a sessionHandoffAPI) retake(w http.ResponseWriter, ctx context.Context, id
 	a.writeTaken(w, ident, mv, o, fresh)
 }
 
-// release (POST /api/session-handoff-offers/{id}/release) gives a take back after the
-// launch failed or was abandoned, so the offer is pending again and the sender can withdraw
-// it or the recipient retry. A release that no longer matches the take answers 409; the
+// release (POST /api/session-handoff-offers/{id}/release) gives an unconfirmed take back after
+// the launch failed or was abandoned, so the offer is pending again and the sender can
+// withdraw it or the recipient retry. A release that no longer matches the take answers 409; the
 // Console ignores that, since the offer has moved on either way.
 func (a sessionHandoffAPI) release(w http.ResponseWriter, r *http.Request, _ store.Identity, mv store.MembershipView) {
 	in := readHandoffTakeBody(r)
@@ -842,12 +868,20 @@ func (a sessionHandoffAPI) release(w http.ResponseWriter, r *http.Request, _ sto
 	if !ok {
 		return
 	}
-	released, err := a.mgr.store.ReleaseSessionHandoffOffer(r.Context(), o.ID, mv.MembershipID, in.Token)
+	// Only an unconfirmed take is given back on the Console's word. A confirmed one may have
+	// made its session: a Console, current or older, that read a gateway's error as a failure
+	// must not hand the offer to the sender. reconcileTake settles it instead.
+	released, err := a.mgr.store.ReleaseUnconfirmedSessionHandoffTake(r.Context(), o.ID, mv.MembershipID, in.Token)
 	if err != nil {
 		writeAPIErr(w, internalErr(err))
 		return
 	}
 	if !released {
+		if token, held, _ := a.mgr.store.ConfirmedSessionHandoffTake(r.Context(), o.ID, mv.MembershipID); held && token == in.Token {
+			writeHandoffErr(w, http.StatusConflict, "handoff_launch_unknown",
+				"the launch reached your workspace and its outcome is not known; launch again to check", offerStatusDetail("pending"))
+			return
+		}
 		writeHandoffErr(w, http.StatusConflict, "handoff_not_taken", "this launch does not hold the handoff", offerStatusDetail(a.statusOf(r.Context(), o.ID)))
 		return
 	}

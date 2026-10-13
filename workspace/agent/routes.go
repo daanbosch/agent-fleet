@@ -73,6 +73,7 @@ func buildMux() *http.ServeMux {
 	// response was lost to a client timeout, so the caller need not retry into a dup.
 	// Top-level path (not under /sessions/{name}/…) to avoid a mux wildcard collision.
 	mux.HandleFunc("GET /sessions-idempotency/{key}", sessionx.HandleIdempotencyLookup)
+	mux.HandleFunc("POST /sessions-idempotency/{key}/abandon", sessionx.HandleIdempotencyAbandon)
 	mux.HandleFunc("GET /share-operations/{key}", handleShareOperationLookup)
 	mux.HandleFunc("POST /sessions/{name}/fork", sessionx.HandleForkSession)
 	mux.HandleFunc("POST /sessions/{name}/stop", sessionx.HandleStopSession)

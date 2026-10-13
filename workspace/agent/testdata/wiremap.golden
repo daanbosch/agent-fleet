@@ -167,12 +167,12 @@ internal/sessionx/session_carried.go HandleSessionCarriedAnswer x2 {delivering,k
 internal/sessionx/session_cleanup.go HandleSessionsCleanup x1 {candidates,counts}
 internal/sessionx/session_files.go HandleSessionCommittedFiles x1 {committed,repo}
 internal/sessionx/session_handlers.go HandleArchiveSession x1 {archived}
-internal/sessionx/session_handlers.go HandleIdempotencyLookup x1 {status}
 internal/sessionx/session_handlers.go HandleListArchived x1 {sessions}
 internal/sessionx/session_handlers.go HandleListSessions x1 {imageJobs,limits,repoJobs,sessions} cond{limits}
 internal/sessionx/session_handlers.go HandleSessionCatalog x1 {sessions}
 internal/sessionx/session_handlers.go HandleStopSession x1 {archive,deleted,stopped}
 internal/sessionx/session_handlers.go HandleStopSession x1 {stopped}
+internal/sessionx/session_handlers.go writeCreateState x1 {status}
 internal/sessionx/session_handoff_proposal.go HandleSessionHandoffProposal x1 {proposals}
 internal/sessionx/session_handoff_proposal.go HandleSessionHandoffProposal x2 {proposal}
 internal/sessionx/session_io.go HandleSessionInput x1 {queued}

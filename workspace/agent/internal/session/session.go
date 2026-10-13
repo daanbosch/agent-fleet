@@ -601,11 +601,6 @@ type Meta struct {
 	// rename through POST /repos/{name}/branch-name keeps {ref} and the kind. nil for every
 	// other launch.
 	WorkItem *WorkItemRef `json:"workItem,omitempty"`
-	// CreateKey is the idempotency key a client sent with its create, "" for none. The create
-	// ledger forgets a key after minutes and with the process; this is what still answers
-	// GET /sessions-idempotency/{key} after that, so a client that lost the create's answer
-	// can tell "the session exists" from "nothing was created" (issue #2040).
-	CreateKey string `json:"createKey,omitempty"`
 }
 
 // WorkItemRef is the part of a work item the branch-name resolver renders from.

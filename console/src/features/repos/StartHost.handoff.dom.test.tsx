@@ -206,6 +206,21 @@ describe("launching from a received handoff", () => {
     expect(posts("/offer-1/accept")[0]).toEqual({ sessionName: "s-again", token: "tok-7" });
   });
 
+  it("keeps the take when the CP refuses to release it because the create reached the Agent", async () => {
+    routes({
+      "/offer-1/take": { status: 200, body: { status: "pending", token: "tok-8" } },
+      "/api/sessions": { status: 504, body: { error: { code: "upstream_timeout", message: "gateway" } } },
+      "/offer-1/release": { status: 409, body: { error: { code: "handoff_launch_unknown", message: "x", status: "pending", offerStatus: "pending" } } },
+    });
+    await pressLaunch();
+    expect(document.body.textContent).toContain(t("handoff.launch_unknown"));
+    fetchMock.mockClear();
+    routes({ "/offer-1/take": { status: 200, body: { status: "accepted", sessionName: "s-proxied" } } });
+    await pressLaunch();
+    expect(posts("/offer-1/take")[0]).toEqual({ token: "tok-8" });
+    expect(document.body.textContent).toContain(t("handoff.launch_recovered", { name: "s-proxied" }));
+  });
+
   it("says the outcome is still unknown when the CP cannot ask the workspace", async () => {
     routes({
       "/offer-1/take": { status: 409, body: { error: { code: "handoff_launch_unknown", message: "x", status: "pending", offerStatus: "pending" } } },

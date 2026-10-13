@@ -482,6 +482,10 @@ func (f *handoffLife) recipientWorkspace() *recipientCreate {
 			f.mu.Lock()
 			rc.bodies = append(rc.bodies, b)
 			f.mu.Unlock()
+			if key, _ := b["idempotency_key"].(string); key != "" {
+				w.Header().Set(createKeyHeader, key)
+				w.Header().Set(createOutcomeHeader, "created")
+			}
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(map[string]any{"name": "taken-over"})
 			return
@@ -565,8 +569,9 @@ func TestHandoffCreateIsFencedByTheTake(t *testing.T) {
 		t.Fatalf("accept after a slow create = %d %s", rec.Code, rec.Body.String())
 	}
 
-	// Unsharing during a confirmed launch keeps the take; giving it back then expires the
-	// offer, and the release answers with that status.
+	// Unsharing during a launch keeps the take. A confirmed one is not given back on the
+	// Console's word (its session may exist, #2040); once the Agent refused the create it is
+	// unconfirmed, and giving it back then expires the offer, the release answering so.
 	o2 := f.mustOffer(nil)
 	token = f.take(o2.ID)
 	if ok, err := f.st.ConfirmSessionHandoffTake(context.Background(), o2.ID, f.recipient.mv.MembershipID, token, store.NowTS()); err != nil || !ok {
@@ -576,6 +581,10 @@ func TestHandoffCreateIsFencedByTheTake(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.requireConflict(f.as(f.owner, f.api.withdraw, http.MethodDelete, o2.ID, nil), "handoff_being_taken", "pending")
+	f.requireConflict(f.as(f.recipient, f.api.release, http.MethodPost, o2.ID, map[string]any{"token": token}), "handoff_launch_unknown", "pending")
+	if ok, err := f.st.UnconfirmSessionHandoffTake(context.Background(), o2.ID, f.recipient.mv.MembershipID, token, store.NowTS()); err != nil || !ok {
+		t.Fatalf("unconfirm: ok=%v err=%v", ok, err)
+	}
 	rec = f.as(f.recipient, f.api.release, http.MethodPost, o2.ID, map[string]any{"token": token})
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"expired"`) {
 		t.Fatalf("release after the unshare = %d %s, want 200 status expired", rec.Code, rec.Body.String())

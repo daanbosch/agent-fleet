@@ -113,7 +113,14 @@ export async function launchFromHandoffOffer(
       }
     } else {
       // Best-effort: an unreleased take stops holding the offer after the CP's take window.
-      await apiJSON(offerPath(offerId, "release"), "POST", { token }).catch(() => undefined);
+      // The CP keeps a take whose create reached the Agent unless the Agent itself refused it:
+      // what read as a failure here (a gateway's error, say) may have made the session.
+      const rel = await apiJSON(offerPath(offerId, "release"), "POST", { token }).catch(() => undefined);
+      if ((rel?.error as HandoffErrorBody | undefined)?.code === "handoff_launch_unknown") {
+        r = { ...r, unknown: true };
+        lostTakes.set(offerId, token);
+        notify(t("handoff.launch_unknown"));
+      }
     }
     void useHandoffStore.getState().refresh();
   }

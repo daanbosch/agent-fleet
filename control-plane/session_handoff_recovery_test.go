@@ -19,24 +19,27 @@ import (
 	"github.com/k-k1/agent-fleet/control-plane/internal/store"
 )
 
-// handoffFakeAgent is the recipient's Agent. create decides what a POST /sessions does:
-// "ok" creates and answers 201, "lost" creates and answers a bare 502 (the answer is lost on
-// the way back), "drop" answers a bare 502 without creating, "fail" answers the Agent's own
-// 500 tmux_failed and "refuse" its 400 bad_title, neither creating.
-// lookup decides GET /sessions-idempotency: "agent" answers like today's Agent (200, or 404
-// not_created), "old" like an Agent from before not_created, "creating" with 202.
+// handoffFakeAgent is the recipient's Agent, with its create headers, its durable keys and
+// abandon (workspace/agent sessionx session_idempotency.go). create decides what a POST
+// /sessions does: "ok" creates and answers 201; "lost" creates and answers a bare 502 (the
+// answer is lost on the way back); "proxy" creates and something in between answers 504 with
+// a JSON error of its own; "drop" answers a bare 502 without creating; "fail" (500
+// tmux_failed) and "refuse" (400 bad_title) are the Agent's own refusals. abandon decides
+// POST /sessions-idempotency/{key}/abandon: "agent" answers like today's Agent, "old" like an
+// Agent without the route, "creating" with 202, "unknown" with an unreadable record.
 type handoffFakeAgent struct {
-	mu      sync.Mutex
-	create  string
-	lookup  string
-	creates int
-	keys    map[string]string
-	bodies  []map[string]any
-	srv     *httptest.Server
+	mu        sync.Mutex
+	create    string
+	abandon   string
+	creates   int
+	keys      map[string]string
+	abandoned map[string]bool
+	bodies    []map[string]any
+	srv       *httptest.Server
 }
 
 func newHandoffFakeAgent(t *testing.T) *handoffFakeAgent {
-	f := &handoffFakeAgent{create: "ok", lookup: "agent", keys: map[string]string{}}
+	f := &handoffFakeAgent{create: "ok", abandon: "agent", keys: map[string]string{}, abandoned: map[string]bool{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -46,19 +49,32 @@ func newHandoffFakeAgent(t *testing.T) *handoffFakeAgent {
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			f.bodies = append(f.bodies, body)
 			key, _ := body["idempotency_key"].(string)
+			if f.abandoned[key] {
+				w.WriteHeader(http.StatusConflict)
+				_, _ = io.WriteString(w, `{"error":{"code":"create_abandoned"}}`)
+				return
+			}
 			if name, ok := f.keys[key]; ok && key != "" {
+				w.Header().Set(createKeyHeader, key)
+				w.Header().Set(createOutcomeHeader, "created")
 				_, _ = io.WriteString(w, `{"name":"`+name+`"}`)
 				return
+			}
+			owned := func(outcome string) {
+				w.Header().Set(createKeyHeader, key)
+				w.Header().Set(createOutcomeHeader, outcome)
 			}
 			switch f.create {
 			case "drop":
 				w.WriteHeader(http.StatusBadGateway)
 				return
 			case "fail":
+				owned("refused")
 				w.WriteHeader(http.StatusInternalServerError)
 				_, _ = io.WriteString(w, `{"error":{"code":"tmux_failed"}}`)
 				return
 			case "refuse":
+				owned("refused")
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = io.WriteString(w, `{"error":{"code":"bad_title"}}`)
 				return
@@ -66,24 +82,36 @@ func newHandoffFakeAgent(t *testing.T) *handoffFakeAgent {
 			f.creates++
 			name := "s-" + string(rune('0'+f.creates))
 			f.keys[key] = name
-			if f.create == "lost" {
+			switch f.create {
+			case "lost":
 				w.WriteHeader(http.StatusBadGateway)
+			case "proxy":
+				w.WriteHeader(http.StatusGatewayTimeout)
+				_, _ = io.WriteString(w, `{"error":{"code":"upstream_timeout"}}`)
+			default:
+				owned("created")
+				w.WriteHeader(http.StatusCreated)
+				_, _ = io.WriteString(w, `{"name":"`+name+`"}`)
+			}
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/sessions-idempotency/") && strings.HasSuffix(r.URL.Path, "/abandon"):
+			key := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/sessions-idempotency/"), "/abandon")
+			if f.abandon == "old" {
+				w.WriteHeader(http.StatusNotFound)
 				return
 			}
-			w.WriteHeader(http.StatusCreated)
-			_, _ = io.WriteString(w, `{"name":"`+name+`"}`)
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/sessions-idempotency/"):
-			name, ok := f.keys[strings.TrimPrefix(r.URL.Path, "/sessions-idempotency/")]
+			w.Header().Set(createKeyHeader, key)
+			name, ok := f.keys[key]
 			switch {
-			case f.lookup == "creating":
+			case f.abandon == "creating":
 				w.WriteHeader(http.StatusAccepted)
 				_, _ = io.WriteString(w, `{"status":"creating"}`)
-			case ok && f.lookup == "agent":
+			case f.abandon == "unknown":
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = io.WriteString(w, `{"error":{"code":"create_outcome_unknown"}}`)
+			case ok:
 				_, _ = io.WriteString(w, `{"name":"`+name+`"}`)
-			case f.lookup == "old":
-				w.WriteHeader(http.StatusNotFound)
-				_, _ = io.WriteString(w, `{"error":{"code":"not_found"}}`)
 			default:
+				f.abandoned[key] = true
 				w.WriteHeader(http.StatusNotFound)
 				_, _ = io.WriteString(w, `{"error":{"code":"not_created"}}`)
 			}
@@ -95,10 +123,10 @@ func newHandoffFakeAgent(t *testing.T) *handoffFakeAgent {
 	return f
 }
 
-func (f *handoffFakeAgent) set(create, lookup string) {
+func (f *handoffFakeAgent) set(create, abandon string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.create, f.lookup = create, lookup
+	f.create, f.abandon = create, abandon
 }
 
 func (f *handoffFakeAgent) count() int {
@@ -305,6 +333,9 @@ func TestHandoffUnknownOutcomeKeepsTheTake(t *testing.T) {
 		h.agent.set("drop", "creating")
 		rec, _ = h.take()
 		h.requireCode(rec, http.StatusConflict, "handoff_being_taken")
+		h.agent.set("drop", "unknown")
+		rec, _ = h.take()
+		h.requireCode(rec, http.StatusConflict, "handoff_launch_unknown")
 		if o := h.row(); o.Status != "pending" || o.TakeConfirmedAt == "" || h.agent.count() != 0 {
 			t.Fatalf("the take moved without an answer: %+v sessions=%d", o, h.agent.count())
 		}
@@ -376,4 +407,75 @@ func TestHandoffAgentErrorIsARefusal(t *testing.T) {
 	_ = h2.create(token)
 	rec, _ = h2.take(token)
 	h2.requireCode(rec, http.StatusConflict, "handoff_launch_unknown")
+}
+
+// TestHandoffConfirmedTakeIsNotReleasedOnTheConsolesWord: a Console's release, from this
+// version or an older one that releases on any failure, cannot give back a take whose create
+// reached the Agent, since its session may exist. The sender stays refused, and the next press
+// reconciles to that session.
+func TestHandoffConfirmedTakeIsNotReleasedOnTheConsolesWord(t *testing.T) {
+	h := newHandoffRecovery(t)
+	h.agent.set("lost", "agent")
+	token := h.mustTake()
+	_ = h.create(token)
+	rec := h.do("b", http.MethodPost, "/api/session-handoff-offers/"+h.offer+"/release", map[string]any{"token": token})
+	h.requireCode(rec, http.StatusConflict, "handoff_launch_unknown")
+	h.requireCode(h.withdraw(), http.StatusConflict, "handoff_being_taken")
+	if rec, out := h.take(); rec.Code != http.StatusOK || out.Status != "accepted" || out.SessionName != "s-1" {
+		t.Fatalf("next press = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandoffProxyErrorIsNotARefusal: an error answered by something between the CP and the
+// Agent is not the Agent's word, JSON or not, so it settles nothing: the take stays confirmed
+// past the window, and the next press finds the session the Agent did create.
+func TestHandoffProxyErrorIsNotARefusal(t *testing.T) {
+	h := newHandoffRecovery(t)
+	h.agent.set("proxy", "agent")
+	token := h.mustTake()
+	h.requireCode(h.create(token), http.StatusGatewayTimeout, "upstream_timeout")
+	if o := h.row(); o.TakeConfirmedAt == "" {
+		t.Fatalf("a proxy's error unconfirmed the take: %+v", o)
+	}
+	if _, err := h.st.DB().Exec(`UPDATE session_handoff_offer SET taken_at='2000-01-01T00:00:00Z' WHERE id=?`, h.offer); err != nil {
+		t.Fatal(err)
+	}
+	h.requireCode(h.withdraw(), http.StatusConflict, "handoff_being_taken")
+	if rec, out := h.take(); rec.Code != http.StatusOK || out.Status != "accepted" || out.SessionName != "s-1" || h.agent.count() != 1 {
+		t.Fatalf("next press = %d %s, sessions=%d", rec.Code, rec.Body.String(), h.agent.count())
+	}
+}
+
+// TestHandoffLateCreateAfterAbandonIsRefused: the confirmed create is still on its way to the
+// Agent when the next press reconciles. The Agent records the key as abandoned before answering
+// not_created, so when the create finally arrives it is refused: the fresh take may be given
+// back and the sender may withdraw without the same work starting on both sides.
+func TestHandoffLateCreateAfterAbandonIsRefused(t *testing.T) {
+	h := newHandoffRecovery(t)
+	inner := h.agent.srv.Config.Handler
+	arrived, release := make(chan struct{}), make(chan struct{})
+	h.agent.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/sessions" {
+			close(arrived)
+			<-release
+		}
+		inner.ServeHTTP(w, r)
+	})
+	token := h.mustTake()
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- h.create(token) }()
+	<-arrived
+	rec, out := h.take()
+	if rec.Code != http.StatusOK || out.Token == "" || out.Token == token {
+		close(release)
+		<-done
+		t.Fatalf("press while the create is held = %d %s, want a fresh take", rec.Code, rec.Body.String())
+	}
+	h.requireCode(h.do("b", http.MethodPost, "/api/session-handoff-offers/"+h.offer+"/release", map[string]any{"token": out.Token}), http.StatusOK, "")
+	h.requireCode(h.withdraw(), http.StatusOK, "")
+	close(release)
+	late := <-done
+	if late.Code == http.StatusCreated || h.agent.count() != 0 {
+		t.Fatalf("the late create = %d, sessions=%d: the work started after the sender took it back", late.Code, h.agent.count())
+	}
 }

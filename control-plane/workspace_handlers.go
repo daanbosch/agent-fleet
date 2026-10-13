@@ -1022,7 +1022,7 @@ func (a workspaceAPI) sessionCreate(w http.ResponseWriter, r *http.Request, res 
 		return nil
 	})
 	if confirmed {
-		settleHandoffCreate(r.Context(), a.mgr, res, *take, tw.status, tw.buf)
+		settleHandoffCreate(r.Context(), a.mgr, res, *take, tw.status, tw.Header(), tw.buf)
 	}
 }
 

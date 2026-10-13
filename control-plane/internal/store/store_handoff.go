@@ -221,10 +221,12 @@ func (s *SQL) ConfirmSessionHandoffTake(ctx context.Context, id, recipientMember
 	return n == 1, err
 }
 
-// ReleaseSessionHandoffOffer gives a take back after a launch that failed or was abandoned,
-// so the offer is pending and decidable again. Only the take's own token releases it. An
-// offer whose share was revoked while its take was confirmed (body already erased by
-// invalidateUnauthorizedShareDerivatives) expires instead: nobody may take it any more.
+// ReleaseSessionHandoffOffer gives any take back, confirmed or not, so the offer is pending and
+// decidable again: the CP's reconcileTake, once the recipient's Agent recorded the create as
+// abandoned. A Console's release goes through ReleaseUnconfirmedSessionHandoffTake instead.
+// Only the take's own token releases it. An offer whose share was revoked while its take was
+// confirmed (body already erased by invalidateUnauthorizedShareDerivatives) expires instead:
+// nobody may take it any more.
 func (s *SQL) ReleaseSessionHandoffOffer(ctx context.Context, id, recipientMembershipID, token string) (bool, error) {
 	if token == "" {
 		return false, nil
@@ -244,17 +246,22 @@ func (s *SQL) ReleaseSessionHandoffOffer(ctx context.Context, id, recipientMembe
 }
 
 // ReleaseUnconfirmedSessionHandoffTake gives back a take whose create never reached the Agent,
-// or was refused by it: the holder's next press after losing the create's answer (issue
-// #2040). A confirmed take is left alone, since its session may exist. Releasing the
+// or was refused by it: the Console's release, and the holder's next press after losing the
+// create's answer (issue #2040). A confirmed take is left alone, since its session may exist.
+// As with ReleaseSessionHandoffOffer, an offer whose share was revoked meanwhile expires. Releasing the
 // unconfirmed one is safe even while its create is still on the way, because that create's
 // confirm needs this very token and fails once it is gone.
 func (s *SQL) ReleaseUnconfirmedSessionHandoffTake(ctx context.Context, id, recipientMembershipID, token string) (bool, error) {
 	if token == "" {
 		return false, nil
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE session_handoff_offer SET take_token='',taken_at='',take_confirmed_at=''
+	now := NowTS()
+	res, err := s.db.ExecContext(ctx, `UPDATE session_handoff_offer
+		SET take_token='',taken_at='',take_confirmed_at='',
+		    status=CASE WHEN ciphertext='' THEN 'expired' ELSE status END,
+		    decided_at=CASE WHEN ciphertext='' THEN ? ELSE decided_at END
 		WHERE id=? AND recipient_membership_id=? AND status='pending' AND take_token=? AND take_confirmed_at=''`,
-		id, recipientMembershipID, token)
+		now, id, recipientMembershipID, token)
 	if err != nil {
 		return false, err
 	}
