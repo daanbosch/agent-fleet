@@ -141,7 +141,12 @@ the shared app-server still has loaded, by `/driver` or `/start`, is refused wit
 - `POST /work-items/fetch` — the timer-driven fetch of the saved queries the CP owns.
 - `GET /sessions/catalog`, `GET /share-operations/{key}`,
   `GET /sessions/{name}/handoff-context` and `POST /sessions/{name}/handoff-push` — sharing
-  and handoff.
+  and handoff. `GET /sessions/catalog?since=<cursor>` answers only the rows changed after the
+  cursor plus the deleted names (`delta: true`), and returns a new `cursor`
+  (`<epoch>.<revision>`; the epoch is random per Agent process, so a restart never matches an
+  old cursor). An empty or unknown cursor, and an Agent from before this, give the whole
+  catalog; without `since` the body is unchanged. The CP re-reads the whole catalog at least
+  every 10 minutes and whenever the working-copy inventory it stores columns from changes.
 - `POST /engine/usage` and `POST /engine/catalog-changed` — the engine gateway's token count,
   and the model catalogue's change notice.
 - `POST /assistant-turns` — scheduled assistant runs.

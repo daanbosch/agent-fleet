@@ -365,6 +365,15 @@ func (s *SQL) ReplaceSharedSessionCatalog(ctx context.Context, workspaceID, owne
 			stale = append(stale, name)
 		}
 	}
+	if err = deleteCatalogNames(ctx, tx, workspaceID, owner, stale); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// deleteCatalogNames removes catalog rows and the session-scoped share rules that point at
+// them, batched.
+func deleteCatalogNames(ctx context.Context, tx *sqlTx, workspaceID, owner string, stale []string) error {
 	for len(stale) > 0 {
 		n := min(len(stale), catalogWriteBatch)
 		names, marks := make([]any, 0, n), make([]string, 0, n)
@@ -382,6 +391,52 @@ func (s *SQL) ReplaceSharedSessionCatalog(ctx context.Context, workspaceID, owne
 			return err
 		}
 		stale = stale[n:]
+	}
+	return nil
+}
+
+// ApplySharedSessionCatalogDelta applies what changed in an owner's catalog since the last
+// sync the caller applied: `upserts` are written (an existing row keeps its id, created_at and
+// owner) and `deleted` names are removed with their session-scoped share rules. Everything not
+// named is left as it is, which is the difference from ReplaceSharedSessionCatalog; the caller
+// is responsible for knowing that the stored catalog already matched the Agent's before the
+// delta (a full Replace first), and for falling back to Replace whenever it does not.
+// It takes the same owner lock and idle check as Replace.
+func (s *SQL) ApplySharedSessionCatalogDelta(ctx context.Context, workspaceID, owner string, upserts []SharedSessionCatalog, deleted []string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = lockSessionShareOwner(ctx, tx, owner); err != nil {
+		return err
+	}
+	if err = ensureSessionShareOwnerIdle(ctx, tx, owner, ownerLeaseNowTS()); err != nil {
+		return err
+	}
+	seen := make(map[string]bool, len(upserts))
+	var write []SharedSessionCatalog
+	for _, r := range upserts {
+		if !seen[r.Name] {
+			seen[r.Name] = true
+			write = append(write, r)
+		}
+	}
+	for len(write) > 0 {
+		n := min(len(write), catalogWriteBatch)
+		if err = upsertCatalogRows(ctx, tx, workspaceID, owner, write[:n]); err != nil {
+			return err
+		}
+		write = write[n:]
+	}
+	var gone []string
+	for _, name := range deleted {
+		if !seen[name] { // a name both changed and deleted in one answer is not deleted
+			gone = append(gone, name)
+		}
+	}
+	if err = deleteCatalogNames(ctx, tx, workspaceID, owner, gone); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

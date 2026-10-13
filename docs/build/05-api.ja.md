@@ -127,7 +127,11 @@ Terminal へ移せるのは停止後だけで（`409 codex_stop_first`）、共�
 - `GET /notifications` と `POST /notifications/ack` — CP が吸い上げる通知の送信箱。
 - `POST /work-items/fetch` — CP が持つ保存クエリの、タイマー駆動の取得。
 - `GET /sessions/catalog`・`GET /share-operations/{key}`・`GET /sessions/{name}/handoff-context`・
-  `POST /sessions/{name}/handoff-push` — 共有と引き継ぎ。
+  `POST /sessions/{name}/handoff-push` — 共有と引き継ぎ。`GET /sessions/catalog?since=<cursor>` は
+  カーソル以降に変わった行と削除された名前だけを返し（`delta: true`）、新しい `cursor`
+  （`<epoch>.<revision>`。epoch は Agent プロセスごとにランダムで、再起動後は古いカーソルに一致しない）を添える。
+  空・未知のカーソル、およびこの機能より前の Agent には全件を返す。`since` が無ければ本文は従来どおり。
+  CP は少なくとも 10 分ごと、また列の元になる作業コピー一覧が変わったときに全件を読み直す。
 - `POST /engine/usage` と `POST /engine/catalog-changed` — エンジンゲートウェイが数えたトークンと、
   モデルカタログの変更通知。
 - `POST /assistant-turns` — スケジュール実行のアシスタントのターン。

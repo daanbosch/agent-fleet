@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"reflect"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -24,6 +25,11 @@ const (
 	// catalogSyncTimeout bounds one coalesced sync. It is detached from the request that
 	// started it, because other callers wait on the same result.
 	catalogSyncTimeout = 60 * time.Second
+	// catalogFullResync bounds how long deltas run before the whole catalog is read again.
+	// Deltas assume the stored catalog still equals what the previous sync wrote; another CP
+	// replica applying an older snapshot, or a row removed by hand, would otherwise stay wrong
+	// until the Agent happened to change that session.
+	catalogFullResync = 10 * time.Minute
 )
 
 // catalogSyncNeed is what a caller requires of the sync it waits for.
@@ -52,6 +58,12 @@ type ownerCatalogSync struct {
 	cur, next *catalogFlight
 	repos     map[string]repoInfo
 	reposAt   time.Time
+	// cursor is the Agent's catalog cursor as of the last catalog this CP wrote for the owner,
+	// cursorWS the workspace it belongs to, and fullAt when that catalog was last read whole.
+	// In memory only: a CP restart or another replica starts with no cursor and reads the whole
+	// catalog, which is always correct. Empty after any failed or skipped write.
+	cursor, cursorWS string
+	fullAt           time.Time
 }
 
 type catalogSyncer struct {
@@ -160,6 +172,10 @@ func (m *manager) syncCatalogOnce(ctx context.Context, cs *catalogSyncer, o *own
 	}
 	cs.mu.Lock()
 	cached, cachedAt := o.repos, o.reposAt
+	var since string
+	if o.cursor != "" && o.cursorWS == res.ws.ID && time.Since(o.fullAt) < catalogFullResync {
+		since = o.cursor
+	}
 	cs.mu.Unlock()
 	readRepos := f.liveRepos || cached == nil || time.Since(cachedAt) >= shareReposTTL
 	type reposResult struct{ inv map[string]repoInfo }
@@ -171,10 +187,11 @@ func (m *manager) syncCatalogOnce(ctx context.Context, cs *catalogSyncer, o *own
 	if readRepos {
 		startRepos() // in parallel with the catalog: /repos is the slow one
 	}
-	sessions, err := readAgentCatalog(ctx, res.rt)
+	read, err := readAgentCatalog(ctx, res.rt, since)
 	if err != nil {
 		return nil, err
 	}
+	sessions := read.sessions
 	if !readRepos {
 		for _, s := range sessions {
 			if _, known := cached[s.WorkingCopyID]; s.WorkingCopyID != "" && !known {
@@ -190,6 +207,15 @@ func (m *manager) syncCatalogOnce(ctx context.Context, cs *catalogSyncer, o *own
 	var live map[string]repoInfo
 	if readRepos {
 		live = (<-pending).inv
+	}
+	// A row stores its working copy's worktree, parent and branch, which come from /repos and
+	// not from the Agent's catalog: a changed inventory can change rows whose session did not
+	// change, so a delta cannot be trusted for it. Read the whole catalog then.
+	if read.delta && live != nil && !reflect.DeepEqual(live, cached) {
+		if read, err = readAgentCatalog(ctx, res.rt, ""); err != nil {
+			return nil, err
+		}
+		sessions = read.sessions
 	}
 	info := live
 	if live == nil {
@@ -248,11 +274,32 @@ func (m *manager) syncCatalogOnce(ctx context.Context, cs *catalogSyncer, o *own
 		o.repos, o.reposAt = live, time.Now()
 		cs.mu.Unlock()
 	}
-	if err := m.store.ReplaceSharedSessionCatalog(ctx, res.ws.ID, res.mv.MembershipID, rows); errors.Is(err, store.ErrSessionShareOwnerBusy) {
-		return result, nil // another CP replica is applying an already-authorized operation
-	} else if err != nil {
-		return result, err
+	// The cursor only moves forward once the rows it covers are committed; any other outcome
+	// drops it, so the next sync reads the whole catalog.
+	setCursor := func(c string, full bool) {
+		cs.mu.Lock()
+		defer cs.mu.Unlock()
+		o.cursor, o.cursorWS = c, res.ws.ID
+		if full {
+			o.fullAt = time.Now()
+		}
 	}
+	var werr error
+	if read.delta && len(rows) == 0 && len(read.deleted) == 0 {
+		// Nothing changed since the last write: no transaction, no owner lock round trip.
+	} else if read.delta {
+		werr = m.store.ApplySharedSessionCatalogDelta(ctx, res.ws.ID, res.mv.MembershipID, rows, read.deleted)
+	} else {
+		werr = m.store.ReplaceSharedSessionCatalog(ctx, res.ws.ID, res.mv.MembershipID, rows)
+	}
+	if errors.Is(werr, store.ErrSessionShareOwnerBusy) {
+		setCursor("", false)
+		return result, nil // another CP replica is applying an already-authorized operation
+	} else if werr != nil {
+		setCursor("", false)
+		return result, werr
+	}
+	setCursor(read.cursor, !read.delta)
 	if live == nil {
 		return result, nil
 	}

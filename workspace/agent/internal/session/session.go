@@ -399,6 +399,26 @@ type CatalogEntry struct {
 	Archived bool   `json:"archived,omitempty"`
 }
 
+// CatalogResponse is the body of GET /sessions/catalog.
+//
+// Without a "since" query it is {"sessions": [...]}, exactly as before, so an older Control
+// Plane reads it unchanged. With "since" present (empty on a first call) it also carries Cursor.
+// With a cursor the Agent still recognises (same Epoch, not older than what it kept) Delta is
+// true, Sessions holds only the rows that changed after it and Deleted the names that are gone;
+// otherwise Sessions is the whole catalog and Delta is false — the reader replaces its copy.
+// A reader that gets no Delta flag (an Agent from before this existed) must treat the body as
+// the whole catalog. Cursor is "<epoch>.<revision>": the epoch is random per Agent process and
+// the revision a counter, so no wall clock is involved and a restarted Agent never matches an
+// old cursor.
+//
+// was: map[string]any{"sessions": items}
+type CatalogResponse struct {
+	Sessions []CatalogEntry `json:"sessions"`
+	Cursor   string         `json:"cursor,omitempty"`
+	Delta    bool           `json:"delta,omitempty"`
+	Deleted  []string       `json:"deleted,omitempty"`
+}
+
 // ContextUsage is a claude session's current context fill — the newest assistant
 // turn's prompt token breakdown. It is serialized into Session.Context so the
 // Console can render the /context-like gauge in BOTH the terminal and chat heads
