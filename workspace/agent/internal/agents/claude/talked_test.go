@@ -232,3 +232,25 @@ func TestStartFreshSetsAsideEveryProjectCopy(t *testing.T) {
 		t.Fatalf("plan %q err %v, want a fresh start", plan.Program, err)
 	}
 }
+
+// An unreadable projects tree is an error, not "no logs": the evidence must survive so the
+// conversation is still lost (and the old log not resumed) once the tree is readable again.
+func TestStartFreshEnumerationErrorKeepsEvidence(t *testing.T) {
+	cfg := isolateSlot(t)
+	m := session.Meta{Kind: session.KindClaude, Name: "unreadable", Dir: t.TempDir()}
+	sid, _ := lostDrift(t, cfg, m)
+	root := filepath.Join(cfg, "projects")
+	if err := os.Chmod(root, 0o100); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(root, 0o700)
+	if err := StartFresh(sid); err == nil {
+		t.Skip("directory permissions not enforced here (running as root?)")
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := launchOf(t, m); !errors.Is(err, ErrTranscriptLost) {
+		t.Fatalf("err = %v, want ErrTranscriptLost", err)
+	}
+}

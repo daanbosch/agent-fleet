@@ -83,7 +83,7 @@ func StartFresh(slot string) error {
 		ids[live] = true
 	}
 	for id := range ids {
-		paths, err := filepath.Glob(filepath.Join(ConfigDir(), "projects", "*", id+".jsonl"))
+		paths, err := exactLogs(id)
 		if err != nil {
 			return err
 		}
@@ -92,7 +92,11 @@ func StartFresh(slot string) error {
 				return err
 			}
 		}
-		if rest, _ := filepath.Glob(filepath.Join(ConfigDir(), "projects", "*", id+".jsonl")); len(rest) > 0 {
+		rest, err := exactLogs(id)
+		if err != nil {
+			return err
+		}
+		if len(rest) > 0 {
 			return fmt.Errorf("conversation log still present: %s", rest[0])
 		}
 	}
@@ -124,4 +128,32 @@ func LostTranscript(slot string) bool { return lostTranscript(slot) }
 func lostTranscript(slot string) bool {
 	id, ok := talkedID(slot)
 	return ok && !resumableAt(id, session.CWDForUUID(slot))
+}
+
+// exactLogs lists <id>.jsonl in every project directory. Unlike filepath.Glob it returns I/O
+// errors: an unreadable projects tree must not read as "no logs", or the evidence gets dropped
+// and a log that is merely hidden is resumed once it is readable again. A missing projects
+// directory is the ordinary no-log case.
+func exactLogs(id string) ([]string, error) {
+	root := filepath.Join(ConfigDir(), "projects")
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range entries {
+		p := filepath.Join(root, e.Name(), id+".jsonl")
+		_, err := os.Lstat(p)
+		switch {
+		case err == nil:
+			out = append(out, p)
+		case errors.Is(err, os.ErrNotExist):
+		default:
+			return nil, err
+		}
+	}
+	return out, nil
 }
