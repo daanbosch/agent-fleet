@@ -3111,3 +3111,28 @@ release manifest's `msp_schema_fingerprint`). The checker is unchanged.
 
 The same cost applies again: the 1.4.4 bundle is red against a 1.4.3 binary until `MUSE_VERSION`
 moves; measured: 1.4.4 green, 1.4.3 red. The pin bump is cli-pin-bump's.
+
+### Note 2026-10-14: bundle re-exported for 1.4.7-R6101.1 (#2088)
+
+1.4.7-R6101.1 adds values to three closed enums the client decodes (`ErrorKind` gains four
+plugin/marketplace kinds, `TurnErrorKind` gains `mcpLinkError`, `ItemKind` gains `webSearch`), and
+makes seven optional members explicitly nullable (`Session.sideFrom`,
+`SessionBranchChangedParams.branch`, `SessionGoalChangedParams.goal`, `providerId` on
+`SessionModelChangedParams` and `SessionModelRouteUnservedParams`,
+`SessionTokenUsageParams.modelId`, `SnapshotState.name`). The compatibility check reads all of
+these as breaks. None changes Go behaviour: the seven members were already pointers, so `null`
+decodes to `nil`. No code switches on `ErrorKind` or `TurnErrorKind`. A `webSearch` item renders
+through the transcript's generic part. Everything else is an addition, including four
+notifications (`computerUseSetup/changed`, `plugin/changed`, `plugin/marketplaceChanged`,
+`recap/completed`) that the handle drops like any it does not handle. Per P2-24 the answer is a
+re-export: `internal/msp/schema` and `types_gen.go` now carry the 1.4.7 export (fingerprint
+`sha256:6de32db0…`, equal to the release manifest's `msp_schema_fingerprint`). The checker is
+unchanged. No existing field in `types_gen.go` changed type.
+
+The two host-side issues reported upstream on 2026-10-05 (#1695) are still open in 1.4.7.
+`userInput/cancel` without a `reason` is still refused with `-32602`, measured with
+`TestLiveUserInputCancelNeedsAReason` (throwaway HOME, no turn). The schema still carries no
+commentary phase on `Item`. Both workarounds (#1699, #1696) stay.
+
+The same cost applies again: the 1.4.7 bundle is red against a 1.4.4 binary until `MUSE_VERSION`
+moves; measured: 1.4.7 green, 1.4.4 red. The pin bump is cli-pin-bump's.

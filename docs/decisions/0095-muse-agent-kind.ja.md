@@ -2827,3 +2827,27 @@ P2-24 により再エクスポートが答えなので、`internal/msp/schema` �
 
 同じ代償がある。1.4.4 のバンドルは `MUSE_VERSION` を動かすまで 1.4.3 のバイナリに対して赤になる。
 実測: 1.4.4 緑・1.4.3 赤。ピンの更新は cli-pin-bump の仕事。
+
+### 注記 2026-10-14: 1.4.7-R6101.1 に合わせてバンドルを再エクスポート（#2088）
+
+1.4.7-R6101.1 で、クライアントが decode する閉じた enum 3 つに値が増えた（`ErrorKind` に
+plugin/marketplace 系 4 値、`TurnErrorKind` に `mcpLinkError`、`ItemKind` に `webSearch`）。また
+optional なメンバー 7 つが明示的に nullable になった（`Session.sideFrom`、
+`SessionBranchChangedParams.branch`、`SessionGoalChangedParams.goal`、
+`SessionModelChangedParams` と `SessionModelRouteUnservedParams` の `providerId`、
+`SessionTokenUsageParams.modelId`、`SnapshotState.name`）。互換検査はこれらをすべて非互換と判定する。
+ただし Go の振る舞いは変わらない。7 メンバーは元からポインタなので `null` は `nil` になる。
+`ErrorKind` と `TurnErrorKind` を switch するコードは無い。`webSearch` 項目は転写の汎用表示で描かれる。
+ほかは追加だけで、通知 4 つ（`computerUseSetup/changed`・`plugin/changed`・
+`plugin/marketplaceChanged`・`recap/completed`）も含む。これらはハンドルが扱わない他の通知と同じく
+捨てられる。P2-24 により再エクスポートが答えなので、`internal/msp/schema` と `types_gen.go` を 1.4.7 の
+エクスポート（fingerprint `sha256:6de32db0…`。リリース manifest の `msp_schema_fingerprint` と一致）に
+置き換えた。検査器は変えていない。`types_gen.go` の既存フィールドで型が変わったものは無い。
+
+2026-10-05 に上流へ報告したホスト側の 2 件（#1695）は 1.4.7 でも直っていない。`reason` なしの
+`userInput/cancel` は今も `-32602` で拒否される（`TestLiveUserInputCancelNeedsAReason` で実測。
+使い捨て HOME・ターンなし）。スキーマの `Item` にも commentary の phase はまだ無い。回避策（#1699・#1696）は
+そのまま残す。
+
+同じ代償がある。1.4.7 のバンドルは `MUSE_VERSION` を動かすまで 1.4.4 のバイナリに対して赤になる。
+実測: 1.4.7 緑・1.4.4 赤。ピンの更新は cli-pin-bump の仕事。

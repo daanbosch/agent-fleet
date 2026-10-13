@@ -8,7 +8,7 @@ import "encoding/json"
 // rendered from. A different fingerprint only says the bundle is behind the host;
 // whether these types can still speak to it is schemagen.Compare's question, asked of
 // the installed binary by fingerprint_test.go.
-const SchemaFingerprint = "sha256:7c94f153c41659cb3f1bd3c3e04438be254644cb2a97d65d48edc7449b74858a"
+const SchemaFingerprint = "sha256:6de32db08bbbe0deb478d2bfcaba001e9fb490986bc80db3aceb4d996abf7df9"
 
 // SchemaVersion is MSP's own version, carried in `initialize`.
 const SchemaVersion = 1
@@ -19,6 +19,9 @@ const (
 	MethodApprovalListPending       = "approval/listPending"
 	MethodComputerUseSettingsRead   = "computerUseSettings/read"
 	MethodComputerUseSettingsUpdate = "computerUseSettings/update"
+	MethodComputerUseSetupCheck     = "computerUseSetup/check"
+	MethodComputerUseSetupRead      = "computerUseSetup/read"
+	MethodComputerUseSetupStart     = "computerUseSetup/start"
 	MethodFeedbackSubmit            = "feedback/submit"
 	MethodGoalClear                 = "goal/clear"
 	MethodGoalEdit                  = "goal/edit"
@@ -30,7 +33,13 @@ const (
 	MethodItemReadOutput            = "item/readOutput"
 	MethodMediaUpload               = "media/upload"
 	MethodModelList                 = "model/list"
+	MethodPluginInstall             = "plugin/install"
 	MethodPluginList                = "plugin/list"
+	MethodPluginMarketplaceAdd      = "plugin/marketplaceAdd"
+	MethodPluginMarketplaceRemove   = "plugin/marketplaceRemove"
+	MethodPluginMarketplaceUpdate   = "plugin/marketplaceUpdate"
+	MethodRecapCancel               = "recap/cancel"
+	MethodRecapRequest              = "recap/request"
 	MethodSessionCompact            = "session/compact"
 	MethodSessionFork               = "session/fork"
 	MethodSessionList               = "session/list"
@@ -43,6 +52,7 @@ const (
 	MethodSessionSideChat           = "session/sideChat"
 	MethodSessionStart              = "session/start"
 	MethodSessionUserShell          = "session/userShell"
+	MethodSkillImport               = "skill/import"
 	MethodSkillList                 = "skill/list"
 	MethodSkillSetActivation        = "skill/setActivation"
 	MethodSubagentClose             = "subagent/close"
@@ -54,6 +64,7 @@ const (
 	MethodSubagentSendMessage       = "subagent/sendMessage"
 	MethodSubagentStop              = "subagent/stop"
 	MethodTaskBackground            = "task/background"
+	MethodTaskList                  = "task/list"
 	MethodTaskStop                  = "task/stop"
 	MethodTaskStopAll               = "task/stopAll"
 	MethodTurnCancel                = "turn/cancel"
@@ -72,6 +83,7 @@ const (
 	MethodWorkflowCancel            = "workflow/cancel"
 	MethodWorkflowChildControl      = "workflow/childControl"
 	MethodWorkflowPause             = "workflow/pause"
+	MethodWorkflowResume            = "workflow/resume"
 )
 
 // Notification names on the wire.
@@ -79,11 +91,15 @@ const (
 	NotificationApprovalRequested             = "approval/requested"
 	NotificationApprovalResolved              = "approval/resolved"
 	NotificationApprovalUpdated               = "approval/updated"
+	NotificationComputerUseSetupChanged       = "computerUseSetup/changed"
 	NotificationInitialized                   = "initialized"
 	NotificationItemCompleted                 = "item/completed"
 	NotificationItemDelta                     = "item/delta"
 	NotificationItemStarted                   = "item/started"
 	NotificationItemUpdated                   = "item/updated"
+	NotificationPluginChanged                 = "plugin/changed"
+	NotificationPluginMarketplaceChanged      = "plugin/marketplaceChanged"
+	NotificationRecapCompleted                = "recap/completed"
 	NotificationSessionApprovalModeChanged    = "session/approvalModeChanged"
 	NotificationSessionBranchChanged          = "session/branchChanged"
 	NotificationSessionClosed                 = "session/closed"
@@ -138,11 +154,15 @@ const (
 	ErrCodeInterrupted                 = -32013
 	ErrCodeInvalidParams               = -32602
 	ErrCodeInvalidRequest              = -32600
+	ErrCodeMarketplaceAlreadyExists    = -32036
+	ErrCodeMarketplaceNotFound         = -32034
 	ErrCodeMethodNotFound              = -32601
 	ErrCodeNotFound                    = -32011
 	ErrCodeOutputUnavailable           = -32041
 	ErrCodeOverloaded                  = -32001
 	ErrCodeParseError                  = -32700
+	ErrCodePluginMutationsDisabled     = -32037
+	ErrCodePluginNotFound              = -32035
 	ErrCodeSessionAmbiguous            = -32022
 	ErrCodeSessionInUse                = -32021
 	ErrCodeSessionNotFound             = -32020
@@ -169,11 +189,15 @@ var notificationParams = map[string]string{
 	"approval/requested":             "ApprovalRequestParams",
 	"approval/resolved":              "ApprovalResolvedParams",
 	"approval/updated":               "ApprovalUpdatedParams",
+	"computerUseSetup/changed":       "ComputerUseSetupChanged",
 	"initialized":                    "",
 	"item/completed":                 "ItemCompletedParams",
 	"item/delta":                     "ItemDeltaParams",
 	"item/started":                   "ItemStartedParams",
 	"item/updated":                   "ItemUpdatedParams",
+	"plugin/changed":                 "PluginChangedParams",
+	"plugin/marketplaceChanged":      "PluginMarketplaceChangedParams",
+	"recap/completed":                "RecapCompletedParams",
 	"session/approvalModeChanged":    "SessionApprovalModeChangedParams",
 	"session/branchChanged":          "SessionBranchChangedParams",
 	"session/closed":                 "SessionClosedParams",
@@ -616,10 +640,12 @@ type BranchState struct {
 type CapabilityName string
 
 const (
-	CapabilityNameUserShell         CapabilityName = "userShell"
-	CapabilityNameSessionMCP        CapabilityName = "sessionMcp"
-	CapabilityNameSessionListStream CapabilityName = "sessionListStream"
-	CapabilityNameFeedback          CapabilityName = "feedback"
+	CapabilityNameUserShell            CapabilityName = "userShell"
+	CapabilityNameSessionMCP           CapabilityName = "sessionMcp"
+	CapabilityNameSessionListStream    CapabilityName = "sessionListStream"
+	CapabilityNameFeedback             CapabilityName = "feedback"
+	CapabilityNameComputerUseSetup     CapabilityName = "computerUseSetup"
+	CapabilityNameComputerUseHostSetup CapabilityName = "computerUseHostSetup"
 )
 
 // CapabilityNameValues are every CapabilityName the bundle declares, in schema order.
@@ -628,6 +654,8 @@ var CapabilityNameValues = []CapabilityName{
 	CapabilityNameSessionMCP,
 	CapabilityNameSessionListStream,
 	CapabilityNameFeedback,
+	CapabilityNameComputerUseSetup,
+	CapabilityNameComputerUseHostSetup,
 }
 
 // ClientCapabilities The client's requested capability posture (SS1.4.1). Every member defaults; an absent
@@ -836,6 +864,22 @@ var ComputerUseChoiceValues = []ComputerUseChoice{
 	ComputerUseChoiceAlwaysAllow,
 }
 
+// ComputerUsePermission One macOS permission as setup last saw it. **Open**, like the phase.
+type ComputerUsePermission string
+
+const (
+	ComputerUsePermissionGranted ComputerUsePermission = "granted"
+	ComputerUsePermissionMissing ComputerUsePermission = "missing"
+	ComputerUsePermissionUnknown ComputerUsePermission = "unknown"
+)
+
+// ComputerUsePermissionValues are every ComputerUsePermission the bundle declares, in schema order.
+var ComputerUsePermissionValues = []ComputerUsePermission{
+	ComputerUsePermissionGranted,
+	ComputerUsePermissionMissing,
+	ComputerUsePermissionUnknown,
+}
+
 // ComputerUseSettings `computerUseSettings/read` result, also answered by `computerUseSettings/update`.
 type ComputerUseSettings struct {
 	// The user's blocks in the order they were added, then the built-in blocks when
@@ -867,6 +911,69 @@ type ComputerUseSettingsUpdateParams struct {
 	// Bundle IDs to remove from the user's blocked apps. Only the user's own entries can be
 	// removed; a built-in block stays.
 	UnblockApps []string `json:"unblockApps,omitempty"`
+}
+
+// ComputerUseSetupChanged `computerUseSetup/changed` params.
+type ComputerUseSetupChanged struct {
+	// The session whose setup state changed; absent for the host's own setup, which only
+	// `computerUseHostSetup` holders receive.
+	SessionID *string `json:"sessionId,omitempty"`
+	// Its new state.
+	State ComputerUseSetupState `json:"state"`
+}
+
+// ComputerUseSetupPhase Where the session's setup stands: `cua_setup`'s state codes, camelCase. **Open**: a
+// result vocabulary, so an older client tolerates a new state.
+type ComputerUseSetupPhase string
+
+const (
+	ComputerUseSetupPhaseDormant         ComputerUseSetupPhase = "dormant"
+	ComputerUseSetupPhaseInProgress      ComputerUseSetupPhase = "inProgress"
+	ComputerUseSetupPhaseRestartRequired ComputerUseSetupPhase = "restartRequired"
+	ComputerUseSetupPhaseReadyForTarget  ComputerUseSetupPhase = "readyForTarget"
+	ComputerUseSetupPhaseStopped         ComputerUseSetupPhase = "stopped"
+)
+
+// ComputerUseSetupPhaseValues are every ComputerUseSetupPhase the bundle declares, in schema order.
+var ComputerUseSetupPhaseValues = []ComputerUseSetupPhase{
+	ComputerUseSetupPhaseDormant,
+	ComputerUseSetupPhaseInProgress,
+	ComputerUseSetupPhaseRestartRequired,
+	ComputerUseSetupPhaseReadyForTarget,
+	ComputerUseSetupPhaseStopped,
+}
+
+// ComputerUseSetupReadParams `computerUseSetup/read` params.
+type ComputerUseSetupReadParams struct {
+	// The session whose setup to read. Omitted reads the host's own setup, which needs the
+	// `computerUseHostSetup` grant.
+	SessionID *string `json:"sessionId,omitempty"`
+}
+
+// ComputerUseSetupStartParams `computerUseSetup/start` params: a human command.
+type ComputerUseSetupStartParams struct {
+	// The client's id for this command.
+	CommandID string `json:"commandId"`
+	// The session whose setup to start. Omitted starts the host's own setup, which needs the
+	// `computerUseHostSetup` grant.
+	SessionID *string `json:"sessionId,omitempty"`
+}
+
+// ComputerUseSetupState The session's setup state: the result of both methods and the `computerUseSetup/changed`
+// payload's `state`.
+type ComputerUseSetupState struct {
+	// Accessibility.
+	Accessibility ComputerUsePermission `json:"accessibility"`
+	// Input Monitoring: computer use is ready without it; some actions need it.
+	InputMonitoring ComputerUsePermission `json:"inputMonitoring"`
+	// The sentence `cua_setup` gives the user for this answer.
+	Message *string `json:"message,omitempty"`
+	// The `cua_setup` refusal code when the call was refused, verbatim.
+	Refused *string `json:"refused,omitempty"`
+	// Screen Recording.
+	ScreenRecording ComputerUsePermission `json:"screenRecording"`
+	// Where setup stands.
+	Setup ComputerUseSetupPhase `json:"setup"`
 }
 
 // ContextPressureLevel Context pressure level (tdd SS4.6.6): hard threshold first, both inclusive `>=`. Open.
@@ -1031,6 +1138,12 @@ type ErrorData struct {
 	LatestBoundaryCursor *string `json:"latestBoundaryCursor,omitempty"`
 	// The exceeded byte limit, on `inputTooLarge` errors.
 	LimitBytes *int64 `json:"limitBytes,omitempty"`
+	// The store on `pluginNotFound` (`-32035`, SS3.29.1).
+	Marketplace *string `json:"marketplace,omitempty"`
+	// The rejected marketplace name on `marketplaceNotFound` (`-32034`, SS3.29.7) and
+	// `marketplaceAlreadyExists` (`-32036`, SS3.29.2); the rejected plugin name on
+	// `pluginNotFound` (`-32035`, SS3.29.1).
+	Name *string `json:"name,omitempty"`
 	// The requested `outputRef.id`, on the same `item/readOutput` arms.
 	OutputRef *string `json:"outputRef,omitempty"`
 	// Candidate retained paths on `sessionAmbiguous`.
@@ -1043,6 +1156,17 @@ type ErrorData struct {
 	// Whether retrying can succeed (e.g. `overloaded`). When present, overrides the error
 	// table row's `retryable` default for this code.
 	Retryable *bool `json:"retryable,omitempty"`
+	// Why the branch seed did not use a checkpoint, on the same arms: one of
+	// `no_usable_checkpoint`, `unsupported_checkpoint_shape`,
+	// `checkpoint_has_model_visible_tail`, `checkpoint_missing_suffix`; absent when the seed
+	// used a checkpoint or no fallback was recorded.
+	SeedFallbackReason *string `json:"seedFallbackReason,omitempty"`
+	// The branch-seed path the host read before rejecting, on branch-validation rejections
+	// (`session/fork`, `session/sideChat`: the `forkBoundaryInvalid`, `commandRejected` and
+	// `sessionNotFound` arms; SS2.5.3, SS2.5.7; #51365): one of `runtime_checkpoint_tail`,
+	// `runtime_full_replay`, `legacy_session_data` — the durable branch-seed vocabulary, so
+	// the client cites the real seed decision instead of guessing at a stale binary.
+	SeedPath *string `json:"seedPath,omitempty"`
 	// The rejected skill selector on `skillNotFound` (`-32032`, SS3.22.4).
 	Selector *string `json:"selector,omitempty"`
 	// Session identity on errors whose lookup is session-scoped.
@@ -1090,6 +1214,10 @@ const (
 	ErrorKindBackpressured               ErrorKind = "backpressured"
 	ErrorKindSkillNotFound               ErrorKind = "skillNotFound"
 	ErrorKindComputerUseUnavailable      ErrorKind = "computerUseUnavailable"
+	ErrorKindMarketplaceNotFound         ErrorKind = "marketplaceNotFound"
+	ErrorKindPluginNotFound              ErrorKind = "pluginNotFound"
+	ErrorKindMarketplaceAlreadyExists    ErrorKind = "marketplaceAlreadyExists"
+	ErrorKindPluginMutationsDisabled     ErrorKind = "pluginMutationsDisabled"
 	ErrorKindUploadNotFound              ErrorKind = "uploadNotFound"
 	ErrorKindViewTruncated               ErrorKind = "viewTruncated"
 	ErrorKindOutputUnavailable           ErrorKind = "outputUnavailable"
@@ -1134,6 +1262,10 @@ var ErrorKindValues = []ErrorKind{
 	ErrorKindBackpressured,
 	ErrorKindSkillNotFound,
 	ErrorKindComputerUseUnavailable,
+	ErrorKindMarketplaceNotFound,
+	ErrorKindPluginNotFound,
+	ErrorKindMarketplaceAlreadyExists,
+	ErrorKindPluginMutationsDisabled,
 	ErrorKindUploadNotFound,
 	ErrorKindViewTruncated,
 	ErrorKindOutputUnavailable,
@@ -1601,6 +1733,14 @@ type InitializeResult struct {
 	PlatformFamily PlatformFamily `json:"platformFamily"`
 	// Server operating system.
 	PlatformOS PlatformOS `json:"platformOs"`
+	// Whether this host can enforce the sandbox (ADR 50064-startup-report-sandbox-availability
+	// D2/D4). Optional so the addition is additive under SS1.5.4; a v1 host always sends it,
+	// and a client reads absent as unknown — the host predates the field, so the client
+	// falls back to its own probe rather than inventing an answer.
+	SandboxAvailability *SandboxAvailability `json:"sandboxAvailability,omitempty"`
+	// Why enforcement is impossible. Sent only when `sandbox_availability` is `unavailable`; a
+	// client MUST NOT infer a reason when none is sent.
+	SandboxUnavailableReason *SandboxUnavailableReason `json:"sandboxUnavailableReason,omitempty"`
 	// Envelope schema version and stable-surface fingerprint.
 	Schema SchemaInfo `json:"schema"`
 	// Server identification.
@@ -1662,6 +1802,10 @@ type Item struct {
 	// `subagent`: camelCased `SubagentControlStatus` (open enum); `status` stays the generic
 	// item vocabulary.
 	ControlStatus *SubagentControlStatus `json:"controlStatus,omitempty"`
+	// `agentMessage`: `true` when the provider stream died mid-reply and the run failed with
+	// this partial text committed (ADR 50063 D2) — the wire mark for the gate-off
+	// "incomplete response" rule (#13328). Absent otherwise; never cleared once set.
+	CutOff *bool `json:"cutOff,omitempty"`
 	// `workflow`: the run-level declared-phase label — the last `Phase` detail-row label of
 	// the reconciled projection; terminal-only, absent while live (tdd SS4.5.8, #45449).
 	DeclaredPhase *string `json:"declaredPhase,omitempty"`
@@ -1892,8 +2036,9 @@ type ItemDeltaParams struct {
 	ViewCursor string `json:"viewCursor"`
 }
 
-// ItemKind The eleven v1 item kinds (tdd SS4.5.2–4.5.13). Open: a new kind is additive evolution,
-// and clients MUST render unknown kinds generically (tdd SS4.10).
+// ItemKind The eleven v1 item kinds (tdd SS4.5.2–4.5.13) plus post-v1 kinds (tdd SS4.5.14+).
+// Open: a new kind is additive evolution, and clients MUST render unknown kinds
+// generically (tdd SS4.10).
 type ItemKind string
 
 const (
@@ -1908,6 +2053,7 @@ const (
 	ItemKindCompaction    ItemKind = "compaction"
 	ItemKindHookRun       ItemKind = "hookRun"
 	ItemKindSideChat      ItemKind = "sideChat"
+	ItemKindWebSearch     ItemKind = "webSearch"
 )
 
 // ItemKindValues are every ItemKind the bundle declares, in schema order.
@@ -1923,6 +2069,7 @@ var ItemKindValues = []ItemKind{
 	ItemKindCompaction,
 	ItemKindHookRun,
 	ItemKindSideChat,
+	ItemKindWebSearch,
 }
 
 // ItemReadOutputEncoding The `item/readOutput` content encoding (tdd SS4.7.4). Closed: text media is ALWAYS
@@ -2058,6 +2205,18 @@ type LastTurn struct {
 	// The turn's id, as on its `turn/completed`; clients deduplicate a live `turn/completed`
 	// against this member by it (ADR 36635 D2).
 	TurnID string `json:"turnId"`
+}
+
+// LimitKind Quota limit kinds (tdd SS4.5.1, ADR 50047 D2): open for evolution.
+type LimitKind string
+
+const (
+	LimitKindTierLimit LimitKind = "tierLimit"
+)
+
+// LimitKindValues are every LimitKind the bundle declares, in schema order.
+var LimitKindValues = []LimitKind{
+	LimitKindTierLimit,
 }
 
 // MediaUploadParams `media/upload` params (tdd SS3.33, ADR 45443 D5): one chunk of a client-minted upload.
@@ -2441,6 +2600,96 @@ type PluginCatalogEntry struct {
 	Version string `json:"version"`
 }
 
+// PluginChangedParams `plugin/changed` params (tdd SS3.29.5): an install landed; clients re-issue
+// `plugin/list` (plus `hook/list` and `skill/list`).
+type PluginChangedParams struct {
+	// The installed record's own switch.
+	Enabled bool `json:"enabled"`
+	// The installed record's identifier.
+	ID string `json:"id"`
+	// The acting session.
+	SessionID string `json:"sessionId"`
+	// The installed-list provenance vocabulary (tdd SS3.26.2).
+	Source PluginSource `json:"source"`
+	// The installed record's version.
+	Version string `json:"version"`
+}
+
+// PluginInstallLocalPathTarget The `plugin/install` local-path arm (tdd SS3.29.1).
+type PluginInstallLocalPathTarget struct {
+	// The host folder to install from; absolute recommended, relative resolves against the
+	// host working directory.
+	Path string `json:"path"`
+	// The install lane; omitted means `default`.
+	Scope *PluginInstallScope `json:"scope,omitempty"`
+}
+
+// PluginInstallMarketplaceTarget The `plugin/install` marketplace arm (tdd SS3.29.1).
+type PluginInstallMarketplaceTarget struct {
+	// The configured marketplace name.
+	Marketplace string `json:"marketplace"`
+	// The plugin name within the store.
+	Name string `json:"name"`
+}
+
+// PluginInstallParams `plugin/install` params (tdd SS3.29.1). Per-session params plus a client-generated
+// `commandId` (UUIDv7) with the uniform SS3.1.1 idempotency contract.
+type PluginInstallParams struct {
+	// The client-generated idempotency key (UUIDv7).
+	CommandID string `json:"commandId"`
+	// The target session; its workspace resolves project scope.
+	SessionID string `json:"sessionId"`
+	// Exactly one install target arm.
+	Target PluginInstallTarget `json:"target"`
+}
+
+// PluginInstallResult `plugin/install` result (tdd SS3.29.1): the SS3.1.2 ack envelope plus the installed
+// receipt.
+type PluginInstallResult struct {
+	// The echoed idempotency key.
+	CommandID string `json:"commandId"`
+	// The installed record's own switch.
+	Enabled bool `json:"enabled"`
+	// The installed record's identifier.
+	ID string `json:"id"`
+	// The installed-list provenance vocabulary (tdd SS3.26.2).
+	Source PluginSource `json:"source"`
+	// The ack status.
+	Status CommandStatus `json:"status"`
+	// The installed record's version.
+	Version string `json:"version"`
+	// The installer's advisory text when the install succeeded with a caveat; absent
+	// otherwise.
+	Warning *string `json:"warning,omitempty"`
+}
+
+// PluginInstallScope The `plugin/install` local-path scope (tdd SS3.29.1). Closed: an unknown scope is
+// `-32602 invalidParams`.
+type PluginInstallScope string
+
+const (
+	PluginInstallScopeDefault PluginInstallScope = "default"
+	PluginInstallScopeUser    PluginInstallScope = "user"
+	PluginInstallScopeProject PluginInstallScope = "project"
+)
+
+// PluginInstallScopeValues are every PluginInstallScope the bundle declares, in schema order.
+var PluginInstallScopeValues = []PluginInstallScope{
+	PluginInstallScopeDefault,
+	PluginInstallScopeUser,
+	PluginInstallScopeProject,
+}
+
+// PluginInstallTarget The one structured install target (tdd SS3.29.1): a flat object with two optional arms,
+// exactly one present — the `TurnInputPart` convention, since the v1 schema model names
+// no object-variant union. Both arms or neither is `-32602 invalidParams`.
+type PluginInstallTarget struct {
+	// The local-path arm: install from a host folder.
+	LocalPath *PluginInstallLocalPathTarget `json:"localPath,omitempty"`
+	// The marketplace arm: install a named plugin from a store.
+	Marketplace *PluginInstallMarketplaceTarget `json:"marketplace,omitempty"`
+}
+
 // PluginListParams `plugin/list` params (tdd SS3.26.2). Per-session params; rows are the installed plugin
 // records.
 type PluginListParams struct {
@@ -2453,6 +2702,118 @@ type PluginListParams struct {
 type PluginListResult struct {
 	// The installed plugin rows.
 	Plugins []PluginCatalogEntry `json:"plugins"`
+}
+
+// PluginMarketplaceAddParams `plugin/marketplaceAdd` params (tdd SS3.29.2). Per-session params plus a
+// client-generated `commandId` (UUIDv7).
+type PluginMarketplaceAddParams struct {
+	// The client-generated idempotency key (UUIDv7).
+	CommandID string `json:"commandId"`
+	// The marketplace name to configure.
+	Name string `json:"name"`
+	// The target session.
+	SessionID string `json:"sessionId"`
+	// The app's source vocabulary: `owner/repo`, a git URL, a `file://` URL, or a local path.
+	Source string `json:"source"`
+}
+
+// PluginMarketplaceChange What happened to a marketplace (tdd SS3.29.6). Closed: an unknown change is a contract
+// violation, never tolerated.
+type PluginMarketplaceChange string
+
+const (
+	PluginMarketplaceChangeAdded   PluginMarketplaceChange = "added"
+	PluginMarketplaceChangeUpdated PluginMarketplaceChange = "updated"
+	PluginMarketplaceChangeRemoved PluginMarketplaceChange = "removed"
+)
+
+// PluginMarketplaceChangeValues are every PluginMarketplaceChange the bundle declares, in schema order.
+var PluginMarketplaceChangeValues = []PluginMarketplaceChange{
+	PluginMarketplaceChangeAdded,
+	PluginMarketplaceChangeUpdated,
+	PluginMarketplaceChangeRemoved,
+}
+
+// PluginMarketplaceChangedParams `plugin/marketplaceChanged` params (tdd SS3.29.6): a marketplace was added, updated, or
+// removed.
+type PluginMarketplaceChangedParams struct {
+	// What happened.
+	Change PluginMarketplaceChange `json:"change"`
+	// The marketplace name.
+	Name string `json:"name"`
+	// The stored record's plugin count; omitted on `removed`, never fabricated.
+	PluginCount *int64 `json:"pluginCount,omitempty"`
+	// The acting session.
+	SessionID string `json:"sessionId"`
+	// The stored record's skipped count; omitted on `removed`, never fabricated.
+	SkippedCount *int64 `json:"skippedCount,omitempty"`
+}
+
+// PluginMarketplaceRecordResult The stored marketplace record both add and update answer (tdd SS3.29.2, SS3.29.3): the
+// SS3.1.2 ack envelope plus the record.
+type PluginMarketplaceRecordResult struct {
+	// The echoed idempotency key.
+	CommandID string `json:"commandId"`
+	// The configured marketplace name.
+	Name string `json:"name"`
+	// The plugins the store now offers.
+	PluginCount int64 `json:"pluginCount"`
+	// Entries the store could not offer, with the reason each was skipped; empty when nothing
+	// was skipped.
+	Skipped []PluginMarketplaceSkippedEntry `json:"skipped"`
+	// The normalized stored source.
+	Source PluginMarketplaceSourceShape `json:"source"`
+	// The ack status.
+	Status CommandStatus `json:"status"`
+}
+
+// PluginMarketplaceRemoveParams `plugin/marketplaceRemove` params (tdd SS3.29.4). Per-session params plus a
+// client-generated `commandId` (UUIDv7).
+type PluginMarketplaceRemoveParams struct {
+	// The client-generated idempotency key (UUIDv7).
+	CommandID string `json:"commandId"`
+	// The marketplace name to remove.
+	Name string `json:"name"`
+	// The target session.
+	SessionID string `json:"sessionId"`
+}
+
+// PluginMarketplaceRemoveResult `plugin/marketplaceRemove` result (tdd SS3.29.4): the SS3.1.2 ack envelope plus the
+// removed name.
+type PluginMarketplaceRemoveResult struct {
+	// The echoed idempotency key.
+	CommandID string `json:"commandId"`
+	// The removed marketplace name.
+	Name string `json:"name"`
+	// The ack status.
+	Status CommandStatus `json:"status"`
+}
+
+// PluginMarketplaceSkippedEntry One skipped marketplace entry (tdd SS3.29.2).
+type PluginMarketplaceSkippedEntry struct {
+	// The skipped plugin.
+	Plugin string `json:"plugin"`
+	// Why it was skipped.
+	Reason string `json:"reason"`
+}
+
+// PluginMarketplaceSourceShape The normalized stored marketplace source (tdd SS3.29.2).
+type PluginMarketplaceSourceShape struct {
+	// The stored source kind.
+	Kind string `json:"kind"`
+	// The stored source path.
+	Path string `json:"path"`
+}
+
+// PluginMarketplaceUpdateParams `plugin/marketplaceUpdate` params (tdd SS3.29.3). Per-session params plus a
+// client-generated `commandId` (UUIDv7).
+type PluginMarketplaceUpdateParams struct {
+	// The client-generated idempotency key (UUIDv7).
+	CommandID string `json:"commandId"`
+	// The marketplace name to refresh.
+	Name string `json:"name"`
+	// The target session.
+	SessionID string `json:"sessionId"`
 }
 
 // PluginSource A plugin row's source provenance (tdd SS3.26.2, ADR 33398 D7 item 3): camelCase of
@@ -2473,6 +2834,15 @@ var PluginSourceValues = []PluginSource{
 	PluginSourceMarketplaceUserAdded,
 	PluginSourceForeignImport,
 	PluginSourceNativeLocal,
+}
+
+// QuotaDetail Typed quota-exhaustion detail (tdd SS4.5.1, ADR 50047 D2): the limit kind plus the
+// provider's reset instant.
+type QuotaDetail struct {
+	// Which quota was exhausted (open enum; unknown values fall back).
+	LimitKind LimitKind `json:"limitKind"`
+	// Epoch milliseconds at which the provider says usage resets.
+	ResetsAtMs int64 `json:"resetsAtMs"`
 }
 
 // ReasoningEffort The reasoning-effort tier sampled at submission (tdd SS3.2, SS3.3). The **same closed
@@ -2532,6 +2902,94 @@ type ReasoningEffortState struct {
 	Source ReasoningEffortChangeSource `json:"source"`
 }
 
+// RecapCancelParams `recap/cancel` params (tdd SS3.28.5): the session plus the cancel's own retry id. No
+// target — one in-flight slot per session makes the target unambiguous.
+type RecapCancelParams struct {
+	// The cancel's own retry id (required, SS3.1.1).
+	CommandID string `json:"commandId"`
+	// The session whose in-flight recap to cancel (required).
+	SessionID string `json:"sessionId"`
+}
+
+// RecapCancelResult `recap/cancel` result (tdd SS3.28.5): admission only. In flight → the recap settles
+// `cancelled`; idle → accepted no-op.
+type RecapCancelResult struct {
+	// The cancel's id, echoed.
+	CommandID string `json:"commandId"`
+	// Always `accepted` on this path.
+	Status CommandStatus `json:"status"`
+}
+
+// RecapCompletedParams `recap/completed` params (tdd SS3.28.2): the settlement, delivered to the requesting
+// connection outside the view stream — no `viewCursor`, no `sourceRange`. `text` is
+// required on `completed` (plus optional `title`, untrusted model output — clients MUST
+// sanitize per spec 442 INV-015); `reason` is required on `failed`; neither rides
+// `cancelled`/`timedOut`. The struct marks the conditional members optional; the SS prose
+// pins the per-outcome rule, the `turn/completed` usage/error convention.
+type RecapCompletedParams struct {
+	// The request's id — the correlation key.
+	CommandID string `json:"commandId"`
+	// How the request settled.
+	Outcome RecapOutcome `json:"outcome"`
+	// Why the side-call failed (on `failed`).
+	Reason *RecapFailureReason `json:"reason,omitempty"`
+	// The recapped session.
+	SessionID string `json:"sessionId"`
+	// The recap text verbatim (on `completed`).
+	Text *string `json:"text,omitempty"`
+	// The model-produced short title (on `completed`, when produced).
+	Title *string `json:"title,omitempty"`
+}
+
+// RecapFailureReason `recap/completed` failure reason (tdd SS3.28.2/SS3.28.8): post-ack failures fold to the
+// single initial value. **Open**: later splits stay additive (#22785 E2).
+type RecapFailureReason string
+
+const (
+	RecapFailureReasonProviderFailed RecapFailureReason = "providerFailed"
+)
+
+// RecapFailureReasonValues are every RecapFailureReason the bundle declares, in schema order.
+var RecapFailureReasonValues = []RecapFailureReason{
+	RecapFailureReasonProviderFailed,
+}
+
+// RecapOutcome `recap/completed` outcome (tdd SS3.28.2): the terminal vocabulary, camelCase per SS1.6.
+// **Open**: a server-produced result vocabulary (#22785 E2).
+type RecapOutcome string
+
+const (
+	RecapOutcomeCompleted RecapOutcome = "completed"
+	RecapOutcomeFailed    RecapOutcome = "failed"
+	RecapOutcomeCancelled RecapOutcome = "cancelled"
+	RecapOutcomeTimedOut  RecapOutcome = "timedOut"
+)
+
+// RecapOutcomeValues are every RecapOutcome the bundle declares, in schema order.
+var RecapOutcomeValues = []RecapOutcome{
+	RecapOutcomeCompleted,
+	RecapOutcomeFailed,
+	RecapOutcomeCancelled,
+	RecapOutcomeTimedOut,
+}
+
+// RecapRequestParams `recap/request` params (tdd SS3.28.1): the session plus the client-minted UUIDv7 retry
+// id. No other param; unknown fields are `invalidParams`.
+type RecapRequestParams struct {
+	// The client-minted retry id (required, SS3.1.1).
+	CommandID string `json:"commandId"`
+	// The session to recap (required).
+	SessionID string `json:"sessionId"`
+}
+
+// RecapRequestResult `recap/request` result (tdd SS3.28.1): admission only — the ack is never the recap.
+type RecapRequestResult struct {
+	// The request's id, echoed.
+	CommandID string `json:"commandId"`
+	// Always `accepted` on this path.
+	Status CommandStatus `json:"status"`
+}
+
 // RecordPosition One end of a [`SourceRange`]: a record's event id and its sequence number within the
 // stream (tdd SS4.2).
 type RecordPosition struct {
@@ -2568,6 +3026,57 @@ type RequestID = json.RawMessage
 // re-issued on the next subscribe (SS5.6). There is no dismiss-without-deciding on the
 // wire.
 type RequestReceipt struct{}
+
+// RetractOutcome A `turn/retracted` settlement outcome (tdd SS4.5.1, ADR 50074 D1). Open enum (D-033):
+// decode is tolerant — a value outside the list reads as `Accepted` (the event's
+// historical meaning — pre-feature hosts emit it only for accepted retracts), never
+// fails. The bundle keeps enumerating the known values for codegen and docs.
+type RetractOutcome string
+
+const (
+	RetractOutcomeAccepted RetractOutcome = "accepted"
+	RetractOutcomeDeclined RetractOutcome = "declined"
+)
+
+// RetractOutcomeValues are every RetractOutcome the bundle declares, in schema order.
+var RetractOutcomeValues = []RetractOutcome{
+	RetractOutcomeAccepted,
+	RetractOutcomeDeclined,
+}
+
+// SandboxAvailability Whether this host can enforce the sandbox (ADR 50064-startup-report-sandbox-availability
+// D2/D4). A property of the host process, probed once at construction and identical for
+// every session and every connection it serves — never requested, granted, or
+// negotiated, which is why it is not a capability. Open: a future enforcement posture
+// arrives as a new value, read by older clients as unknown.
+type SandboxAvailability string
+
+const (
+	SandboxAvailabilityAvailable   SandboxAvailability = "available"
+	SandboxAvailabilityUnavailable SandboxAvailability = "unavailable"
+)
+
+// SandboxAvailabilityValues are every SandboxAvailability the bundle declares, in schema order.
+var SandboxAvailabilityValues = []SandboxAvailability{
+	SandboxAvailabilityAvailable,
+	SandboxAvailabilityUnavailable,
+}
+
+// SandboxUnavailableReason Why sandbox enforcement is impossible on this host. Sent only when
+// [`SandboxAvailability`] is `unavailable`; a client MUST NOT infer a reason when none is
+// sent. Open: a future reason arrives as a new value, read by older clients as unknown.
+type SandboxUnavailableReason string
+
+const (
+	SandboxUnavailableReasonUserNamespacesDenied  SandboxUnavailableReason = "userNamespacesDenied"
+	SandboxUnavailableReasonBubblewrapUnavailable SandboxUnavailableReason = "bubblewrapUnavailable"
+)
+
+// SandboxUnavailableReasonValues are every SandboxUnavailableReason the bundle declares, in schema order.
+var SandboxUnavailableReasonValues = []SandboxUnavailableReason{
+	SandboxUnavailableReasonUserNamespacesDenied,
+	SandboxUnavailableReasonBubblewrapUnavailable,
+}
 
 // SchemaInfo The `schema` pair in [`InitializeResult`] (SS1.4.1, SS1.5.3). `version` is the wire
 // **envelope** schema version — distinct from the session-view `schemaVersion`, the
@@ -2650,6 +3159,12 @@ type Session struct {
 	// otherwise — absent is never fabricated. Authoritative and renameable via
 	// `session/rename`.
 	Name *string `json:"name,omitempty"`
+	// How the served `name` was set (tdd SS2.4/SS2.14.1, #50048; ADR 50048 D1/D2).
+	// **Additive-optional**, **fold-only**: the snapshot fold (`session/read`, the
+	// resume/start/fork-ack snapshot) derives and carries it from the log; `session/list` rows
+	// never carry it. Absent — and any value the client does not recognize — reads as
+	// unknown, never fabricated.
+	NameOrigin *SessionNameOrigin `json:"nameOrigin,omitempty"`
 	// The containing session's id when `kind` is `"subagent"` (FR-002, INV-002) — the id of
 	// the TOP-LEVEL session whose home holds this child, which is **not necessarily the
 	// session that spawned it**: native-child homes are physical siblings under the outer
@@ -3121,12 +3636,34 @@ type SessionModelRouteUnservedParams struct {
 type SessionNameChangedParams struct {
 	// The new canonical name now in effect.
 	Name string `json:"name"`
+	// How the new name was set (tdd SS2.4/SS4.6.7, #50048; ADR 50048 D1/D2).
+	// **Additive-optional**: omitted when the emitting fold cannot prove an origin — absent
+	// reads as unknown, never fabricated.
+	NameOrigin *SessionNameOrigin `json:"nameOrigin,omitempty"`
 	// The owning session.
 	SessionID string `json:"sessionId"`
 	// The durable records this event folded from.
 	SourceRange SourceRange `json:"sourceRange"`
 	// Opaque, strictly monotonic view cursor (tdd SS4.1).
 	ViewCursor string `json:"viewCursor"`
+}
+
+// SessionNameOrigin How the served session name was set (tdd SS2.4/SS4.6.7, #50048; ADR 50048 D1). **Open
+// enum** (`x-msp-openness: open`): v1 serves `automatic` and `custom`; a client MUST read
+// absent — and any value it does not recognize — as unknown, never fabricated. Open: a
+// future source such as conversation-generated names (#35260) adds a value here, so closed
+// would make that a breaking change.
+type SessionNameOrigin string
+
+const (
+	SessionNameOriginAutomatic SessionNameOrigin = "automatic"
+	SessionNameOriginCustom    SessionNameOrigin = "custom"
+)
+
+// SessionNameOriginValues are every SessionNameOrigin the bundle declares, in schema order.
+var SessionNameOriginValues = []SessionNameOrigin{
+	SessionNameOriginAutomatic,
+	SessionNameOriginCustom,
 }
 
 // SessionReadParams `session/read` params (tdd SS2.5.5): read one stored session **without attaching** —
@@ -3352,6 +3889,17 @@ type SessionStartParams struct {
 	Config *SessionConfig `json:"config,omitempty"`
 	// Initial model; server default when omitted.
 	ModelID *string `json:"modelId,omitempty"`
+	// The new session's initial permission profile (amendment 42624 FR-42624-1, ADR 42197 D2):
+	// a profile id the host catalog already admits — the rows `permissionProfile/list`
+	// serves without `sessionId`. Select, never create. Omitted means today's behavior: the
+	// host's configured default under native admission, unchanged. An id the catalog does not
+	// carry, or one it serves unavailable, refuses the start `commandRejected` (-32030;
+	// `permission_profile_unknown` / `permission_profile_unavailable`) before any durable
+	// byte, and an ephemeral host refuses any id (`permission_profile_ephemeral_fixed`).
+	// `session/resume` and `session/fork` do not admit the member. Explicit `null` is invalid
+	// params: the set of members that tolerate `null` is closed and excludes this one, exactly
+	// as it excludes `workspaceRoots`.
+	PermissionProfile *string `json:"permissionProfile,omitempty"`
 	// Initial provider routing; server default when omitted or explicit `null` — both
 	// spellings select the default (#23468).
 	ProviderID *string `json:"providerId,omitempty"`
@@ -3618,6 +4166,95 @@ type SkillCatalogEntry struct {
 type SkillChangedParams struct {
 	// The session whose set changed.
 	SessionID string `json:"sessionId"`
+}
+
+// SkillImportCounts The four receipt-list lengths (tdd SS3.30.2): a client renders counts without walking
+// lists.
+type SkillImportCounts struct {
+	// `failed.len()`.
+	Failed int64 `json:"failed"`
+	// `installed.len()`.
+	Installed int64 `json:"installed"`
+	// `quarantined.len()`.
+	Quarantined int64 `json:"quarantined"`
+	// `skipped.len()`.
+	Skipped int64 `json:"skipped"`
+}
+
+// SkillImportFailure One import candidate that could neither install nor quarantine (tdd SS3.30.2): recorded
+// so the run continues past it. `id` is null when the candidate never yielded one —
+// present-but-null, never omitted.
+type SkillImportFailure struct {
+	// The candidate's id, or null when it never yielded one.
+	ID *string `json:"id,omitempty"`
+	// Why the candidate failed.
+	Reason string `json:"reason"`
+}
+
+// SkillImportParams `skill/import` params (tdd SS3.30.2, #45433): import foreign skills through the single
+// `SkillsService::import_skills` seam.
+type SkillImportParams struct {
+	// The SS3.1.1 idempotency handle (UUIDv7) — required even for `dryRun` previews.
+	CommandID string `json:"commandId"`
+	// Preview for the consent UI; writes nothing. Additive-optional, default false.
+	DryRun *bool `json:"dryRun,omitempty"`
+	// Re-import over already-imported ids (the CLI `--force` twin). Additive-optional, default
+	// false.
+	Force *bool `json:"force,omitempty"`
+	// The target session.
+	SessionID string `json:"sessionId"`
+	// The foreign ecosystem to import from.
+	Source SkillImportSource `json:"source"`
+}
+
+// SkillImportQuarantine One quarantined import candidate (tdd SS3.30.2): kept, not loaded.
+type SkillImportQuarantine struct {
+	// The candidate's id.
+	ID string `json:"id"`
+	// The quarantine reasons.
+	Reasons []string `json:"reasons"`
+}
+
+// SkillImportResult `skill/import` result (tdd SS3.30.2, #45433): the ack envelope plus the service receipt
+// projection.
+type SkillImportResult struct {
+	// Echoes the client's id.
+	CommandID string `json:"commandId"`
+	// The four list lengths.
+	Counts SkillImportCounts `json:"counts"`
+	// Echoes the call's preview flag.
+	DryRun bool `json:"dryRun"`
+	// Candidates that could neither install nor quarantine. Import never aborts the whole run
+	// on one bad candidate.
+	Failed []SkillImportFailure `json:"failed"`
+	// The ids the run installed, in pipeline order.
+	Installed []string `json:"installed"`
+	// Kept, not loaded, with reasons.
+	Quarantined []SkillImportQuarantine `json:"quarantined"`
+	// Ids the run did not install: already-imported ids and in-run duplicates, verbatim from
+	// the seam's `skipped` vec.
+	Skipped []string `json:"skipped"`
+	// Echoes the call's ecosystem.
+	Source SkillImportSource `json:"source"`
+	// Admission status.
+	Status CommandStatus `json:"status"`
+}
+
+// SkillImportSource `skill/import` foreign ecosystem (tdd SS3.30.2). **Closed**: a client-selected write
+// vocabulary (ADR 45433 D2) — a write must fail an ecosystem the host does not implement
+// rather than import from an unknown dir. The host resolves its own foreign dir (the
+// `foreign_skills_sources` derivation); no client paths cross the wire.
+type SkillImportSource string
+
+const (
+	SkillImportSourceClaude SkillImportSource = "claude"
+	SkillImportSourceCodex  SkillImportSource = "codex"
+)
+
+// SkillImportSourceValues are every SkillImportSource the bundle declares, in schema order.
+var SkillImportSourceValues = []SkillImportSource{
+	SkillImportSourceClaude,
+	SkillImportSourceCodex,
 }
 
 // SkillListParams `skill/list` params (tdd SS3.22.1, SS3.30.3). Per-session because skill scope follows
@@ -4302,6 +4939,9 @@ type TurnError struct {
 	Kind TurnErrorKind `json:"kind"`
 	// Human-readable failure text.
 	Message string `json:"message"`
+	// Typed quota-exhaustion detail (ADR 50047 D2/D3): present iff the stopping failure was
+	// the quota class. Clients branch on presence, never by parsing `message`.
+	Quota *QuotaDetail `json:"quota,omitempty"`
 	// The server's judgment that resubmitting the same input may succeed.
 	Retryable bool `json:"retryable"`
 }
@@ -4320,6 +4960,7 @@ const (
 	TurnErrorKindModelError          TurnErrorKind = "modelError"
 	TurnErrorKindLaunchError         TurnErrorKind = "launchError"
 	TurnErrorKindAuthRequired        TurnErrorKind = "authRequired"
+	TurnErrorKindMCPLinkError        TurnErrorKind = "mcpLinkError"
 )
 
 // TurnErrorKindValues are every TurnErrorKind the bundle declares, in schema order.
@@ -4333,6 +4974,7 @@ var TurnErrorKindValues = []TurnErrorKind{
 	TurnErrorKindModelError,
 	TurnErrorKindLaunchError,
 	TurnErrorKindAuthRequired,
+	TurnErrorKindMCPLinkError,
 }
 
 // TurnForegroundCompletedParams `turn/foregroundCompleted` params (tdd SS4.5.12): the turn's foreground work is done and
@@ -4460,11 +5102,17 @@ type TurnRef struct {
 	TurnID string `json:"turnId"`
 }
 
-// TurnRetractedParams `turn/retracted` params (tdd SS4.5.1): an interrupt-paired retract was durably accepted.
-// The retracted user-message item is re-emitted via `item/updated` with `retracted: true`.
+// TurnRetractedParams `turn/retracted` params (tdd SS4.5.1): an interrupt-paired retract durably settled,
+// accepted or declined (ADR 50074 D1). On `"accepted"` the retracted user-message item is
+// re-emitted via `item/updated` with `retracted: true`; on `"declined"` the client folds
+// the legacy declined rollback instead and no item is re-emitted.
 type TurnRetractedParams struct {
 	// The retracted submission's command id.
 	CommandID string `json:"commandId"`
+	// The retract settlement outcome (tdd SS4.5.1, ADR 50074 D1). Additive-optional: absent
+	// reads as `"accepted"` — pre-feature hosts emit the event only for accepted retracts
+	// — and so does an unrecognized value (open enum, D-033).
+	Outcome *RetractOutcome `json:"outcome,omitempty"`
 	// The owning session.
 	SessionID string `json:"sessionId"`
 	// The durable records this event folded from.
@@ -4485,6 +5133,11 @@ type TurnRetractedParams struct {
 type TurnRetryScheduledParams struct {
 	// The attempt that failed (producer-normalized, >= 1).
 	Attempt int64 `json:"attempt"`
+	// The failing model attempt's durable kind, verbatim (ADR 50047 D2/D3) — a plain string:
+	// the durable vocabulary is open-ended.
+	ErrorKind *string `json:"errorKind,omitempty"`
+	// The failing model attempt's HTTP status (ADR 50047 D2/D3).
+	HTTPStatus *int64 `json:"httpStatus,omitempty"`
 	// The turn's model-retry chain bound.
 	MaxAttempts int64 `json:"maxAttempts"`
 	// The attempt about to run (producer contract: attempt < nextAttempt <= maxAttempts; not a
@@ -4500,6 +5153,10 @@ type TurnRetryScheduledParams struct {
 	// The durable record this event folded from (the session stream's mirror of the
 	// retry-scheduled task status; `first == last`).
 	SourceRange SourceRange `json:"sourceRange"`
+	// The failing model attempt's provider system, verbatim (ADR 50047 D2/D3) — e.g.
+	// `"meta"`. Absent when no model-attempt facet precedes the retry status on the task (old
+	// logs).
+	System *string `json:"system,omitempty"`
 	// The running turn whose model attempt is being retried.
 	TurnID string `json:"turnId"`
 	// Opaque, strictly monotonic view cursor (tdd SS4.1).
@@ -4523,10 +5180,10 @@ var TurnStartDispositionValues = []TurnStartDisposition{
 	TurnStartDispositionSteered,
 }
 
-// TurnStartParams `turn/start.providerRequestOptions` is deliberately absent: **RULED (#22785 E3, owner,
-// 2026-08-26) to stay off the published schema.** The schema is the contract, and a
-// free-form-object node kind is revisited only if the experimental field graduates.
-// `turn/start` params (tdd SS3.2).
+// TurnStartParams `turn/start` params (tdd SS3.2). `turn/start.providerRequestOptions` is deliberately
+// absent: **RULED (#22785 E3, owner, 2026-08-26) to stay off the published schema.** The
+// schema is the contract, and a free-form-object node kind is revisited only if the
+// experimental field graduates.
 type TurnStartParams struct {
 	// The SS3.1.1 idempotency handle (UUIDv7). The fresh turn's `turnId` derives from it (tdd
 	// SS3.1.4).
@@ -4542,6 +5199,13 @@ type TurnStartParams struct {
 	ReasoningEffort *ReasoningEffort `json:"reasoningEffort,omitempty"`
 	// The target session.
 	SessionID string `json:"sessionId"`
+	// A queued `!` shell action riding this turn (tdd SS3.2, ADR 50034): the `!cmd` typed
+	// while a turn runs, executed at the next model-call boundary before any later steer.
+	// Exclusive with `text` and `skill` input; `input` may be empty only when this member is
+	// present. Capability-gated on `userShell`: a carrying turn on a connection without the
+	// grant fails `-32010 capabilityRequired`. Explicit `null` is invalid params (the
+	// null-tolerant set is closed). A v1 stable member.
+	UserShell *TurnUserShell `json:"userShell,omitempty"`
 	// A sticky REPLACEMENT of the session's runtime workspace-root set, binding at this turn's
 	// launch and persisting for subsequent turns until replaced again — unlike
 	// `reasoningEffort`, which is this-turn-only. Same shape and validation as
@@ -4671,6 +5335,15 @@ type TurnUnqueuedParams struct {
 	TurnID string `json:"turnId"`
 	// Opaque, strictly monotonic view cursor (tdd SS4.1).
 	ViewCursor string `json:"viewCursor"`
+}
+
+// TurnUserShell The queued `!` shell action a `turn/start` carries (tdd SS3.2, ADR 50034): the `!cmd`
+// typed while a turn runs. The shell's command id derives from the carrying turn's
+// `commandId`, exactly as the app's own queued submit does; the params' sibling
+// `displayText` carries the `!…` presentation form.
+type TurnUserShell struct {
+	// The shell command text, without the leading `!`.
+	CommandText string `json:"commandText"`
 }
 
 // UnframedViewNotification One element of a `view/page` result's `events` array: an **unframed view notification**
@@ -5199,6 +5872,31 @@ type WorkflowPauseParams struct {
 	// The run to pause, exactly as the `workflow` item names it (SS4.5.8); required,
 	// non-empty.
 	WorkflowRunID string `json:"workflowRunId"`
+}
+
+// WorkflowResumeParams `workflow/resume` params (tdd SS3.34, ADR 45437 D3): resume a paused workflow run,
+// host-driven.
+type WorkflowResumeParams struct {
+	// The SS3.1.1 idempotency handle (UUIDv7).
+	CommandID string `json:"commandId"`
+	// The target session.
+	SessionID string `json:"sessionId"`
+	// The paused run to resume, exactly as the `workflow` item names it (SS4.5.8); required,
+	// non-empty.
+	WorkflowRunID string `json:"workflowRunId"`
+}
+
+// WorkflowResumeResult `workflow/resume` result (tdd SS3.34): admission-only plus the driven turn — always
+// present, since resume always drives (idle fresh turn or busy steer).
+type WorkflowResumeResult struct {
+	// Echoes the client's id.
+	CommandID string `json:"commandId"`
+	// Admission status.
+	Status CommandStatus `json:"status"`
+	// The turn the host drove: the fresh resume turn on an idle session, the admission-time
+	// active turn on a busy session (a routing fact like the SS3.18 wake-gate's, not
+	// settlement).
+	TurnID string `json:"turnId"`
 }
 
 // WorkflowTokenBudget `workflow`: the run's launch token budget (tdd SS4.5.8, #45449).
