@@ -355,7 +355,16 @@ trixie・trixie-updates・trixie-security のどれかに載っていること�
 しか持たないので、Debian が次の更新を出した時点でピンは消え（片方のアーキテクチャだけ先に
 消えることもある）、キャッシュの無い次のイメージビルドが落ちる。これはドリフトの定常状態では
 なくビルドが壊れた状態なので、このジョブは赤くなる。出力には両アーキテクチャで配られている
-最新版が出るので、ARG はその版へ手で上げる。判定は `deploy/local/apt-pin-check-test.sh` が固定する。
+最新版が出る。判定は `deploy/local/apt-pin-check-test.sh` が固定する。
+
+版上げそのものは `apt-pin-bump.yml`（6 時間ごと・dispatch）が行う。その最新版がピンより新しいときだけ
+ARG のピンをそこへ動かす（下げることはなく、読めない索引があれば何もしない。`deploy/local/apt-pin-bump.sh`、
+判定は `deploy/local/apt-pin-bump-test.sh` が固定）。PR は `automation/apt-pin-bump` に 1 本だけ保ち、
+仕組みとトークンは CLI の版上げ PR（§10.2.2）と同じ。push のたびにそのブランチで workspace の
+`dev-image.yml` ビルドを 2 アーキで dispatch する。PR の CI はイメージを焼かないので、このビルドが
+証拠になる（Dockerfile が導入された版・`chromium --version`・sandbox の権限を確かめる）。緑になったら
+マージする。`publish-dist.yml` の preflight も同じ検査を走らせる。リリースはレイヤキャッシュ無しで
+焼くので、消えたピンに最初に当たるのがリリースだからである。
 
 もう 1 本の `cli-release-watch.yml` は 2 時間ごとに（drift が :00、watcher が :30、版上げの保険が次の奇数時）公開版を比べ、**版が実際に変わった CLI だけ**
 contract を dispatch する（対象の kind は `deploy/local/cli-release-edges.sh` の `KINDS`）。

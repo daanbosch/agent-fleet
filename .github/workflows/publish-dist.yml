@@ -71,6 +71,24 @@ jobs:
           fi
           echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$' \
             || { echo "::error::version is not semver: $VERSION"; exit 1; }
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # A release builds without layer cache, so it is the first build to meet a Debian pin
+      # that trixie-security no longer serves (it keeps only the current build). Stop here, in
+      # seconds, rather than fail the workspace image build mid-publish.
+      - name: preflight (Debian package pins are still served)
+        run: |
+          set +e
+          deploy/local/apt-pin-check.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            2) echo "::warning::a Debian index could not be read, so the package pins were not fully checked" ;;
+            *) echo "::error::a Debian package pin in workspace/Dockerfile is no longer served (output above). Merge the apt-pin-bump PR, or set the ARG to the version named above, then release."
+               exit 1 ;;
+          esac
 
   # The native package (C) and its rootfs (R), once per CPU architecture. build.sh
   # --native builds for the host it runs on — every step is a plain `docker build`,

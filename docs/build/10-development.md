@@ -417,8 +417,18 @@ amd64 **and** arm64 in trixie, trixie-updates or trixie-security. trixie-securit
 only the current build, so a pin disappears as soon as Debian ships the next update — for
 one architecture first, sometimes — and the next uncached image build fails. That is a
 broken build, not steady-state drift, so this job goes red; its output names the newest
-version served on both architectures, which is what the ARG is bumped to by hand.
-`deploy/local/apt-pin-check-test.sh` pins its verdicts.
+version served on both architectures. `deploy/local/apt-pin-check-test.sh` pins its verdicts.
+
+The bump itself is `apt-pin-bump.yml` (every 6 hours, and on dispatch). It moves an ARG pin
+to that newest version when it is newer than the pin (never a downgrade, nothing when an
+index could not be read; `deploy/local/apt-pin-bump.sh`, pinned by
+`deploy/local/apt-pin-bump-test.sh`). It keeps one PR on `automation/apt-pin-bump` with the
+same mechanics and token as the CLI bump PR (§10.2.2), and after each push it dispatches a
+two-architecture `dev-image.yml` build of the workspace on that branch. PR CI does not build
+the image, so that build is the evidence: the Dockerfile asserts the installed version,
+`chromium --version` and the sandbox mode. Merge once it is green. `publish-dist.yml`'s
+preflight runs the same check, because a release builds without layer cache and is the first
+build to meet a pin that has gone.
 
 A second workflow, `cli-release-watch.yml`, compares the published versions every 2 hours (drift at :00, the watcher at :30, the
 pin-bump backstop at the next odd hour) and
