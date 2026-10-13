@@ -440,8 +440,17 @@ func worktreeIntegration(parentDir, worktreeDir, targetBranch string) (RepoInteg
 }
 
 func HandleListRepos(w http.ResponseWriter, r *http.Request) {
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"repos": listRepos()})
+}
+
+// listRepos builds the GET /repos list. The per-copy git answers come from listCache
+// (repos_cache.go), which says which field is invalidated by what.
+func listRepos() []Repo {
 	repos := []Repo{}
+	global := globalConfigPaths()
+	live := map[string]bool{}
 	entries, _ := os.ReadDir(ReposRoot()) // missing root => empty list
+	var gitIdx []int                      // positions in repos that still need their git facts
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -464,25 +473,21 @@ func HandleListRepos(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
-		st, _ := GitStatus(dir)
-		var provider, host, remotePath string
-		if origin, ok := GitOriginURL(dir); ok {
-			provider, host = gitProviderHost(origin)
-			remotePath = gitRemotePath(origin)
-		}
-		var parent, createdAt string
-		wt := IsLinkedWorktree(dir)
-		if wt {
-			parent = filepath.Base(WorktreeParent(dir))
-			createdAt = worktreeCreatedAt(dir)
-		}
-		repos = append(repos, Repo{
-			Name: e.Name(), WorkingCopyID: WorkingCopyID(dir), Path: dir, Branch: st.Branch,
-			Dirty: st.Dirty, Ahead: st.Ahead, Behind: st.Behind, Unborn: st.Unborn,
-			Provider: provider, Remote: host, RemotePath: remotePath,
-			Worktree: wt, Parent: parent, CreatedAt: createdAt,
-		})
+		live[dir] = true
+		gitIdx = append(gitIdx, len(repos))
+		repos = append(repos, Repo{Name: e.Name(), Path: dir})
 	}
+	listCache.prune(live)
+	parallel(gitIdx, func(i int) {
+		dir := repos[i].Path
+		st, id := listCache.inspect(dir, global)
+		repos[i].WorkingCopyID = WorkingCopyID(dir)
+		repos[i].Branch, repos[i].Dirty, repos[i].Ahead, repos[i].Behind, repos[i].Unborn = st.Branch, st.Dirty, st.Ahead, st.Behind, st.Unborn
+		repos[i].Provider, repos[i].Remote, repos[i].RemotePath = id.provider, id.host, id.remotePath
+		if id.worktree {
+			repos[i].Worktree, repos[i].Parent, repos[i].CreatedAt = true, id.parent, id.createdAt
+		}
+	})
 	// Compare linked worktrees only after the full list is available, so the
 	// target label comes from the already-read parent status. The actual commit
 	// comparison uses the parent path reported by Git rather than trusting names.
@@ -490,25 +495,28 @@ func HandleListRepos(w http.ResponseWriter, r *http.Request) {
 	for _, repo := range repos {
 		byName[repo.Name] = repo
 	}
-	for i := range repos {
-		if !repos[i].Worktree {
-			continue
+	var wtIdx []int
+	for _, i := range gitIdx {
+		if repos[i].Worktree {
+			wtIdx = append(wtIdx, i)
 		}
-		parentDir := WorktreeParent(repos[i].Path)
+	}
+	parallel(wtIdx, func(i int) {
+		parentDir := listCache.parentDir(repos[i].Path)
 		targetBranch := ""
 		if parent, ok := byName[repos[i].Parent]; ok {
 			targetBranch = parent.Branch
 		}
-		integration := GitWorktreeIntegration(parentDir, repos[i].Path, targetBranch)
+		integration := listCache.integration(repos[i].Path, parentDir, targetBranch, global)
 		repos[i].Integration = &integration
-	}
+	})
 	// Delete lock (docs/log/45): one ledger read for the whole list, not one per row.
 	if locked := lockedRepoDirs(); len(locked) > 0 {
 		for i := range repos {
 			repos[i].Locked = locked[absPath(repos[i].Path)]
 		}
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"repos": repos})
+	return repos
 }
 
 type cloneReq struct {
