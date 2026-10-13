@@ -87,6 +87,7 @@ export const errors = {
   "err.member_origin_invalid": "要求があなたのものだと確認できませんでした（期限切れの可能性があります）。もう一度お試しください。",
   "err.member_origin_unavailable": "ワークスペースのエージェントが起動直後か、再起動が必要です。1 分ほど待ってから再試行してください。",
   "err.too_many_uploads": "別のメモリのインポートが実行中です。完了してから再度お試しください。",
+  "err.upload_timeout": "アップロードが止まったか、時間がかかりすぎました。もう一度お試しください。",
   "err.runtime_failed": "エージェントを起動できませんでした。しばらく待ってから再試行してください。",
   // ↑ は「待てば直る」失敗のための文言。共有 daemon が未認証で起こされなかった場合は
   // 待っても直らないので、runtime_failed に潰さず専用コードで出す（workspace/agent の

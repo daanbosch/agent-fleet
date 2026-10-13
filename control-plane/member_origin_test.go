@@ -492,3 +492,56 @@ func TestHashedUploadTimingLimitsAndCleanup(t *testing.T) {
 	releaseUploadSlot(res.ws.MembershipID)
 	empty("after the slot test")
 }
+
+// A stalled upload is dropped (408) and gives its slot back; one that keeps moving is not.
+func TestHashedUploadStallFreesTheSlot(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	proxy, res, _, cleanup := newFSProxyTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer cleanup()
+	oldIdle := memberOriginUploadIdle
+	memberOriginUploadIdle = 300 * time.Millisecond
+	defer func() { memberOriginUploadIdle = oldIdle }()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { proxy.rest(w, r, res) }))
+	defer srv.Close()
+
+	post := func(body io.Reader) (int, error) {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/agents/memory/import", body)
+		req.Header.Set("Content-Type", "multipart/form-data; boundary=B")
+		req.Header.Set(memberOriginConsoleHeader, "1")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return 0, err
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode, nil
+	}
+	// Sends a little and then nothing, without closing.
+	pr, pw := io.Pipe()
+	go func() { _, _ = pw.Write([]byte("--B\r\n")) }()
+	code, err := post(pr)
+	_ = pw.Close()
+	if err != nil || code != http.StatusRequestTimeout {
+		t.Fatalf("stalled upload: %d %v", code, err)
+	}
+	uploadMu.Lock()
+	held := uploadsActive
+	uploadMu.Unlock()
+	if held != 0 {
+		t.Fatalf("%d slots still held after the stall", held)
+	}
+	// Slow but moving: each gap is under the idle limit, the total is over it.
+	pr2, pw2 := io.Pipe()
+	go func() {
+		for i := 0; i < 4; i++ {
+			_, _ = pw2.Write([]byte("x"))
+			time.Sleep(150 * time.Millisecond)
+		}
+		_ = pw2.Close()
+	}()
+	if code, err := post(pr2); err != nil || code != http.StatusOK {
+		t.Fatalf("slow upload: %d %v", code, err)
+	}
+}

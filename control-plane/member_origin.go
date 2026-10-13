@@ -23,6 +23,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"mime"
@@ -208,12 +209,12 @@ func (m *manager) memberOriginSignHash(res *resolved, method, path, query, bodyS
 
 // relayBody is the body and mark a relayed request goes out with: the member routes are buffered
 // and signed, everything else streams through untouched and unmarked.
-func (m *manager) relayBody(r *http.Request, res *resolved) (io.Reader, string, *apiError) {
+func (m *manager) relayBody(w http.ResponseWriter, r *http.Request, res *resolved) (io.Reader, string, *apiError) {
 	if !memberOriginRoute(r) {
 		return r.Body, "", nil
 	}
 	if memberOriginHashedRoute(r) {
-		return m.hashedUploadMark(r, res)
+		return m.hashedUploadMark(w, r, res)
 	}
 	body, mark, aerr := m.memberOriginMark(r, res, time.Now())
 	if aerr != nil {
@@ -256,6 +257,38 @@ func memberOriginOriginCheck(r *http.Request) *apiError {
 		return &apiError{http.StatusForbidden, "forbidden", "member writes are accepted from the Console's own origin only"}
 	}
 	return nil
+}
+
+// An upload that makes no progress for memberOriginUploadIdle, or runs past memberOriginUploadTotal,
+// is dropped so that it cannot hold one of the few spool slots indefinitely (the http.Server has no
+// body read timeout). Vars so tests can shorten them.
+var (
+	memberOriginUploadIdle  = 60 * time.Second
+	memberOriginUploadTotal = 30 * time.Minute
+)
+
+// progressReader pushes the connection's read deadline out before each read, so only a stall
+// (not a slow but moving upload) trips it, and enforces the overall limit.
+type progressReader struct {
+	r        io.Reader
+	rc       *http.ResponseController
+	idle     time.Duration
+	deadline time.Time
+	expired  bool
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	now := time.Now()
+	if now.After(p.deadline) {
+		p.expired = true
+		return 0, os.ErrDeadlineExceeded
+	}
+	d := now.Add(p.idle)
+	if d.After(p.deadline) {
+		d = p.deadline
+	}
+	_ = p.rc.SetReadDeadline(d) // unsupported on a recorder; the real server supports it
+	return p.r.Read(b)
 }
 
 // memberOriginNow is the clock the upload mark is taken from; a var so a test can watch it.
@@ -310,7 +343,7 @@ func (u spooledUpload) Close() error {
 // file (rewound; the relay closes it) with the mark over the hash. The same ownership and
 // same-origin checks as the JSON routes apply, with the custom header standing in for the JSON
 // content type.
-func (m *manager) hashedUploadMark(r *http.Request, res *resolved) (io.Reader, string, *apiError) {
+func (m *manager) hashedUploadMark(w http.ResponseWriter, r *http.Request, res *resolved) (io.Reader, string, *apiError) {
 	if res.ws.MembershipID == "" || res.ws.MembershipID != res.mv.MembershipID {
 		return nil, "", &apiError{http.StatusForbidden, "forbidden", "only the workspace's own member can change its memory"}
 	}
@@ -336,8 +369,14 @@ func (m *manager) hashedUploadMark(r *http.Request, res *resolved) (io.Reader, s
 		return nil, "", aerr
 	}
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(r.Body, memberOriginUploadMax+1))
+	pr := &progressReader{r: io.LimitReader(r.Body, memberOriginUploadMax+1), rc: http.NewResponseController(w),
+		idle: memberOriginUploadIdle, deadline: time.Now().Add(memberOriginUploadTotal)}
+	n, err := io.Copy(io.MultiWriter(f, h), pr)
+	_ = pr.rc.SetReadDeadline(time.Time{})
 	if err != nil {
+		if pr.expired || errors.Is(err, os.ErrDeadlineExceeded) {
+			return fail(&apiError{http.StatusRequestTimeout, "upload_timeout", "the upload stalled or took too long"})
+		}
 		return fail(&apiError{http.StatusBadRequest, "bad_request", "could not read the request body"})
 	}
 	if n > memberOriginUploadMax {

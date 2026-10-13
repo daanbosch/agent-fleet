@@ -227,7 +227,7 @@ func (a agentProxyAPI) rest(w http.ResponseWriter, r *http.Request, res *resolve
 		target += "?" + r.URL.RawQuery
 	}
 
-	body, mark, aerr := a.mgr.relayBody(r, res)
+	body, mark, aerr := a.mgr.relayBody(w, r, res)
 	if aerr != nil {
 		writeAPIErr(w, aerr)
 		return

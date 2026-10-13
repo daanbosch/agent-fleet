@@ -87,6 +87,7 @@ export const errors: Record<keyof typeof jaErrors, string> = {
   "err.member_origin_invalid": "The request could not be verified as yours (it may have expired). Try again.",
   "err.member_origin_unavailable": "The workspace's agent just started or needs a restart. Try again in a minute.",
   "err.too_many_uploads": "Another memory import is already running. Try again when it finishes.",
+  "err.upload_timeout": "The upload stalled or took too long. Try again.",
   "err.runtime_failed": "Couldn't start the agent. Wait a moment and try again.",
   // The line above is for failures that waiting fixes. A shared daemon that was not
   // started because the CLI is not signed in never fixes itself, so it gets its own
