@@ -146,8 +146,8 @@ RUN if [ "${BAKE_OPTIONAL_TOOLS}" = "1" ]; then set -eux; \
 # publishes the same security build for both architectures. Fonts and fontconfig are
 # explicit so Japanese pages render without depending on a transient recommendation.
 # deploy/local/apt-pin-check.sh checks the pin against both architectures' indexes and
-# prints the version to bump to; cli-drift.yml runs it daily and goes red when the pin
-# is gone for either architecture.
+# prints the version to bump to; cli-drift.yml runs it every 2 hours and goes red when the
+# pin is gone for either architecture, and apt-pin-bump.yml opens the PR that moves it.
 # ⚠ trixie-security は「現行ビルドだけ」を持ち、古い版はミラーから消える。ピンを
 # 放置すると、この層のキャッシュが破れた次のビルドで `Version ... was not found` と
 # 落ちる（＝別の ARG を触った瞬間に無関係に見える形で発火する）。上流のセキュリティ
