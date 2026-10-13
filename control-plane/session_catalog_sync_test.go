@@ -440,3 +440,42 @@ func TestSharePutRechecksTheInventoryAppliedAfterItsSync(t *testing.T) {
 		}
 	}
 }
+
+type panicStateRuntime struct{ stubRuntime }
+
+func (panicStateRuntime) State(context.Context) string { panic("boom") }
+
+// A panic inside a sync must fail that sync, not wedge the owner's queue: every later sync
+// would otherwise wait on a flight that never finishes.
+func TestCatalogSyncSurvivesAPanickingFlight(t *testing.T) {
+	f := newSyncBenchFixture(t, 3)
+	f.agent.catalogDelay, f.agent.reposDelay = 0, 0
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	bad := *f.res
+	bad.rt = panicStateRuntime{}
+	if _, err := f.mgr.syncOwnerCatalog(ctx, &bad, catalogSyncNeed{}); err == nil || ctx.Err() != nil {
+		t.Fatalf("panicking sync: err=%v ctx=%v", err, ctx.Err())
+	}
+	if _, err := f.mgr.syncOwnerCatalog(ctx, f.res, catalogSyncNeed{exact: true}); err != nil {
+		t.Fatalf("the next sync after a panic: %v", err)
+	}
+	if _, ok := f.row(t, "s-0001"); !ok {
+		t.Fatal("the next sync did not run")
+	}
+}
+
+func TestCatalogSyncerEvictsIdleOwners(t *testing.T) {
+	cs := &catalogSyncer{owners: map[string]*ownerCatalogSync{}}
+	busy := &catalogFlight{done: make(chan struct{})}
+	cs.owners["busy"] = &ownerCatalogSync{cur: busy}
+	cs.owners["fresh"] = &ownerCatalogSync{reposAt: time.Now()}
+	cs.owners["idle"] = &ownerCatalogSync{reposAt: time.Now().Add(-2 * shareReposTTL)}
+	cs.evictIdle()
+	if _, ok := cs.owners["idle"]; ok {
+		t.Fatal("an idle owner with an expired cache was kept")
+	}
+	if len(cs.owners) != 2 {
+		t.Fatalf("owners=%v, want busy and fresh kept", cs.owners)
+	}
+}

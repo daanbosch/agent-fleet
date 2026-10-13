@@ -8,18 +8,18 @@
 // The push gate is a fact the CP obtained from the owner's Agent and is only displayed
 // here. Recomputing the decision client-side would split the condition across two places
 // and it would drift from the server's check at send time (docs/log/77 §77.5).
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { Modal } from "../../ui/Modal.tsx";
 import { Button } from "../../ui/Button.tsx";
 import { Icon } from "../../ui/Icon.tsx";
 import { useToast } from "../../ui/ToastProvider.tsx";
-import { api, apiJSON, errText } from "../../core/api/client.ts";
+import { api, errText } from "../../core/api/client.ts";
 import { useT } from "../../lib/i18n/index.ts";
 import { SESSION_TITLE_MAX, clampSessionTitle } from "../../lib/sessionTitle.ts";
 import { ShareCreateModal } from "./ShareCreateModal.tsx";
 import { useHandoffStore } from "./handoffStore.ts";
-import { boundedRequest } from "./boundedRequest.ts";
+import { boundedRequest, type BoundedRequest } from "./boundedRequest.ts";
 import "./sharing.css";
 
 interface RecipientCandidate {
@@ -82,13 +82,21 @@ export function HandoffOfferModal({
   const [sending, setSending] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
 
-  // The recipient lookup syncs the owner's session catalog first; bound it so "loading"
-  // always ends, in the list or in the load error below.
+  // The recipient lookup and the send both wait on the owner's Workspace (catalog sync,
+  // handoff-context), so each is bounded and abandoned when superseded or closed.
+  const loadReq = useRef<BoundedRequest | null>(null);
+  const sendReq = useRef<BoundedRequest | null>(null);
   const load = () => {
     setLoading(true);
+    loadReq.current?.cancel();
     const req = boundedRequest();
+    loadReq.current = req;
+    // Only the newest lookup may write: an older one answering late would show another
+    // session's recipients.
+    const current = () => loadReq.current === req;
     api(`api/sessions/${encodeURIComponent(session)}/handoff-recipients`, { signal: req.signal })
       .then((d) => {
+        if (!current()) return;
         if (d?.error) {
           setLoadErr(errText(d.error));
           setMembers([]);
@@ -99,13 +107,22 @@ export function HandoffOfferModal({
         setCtx((d.context || null) as HandoffContext | null);
         setRecipient((prev) => prev || (d.members?.[0]?.userKey ?? ""));
       })
-      .catch(() => setLoadErr(tr("handoff.load_failed")))
+      .catch(() => {
+        if (current()) setLoadErr(tr("handoff.load_failed"));
+      })
       .finally(() => {
         req.settle();
-        setLoading(false);
+        if (current()) setLoading(false);
       });
   };
   useEffect(load, [session]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => {
+    for (const ref of [loadReq, sendReq]) {
+      const req = ref.current;
+      ref.current = null;
+      req?.cancel();
+    }
+  }, []);
 
   const blocked = ctx?.blocked || "";
   const warning = ctx?.warning || "";
@@ -115,16 +132,23 @@ export function HandoffOfferModal({
     e.preventDefault();
     if (!canSubmit || sending) return;
     setSending(true);
-    const d = await apiJSON("api/session-handoff-offers", "POST", {
-      sessionName: session,
-      recipientUserKey: recipient,
-      title: title.trim(),
-      prompt,
-      ackWarning,
-    }).catch(() => ({ error: { message: tr("handoff.send_failed") } }));
+    const req = boundedRequest();
+    sendReq.current = req;
+    const d = await api("api/session-handoff-offers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionName: session, recipientUserKey: recipient, title: title.trim(), prompt, ackWarning }),
+      signal: req.signal,
+    }).catch(() => (req.signal.aborted && !req.timedOut() ? null : { error: { message: tr(req.timedOut() ? "handoff.send_timeout" : "handoff.send_failed") } }));
+    req.settle();
+    if (sendReq.current !== req || d === null) return; // closed meanwhile
+    sendReq.current = null;
     setSending(false);
     if (d?.error) {
       toast(errText(d.error));
+      // A timed-out send may still have created the offer; resending is safe (an offer
+      // already pending answers 409).
+      if (req.timedOut()) void useHandoffStore.getState().refresh();
       // Hitting the gate, or an offer already pending, can first become true here (a
       // commit landed after the modal opened). Refetch the verdict and match the screen
       // to it.
@@ -135,15 +159,24 @@ export function HandoffOfferModal({
     onSent?.();
     onClose();
   };
+  // Closing abandons a send in flight instead of waiting for it.
+  const close = () => {
+    const req = sendReq.current;
+    if (req) {
+      sendReq.current = null;
+      req.cancel();
+      void useHandoffStore.getState().refresh();
+    }
+    onClose();
+  };
 
   return (
     <>
       <Modal
         title={tr("handoff.offer_title")}
-        onClose={onClose}
+        onClose={close}
         as="form"
         onSubmit={submit}
-        lockClose={sending}
         className="share-create-modal"
       >
         <div className="ui-modal-body">
@@ -212,7 +245,7 @@ export function HandoffOfferModal({
           )}
         </div>
         <div className="ui-modal-foot">
-          <Button variant="ghost" onClick={onClose}>
+          <Button variant="ghost" onClick={close}>
             {tr("common.cancel")}
           </Button>
           <Button type="submit" variant="primary" disabled={!canSubmit || sending}>

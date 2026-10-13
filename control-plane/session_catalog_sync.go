@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -56,6 +59,19 @@ type catalogSyncer struct {
 	owners map[string]*ownerCatalogSync
 }
 
+// catalogSyncOwnersMax bounds the per-owner state a long-lived CP keeps. Dropping an idle
+// owner only costs that owner's next sync a live /repos read.
+const catalogSyncOwnersMax = 10_000
+
+// evictIdle drops owners with no flight whose /repos cache has expired. Call with cs.mu held.
+func (cs *catalogSyncer) evictIdle() {
+	for k, o := range cs.owners {
+		if o.cur == nil && o.next == nil && time.Since(o.reposAt) >= shareReposTTL {
+			delete(cs.owners, k)
+		}
+	}
+}
+
 func (m *manager) catalogSyncer() *catalogSyncer {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -79,6 +95,9 @@ func (m *manager) syncOwnerCatalog(ctx context.Context, res *resolved, need cata
 	cs.mu.Lock()
 	o := cs.owners[owner]
 	if o == nil {
+		if len(cs.owners) >= catalogSyncOwnersMax {
+			cs.evictIdle()
+		}
 		o = &ownerCatalogSync{}
 		cs.owners[owner] = o
 	}
@@ -110,15 +129,28 @@ func (m *manager) syncOwnerCatalog(ctx context.Context, res *resolved, need cata
 // order is what keeps an older Agent snapshot from being written over a newer one.
 func (m *manager) runCatalogFlights(cs *catalogSyncer, o *ownerCatalogSync, f *catalogFlight) {
 	for f != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), catalogSyncTimeout)
-		f.repos, f.err = m.syncCatalogOnce(ctx, cs, o, f)
-		cancel()
+		f.repos, f.err = m.runCatalogFlight(cs, o, f)
 		cs.mu.Lock()
 		close(f.done)
 		o.cur, o.next = o.next, nil
 		f = o.cur
 		cs.mu.Unlock()
 	}
+}
+
+// runCatalogFlight runs one flight and turns a panic into its error. Without that, a panic
+// would leave done unclosed and the queue stuck, so every later sync for this owner would hang
+// on a dead flight — and an unrecovered panic in this goroutine would take the CP down.
+func (m *manager) runCatalogFlight(cs *catalogSyncer, o *ownerCatalogSync, f *catalogFlight) (repos map[string]repoInfo, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			log.Printf("catalog sync for %s panicked: %v\n%s", f.res.mv.MembershipID, p, debug.Stack())
+			repos, err = nil, &catalogSyncError{fmt.Errorf("catalog sync panicked: %v", p)}
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), catalogSyncTimeout)
+	defer cancel()
+	return m.syncCatalogOnce(ctx, cs, o, f)
 }
 
 func (m *manager) syncCatalogOnce(ctx context.Context, cs *catalogSyncer, o *ownerCatalogSync, f *catalogFlight) (map[string]repoInfo, error) {

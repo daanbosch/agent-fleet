@@ -457,10 +457,10 @@ func (a sessionShareAPI) listReceived(w http.ResponseWriter, r *http.Request, _ 
 		if e == nil {
 			wsState = res.rt.State(r.Context())
 		}
-		// Put the inventory reconciliation behind the per-owner throttle. A sync makes two
-		// round trips to the Agent while holding the owner's share lock, so running it on
-		// every 5s poll left share creation/removal (which takes the same lock) queued behind
-		// it. All that can lag here is noticing that the owner deleted or archived a session,
+		// Put the inventory reconciliation behind the per-owner throttle. A sync reads the
+		// owner's Agent (and /repos when its cache is stale), so running it on every 5s poll
+		// from every recipient's tab was a standing load on somebody else's Workspace. All
+		// that can lag here is noticing that the owner deleted or archived a session,
 		// and the freshness of the state badge; effectivePermission below still evaluates the
 		// ACL from the database on every request.
 		if e == nil && wsState == "running" && !a.freshCatalog(owner, ttl) {

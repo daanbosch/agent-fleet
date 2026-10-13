@@ -332,6 +332,12 @@ func (s *SQL) ReplaceSharedSessionCatalog(ctx context.Context, workspaceID, owne
 		}
 		stored[r.Name] = r
 	}
+	// A read cut short must not pass for the full catalog: every row it missed would be
+	// swept below as stale, its session-scoped share rules with it.
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	if err = rows.Close(); err != nil {
 		return err
 	}

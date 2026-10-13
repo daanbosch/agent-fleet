@@ -25,7 +25,7 @@ export function ShareListModal({ onClose }: { onClose: () => void }) {
   const askConfirm = useConfirm();
   const toast = useToast();
   const [createOpen, setCreateOpen] = useState(false);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [busy, setBusy] = useState<ReadonlySet<string>>(() => new Set());
   useEffect(() => { void useMySharesStore.getState().refresh(); }, []);
 
   const targetInfo = useMemo(() => (scope: { type: string; key: string }) => {
@@ -60,12 +60,16 @@ export function ShareListModal({ onClose }: { onClose: () => void }) {
   // a silent failure (a 409 while an approved operation runs, say) left the row looking
   // changed until the next refresh put it back.
   const mutate = async (id: string, init: RequestInit, failKey: "share.unshare_failed" | "share.permission_failed") => {
-    setBusy(id);
+    setBusy((b) => new Set(b).add(id));
     const req = boundedRequest();
     const d = await api(`api/session-shares/${encodeURIComponent(id)}`, { ...init, signal: req.signal })
       .catch(() => ({ error: { message: tr(req.timedOut() ? "share.request_timeout" : failKey) } }));
     req.settle();
-    setBusy(null);
+    setBusy((b) => {
+      const next = new Set(b);
+      next.delete(id);
+      return next;
+    });
     if (d?.error) toast(errText(d.error));
     await useMySharesStore.getState().refresh();
   };
@@ -80,18 +84,18 @@ export function ShareListModal({ onClose }: { onClose: () => void }) {
             {shares.map((s) => {
               const info = targetInfo(s.scope);
               return (
-                <li key={s.id} className="share-row" aria-busy={busy === s.id}>
+                <li key={s.id} className="share-row" aria-busy={busy.has(s.id)}>
                   <div className="share-info" title={info.label}>
                     <Icon name={info.icon} />
                     <span className="share-target-name">{info.label}</span>
                     <span className="share-recipient">{s.recipientUserKey}</span>
                   </div>
                   <div className="share-actions">
-                    <select value={s.permission} disabled={busy === s.id} onChange={(e) => void change(s.id, e.target.value as "ro" | "rw")}>
+                    <select value={s.permission} disabled={busy.has(s.id)} onChange={(e) => void change(s.id, e.target.value as "ro" | "rw")}>
                       <option value="ro">{tr("share.permission_ro")}</option>
                       <option value="rw">{tr("share.permission_rw")}</option>
                     </select>
-                    <IconButton icon={busy === s.id ? "loading" : "trash"} spin={busy === s.id} label={tr("share.unshare")} variant="danger" disabled={busy === s.id} onClick={() => void remove(s.id)} />
+                    <IconButton icon={busy.has(s.id) ? "loading" : "trash"} spin={busy.has(s.id)} label={tr("share.unshare")} variant="danger" disabled={busy.has(s.id)} onClick={() => void remove(s.id)} />
                   </div>
                 </li>
               );

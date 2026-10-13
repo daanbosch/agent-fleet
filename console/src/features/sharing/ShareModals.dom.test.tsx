@@ -197,4 +197,38 @@ describe("HandoffOfferModal", () => {
     expect(document.body.textContent || "").not.toContain("読み込み中");
     expect(document.body.textContent || "").toContain("引き継ぎ先を取得できませんでした");
   });
+
+  async function openAndSend(onClose: () => void) {
+    handler = async (path, opts) => {
+      if (path.endsWith("/handoff-recipients")) {
+        return { members: [{ userKey: "b-example-com", email: "b@example.com" }], context: { vcs: "git", branch: "main", ahead: 0 } };
+      }
+      if (path === "api/session-handoff-offers" && opts?.method === "POST") return hang(opts);
+      return {};
+    };
+    await mount(<HandoffOfferModal session="s1" initialTitle="next" initialPrompt="continue" onClose={onClose} />);
+    await act(async () => buttons().find((b) => b.type === "submit")!.click());
+    await flush();
+    const post = calls.find((c) => c.path === "api/session-handoff-offers")!;
+    expect(post).toBeTruthy();
+    return post;
+  }
+
+  // The send waits on the owner's Workspace too (catalog sync, handoff-context): it must
+  // neither lock the dialog nor spin forever.
+  it("can be closed while the send is running, and abandons it", async () => {
+    const onClose = vi.fn();
+    const post = await openAndSend(onClose);
+    const cancel = [...document.querySelectorAll(".ui-modal-foot button")].find((b) => (b as HTMLButtonElement).type !== "submit") as HTMLButtonElement;
+    await act(async () => cancel.click());
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(post.opts?.signal?.aborted).toBe(true);
+  });
+
+  it("gives up on a send that never answers and says so", async () => {
+    await openAndSend(() => {});
+    await flush(SHARE_REQUEST_TIMEOUT_MS + 10);
+    expect(document.body.textContent || "").toContain("引き継ぎの応答がありません");
+    expect(buttons().find((b) => b.type === "submit")!.disabled).toBe(false);
+  });
 });
