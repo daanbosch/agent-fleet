@@ -40,6 +40,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 )
 
 // agentMemPurgedTrailer marks the first kept change of a memory whose earlier revisions were
@@ -935,6 +937,9 @@ var agentMemPurgeLockHeld = func(path string) (bool, error) {
 			if os.IsNotExist(err) {
 				continue // exited meanwhile
 			}
+			if os.IsPermission(err) && purgeOtherUser(filepath.Join("/proc", e.Name())) {
+				continue // another user's process cannot be this Agent's git
+			}
 			return true, err
 		}
 		for _, fd := range fds {
@@ -944,6 +949,21 @@ var agentMemPurgeLockHeld = func(path string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// purgeLockSkew absorbs filesystem timestamp granularity: a lock made right after the marker can
+// carry a slightly earlier mtime on a coarse-clock filesystem (seen on CI). A lock made by someone
+// else long before the purge is still far outside it.
+const purgeLockSkew = 2 * time.Second
+
+// purgeOtherUser says whether the process directory belongs to a different uid than ours.
+func purgeOtherUser(dir string) bool {
+	st, err := os.Stat(dir)
+	if err != nil {
+		return false
+	}
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	return ok && int(sys.Uid) != os.Getuid()
 }
 
 // agentMemPurgeClearLocks removes the lock files this purge's own update-ref left. A lock is ours
@@ -968,7 +988,7 @@ func agentMemPurgeClearLocks(moves []agentMemPurgeRefMove) error {
 			return err
 		}
 		held, herr := agentMemPurgeLockHeld(l)
-		if herr != nil || held || info.ModTime().Before(st.ModTime()) {
+		if herr != nil || held || info.ModTime().Before(st.ModTime().Add(-purgeLockSkew)) {
 			return memoryErrf(http.StatusInternalServerError, errCodeMemorySnapshotFailed,
 				"a ref is locked by something other than the interrupted purge; it was left as it is")
 		}
