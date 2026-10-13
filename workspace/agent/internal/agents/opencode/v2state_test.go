@@ -564,6 +564,7 @@ func newTurnDaemon(t *testing.T) *turnDaemon {
 		inner.ServeHTTP(w, r)
 	})
 	d.sessions["ses_1"] = `{"data":{"id":"ses_1","time":{"created":1,"updated":1}}}`
+	d.messages["ses_1"] = []string{}
 	return td
 }
 
@@ -829,5 +830,34 @@ func TestV2HungDaemonCostsOneTimeoutNotOnePerSlot(t *testing.T) {
 	}
 	if el := time.Since(start); el > 250*time.Millisecond {
 		t.Fatalf("5 readers took %v: each paid the timeout", el)
+	}
+}
+
+// Failed outcome reads are counted on their own: a next execution that keeps the session running
+// must not keep resetting the count, or the turn never settles while /message is down.
+func TestV2UnreadableOutcomeGivesUpWhileTheNextExecutionRuns(t *testing.T) {
+	d := newTurnDaemon(t)
+	d.setActive("ses_1") // running for the whole test
+	var reads int
+	inner := d.f.srv.Config.Handler
+	d.f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/message") {
+			d.mu.Lock()
+			reads++
+			d.mu.Unlock()
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	})
+	// seen must be true before outcome reads start: let the first poll see it running.
+	if res, err := v2Turn(t, d.f); err == nil {
+		res.Body.Close()
+		t.Fatal("an unreadable outcome ended the turn as finished")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if reads != v2PollMisses {
+		t.Fatalf("gave up after %d outcome reads, want %d", reads, v2PollMisses)
 	}
 }

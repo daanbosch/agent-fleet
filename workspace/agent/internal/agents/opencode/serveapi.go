@@ -441,8 +441,8 @@ func sendTurn(addr, ses, dir string, req *http.Request, st agents.ThreadSettings
 	}
 	_ = json.Unmarshal(promptBody, &userMsg)
 	gen := Serve().Generation()
-	seen, misses := false, 0
-	lastLive := time.Now() // the last moment the turn was known to be alive or not yet due
+	seen, misses, outMisses := false, 0, 0 // failed active reads / failed outcome reads, in a row
+	lastLive := time.Now()                 // the last moment the turn was known to be alive or not yet due
 	for {
 		m, err := activeSessions(addr, dir)
 		// A new generation means the daemon this turn ran on is gone, whatever the new one
@@ -467,13 +467,15 @@ func sendTurn(addr, ses, dir string, req *http.Request, st agents.ThreadSettings
 			kind, e, found, oerr := v2OutcomeFor(addr, ses, userMsg.Data.ID)
 			switch {
 			case oerr != nil:
-				if misses++; misses >= v2PollMisses {
+				if outMisses++; outMisses >= v2PollMisses {
 					return nil, fmt.Errorf("opencode v2 turn outcome unreadable: %w", oerr)
 				}
 			case found:
 				return v2OutcomeResponse(kind, e), nil
 			case !running && time.Since(lastLive) > v2StartWithin:
 				return nil, errors.New("opencode v2 turn state unknown: no outcome was recorded")
+			default:
+				outMisses = 0 // read fine, just not recorded yet
 			}
 		}
 		select {
