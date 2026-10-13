@@ -477,3 +477,66 @@ func TestTrashArchivesBackupWhenLogIsReplacedByStub(t *testing.T) {
 		t.Fatalf("restored = %q, %v; want the backed-up conversation", got, err)
 	}
 }
+
+// "A good log exists somewhere" is not a reason to drop the backup: an older complete log in
+// another project, or an older complete log at the canonical path, must not displace a newer
+// backup in the archive.
+func TestTrashKeepsNewerBackupAgainstOlderCompleteLogs(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		other bool // the older log sits in another project, with a partial one at the canonical path
+	}{{"bkpoldother", true}, {"bkpoldlive", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("AF_SESSIONS_DIR", filepath.Join(home, "sessions"))
+			t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
+			srv := httptest.NewServer(trashMux())
+			defer srv.Close()
+			dir := filepath.Join(home, "repos", "app")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			m := session.Meta{Name: tc.name, Dir: dir, Kind: session.KindClaude, CreatedAt: time.Now().Format(time.RFC3339)}
+			session.WriteMeta(m)
+			id := session.UUID(dir, m.Name)
+			canon := filepath.Join(home, "claude", "projects", claude.ProjectKey(dir), id+".jsonl")
+			if err := os.MkdirAll(filepath.Dir(canon), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			newest := `{"type":"user","message":"NEWEST"}` + "\n"
+			older := `{"type":"user","message":"OLDER"}` + "\n"
+			if err := os.WriteFile(canon, []byte(newest), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := claude.BackupTranscript(m); err != nil {
+				t.Fatal(err)
+			}
+			oldPath := canon
+			if tc.other {
+				if err := os.WriteFile(canon, []byte(`{"type":"user","message":"INCOMPLETE`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				oldPath = filepath.Join(home, "claude", "projects", "elsewhere", id+".jsonl")
+				if err := os.MkdirAll(filepath.Dir(oldPath), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(oldPath, []byte(older), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			past := time.Now().Add(-24 * time.Hour)
+			if err := os.Chtimes(oldPath, past, past); err != nil {
+				t.Fatal(err)
+			}
+
+			var out struct{ Archive string }
+			do(t, srv, "DELETE", "/sessions/"+tc.name, nil, http.StatusOK, &out)
+			_ = os.RemoveAll(filepath.Join(home, "claude", "projects"))
+			do(t, srv, "POST", "/cleanup/archives/"+out.Archive+"/restore", nil, http.StatusOK, nil)
+			if got, err := os.ReadFile(canon); err != nil || string(got) != newest {
+				t.Fatalf("restored canonical log = %q, %v; want the newer backup", got, err)
+			}
+		})
+	}
+}

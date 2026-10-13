@@ -567,19 +567,19 @@ func placeStaged(tmp, dest string) (created bool, err error) {
 	return true, nil
 }
 
-// HasCurrentLog reports whether the log of the conversation the slot last wrote (under the
-// recorded id) is on disk and holds a conversation. An older slot log or a stub does not count.
-func HasCurrentLog(m session.Meta) (bool, error) {
-	logs, err := exactLogs(recordedLogID(session.UUID(m.Dir, m.Name)))
+// LiveBeatsBackup reports whether the log at live is a complete conversation strictly newer than
+// the backup file: the only case in which the archive may take the live log in the backup's
+// place. Anything else (a stub, a partial log, an older one) never justifies dropping the backup.
+func LiveBeatsBackup(live, backup string) bool {
+	li, err := os.Stat(live)
 	if err != nil {
-		return false, err
+		return false
 	}
-	for _, p := range logs {
-		if completeTranscript(p) {
-			return true, nil
-		}
+	bi, err := os.Stat(backup)
+	if err != nil {
+		return true
 	}
-	return false, nil
+	return li.ModTime().After(bi.ModTime()) && completeTranscript(live)
 }
 
 // ArchiveBackup returns the backed-up log of a session whose own log is gone, for the cleanup

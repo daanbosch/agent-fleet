@@ -257,49 +257,47 @@ func archiveSessionForDelete(m session.Meta) (string, error) {
 	payloads := map[string][]byte{}
 	as := cleanupArchivedSession{Name: m.Name, Display: session.Display(m), Kind: m.Kind, Meta: metaJSON}
 	if m.Kind == session.KindClaude {
-		// The Agent's backup stands in for the current conversation's log whenever that log is
-		// not on disk as a conversation: gone, or replaced by a stub, or only an older slot log
-		// left. Deleting the session removes the backup, so the archive must hold it then.
-		var bkSrc, bkDest string
-		haveCurrent, err := claude.HasCurrentLog(m)
+		// Deleting the session removes the Agent's backup of the log, so the archive must hold
+		// whatever of it is not already held by a live log that is complete and newer. A live
+		// log that is a stub, partial or older is archived beside it (never in its place), and
+		// "a good log exists somewhere" is not a reason to drop the backup.
+		bkSrc, bkDest, hasBackup, err := claude.ArchiveBackup(m)
 		if err != nil {
 			return "", err
 		}
-		if !haveCurrent {
-			src, dest, ok, err := claude.ArchiveBackup(m)
-			if err != nil {
-				return "", err
-			}
-			if ok {
-				bkSrc, bkDest = src, dest
+		_, _, matched := claude.TranscriptRead(session.UUID(m.Dir, m.Name))
+		useBackup := hasBackup
+		for _, p := range matched {
+			if hasBackup && p == bkDest && claude.LiveBeatsBackup(p, bkSrc) {
+				useBackup = false
 			}
 		}
+		add := func(i int, src, dest string, b []byte) {
+			entry := "sessions/" + idSlug(m.Name) + "/" + jsonlEntryName(i, src)
+			payloads[entry] = b
+			as.JSONLPaths = append(as.JSONLPaths, dest)
+			as.JSONLNames = append(as.JSONLNames, entry)
+		}
 		off := 0
-		if bkSrc != "" {
+		if useBackup {
 			off = 1
 			b, err := os.ReadFile(bkSrc)
 			if err != nil {
 				return "", err
 			}
-			entry := "sessions/" + idSlug(m.Name) + "/" + jsonlEntryName(0, bkDest)
-			payloads[entry] = b
-			as.JSONLPaths = append(as.JSONLPaths, bkDest)
-			as.JSONLNames = append(as.JSONLNames, entry)
+			add(0, bkDest, bkDest, b)
 		}
-		if _, _, matched := claude.TranscriptRead(session.UUID(m.Dir, m.Name)); len(matched) > 0 {
-			for i, p := range matched {
-				if p == bkDest {
-					continue // the stub the backup replaces in the archive
-				}
-				b, err := os.ReadFile(p)
-				if err != nil {
-					continue
-				}
-				entry := "sessions/" + idSlug(m.Name) + "/" + jsonlEntryName(i+off, p)
-				payloads[entry] = b
-				as.JSONLPaths = append(as.JSONLPaths, p)
-				as.JSONLNames = append(as.JSONLNames, entry)
+		for i, p := range matched {
+			b, err := os.ReadFile(p)
+			if err != nil {
+				continue
 			}
+			dest := p
+			if useBackup && p == bkDest {
+				// The backup takes this path; the file that was here is kept under another name.
+				dest = p + ".superseded.archived"
+			}
+			add(i+off, p, dest, b)
 		}
 	}
 	man := cleanupManifest{
