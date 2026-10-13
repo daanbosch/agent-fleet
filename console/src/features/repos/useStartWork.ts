@@ -31,6 +31,9 @@ export interface StartTarget {
 export interface HandoffTake {
   offerId: string;
   token: string;
+  /** Gives this take up and takes the offer again, for a second create: the CP lets a take
+   *  start one create only (#2040). null when the offer could not be taken again. */
+  renew?: () => Promise<HandoffTake | null>;
 }
 
 export function useStartWork(): (target: StartTarget, opts: LaunchOpts, take?: HandoffTake) => Promise<LaunchResult> {
@@ -126,6 +129,12 @@ export function useStartWork(): (target: StartTarget, opts: LaunchOpts, take?: H
       delete body.driver;
       if (!agentOf(kind).caps.tuiEffort) delete body.effort;
       if (!agentOf(kind).caps.tuiStartMode) delete body.mode;
+      if (take) {
+        const next = take.renew ? await take.renew() : null;
+        if (!next) return { ok: false };
+        take = next;
+        body.handoff_take = { offerId: next.offerId, token: next.token };
+      }
       res = await post();
     }
     if (res?.lost) return { ok: false, unknown: true };

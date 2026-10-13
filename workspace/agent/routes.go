@@ -74,6 +74,7 @@ func buildMux() *http.ServeMux {
 	// Top-level path (not under /sessions/{name}/…) to avoid a mux wildcard collision.
 	mux.HandleFunc("GET /sessions-idempotency/{key}", sessionx.HandleIdempotencyLookup)
 	mux.HandleFunc("POST /sessions-idempotency/{key}/abandon", sessionx.HandleIdempotencyAbandon)
+	mux.HandleFunc("POST /sessions-idempotency/{key}/reserve", sessionx.HandleIdempotencyReserve)
 	mux.HandleFunc("GET /share-operations/{key}", handleShareOperationLookup)
 	mux.HandleFunc("POST /sessions/{name}/fork", sessionx.HandleForkSession)
 	mux.HandleFunc("POST /sessions/{name}/stop", sessionx.HandleStopSession)

@@ -1015,6 +1015,9 @@ func (a workspaceAPI) sessionCreate(w http.ResponseWriter, r *http.Request, res 
 	confirmed := false
 	tw := &teeWriter{ResponseWriter: w}
 	a.sessionCreateThen(tw, r, res, func(ctx context.Context) *apiError {
+		if aerr := reserveHandoffCreate(ctx, res, *take); aerr != nil {
+			return aerr
+		}
 		if aerr := confirmHandoffTake(ctx, a.mgr.store, res.mv, *take); aerr != nil {
 			return aerr
 		}

@@ -205,14 +205,17 @@ func (s *SQL) TakeSessionHandoffOffer(ctx context.Context, id, recipientMembersh
 // immediately before the session create reaches the Agent. It holds only while the offer is
 // still pending under this very token, so a Console that took the offer, went quiet past
 // the take window and lost it — to the sender's withdraw or to another take — cannot start
-// the work when it resumes. Once confirmed, the take holds until it is accepted, released, or
-// unconfirmed because the Agent refused the create (UnconfirmSessionHandoffTake).
+// the work when it resumes. Once confirmed, the take holds until it is accepted or released.
+//
+// A take confirms once: a second create under the same token is refused here, before it
+// reaches the Agent (issue #2040). Two creates under one take would share one Agent key, and
+// the answer of one could then settle the take while the other made the session.
 func (s *SQL) ConfirmSessionHandoffTake(ctx context.Context, id, recipientMembershipID, token, now string) (bool, error) {
 	if token == "" {
 		return false, nil
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE session_handoff_offer SET take_confirmed_at=?
-		WHERE id=? AND recipient_membership_id=? AND status='pending' AND take_token=?`,
+		WHERE id=? AND recipient_membership_id=? AND status='pending' AND take_token=? AND take_confirmed_at=''`,
 		now, id, recipientMembershipID, token)
 	if err != nil {
 		return false, err
@@ -222,8 +225,10 @@ func (s *SQL) ConfirmSessionHandoffTake(ctx context.Context, id, recipientMember
 }
 
 // ReleaseSessionHandoffOffer gives any take back, confirmed or not, so the offer is pending and
-// decidable again: the CP's reconcileTake, once the recipient's Agent recorded the create as
-// abandoned. A Console's release goes through ReleaseUnconfirmedSessionHandoffTake instead.
+// decidable again. Only the CP calls it, on the recipient's Agent's own word that no session
+// exists under the take's key: the create was refused (a refusal is final for that key), or
+// the key was abandoned (reconcileTake). A Console's release goes through
+// ReleaseUnconfirmedSessionHandoffTake instead.
 // Only the take's own token releases it. An offer whose share was revoked while its take was
 // confirmed (body already erased by invalidateUnauthorizedShareDerivatives) expires instead:
 // nobody may take it any more.
@@ -261,25 +266,6 @@ func (s *SQL) ReleaseUnconfirmedSessionHandoffTake(ctx context.Context, id, reci
 		    status=CASE WHEN ciphertext='' THEN 'expired' ELSE status END,
 		    decided_at=CASE WHEN ciphertext='' THEN ? ELSE decided_at END
 		WHERE id=? AND recipient_membership_id=? AND status='pending' AND take_token=? AND take_confirmed_at=''`,
-		now, id, recipientMembershipID, token)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n == 1, err
-}
-
-// UnconfirmSessionHandoffTake turns a confirmed take back into an unconfirmed one taken now,
-// after the Agent refused its create: no session came of it, so the take no longer has to
-// hold without a time limit (issue #2040). The Console still releases it, or retries the
-// create under the same token; if that Console is gone, the take lapses after
-// HandoffTakeWindow like any unconfirmed one.
-func (s *SQL) UnconfirmSessionHandoffTake(ctx context.Context, id, recipientMembershipID, token, now string) (bool, error) {
-	if token == "" {
-		return false, nil
-	}
-	res, err := s.db.ExecContext(ctx, `UPDATE session_handoff_offer SET take_confirmed_at='',taken_at=?
-		WHERE id=? AND recipient_membership_id=? AND status='pending' AND take_token=? AND take_confirmed_at<>''`,
 		now, id, recipientMembershipID, token)
 	if err != nil {
 		return false, err

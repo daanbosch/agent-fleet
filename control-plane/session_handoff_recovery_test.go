@@ -13,33 +13,43 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/k-k1/agent-fleet/control-plane/internal/store"
 )
 
-// handoffFakeAgent is the recipient's Agent, with its create headers, its durable keys and
-// abandon (workspace/agent sessionx session_idempotency.go). create decides what a POST
-// /sessions does: "ok" creates and answers 201; "lost" creates and answers a bare 502 (the
-// answer is lost on the way back); "proxy" creates and something in between answers 504 with
-// a JSON error of its own; "drop" answers a bare 502 without creating; "fail" (500
-// tmux_failed) and "refuse" (400 bad_title) are the Agent's own refusals. abandon decides
-// POST /sessions-idempotency/{key}/abandon: "agent" answers like today's Agent, "old" like an
-// Agent without the route, "creating" with 202, "unknown" with an unreadable record.
+// handoffFakeAgent is the recipient's Agent, keeping its contract (workspace/agent sessionx
+// session_idempotency.go): reserve records a key; only the create that owns a key reports an
+// outcome in the create headers; a refused key stays refused; abandon settles only a reserved
+// key and answers unknown for one it has no record of. create decides what a POST /sessions
+// does: "ok" creates and answers 201; "lost" creates and answers a bare 502 (the answer is
+// lost on the way back); "proxy" creates and something in between answers 504 with a JSON
+// error of its own; "drop" answers a bare 502 without creating; "fail" (500 tmux_failed) and
+// "refuse" (400 bad_title) are the Agent's own refusals. abandon decides POST
+// /sessions-idempotency/{key}/abandon: "agent" answers like today's Agent, "old" like an
+// Agent without the route, "creating" with 202, "unknown" with an unreadable record. "old"
+// also answers reserve like an Agent without that route.
 type handoffFakeAgent struct {
 	mu        sync.Mutex
 	create    string
 	abandon   string
 	creates   int
 	keys      map[string]string
+	reserved  map[string]bool
+	refused   map[string]bool
 	abandoned map[string]bool
 	bodies    []map[string]any
 	srv       *httptest.Server
 }
 
 func newHandoffFakeAgent(t *testing.T) *handoffFakeAgent {
-	f := &handoffFakeAgent{create: "ok", abandon: "agent", keys: map[string]string{}, abandoned: map[string]bool{}}
+	f := &handoffFakeAgent{create: "ok", abandon: "agent", keys: map[string]string{},
+		reserved: map[string]bool{}, refused: map[string]bool{}, abandoned: map[string]bool{}}
+	keyOf := func(path, verb string) string {
+		return strings.TrimSuffix(strings.TrimPrefix(path, "/sessions-idempotency/"), "/"+verb)
+	}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -49,34 +59,39 @@ func newHandoffFakeAgent(t *testing.T) *handoffFakeAgent {
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			f.bodies = append(f.bodies, body)
 			key, _ := body["idempotency_key"].(string)
-			if f.abandoned[key] {
-				w.WriteHeader(http.StatusConflict)
-				_, _ = io.WriteString(w, `{"error":{"code":"create_abandoned"}}`)
-				return
-			}
-			if name, ok := f.keys[key]; ok && key != "" {
-				w.Header().Set(createKeyHeader, key)
-				w.Header().Set(createOutcomeHeader, "created")
-				_, _ = io.WriteString(w, `{"name":"`+name+`"}`)
-				return
-			}
 			owned := func(outcome string) {
 				w.Header().Set(createKeyHeader, key)
 				w.Header().Set(createOutcomeHeader, outcome)
+			}
+			switch {
+			case f.abandoned[key]:
+				w.WriteHeader(http.StatusConflict)
+				_, _ = io.WriteString(w, `{"error":{"code":"create_abandoned"}}`)
+				return
+			case f.refused[key]:
+				owned("refused")
+				w.WriteHeader(http.StatusConflict)
+				_, _ = io.WriteString(w, `{"error":{"code":"create_refused"}}`)
+				return
+			case key != "" && f.keys[key] != "":
+				owned("created")
+				_, _ = io.WriteString(w, `{"name":"`+f.keys[key]+`"}`)
+				return
 			}
 			switch f.create {
 			case "drop":
 				w.WriteHeader(http.StatusBadGateway)
 				return
-			case "fail":
+			case "fail", "refuse":
+				f.refused[key] = true
 				owned("refused")
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = io.WriteString(w, `{"error":{"code":"tmux_failed"}}`)
-				return
-			case "refuse":
-				owned("refused")
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = io.WriteString(w, `{"error":{"code":"bad_title"}}`)
+				if f.create == "fail" {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = io.WriteString(w, `{"error":{"code":"tmux_failed"}}`)
+				} else {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = io.WriteString(w, `{"error":{"code":"bad_title"}}`)
+				}
 				return
 			}
 			f.creates++
@@ -93,8 +108,17 @@ func newHandoffFakeAgent(t *testing.T) *handoffFakeAgent {
 				w.WriteHeader(http.StatusCreated)
 				_, _ = io.WriteString(w, `{"name":"`+name+`"}`)
 			}
-		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/sessions-idempotency/") && strings.HasSuffix(r.URL.Path, "/abandon"):
-			key := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/sessions-idempotency/"), "/abandon")
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/reserve"):
+			if f.abandon == "old" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			key := keyOf(r.URL.Path, "reserve")
+			f.reserved[key] = true
+			w.Header().Set(createKeyHeader, key)
+			_, _ = io.WriteString(w, `{"status":"reserved"}`)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/abandon"):
+			key := keyOf(r.URL.Path, "abandon")
 			if f.abandon == "old" {
 				w.WriteHeader(http.StatusNotFound)
 				return
@@ -105,13 +129,13 @@ func newHandoffFakeAgent(t *testing.T) *handoffFakeAgent {
 			case f.abandon == "creating":
 				w.WriteHeader(http.StatusAccepted)
 				_, _ = io.WriteString(w, `{"status":"creating"}`)
-			case f.abandon == "unknown":
+			case f.abandon == "unknown" || !(ok || f.refused[key] || f.reserved[key] || f.abandoned[key]):
 				w.WriteHeader(http.StatusServiceUnavailable)
 				_, _ = io.WriteString(w, `{"error":{"code":"create_outcome_unknown"}}`)
 			case ok:
 				_, _ = io.WriteString(w, `{"name":"`+name+`"}`)
 			default:
-				f.abandoned[key] = true
+				f.abandoned[key] = !f.refused[key]
 				w.WriteHeader(http.StatusNotFound)
 				_, _ = io.WriteString(w, `{"error":{"code":"not_created"}}`)
 			}
@@ -342,71 +366,131 @@ func TestHandoffUnknownOutcomeKeepsTheTake(t *testing.T) {
 	})
 }
 
-// TestHandoffRefusedCreateDoesNotPinTheOffer: a create the Agent refused made no session, so
-// its take holds only as long as an unconfirmed one. The Console's retry under the same take
-// still goes through, and a Console that never comes back lets the offer go after the window.
+// TestHandoffRefusedCreateDoesNotPinTheOffer: a create the Agent refused made no session and
+// never will under its key, so the CP gives the take back at once: the sender may withdraw,
+// and a retry under the same take is refused before it reaches the Agent (the Console starts
+// over under a new take).
 func TestHandoffRefusedCreateDoesNotPinTheOffer(t *testing.T) {
+	for _, mode := range []string{"refuse", "fail"} { // the Agent's own 400 and 500
+		t.Run(mode, func(t *testing.T) {
+			h := newHandoffRecovery(t)
+			h.agent.set(mode, "agent")
+			token := h.mustTake()
+			if rec := h.create(token); rec.Code < 400 {
+				t.Fatalf("create = %d", rec.Code)
+			}
+			if o := h.row(); o.Status != "pending" || o.TakenAt != "" {
+				t.Fatalf("after a refused create: %+v, want no take", o)
+			}
+			h.agent.set("ok", "agent")
+			h.requireCode(h.create(token), http.StatusConflict, "handoff_take_lost")
+			if len(h.agent.bodies) != 1 {
+				t.Fatalf("the Agent was asked %d times, want once", len(h.agent.bodies))
+			}
+			if rec := h.create(h.mustTake()); rec.Code != http.StatusCreated || h.agent.count() != 1 {
+				t.Fatalf("create under a new take = %d, sessions=%d", rec.Code, h.agent.count())
+			}
+		})
+	}
 	h := newHandoffRecovery(t)
 	h.agent.set("refuse", "agent")
-	token := h.mustTake()
-	h.requireCode(h.create(token), http.StatusBadRequest, "bad_title")
-	if o := h.row(); o.Status != "pending" || o.TakeConfirmedAt != "" || o.TakenAt == "" {
-		t.Fatalf("after a refused create: %+v, want an unconfirmed take", o)
-	}
-	h.agent.set("ok", "agent")
-	if rec := h.create(token); rec.Code != http.StatusCreated {
-		t.Fatalf("the Console's retry under the same take = %d %s", rec.Code, rec.Body.String())
-	}
+	_ = h.create(h.mustTake())
+	h.requireCode(h.withdraw(), http.StatusOK, "")
+}
 
-	h2 := newHandoffRecovery(t)
-	h2.agent.set("refuse", "agent")
-	token = h2.mustTake()
-	_ = h2.create(token)
-	h2.requireCode(h2.withdraw(), http.StatusConflict, "handoff_being_taken")
-	if _, err := h2.st.DB().Exec(`UPDATE session_handoff_offer SET taken_at='2000-01-01T00:00:00Z' WHERE id=?`, h2.offer); err != nil {
-		t.Fatal(err)
+// TestHandoffOneCreatePerTake is review round 2's order: a take's create is held at the Agent,
+// a second create under the same take is sent meanwhile, and the first one's refusal arrives
+// last. The second is refused before it reaches the Agent, so the take's key has one create,
+// whose refusal is true however late it comes: the take goes back, the sender may withdraw,
+// and no session exists.
+func TestHandoffOneCreatePerTake(t *testing.T) {
+	h := newHandoffRecovery(t)
+	h.agent.set("refuse", "agent")
+	inner := h.agent.srv.Config.Handler
+	arrived, answer := make(chan struct{}), make(chan struct{})
+	var posts atomic.Int32
+	h.agent.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/sessions" && posts.Add(1) == 1 {
+			close(arrived)
+			<-answer
+		}
+		inner.ServeHTTP(w, r)
+	})
+	token := h.mustTake()
+	first := make(chan *httptest.ResponseRecorder, 1)
+	go func() { first <- h.create(token) }()
+	<-arrived
+	second := h.create(token)
+	if second.Code != http.StatusConflict || decode[errResp](t, second).Error.Code != "handoff_take_used" {
+		close(answer)
+		<-first
+		t.Fatalf("a second create under the take = %d %s, want it refused before the Agent", second.Code, second.Body.String())
 	}
-	if rec := h2.withdraw(); rec.Code != http.StatusOK {
-		t.Fatalf("withdraw once the refused take lapsed = %d %s", rec.Code, rec.Body.String())
+	close(answer)
+	h.requireCode(<-first, http.StatusBadRequest, "bad_title")
+	h.requireCode(h.withdraw(), http.StatusOK, "")
+	if h.agent.count() != 0 || len(h.agent.bodies) != 1 {
+		t.Fatalf("sessions=%d creates received=%d, want 0 and 1", h.agent.count(), len(h.agent.bodies))
 	}
 }
 
-// TestHandoffAgentErrorIsARefusal: an answer carrying the Agent's own error code is a refusal
-// whatever its status (worktree_failed is a 502, tmux_failed a 500), so the take stops holding
-// without a limit. The Console that lost that answer sends its old token with the next press,
-// which gives the unconfirmed take back and takes the offer afresh; without the token the
-// press is busy until the window lapses, as for another tab's launch.
+// TestHandoffUnreservedKeyStaysUnknown: on an Agent without reserve the create still goes
+// ahead, but its key has no record there, so even after that Agent is updated an abandon
+// cannot answer "not created": the take stays.
+func TestHandoffUnreservedKeyStaysUnknown(t *testing.T) {
+	h := newHandoffRecovery(t)
+	h.agent.set("lost", "old")
+	token := h.mustTake()
+	_ = h.create(token)
+	h.agent.mu.Lock()
+	reserved := h.agent.reserved[handoffCreateKey(h.offer, token)]
+	h.agent.keys = map[string]string{} // updated and restarted: no memory of the create
+	h.agent.mu.Unlock()
+	if reserved {
+		t.Fatal("an Agent without reserve recorded the key")
+	}
+	h.agent.set("ok", "agent")
+	rec, _ := h.take()
+	h.requireCode(rec, http.StatusConflict, "handoff_launch_unknown")
+	h.requireCode(h.withdraw(), http.StatusConflict, "handoff_being_taken")
+}
+
+// TestHandoffAgentErrorIsARefusal: an answer carrying the Agent's create headers is the
+// Agent's word whatever its status (tmux_failed is a 500), so the take goes back. A press that
+// sends the token of a launch whose create never reached the Agent gives that unconfirmed take
+// back and takes afresh; a confirmed take is not given back by its token.
 func TestHandoffAgentErrorIsARefusal(t *testing.T) {
 	h := newHandoffRecovery(t)
 	h.agent.set("fail", "agent")
-	token := h.mustTake()
-	h.requireCode(h.create(token), http.StatusInternalServerError, "tmux_failed")
-	if o := h.row(); o.TakeConfirmedAt != "" {
-		t.Fatalf("after the Agent's own error: %+v, want an unconfirmed take", o)
+	h.requireCode(h.create(h.mustTake()), http.StatusInternalServerError, "tmux_failed")
+	if o := h.row(); o.TakenAt != "" {
+		t.Fatalf("after the Agent's own error: %+v, want the take given back", o)
 	}
-	rec, _ := h.take()
-	h.requireCode(rec, http.StatusConflict, "handoff_being_taken")
-	rec, out := h.take("not-mine")
-	h.requireCode(rec, http.StatusConflict, "handoff_being_taken")
-	rec, out = h.take(token)
+
+	// The create never reached the CP's confirm (say the workspace start failed on the way):
+	// the take is unconfirmed, and only its own token frees it before the window.
+	h2 := newHandoffRecovery(t)
+	token := h2.mustTake()
+	rec, _ := h2.take()
+	h2.requireCode(rec, http.StatusConflict, "handoff_being_taken")
+	rec, _ = h2.take("not-mine")
+	h2.requireCode(rec, http.StatusConflict, "handoff_being_taken")
+	rec, out := h2.take(token)
 	if rec.Code != http.StatusOK || out.Token == "" || out.Token == token {
 		t.Fatalf("press with the lost launch's token = %d %s, want a fresh take", rec.Code, rec.Body.String())
 	}
-	h.agent.set("ok", "agent")
-	if rec := h.create(token); rec.Code != http.StatusConflict {
-		t.Fatalf("the old take's create after the retake = %d %s, want it fenced", rec.Code, rec.Body.String())
-	}
-	if rec := h.create(out.Token); rec.Code != http.StatusCreated || h.agent.count() != 1 {
-		t.Fatalf("create under the fresh take = %d, sessions=%d", rec.Code, h.agent.count())
+	h2.requireCode(h2.create(token), http.StatusConflict, "handoff_take_lost")
+	if rec := h2.create(out.Token); rec.Code != http.StatusCreated || h2.agent.count() != 1 {
+		t.Fatalf("create under the fresh take = %d, sessions=%d", rec.Code, h2.agent.count())
 	}
 
 	// A confirmed take is not released by its token: its session may exist.
-	h2 := newHandoffRecovery(t)
-	h2.agent.set("lost", "old")
-	token = h2.mustTake()
-	_ = h2.create(token)
-	rec, _ = h2.take(token)
-	h2.requireCode(rec, http.StatusConflict, "handoff_launch_unknown")
+	h3 := newHandoffRecovery(t)
+	h3.agent.set("lost", "old")
+	token = h3.mustTake()
+	_ = h3.create(token)
+	rec, _ = h3.take(token)
+	h3.requireCode(rec, http.StatusConflict, "handoff_launch_unknown")
 }
 
 // TestHandoffConfirmedTakeIsNotReleasedOnTheConsolesWord: a Console's release, from this

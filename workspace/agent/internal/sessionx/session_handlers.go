@@ -746,6 +746,11 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 			case createAbandoned:
 				// The caller gave this key up (abandon) and may have started over.
 				httpx.WriteErr(w, http.StatusConflict, "create_abandoned", "this create was abandoned by its caller")
+			case createRefused:
+				// A refused durable key stays refused, so this answer is as true as the first.
+				w.Header().Set(createKeyHeader, idemKey)
+				w.Header().Set(createOutcomeHeader, "refused")
+				httpx.WriteErr(w, http.StatusConflict, "create_refused", "a create under this key was refused; start over under a new key")
 			case createUnknown:
 				httpx.WriteErr(w, http.StatusServiceUnavailable, "create_outcome_unknown", "the outcome of an earlier create under this key is unknown")
 			default:
@@ -1329,23 +1334,43 @@ func noteCreateOrigin(name string, req *CreateReq, spawnParent, origin string) {
 // reconcile a timed-out POST instead of retrying it. GET /sessions-idempotency/{key}.
 //
 // A durable key (session_idempotency.go) is also answered from its record on disk: 404
-// not_created once it was abandoned, 503 create_outcome_unknown when the record cannot be
-// read or its create was cut off by a restart. A plain miss stays not_found, which proves
-// nothing: a create may not have begun yet. Only abandon turns a miss into a guarantee.
+// not_created once it was abandoned or refused, 503 create_outcome_unknown when the record
+// cannot be read or its create was cut off by a restart. A plain miss, or a key only reserved,
+// stays not_found, which proves nothing: a create may not have begun yet. Only abandon turns a
+// reserved key into a guarantee.
 func HandleIdempotencyLookup(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	e, ok := createLedger.lookup(key)
-	if !ok {
+	if !ok || e.state == createReserved {
 		httpx.WriteErr(w, http.StatusNotFound, "not_found", "no create on record for this key")
 		return
 	}
 	writeCreateState(w, key, e)
 }
 
-// HandleIdempotencyAbandon is the lookup that settles a miss (issue #2040): when no create
-// under the key is running or recorded, it records the key as abandoned, so a create under it
-// that arrives later is refused (create_abandoned) and the 404 not_created it answers is a
-// guarantee. A create that already began is reported as the lookup would.
+// HandleIdempotencyReserve records a durable key before its create is sent (issue #2040), so
+// that abandon may later answer "not created" for it. The answer names the key, which is how
+// the caller tells this Agent from one without the route.
+// POST /sessions-idempotency/{key}/reserve.
+func HandleIdempotencyReserve(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("key")
+	if strings.TrimSpace(key) == "" {
+		httpx.WriteErr(w, http.StatusBadRequest, "bad_key", "an idempotency key is required")
+		return
+	}
+	if err := createLedger.reserve(key); err != nil {
+		httpx.WriteErr(w, http.StatusServiceUnavailable, "create_outcome_unknown", "the key could not be recorded")
+		return
+	}
+	w.Header().Set(createKeyHeader, key)
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"status": "reserved"})
+}
+
+// HandleIdempotencyAbandon is the lookup that settles a reserved key (issue #2040): when no
+// create under it began, it records the key as abandoned, so a create under it that arrives
+// later is refused (create_abandoned) and the 404 not_created it answers is a guarantee. A
+// create that already began is reported as the lookup would; a key with no record at all is
+// unknown (503), since an Agent that kept no record may have created under it.
 // POST /sessions-idempotency/{key}/abandon.
 func HandleIdempotencyAbandon(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
@@ -1365,7 +1390,7 @@ func writeCreateState(w http.ResponseWriter, key string, e createLedgerEntry) {
 		_, _ = w.Write(e.body)
 	case createInflight:
 		httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"status": "creating"})
-	case createAbandoned:
+	case createAbandoned, createRefused:
 		httpx.WriteErr(w, http.StatusNotFound, "not_created", "no session was or will be created under this key")
 	default:
 		httpx.WriteErr(w, http.StatusServiceUnavailable, "create_outcome_unknown", "the outcome of the create under this key is unknown")

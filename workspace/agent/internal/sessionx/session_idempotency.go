@@ -11,14 +11,16 @@ package sessionx
 // running is never forgotten by time: answering "no such create" while it runs would let the
 // caller start over beside it.
 //
-// A create that asks for a durable key (idempotency_durable; the Control Plane's launch from
-// a handoff offer, issue #2040) also leaves a record on disk (createOutcomeDir), because its
-// outcome may be asked about days later and after a restart: inflight while it runs, done
-// with the answer once it succeeds, removed when it fails. POST /sessions-idempotency/{key}/
-// abandon turns "no record" into an abandoned record, atomically with begin, so a create
-// under that key that arrives later is refused rather than run behind a caller who has
-// already started over. A record that cannot be read, or an inflight one left by an earlier
-// process, is "unknown" — never "not created".
+// A durable key (idempotency_durable; the Control Plane's launch from a handoff offer, issue
+// #2040) also has a record on disk (createOutcomeDir), because its outcome may be asked about
+// days later and after a restart. Its life: reserved (POST .../reserve, before the caller
+// commits to creating), inflight, then done with the answer or refused. Refused is final: no
+// create under that key ever runs again, so a refusal, however late it arrives, proves there
+// is no session under the key. POST /sessions-idempotency/{key}/abandon turns a reserved key
+// into an abandoned one atomically with begin, so a create that arrives later is refused.
+// Only a reserved, abandoned or refused record answers "not created"; no record at all (a key
+// an older Agent created under, say), a record that cannot be read, or an inflight one left
+// by an earlier process is "unknown".
 
 import (
 	"crypto/sha256"
@@ -48,8 +50,10 @@ type createLedgerState int
 const (
 	createInflight  createLedgerState = iota // being created (the first request is doing the work)
 	createDone                               // finished (body holds the wireSession JSON)
-	createAbandoned                          // durable only: the caller gave the key up; a create under it is refused
-	createUnknown                            // durable only: the record cannot be read, or an earlier process died mid-create
+	createAbandoned                          // durable only: reserved, then given up by the caller; a create under it is refused
+	createRefused                            // durable only: a create under it was refused; final
+	createReserved                           // durable only: reserved, no create began yet
+	createUnknown                            // durable only: no record, an unreadable one, or one cut off by a restart
 )
 
 type createLedgerEntry struct {
@@ -68,6 +72,13 @@ type createSessionLedger struct {
 
 var createLedger = &createSessionLedger{m: map[string]*createLedgerEntry{}}
 
+// keyRef names a key in logs. A durable key carries the caller's take token, which must not
+// end up in a log.
+func keyRef(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return "key#" + hex.EncodeToString(sum[:6])
+}
+
 // begin claims the right to create under key. It returns (nil, false) when the caller owns
 // this create and should carry on. When a record already exists it returns a snapshot of it
 // and true, so the caller can replay a done one and refuse the others. A durable key that
@@ -81,11 +92,12 @@ func (l *createSessionLedger) begin(key string, durable bool) (createLedgerEntry
 		return *e, true
 	}
 	if durable {
-		if e, found := readCreateOutcome(key); found {
+		e, found := readCreateOutcome(key)
+		if found && e.state != createReserved {
 			return e, true
 		}
 		if err := writeCreateOutcome(key, createOutcomeRecord{State: outcomeInflight}); err != nil {
-			log.Printf("create %s: recording the key failed: %v", key, err)
+			log.Printf("create %s: recording the key failed: %v", keyRef(key), err)
 			return createLedgerEntry{state: createUnknown}, true
 		}
 	}
@@ -105,25 +117,52 @@ func (l *createSessionLedger) complete(key string, body []byte) {
 			// On failure the disk keeps "inflight" from this process, which a later process
 			// reads as unknown: safe, if unhelpful.
 			if err := writeCreateOutcome(key, createOutcomeRecord{State: outcomeDone, Body: body}); err != nil {
-				log.Printf("create %s: recording the outcome failed: %v", key, err)
+				log.Printf("create %s: recording the outcome failed: %v", keyRef(key), err)
 			}
 		}
 	}
 }
 
-// fail drops a record that ended while still inflight, letting a genuine retry through. done
-// records are kept for replay.
+// fail ends a create that did not succeed. A plain key is dropped, letting a genuine retry
+// through; a durable one becomes refused for good, so that its refusal stays true whatever
+// arrives after it (a retry under the same key is refused too, and its caller starts over
+// under a new key). done records are kept for replay.
 func (l *createSessionLedger) fail(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if e := l.m[key]; e != nil && e.state == createInflight {
-		delete(l.m, key)
-		if e.durable {
-			if err := os.Remove(createOutcomePath(key)); err != nil && !errors.Is(err, os.ErrNotExist) {
-				log.Printf("create %s: removing the record of a failed create: %v", key, err)
-			}
-		}
+	e := l.m[key]
+	if e == nil || e.state != createInflight {
+		return
 	}
+	if !e.durable {
+		delete(l.m, key)
+		return
+	}
+	e.state, e.at = createRefused, time.Now()
+	if err := writeCreateOutcome(key, createOutcomeRecord{State: outcomeRefused}); err != nil {
+		// The disk keeps "inflight" from this process: unknown to a later process.
+		log.Printf("create %s: recording the refusal failed: %v", keyRef(key), err)
+	}
+}
+
+// reserve records a durable key before its create is sent (POST .../reserve). The record is
+// what later lets abandon answer "not created": without it, a key that has no record may
+// still have been created under by an Agent that kept none. Reserving a key that already has
+// a record changes nothing.
+func (l *createSessionLedger) reserve(key string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.m[key] != nil {
+		return nil
+	}
+	if _, found := readCreateOutcome(key); found {
+		return nil
+	}
+	if err := writeCreateOutcome(key, createOutcomeRecord{State: outcomeReserved}); err != nil {
+		log.Printf("create %s: recording the reservation failed: %v", keyRef(key), err)
+		return err
+	}
+	return nil
 }
 
 // lookup returns a snapshot of the current record (for GET /sessions-idempotency/{key}):
@@ -138,9 +177,10 @@ func (l *createSessionLedger) lookup(key string) (createLedgerEntry, bool) {
 	return readCreateOutcome(key)
 }
 
-// abandon is lookup that, when nothing is known about key, records it as abandoned so no
-// create under it can begin later. It holds the same lock as begin, so a create either began
-// before (and is reported) or is refused after.
+// abandon is lookup that settles a reserved key: when no create under it began, it records
+// the key as abandoned so none can begin later. It holds the same lock as begin, so a create
+// either began before (and is reported) or is refused after. A key with no record at all is
+// unknown, not abandoned: nothing shows it was ever meant to be recorded.
 func (l *createSessionLedger) abandon(key string) createLedgerEntry {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -148,18 +188,23 @@ func (l *createSessionLedger) abandon(key string) createLedgerEntry {
 	if e := l.m[key]; e != nil {
 		return *e
 	}
-	if e, found := readCreateOutcome(key); found {
+	e, found := readCreateOutcome(key)
+	if !found {
+		return createLedgerEntry{state: createUnknown}
+	}
+	if e.state != createReserved {
 		return e
 	}
 	if err := writeCreateOutcome(key, createOutcomeRecord{State: outcomeAbandoned}); err != nil {
-		log.Printf("create %s: recording the abandon failed: %v", key, err)
+		log.Printf("create %s: recording the abandon failed: %v", keyRef(key), err)
 		return createLedgerEntry{state: createUnknown}
 	}
-	return createLedgerEntry{state: createAbandoned}
+	return createLedgerEntry{state: createAbandoned, durable: true}
 }
 
 // gcLocked forgets finished in-memory records past the TTL. An inflight record stays until
-// its create ends (complete or fail): a create that outlives the TTL is still running.
+// its create ends (complete or fail): a create that outlives the TTL is still running. A
+// durable key's disk record outlives this.
 func (l *createSessionLedger) gcLocked() {
 	cutoff := time.Now().Add(-createLedgerTTL)
 	for k, e := range l.m {
@@ -170,8 +215,10 @@ func (l *createSessionLedger) gcLocked() {
 }
 
 const (
+	outcomeReserved  = "reserved"
 	outcomeInflight  = "inflight"
 	outcomeDone      = "done"
+	outcomeRefused   = "refused"
 	outcomeAbandoned = "abandoned"
 )
 
@@ -209,16 +256,22 @@ func readCreateOutcome(key string) (createLedgerEntry, bool) {
 	if err != nil || json.Unmarshal(b, &rec) != nil || rec.Key != key {
 		return createLedgerEntry{state: createUnknown}, true
 	}
+	e := createLedgerEntry{durable: true}
 	switch {
 	case rec.State == outcomeDone && len(rec.Body) > 0:
-		return createLedgerEntry{state: createDone, body: rec.Body, durable: true}, true
+		e.state, e.body = createDone, rec.Body
+	case rec.State == outcomeReserved:
+		e.state = createReserved
 	case rec.State == outcomeAbandoned:
-		return createLedgerEntry{state: createAbandoned, durable: true}, true
+		e.state = createAbandoned
+	case rec.State == outcomeRefused:
+		e.state = createRefused
 	case rec.State == outcomeInflight && rec.Proc == createOutcomeProc:
-		return createLedgerEntry{state: createInflight, durable: true}, true
+		e.state = createInflight
 	default:
-		return createLedgerEntry{state: createUnknown, durable: true}, true
+		e.state = createUnknown
 	}
+	return e, true
 }
 
 // writeCreateOutcome replaces a key's record atomically (write, sync, rename), so a reader

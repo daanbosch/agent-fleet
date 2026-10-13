@@ -3,6 +3,7 @@ package sessionx
 import (
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -200,18 +201,23 @@ func TestCreateLedgerKeepsInflightPastTTL(t *testing.T) {
 }
 
 // TestDurableCreateOutcome is the record a handoff launch's outcome is reconciled with (issue
-// #2040): it survives a restart, abandon turns only a true miss into a refusal of later
-// creates, and an unreadable record or one cut off by a restart is unknown, never "not
+// #2040): it survives a restart; abandon settles only a reserved key, so a key with no record
+// (one an Agent without records created under) stays unknown; a refusal is final, so a late
+// one stays true; an unreadable record or one cut off by a restart is unknown, never "not
 // created".
 func TestDurableCreateOutcome(t *testing.T) {
 	dir := useCreateOutcomeDir(t)
 	restart := func() { createLedger = &createSessionLedger{m: map[string]*createLedgerEntry{}} }
-
-	if _, dup := createLedger.begin("handoff-a", true); dup {
-		t.Fatal("first begin must own the key")
+	mustReserve := func(key string) {
+		t.Helper()
+		if err := createLedger.reserve(key); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if e, ok := createLedger.lookup("handoff-a"); !ok || e.state != createInflight {
-		t.Fatalf("running create = %+v", e)
+
+	mustReserve("handoff-a")
+	if _, dup := createLedger.begin("handoff-a", true); dup {
+		t.Fatal("first begin after the reservation must own the key")
 	}
 	if e := createLedger.abandon("handoff-a"); e.state != createInflight {
 		t.Fatalf("abandon of a running create = %+v, want inflight reported and nothing recorded", e)
@@ -225,28 +231,52 @@ func TestDurableCreateOutcome(t *testing.T) {
 		t.Fatalf("a create under a done key = %+v dup=%v, want the replay", e, dup)
 	}
 
-	// A miss is not a guarantee; abandon makes it one.
-	if _, ok := createLedger.lookup("handoff-b"); ok {
-		t.Fatal("an unknown key was found")
+	// A reserved key nothing began under is abandoned, and a late create is refused.
+	mustReserve("handoff-b")
+	if e, ok := createLedger.lookup("handoff-b"); !ok || e.state != createReserved {
+		t.Fatalf("lookup of a reserved key = %+v ok=%v", e, ok)
 	}
 	if e := createLedger.abandon("handoff-b"); e.state != createAbandoned {
-		t.Fatalf("abandon of an unknown key = %+v", e)
+		t.Fatalf("abandon of a reserved key = %+v", e)
 	}
 	restart()
 	if e, dup := createLedger.begin("handoff-b", true); !dup || e.state != createAbandoned {
 		t.Fatalf("a late create under an abandoned key = %+v dup=%v, want refused", e, dup)
 	}
 
-	// A failed create leaves no record, so abandon may then settle it.
+	// No record at all proves nothing: an Agent that kept none may have created under it.
+	if e := createLedger.abandon("handoff-legacy"); e.state != createUnknown {
+		t.Fatalf("abandon of a key with no record = %+v, want unknown", e)
+	}
+
+	// A refusal is final: a retry under the key is refused, so a refusal that arrives late
+	// still means no session exists under it.
+	mustReserve("handoff-c")
 	if _, dup := createLedger.begin("handoff-c", true); dup {
 		t.Fatal("begin")
 	}
 	createLedger.fail("handoff-c")
-	if e := createLedger.abandon("handoff-c"); e.state != createAbandoned {
-		t.Fatalf("abandon after a failed create = %+v", e)
+	if e, dup := createLedger.begin("handoff-c", true); !dup || e.state != createRefused {
+		t.Fatalf("a retry under a refused key = %+v dup=%v, want refused", e, dup)
+	}
+	restart()
+	if e, dup := createLedger.begin("handoff-c", true); !dup || e.state != createRefused {
+		t.Fatalf("a retry under a refused key after a restart = %+v dup=%v", e, dup)
+	}
+	if e := createLedger.abandon("handoff-c"); e.state != createRefused {
+		t.Fatalf("abandon of a refused key = %+v", e)
+	}
+	// A plain key is still dropped on failure, letting a genuine retry through.
+	if _, dup := createLedger.begin("plain", false); dup {
+		t.Fatal("begin")
+	}
+	createLedger.fail("plain")
+	if _, dup := createLedger.begin("plain", false); dup {
+		t.Fatal("a plain key stayed refused")
 	}
 
 	// A create cut off by a restart, and a record that cannot be read, are unknown.
+	mustReserve("handoff-d")
 	if _, dup := createLedger.begin("handoff-d", true); dup {
 		t.Fatal("begin")
 	}
@@ -266,8 +296,34 @@ func TestDurableCreateOutcome(t *testing.T) {
 	if e, ok := createLedger.lookup("handoff-e"); !ok || e.state != createUnknown {
 		t.Fatalf("lookup of an unreadable record = %+v ok=%v", e, ok)
 	}
-	if ents, _ := os.ReadDir(dir); len(ents) != 5 { // a done, b and c abandoned, d inflight, e unreadable; no temp files left
+	if ents, _ := os.ReadDir(dir); len(ents) != 5 { // a done, b abandoned, c refused, d inflight, e unreadable; no temp files
 		t.Fatalf("records on disk = %d, want 5", len(ents))
+	}
+}
+
+// TestDurableKeyNeverLogged: a durable key carries the caller's take token, so a failure to
+// record it names a hash of it instead.
+func TestDurableKeyNeverLogged(t *testing.T) {
+	dir := useCreateOutcomeDir(t)
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var buf strings.Builder
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	const key = "handoff-offer-secrettoken"
+	_ = createLedger.reserve(key)
+	_, _ = createLedger.begin(key, true)
+	createLedger.m[key] = &createLedgerEntry{state: createInflight, at: time.Now(), durable: true}
+	createLedger.complete(key, []byte(`{}`))
+	createLedger.m[key] = &createLedgerEntry{state: createInflight, at: time.Now(), durable: true}
+	createLedger.fail(key)
+	if !strings.Contains(buf.String(), keyRef(key)) {
+		t.Fatalf("no failure was logged at all: %q", buf.String())
+	}
+	if strings.Contains(buf.String(), "secrettoken") {
+		t.Fatalf("the key reached the log: %q", buf.String())
 	}
 }
 
@@ -294,6 +350,7 @@ func TestDurableCreateHTTP(t *testing.T) {
 	mux.HandleFunc("POST /sessions", HandleCreateSession)
 	mux.HandleFunc("GET /sessions-idempotency/{key}", HandleIdempotencyLookup)
 	mux.HandleFunc("POST /sessions-idempotency/{key}/abandon", HandleIdempotencyAbandon)
+	mux.HandleFunc("POST /sessions-idempotency/{key}/reserve", HandleIdempotencyReserve)
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	post := func(path string, body any) *http.Response {
@@ -313,6 +370,11 @@ func TestDurableCreateHTTP(t *testing.T) {
 		return resp
 	}
 
+	for _, k := range []string{"handoff-o-1", "handoff-o-2", "handoff-o-3"} {
+		if resp := post("/sessions-idempotency/"+k+"/reserve", nil); resp.StatusCode != http.StatusOK || resp.Header.Get(createKeyHeader) != k {
+			t.Fatalf("reserve %s = %d", k, resp.StatusCode)
+		}
+	}
 	resp := post("/sessions", map[string]any{"dir": parent, "kind": "shell", "idempotency_key": "handoff-o-1", "idempotency_durable": true})
 	var created session.Session
 	_ = json.NewDecoder(resp.Body).Decode(&created)
@@ -332,6 +394,11 @@ func TestDurableCreateHTTP(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest || resp.Header.Get(createOutcomeHeader) != "refused" || resp.Header.Get(createKeyHeader) != "handoff-o-2" {
 		t.Fatalf("refused create = %d %v", resp.StatusCode, resp.Header)
 	}
+	// The refusal is final: a retry under the same key is refused again, and says so.
+	resp = post("/sessions", map[string]any{"dir": parent, "kind": "shell", "idempotency_key": "handoff-o-2", "idempotency_durable": true})
+	if resp.StatusCode != http.StatusConflict || resp.Header.Get(createOutcomeHeader) != "refused" {
+		t.Fatalf("retry under a refused key = %d %v, want refused again", resp.StatusCode, resp.Header)
+	}
 	resp = post("/sessions-idempotency/handoff-o-2/abandon", nil)
 	if resp.StatusCode != http.StatusNotFound || resp.Header.Get(createKeyHeader) != "handoff-o-2" {
 		t.Fatalf("abandon after the refusal = %d", resp.StatusCode)
@@ -343,11 +410,26 @@ func TestDurableCreateHTTP(t *testing.T) {
 
 	resp = post("/sessions-idempotency/handoff-o-3/abandon", nil)
 	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("abandon of an unused key = %d", resp.StatusCode)
+		t.Fatalf("abandon of a reserved, unused key = %d", resp.StatusCode)
 	}
 	resp = post("/sessions", map[string]any{"dir": parent, "kind": "shell", "idempotency_key": "handoff-o-3", "idempotency_durable": true})
 	b, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(b), `"create_abandoned"`) || resp.Header.Get(createOutcomeHeader) != "" {
 		t.Fatalf("late create under an abandoned key = %d %s %v, want refused without an outcome", resp.StatusCode, b, resp.Header)
+	}
+
+	// A session an Agent without records created under a key (the create did not ask for
+	// durability), then the Agent restarted: abandon cannot say "not created".
+	resp = post("/sessions", map[string]any{"dir": parent, "kind": "shell", "idempotency_key": "handoff-legacy"})
+	var legacy session.Session
+	_ = json.NewDecoder(resp.Body).Decode(&legacy)
+	defer tmuxx.Cmd("kill-session", "-t", session.TmuxName(legacy.Name)).Run()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("legacy create = %d", resp.StatusCode)
+	}
+	createLedger = &createSessionLedger{m: map[string]*createLedgerEntry{}}
+	resp = post("/sessions-idempotency/handoff-legacy/abandon", nil)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("abandon of a key created under without a record = %d, want 503 unknown", resp.StatusCode)
 	}
 }

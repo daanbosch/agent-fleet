@@ -25,7 +25,7 @@ vi.mock("./LaunchModal.tsx", () => ({
       onClick={() =>
         void p
           .onLaunch({
-            kind: "claude", driver: "", model: "", effort: "", startMode: "normal", prompt: "carry on",
+            kind: "claude", driver: (globalThis as { __launchDriver?: string }).__launchDriver ?? "", model: "", effort: "", startMode: "normal", prompt: "carry on",
             title: "Carry on", images: [], subdir: "", base: "feature/x", newBranch: "take/x", worktree: true,
           } as LaunchOpts)
           .catch(() => undefined) // a thrown launch is the dialog's to show; here only the offer matters
@@ -219,6 +219,39 @@ describe("launching from a received handoff", () => {
     await pressLaunch();
     expect(posts("/offer-1/take")[0]).toEqual({ token: "tok-8" });
     expect(document.body.textContent).toContain(t("handoff.launch_recovered", { name: "s-proxied" }));
+  });
+
+  it("starts the driver fallback over under a new take, since a take starts one create", async () => {
+    (globalThis as { __launchDriver?: string }).__launchDriver = "managed";
+    let takes = 0;
+    let creates = 0;
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const path = new URL(url, "http://console.test/").pathname;
+      const json = (status: number, body: unknown) =>
+        new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+      if ((init?.method ?? "GET") === "GET") return json(200, { offers: [] });
+      if (path.endsWith("/offer-1/take")) return json(200, { status: "pending", token: `tok-r${++takes}` });
+      if (path.endsWith("/offer-1/release")) return json(409, { error: { code: "handoff_not_taken", status: "pending", offerStatus: "pending" } });
+      if (path.endsWith("/offer-1/accept")) return json(200, { status: "accepted" });
+      if (path.endsWith("/api/sessions")) {
+        return ++creates === 1
+          ? json(400, { error: { code: "driver_unsupported", message: "no managed" } })
+          : json(201, { name: "s-tui" });
+      }
+      throw new Error("unexpected call " + path);
+    });
+    try {
+      await pressLaunch();
+    } finally {
+      delete (globalThis as { __launchDriver?: string }).__launchDriver;
+    }
+    const created = posts("/api/sessions");
+    expect(created.map((b) => b.handoff_take)).toEqual([
+      { offerId: "offer-1", token: "tok-r1" },
+      { offerId: "offer-1", token: "tok-r2" },
+    ]);
+    expect(created[1].driver).toBeUndefined();
+    expect(posts("/offer-1/accept")[0]).toEqual({ sessionName: "s-tui", token: "tok-r2" });
   });
 
   it("says the outcome is still unknown when the CP cannot ask the workspace", async () => {

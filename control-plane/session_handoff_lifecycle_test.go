@@ -476,6 +476,10 @@ func (f *handoffLife) recipientWorkspace() *recipientCreate {
 	f.t.Helper()
 	rc := &recipientCreate{}
 	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/reserve") {
+			w.Header().Set(createKeyHeader, strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/sessions-idempotency/"), "/reserve"))
+			return
+		}
 		if r.Method == http.MethodPost && r.URL.Path == "/sessions" {
 			var b map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&b)
@@ -569,9 +573,22 @@ func TestHandoffCreateIsFencedByTheTake(t *testing.T) {
 		t.Fatalf("accept after a slow create = %d %s", rec.Code, rec.Body.String())
 	}
 
-	// Unsharing during a launch keeps the take. A confirmed one is not given back on the
-	// Console's word (its session may exist, #2040); once the Agent refused the create it is
-	// unconfirmed, and giving it back then expires the offer, the release answering so.
+	// Unsharing under an unconfirmed take expires the offer at once; the late release
+	// answers with that status.
+	o3 := f.mustOffer(nil)
+	token = f.take(o3.ID)
+	if err := f.st.DeleteSessionShare(context.Background(), f.shareID, f.owner.mv.MembershipID); err != nil {
+		t.Fatal(err)
+	}
+	f.requireConflict(f.as(f.recipient, f.api.release, http.MethodPost, o3.ID, map[string]any{"token": token}), "handoff_not_taken", "expired")
+
+	// Unsharing under a confirmed take keeps it, and the Console cannot give it back (its
+	// session may exist, #2040); it expires when the CP gives it back on the Agent's word.
+	if err := f.st.PutSessionShare(context.Background(), store.SessionShare{ID: f.shareID, TenantID: f.owner.mv.TenantID,
+		OwnerMembershipID: f.owner.mv.MembershipID, RecipientMembershipID: f.recipient.mv.MembershipID,
+		ScopeType: "session", ScopeKey: "session-1", Permission: "ro", CreatedAt: store.NowTS(), UpdatedAt: store.NowTS()}); err != nil {
+		t.Fatal(err)
+	}
 	o2 := f.mustOffer(nil)
 	token = f.take(o2.ID)
 	if ok, err := f.st.ConfirmSessionHandoffTake(context.Background(), o2.ID, f.recipient.mv.MembershipID, token, store.NowTS()); err != nil || !ok {
@@ -582,12 +599,11 @@ func TestHandoffCreateIsFencedByTheTake(t *testing.T) {
 	}
 	f.requireConflict(f.as(f.owner, f.api.withdraw, http.MethodDelete, o2.ID, nil), "handoff_being_taken", "pending")
 	f.requireConflict(f.as(f.recipient, f.api.release, http.MethodPost, o2.ID, map[string]any{"token": token}), "handoff_launch_unknown", "pending")
-	if ok, err := f.st.UnconfirmSessionHandoffTake(context.Background(), o2.ID, f.recipient.mv.MembershipID, token, store.NowTS()); err != nil || !ok {
-		t.Fatalf("unconfirm: ok=%v err=%v", ok, err)
+	if ok, err := f.st.ReleaseSessionHandoffOffer(context.Background(), o2.ID, f.recipient.mv.MembershipID, token); err != nil || !ok {
+		t.Fatalf("release on the Agent's word: ok=%v err=%v", ok, err)
 	}
-	rec = f.as(f.recipient, f.api.release, http.MethodPost, o2.ID, map[string]any{"token": token})
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"expired"`) {
-		t.Fatalf("release after the unshare = %d %s, want 200 status expired", rec.Code, rec.Body.String())
+	if row := f.row(o2.ID); row.Status != "expired" {
+		t.Fatalf("after the unshare and the release: %+v, want expired", row)
 	}
 
 	// A create without a take is passed through untouched.

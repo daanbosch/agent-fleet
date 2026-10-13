@@ -78,7 +78,7 @@ export async function launchFromHandoffOffer(
 ): Promise<LaunchResult> {
   const prev = lostTakes.get(offerId);
   const taken = await apiJSON(offerPath(offerId, "take"), "POST", prev ? { token: prev } : {}).catch(() => ({ error: {} }));
-  const token = typeof taken?.token === "string" ? taken.token : "";
+  let token = typeof taken?.token === "string" ? taken.token : "";
   if (taken?.status === "accepted" && typeof taken?.sessionName === "string" && taken.sessionName) {
     // The lost launch did create its session; the CP has now accepted the offer with it.
     lostTakes.delete(offerId);
@@ -95,7 +95,18 @@ export async function launchFromHandoffOffer(
   lostTakes.delete(offerId);
   let r: LaunchResult = { ok: false };
   try {
-    r = await launch({ offerId, token });
+    // The CP gave a refused create's take back already; the release is for any other case.
+    const renew = async (): Promise<HandoffTake | null> => {
+      await apiJSON(offerPath(offerId, "release"), "POST", { token }).catch(() => undefined);
+      const again = await apiJSON(offerPath(offerId, "take"), "POST", {}).catch(() => ({ error: {} }));
+      if (typeof again?.token !== "string" || !again.token) {
+        notify(takeRefusal(again?.error));
+        return null;
+      }
+      token = again.token;
+      return { offerId, token, renew };
+    };
+    r = await launch({ offerId, token, renew });
   } catch {
     // A launch that threw part-way may have created its session.
     r = { ok: false, unknown: true };

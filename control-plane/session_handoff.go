@@ -573,6 +573,39 @@ func takeHandoffFence(r *http.Request) (*handoffTakeRef, *apiError) {
 	return &take, nil
 }
 
+// reserveHandoffCreate records the take's key on the recipient's Agent before the take is
+// confirmed and the create sent (issue #2040). The reservation is what lets the Agent later
+// answer "not created" for the key (reconcileTake): a key it has no record of may have been
+// created under by an Agent that kept none, so its absence proves nothing. An Agent without
+// the route (no key header on its 404) gets the create anyway, and an unknown outcome there
+// stays unknown. Any other failure refuses the create; nothing is confirmed yet.
+func reserveHandoffCreate(ctx context.Context, res *resolved, take handoffTakeRef) *apiError {
+	key := handoffCreateKey(take.OfferID, take.Token)
+	failed := &apiError{http.StatusBadGateway, "handoff_reserve_failed", "your workspace could not record the launch; nothing was started"}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		res.rt.Endpoint()+"/sessions-idempotency/"+url.PathEscape(key)+"/reserve", nil)
+	if err != nil {
+		return failed
+	}
+	if res.rt.Token() != "" {
+		req.Header.Set("Authorization", "Bearer "+res.rt.Token())
+	}
+	resp, err := agentRelayClient.Do(req)
+	if err != nil {
+		return failed
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	switch {
+	case resp.StatusCode == http.StatusOK && resp.Header.Get(createKeyHeader) == key:
+		return nil
+	case resp.StatusCode == http.StatusNotFound && resp.Header.Get(createKeyHeader) == "":
+		return nil
+	default:
+		return failed
+	}
+}
+
 // confirmHandoffTake is the commit point of a launch from an offer, run by sessionCreateThen
 // immediately before the Agent is asked (issue #2020). Until here the sender may still have
 // won: a take that went quiet past the take window loses the offer to their withdraw, and a
@@ -584,6 +617,9 @@ func confirmHandoffTake(ctx context.Context, st store.Store, mv store.Membership
 		return internalErr(err)
 	}
 	if !ok {
+		if token, held, _ := st.ConfirmedSessionHandoffTake(ctx, take.OfferID, mv.MembershipID); held && token == take.Token {
+			return &apiError{http.StatusConflict, "handoff_take_used", "this launch of the handoff already reached your workspace"}
+		}
 		return &apiError{http.StatusConflict, "handoff_take_lost", "the handoff was withdrawn or taken elsewhere before the session was created"}
 	}
 	return nil
@@ -594,8 +630,9 @@ func confirmHandoffTake(ctx context.Context, st store.Store, mv store.Membership
 // own word moves it, and that word is the answer's create headers naming this take's key
 // (createKeyHeader / createOutcomeHeader, which a proxy in between does not write):
 //   - created with a session name: the offer is accepted with that session;
-//   - refused: no session came of it, and the take becomes an unconfirmed one again, which
-//     lapses after the take window if the Console never releases or retries it.
+//   - refused: no session came of it, nor ever will under this key (the Agent keeps a durable
+//     key refused for good, and only the create that owns the key reports an outcome), so the
+//     take is given back. The Console's driver fallback starts over under a new take.
 //
 // Anything else — no answer, a gateway's or proxy's own error, JSON or not, an Agent too old
 // to write the headers, a create still in progress — is an unknown outcome: the take stays
@@ -622,8 +659,8 @@ func settleHandoffCreate(ctx context.Context, mgr *manager, res *resolved, take 
 			log.Printf("handoff: offer %s left taken: accepting %s failed: %v", take.OfferID, s.Name, err)
 		}
 	case outcome == "refused" && (status < 200 || status >= 300):
-		if _, err := mgr.store.UnconfirmSessionHandoffTake(ctx, take.OfferID, res.mv.MembershipID, take.Token, store.NowTS()); err != nil {
-			log.Printf("handoff: offer %s: unconfirming the take after a refused create failed: %v", take.OfferID, err)
+		if _, err := mgr.store.ReleaseSessionHandoffOffer(ctx, take.OfferID, res.mv.MembershipID, take.Token); err != nil {
+			log.Printf("handoff: offer %s: releasing the take after a refused create failed: %v", take.OfferID, err)
 		}
 	default:
 		log.Printf("handoff: offer %s left taken after create status %d (outcome %q)", take.OfferID, status, outcome)
@@ -720,17 +757,19 @@ func (a sessionHandoffAPI) writeTaken(w http.ResponseWriter, ident store.Identit
 
 // reconcileTake answers a take press that found the offer held. A Console that lost its
 // previous launch's answer sends that take's token (prev): when the take is still
-// unconfirmed, nothing reached the Agent under it or the Agent refused it, so it is released
-// and this press takes the offer afresh. When the hold is this recipient's own confirmed take — an earlier launch whose create reached their Agent and
-// whose outcome nobody learnt (settleHandoffCreate) — it asks their Agent to abandon that
+// unconfirmed, nothing reached the Agent under it, so it is released and this press takes
+// the offer afresh. When the hold is this recipient's own confirmed take — an earlier launch
+// whose create reached their Agent and whose outcome nobody learnt (settleHandoffCreate) — it asks their Agent to abandon that
 // create's idempotency key, which reports a create that began and otherwise records the key
 // so that a create arriving late is refused. It never creates anything itself:
 //   - the session exists: the offer is accepted with it, and the answer names it;
 //   - still being created: busy, as for any held offer;
 //   - the Agent answers not_created (the key is now recorded as abandoned): the stale take
 //     is released and this press takes the offer afresh;
-//   - anything else (the Agent is unreachable, its record unreadable, or too old to abandon;
-//     every answer must name the key in createKeyHeader):
+//   - anything else (the Agent is unreachable, has no record of the key — it was never
+//     reserved there, as with an Agent from before reserveHandoffCreate — its record is
+//     unreadable, or it is too old to abandon; every answer must name the key in
+//     createKeyHeader):
 //     handoff_launch_unknown, and the take stays.
 //
 // The Agent is asked only on the recipient's own press, in their own workspace (ADR 0057
