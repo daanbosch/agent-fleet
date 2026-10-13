@@ -88,7 +88,8 @@ export function ShareCreateModal({ initialTarget, onClose, onCreated }: ShareCre
       signal: req.signal,
     }).catch(() => (req.signal.aborted && !req.timedOut() ? null : { error: { message: tr(req.timedOut() ? "share.save_timeout" : "share.save_failed") } }));
     req.settle();
-    if (inflight.current !== req) return; // the dialog was closed meanwhile
+    // Closed or unmounted meanwhile, or aborted by the user: never report that as created.
+    if (inflight.current !== req || d === null) return;
     inflight.current = null;
     setSaving(false);
     if (d?.error) {
@@ -112,7 +113,11 @@ export function ShareCreateModal({ initialTarget, onClose, onCreated }: ShareCre
     }
     onClose();
   };
-  useEffect(() => () => inflight.current?.cancel(), []);
+  useEffect(() => () => {
+    const req = inflight.current;
+    inflight.current = null; // first, so the pending submit sees it was abandoned
+    req?.cancel();
+  }, []);
 
   return (
     <Modal title={tr("share.create_title")} onClose={close} as="form" onSubmit={submit} className="share-create-modal">

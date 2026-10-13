@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/k-k1/agent-fleet/control-plane/internal/store"
@@ -20,7 +21,26 @@ type handoffAPIFixture struct {
 	owner     store.Membership
 	recipient store.Membership
 	tenant    store.Tenant
-	agentHits map[string]int
+	agentHits *pathHits
+}
+
+// pathHits counts Agent requests per path. The catalog sync reads /sessions/catalog and
+// /repos concurrently, so the stub's handler runs on two goroutines at once.
+type pathHits struct {
+	mu sync.Mutex
+	n  map[string]int
+}
+
+func (h *pathHits) add(path string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.n[path]++
+}
+
+func (h *pathHits) get(path string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.n[path]
 }
 
 func newHandoffAPIFixture(t *testing.T, sessions []map[string]any) handoffAPIFixture {
@@ -45,9 +65,9 @@ func newHandoffAPIFixture(t *testing.T, sessions []map[string]any) handoffAPIFix
 	if err := st.CreateWorkspace(ctx, ws); err != nil {
 		t.Fatal(err)
 	}
-	hits := map[string]int{}
+	hits := &pathHits{n: map[string]int{}}
 	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits[r.URL.Path]++
+		hits.add(r.URL.Path)
 		switch r.URL.Path {
 		case "/sessions/catalog":
 			_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions})
@@ -160,7 +180,7 @@ func TestHandoffRecipientsThrottlesInventorySync(t *testing.T) {
 	if rec := f.getRecipients(t, "session-1"); rec.Code != http.StatusOK {
 		t.Fatalf("status=%d", rec.Code)
 	}
-	first := f.agentHits["/repos"]
+	first := f.agentHits.get("/repos")
 	if first == 0 {
 		t.Fatal("the very first call must sync")
 	}
@@ -169,7 +189,7 @@ func TestHandoffRecipientsThrottlesInventorySync(t *testing.T) {
 			t.Fatalf("status=%d", rec.Code)
 		}
 	}
-	if got := f.agentHits["/repos"]; got != first {
+	if got := f.agentHits.get("/repos"); got != first {
 		t.Fatalf("/repos hits=%d (first=%d) - a re-read within the TTL is running the inventory sync", got, first)
 	}
 }

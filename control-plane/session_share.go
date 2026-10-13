@@ -36,6 +36,10 @@ const (
 	shareForcedCatalogTTL = 3 * time.Second
 )
 
+// sharePutSyncedHook, when set by a test, runs in put between the catalog sync and taking
+// the share lock — the window in which another sync can overtake this one.
+var sharePutSyncedHook func()
+
 type shareReadWindow struct {
 	at time.Time
 	n  int
@@ -237,18 +241,25 @@ func (a sessionShareAPI) put(w http.ResponseWriter, r *http.Request, res *resolv
 		writeAPIErr(w, &apiError{http.StatusConflict, "workspace_not_running", "owner workspace must be running to create a share"})
 		return
 	}
-	// The sync reads the Agent outside the share lock. What makes the target check below
-	// exact is that it reads the catalog under the lock: a session row present now is swept
-	// together with this rule if a later sync finds the session gone, and a later sync's
-	// /repos read prunes a vanished working copy's rule the same way.
+	// The sync reads the Agent outside the share lock, so another sync may apply a newer
+	// inventory before the lock is taken. The target check below therefore reads only what
+	// is current under the lock: the catalog rows (a session row present now is swept with
+	// this rule if a later sync finds the session gone) and the newest applied /repos
+	// (a working copy a later sync saw vanish, and pruned rules for, must not get a new one).
 	repos, err := a.mgr.syncOwnerCatalog(r.Context(), res, catalogSyncNeed{exact: true, liveRepos: in.Scope.Type != "session"})
 	if err != nil {
 		writeAPIErr(w, catalogSyncAPIError(err))
 		return
 	}
+	if sharePutSyncedHook != nil {
+		sharePutSyncedHook()
+	}
 	shareLock := a.mgr.shareLockFor(res.mv.MembershipID)
 	shareLock.Lock()
 	defer shareLock.Unlock()
+	if repos != nil { // nil: this put's own live /repos read failed, so the target is unknown
+		repos = a.mgr.appliedRepos(res.mv.MembershipID)
+	}
 	catalog, err := a.mgr.store.ListSharedSessionCatalogByOwner(r.Context(), res.mv.MembershipID)
 	if err != nil {
 		writeAPIErr(w, internalErr(err))

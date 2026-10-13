@@ -104,6 +104,32 @@ describe("ShareCreateModal", () => {
     expect(post.opts?.signal?.aborted).toBe(true);
   });
 
+  // The parent can unmount the dialog mid-request (HandoffOfferModal closing, a pane
+  // switch). The aborted request is not a created share: onCreated would make the parent
+  // reload recipients from a screen that is gone.
+  it("does not report an abandoned request as created when the parent unmounts it", async () => {
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+    handler = async (path, opts) => {
+      if (path.startsWith("api/session-share-recipients")) return { members: [{ userKey: "b-example-com", email: "b@example.com" }] };
+      if (path === "api/session-shares" && opts?.method === "POST") return hang(opts);
+      return { shares: [] };
+    };
+    await mount(<ShareCreateModal initialTarget="session:s1" onClose={onClose} onCreated={onCreated} />);
+    await flush(300);
+    const pick = buttons().find((b) => b.textContent?.includes("b@example.com"))!;
+    await act(async () => pick.click());
+    await act(async () => buttons().find((b) => b.type === "submit")!.click());
+    await flush();
+    const post = calls.find((c) => c.opts?.method === "POST")!;
+    act(() => root?.unmount());
+    root = null;
+    await flush();
+    expect(post.opts?.signal?.aborted).toBe(true);
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("gives up after the deadline, says so, and lets the user try again", async () => {
     const { submit } = await openAndSubmit(() => {});
     await flush(SHARE_REQUEST_TIMEOUT_MS + 10);

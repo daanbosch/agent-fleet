@@ -160,11 +160,7 @@ func (m *manager) syncCatalogOnce(ctx context.Context, cs *catalogSyncer, o *own
 		live = (<-pending).inv
 	}
 	info := live
-	if live != nil {
-		cs.mu.Lock()
-		o.repos, o.reposAt = live, time.Now()
-		cs.mu.Unlock()
-	} else {
+	if live == nil {
 		info = cached
 	}
 	// A working copy the inventory does not describe keeps what its stored row says, rather
@@ -213,6 +209,13 @@ func (m *manager) syncCatalogOnce(ctx context.Context, cs *catalogSyncer, o *own
 	lock := m.shareLockFor(res.mv.MembershipID)
 	lock.Lock()
 	defer lock.Unlock()
+	// The cache is published under the share lock, so whoever holds that lock sees the
+	// newest live inventory any flight has applied (see appliedRepos).
+	if live != nil {
+		cs.mu.Lock()
+		o.repos, o.reposAt = live, time.Now()
+		cs.mu.Unlock()
+	}
 	if err := m.store.ReplaceSharedSessionCatalog(ctx, res.ws.ID, res.mv.MembershipID, rows); errors.Is(err, store.ErrSessionShareOwnerBusy) {
 		return result, nil // another CP replica is applying an already-authorized operation
 	} else if err != nil {
@@ -228,6 +231,20 @@ func (m *manager) syncCatalogOnce(ctx context.Context, cs *catalogSyncer, o *own
 		}
 	}
 	return result, nil
+}
+
+// appliedRepos is the newest live working-copy inventory a sync has applied for this owner.
+// Call it holding shareLockFor(owner): flights publish it under that lock and run in order,
+// so it is at least as new as any inventory a caller received from syncOwnerCatalog, and a
+// later flight that saw a working copy vanish (and pruned its rules) has replaced it.
+func (m *manager) appliedRepos(owner string) map[string]repoInfo {
+	cs := m.catalogSyncer()
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if o := cs.owners[owner]; o != nil {
+		return o.repos
+	}
+	return nil
 }
 
 // readAgentRepos reads the owner's working-copy inventory keyed by workingCopyId, or nil when

@@ -389,9 +389,54 @@ func TestHandoffRecipientsDoNotWaitForReposWithinItsTTL(t *testing.T) {
 	}
 	t.Logf("handoff recipients, cold: %v", get())
 	f.api.invalidateCatalog(f.res.mv.MembershipID) // the throttle lapses
+	repos := f.agent.reposHits.Load()
 	warm := get()
 	t.Logf("handoff recipients, throttle lapsed: %v", warm)
-	if warm >= f.agent.reposDelay {
-		t.Fatalf("handoff recipients took %v: it waited for /repos again", warm)
+	// Asserted on the call, not the wall time: the timing is logged for the PR, but a busy
+	// host or -race makes decoding 1,200 rows slow enough to cross any fixed bound.
+	if f.agent.reposHits.Load() != repos {
+		t.Fatalf("handoff recipients read /repos again within its TTL (took %v)", warm)
+	}
+	if f.agent.catalogHits.Load() != 2 {
+		t.Fatalf("catalog hits=%d, want a fresh catalog read once the throttle lapsed", f.agent.catalogHits.Load())
+	}
+}
+
+// put syncs outside the share lock, so another sync can apply a newer inventory before put
+// takes the lock. A working copy that newer sync saw vanish (and pruned the rules of) must
+// not get a fresh rule from the inventory put read earlier.
+func TestSharePutRechecksTheInventoryAppliedAfterItsSync(t *testing.T) {
+	f := newSyncBenchFixture(t, 3)
+	f.agent.catalogDelay, f.agent.reposDelay = 0, 0
+	ctx := context.Background()
+	paused, resume := make(chan struct{}), make(chan struct{})
+	sharePutSyncedHook = func() {
+		close(paused)
+		<-resume
+	}
+	t.Cleanup(func() { sharePutSyncedHook = nil })
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		body := `{"recipientUserKey":"peer-bench","scope":{"type":"repo","key":"wc-0"},"permission":"ro"}`
+		rec := httptest.NewRecorder()
+		f.api.put(rec, httptest.NewRequest(http.MethodPut, "/api/session-shares", strings.NewReader(body)), f.res)
+		done <- rec
+	}()
+	<-paused // put's own sync saw wc-0
+	f.agent.set([]map[string]any{}, []map[string]any{})
+	if _, err := f.mgr.syncOwnerCatalog(ctx, f.res, catalogSyncNeed{exact: true, liveRepos: true}); err != nil {
+		t.Fatal(err)
+	}
+	close(resume)
+	rec := <-done
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("put on a working copy a later sync saw vanish: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	shares, _ := f.st.ListSessionSharesByOwner(ctx, f.res.mv.MembershipID)
+	for _, s := range shares {
+		if s.ScopeType == "repo" {
+			t.Fatalf("rule created for a vanished working copy: %+v", s)
+		}
 	}
 }
