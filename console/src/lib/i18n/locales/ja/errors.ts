@@ -112,6 +112,7 @@ export const errors = {
   "err.share_self": "自分自身を共有先に指定することはできません。",
   "err.workspace_not_running": "所有者のワークスペースが起動している必要があります。",
   "err.catalog_sync_failed": "ワークスペースは起動していますが、セッション一覧を読み取れませんでした。しばらくしてから再度お試しください。",
+  "err.catalog_too_large": "このワークスペースはセッションが多すぎるため、セッション一覧を読み取れません。不要なセッション（アーカイブ済みも含む）を削除してください。",
   "err.share_target_not_found": "共有対象が見つかりませんでした。",
   "err.owner_session_archived": "所有者がこのセッションをアーカイブしました。共有先の一覧からは外れています（所有者が復元すればまた表示されます）。",
   "err.settings_change_failed": "設定を変更できませんでした",

@@ -39,11 +39,12 @@ func catalogSyncAPIError(err error) *apiError {
 	if !errors.As(err, &se) {
 		return internalErr(err)
 	}
-	msg := "owner workspace session catalog could not be read"
+	// Too large is permanent, so it gets its own code: under catalog_sync_failed the Console's
+	// translation would tell the user to retry something no retry fixes.
 	if errors.Is(err, errCatalogTooLarge) {
-		msg = "owner workspace session catalog is too large to read"
+		return &apiError{http.StatusBadGateway, errCodeCatalogTooLarge, "owner workspace session catalog is too large to read"}
 	}
-	return &apiError{http.StatusBadGateway, errCodeCatalogSyncFailed, msg}
+	return &apiError{http.StatusBadGateway, errCodeCatalogSyncFailed, "owner workspace session catalog could not be read"}
 }
 
 // readAgentCatalog fetches GET /sessions/catalog with its own size limit, reading one byte

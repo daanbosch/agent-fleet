@@ -101,7 +101,12 @@ func TestReadAgentCatalogDetectsTruncation(t *testing.T) {
 	if !errors.Is(err, errCatalogTooLarge) {
 		t.Fatalf("err=%v, want errCatalogTooLarge", err)
 	}
-	if e := catalogSyncAPIError(err); e.code != errCodeCatalogSyncFailed || !strings.Contains(e.message, "too large") {
-		t.Fatalf("api error=%+v", e)
+	// A permanent oversize and a transient failure must reach the user as different codes,
+	// or the Console's translation advises retrying something no retry fixes.
+	if e := catalogSyncAPIError(err); e.code != errCodeCatalogTooLarge {
+		t.Fatalf("api error=%+v, want %s", e, errCodeCatalogTooLarge)
+	}
+	if e := catalogSyncAPIError(&catalogSyncError{errors.New("connection refused")}); e.code != errCodeCatalogSyncFailed {
+		t.Fatalf("transient failure api error=%+v, want %s", e, errCodeCatalogSyncFailed)
 	}
 }
