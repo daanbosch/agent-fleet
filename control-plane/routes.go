@@ -519,6 +519,7 @@ func registerSessionShareRoutes(mux *http.ServeMux, cfg config) {
 	// the share API.
 	h := newSessionHandoffAPI(cfg.mgr, a, cfg.autostart)
 	mux.HandleFunc("GET /api/sessions/{name}/handoff-recipients", h.withResolved(h.recipients))
+	mux.HandleFunc("GET /api/sessions/{name}/handoff-context", h.withResolved(h.handoffContextGET))
 	mux.HandleFunc("POST /api/session-handoff-offers", h.withResolved(h.create))
 	mux.HandleFunc("GET /api/session-handoff-offers", h.withMembership(h.listOwned))
 	// The recipient's inbox. A literal segment outranks {id}, so this ordering does not

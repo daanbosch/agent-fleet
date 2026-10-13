@@ -1007,6 +1007,7 @@ type SessionShareStore interface {
 	DeleteSessionSharesByScope(ctx context.Context, ownerMembershipID, scopeType, scopeKey string) error
 	UpdateSessionSharePermission(ctx context.Context, id, ownerMembershipID, permission, updatedAt string) (bool, error)
 	ReplaceSharedSessionCatalog(ctx context.Context, workspaceID, ownerMembershipID string, rows []SharedSessionCatalog) error
+	ApplySharedSessionCatalogDelta(ctx context.Context, workspaceID, ownerMembershipID string, upserts []SharedSessionCatalog, deleted []string) error
 	GetSharedSessionCatalog(ctx context.Context, id string) (SharedSessionCatalog, bool, error)
 	ListSharedSessionCatalogByOwner(ctx context.Context, membershipID string) ([]SharedSessionCatalog, error)
 	CreateSessionShareProposal(ctx context.Context, row SessionShareProposal) error

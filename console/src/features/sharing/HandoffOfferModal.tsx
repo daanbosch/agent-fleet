@@ -87,7 +87,12 @@ export function HandoffOfferModal({
   const [loading, setLoading] = useState(true);
   const [members, setMembers] = useState<RecipientCandidate[]>([]);
   const [ctx, setCtx] = useState<HandoffContext | null>(null);
-  const [loadErr, setLoadErr] = useState("");
+  // The verdict is a second request (the Agent runs git for it), so the recipients show
+  // first. Until it has answered there is no verdict, and the send button stays disabled.
+  const [ctxReady, setCtxReady] = useState(false);
+  const [listErr, setListErr] = useState("");
+  const [ctxErr, setCtxErr] = useState("");
+  const loadErr = listErr || ctxErr;
   const [recipient, setRecipient] = useState("");
   // This becomes the session name verbatim in the recipient's workspace, so clamp it to
   // the creation API's rules when offering: sending an over-long name makes the failure
@@ -108,35 +113,49 @@ export function HandoffOfferModal({
   const sendReq = useRef<BoundedRequest | null>(null);
   const load = () => {
     setLoading(true);
+    setCtxReady(false);
     loadReq.current?.cancel();
     const req = boundedRequest();
     loadReq.current = req;
     // Only the newest lookup may write: an older one answering late would show another
     // session's recipients.
     const current = () => loadReq.current === req;
-    api(`api/sessions/${encodeURIComponent(session)}/handoff-recipients`, { signal: req.signal })
+    const listP = api(`api/sessions/${encodeURIComponent(session)}/handoff-recipients?context=skip`, { signal: req.signal })
       .then((d) => {
         if (!current()) return;
         if (d?.error) {
-          setLoadErr(errText(d.error));
+          setListErr(errText(d.error));
           setMembers([]);
           return;
         }
-        setLoadErr("");
+        setListErr("");
         setMembers(Array.isArray(d.members) ? d.members : []);
+        setRecipient((prev) => prev || (d.members?.[0]?.userKey ?? ""));
+      })
+      .catch(() => {
+        if (current()) setListErr(tr("handoff.load_failed"));
+      })
+      .finally(() => {
+        if (current()) setLoading(false);
+      });
+    const ctxP = api(`api/sessions/${encodeURIComponent(session)}/handoff-context`, { signal: req.signal })
+      .then((d) => {
+        if (!current()) return;
+        if (d?.error) {
+          setCtxErr(errText(d.error));
+          return;
+        }
+        setCtxErr("");
         setCtx((d.context || null) as HandoffContext | null);
         // A refreshed verdict is a new snapshot: the push the owner confirmed was for the
         // previous one, so the box starts unticked again.
         setPushFirst(false);
-        setRecipient((prev) => prev || (d.members?.[0]?.userKey ?? ""));
+        setCtxReady(true);
       })
       .catch(() => {
-        if (current()) setLoadErr(tr("handoff.load_failed"));
-      })
-      .finally(() => {
-        req.settle();
-        if (current()) setLoading(false);
+        if (current()) setCtxErr(tr("handoff.load_failed"));
       });
+    void Promise.allSettled([listP, ctxP]).then(() => req.settle());
   };
   useEffect(load, [session]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => () => {
@@ -152,6 +171,7 @@ export function HandoffOfferModal({
   const pushable = PUSHABLE.has(blocked) && !!ctx?.pushRemote;
   const pushing = pushable && pushFirst;
   const canSubmit =
+    ctxReady &&
     !!recipient && !!title.trim() && !!prompt.trim() && (!blocked || pushing) && (!warning || ackWarning);
 
   const submit = async (e: FormEvent) => {
@@ -260,6 +280,7 @@ export function HandoffOfferModal({
                   })}
                 </p>
               )}
+              {!ctxReady && <p className="ui-field-hint">{tr("handoff.gate_checking")}</p>}
               {blocked && <p className="ui-field-hint handoff-blocked">{tr(blockedKey(blocked))}</p>}
               {pushable && (
                 <label className="ui-field-inline handoff-push">
