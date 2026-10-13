@@ -274,6 +274,10 @@ func (a sessionHandoffAPI) recipientsFor(ctx context.Context, mv store.Membershi
 // recipients (GET /api/sessions/{name}/handoff-recipients) returns both the list A picks an
 // addressee from and the push gate's verdict (docs/log/77 §77.5). Putting the gate only on
 // submission would reject A after a long prompt had already been written.
+//
+// The verdict costs a git run on the owner's Agent, which the list does not need, so the
+// Console asks for the list with ?context=skip and reads the verdict from handoffContextGET
+// next. Without the parameter both come back together, as before.
 func (a sessionHandoffAPI) recipients(w http.ResponseWriter, r *http.Request, res *resolved) {
 	name := r.PathValue("name")
 	if res.rt.State(r.Context()) != "running" {
@@ -297,10 +301,13 @@ func (a sessionHandoffAPI) recipients(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 	}
-	ctx, _, e := a.handoffContext(r.Context(), res, name)
-	if e != nil {
-		writeAPIErr(w, e)
-		return
+	var ctx map[string]any
+	if r.URL.Query().Get("context") != "skip" {
+		var e *apiError
+		if ctx, _, e = a.handoffContext(r.Context(), res, name); e != nil {
+			writeAPIErr(w, e)
+			return
+		}
 	}
 	pending := ""
 	if found {
@@ -314,7 +321,28 @@ func (a sessionHandoffAPI) recipients(w http.ResponseWriter, r *http.Request, re
 		}
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
-	writeJSON(w, http.StatusOK, map[string]any{"members": members, "context": ctx, "pendingOfferId": pending})
+	out := map[string]any{"members": members, "pendingOfferId": pending}
+	if ctx != nil {
+		out["context"] = ctx
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handoffContextGET (GET /api/sessions/{name}/handoff-context) is the push gate's verdict
+// alone, relayed from the owner's Agent unchanged. The Console shows the recipients first and
+// enables the send button only once this has answered and passes.
+func (a sessionHandoffAPI) handoffContextGET(w http.ResponseWriter, r *http.Request, res *resolved) {
+	if res.rt.State(r.Context()) != "running" {
+		writeAPIErr(w, &apiError{http.StatusConflict, "workspace_not_running", "owner workspace must be running to hand off"})
+		return
+	}
+	ctx, _, e := a.handoffContext(r.Context(), res, r.PathValue("name"))
+	if e != nil {
+		writeAPIErr(w, e)
+		return
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	writeJSON(w, http.StatusOK, map[string]any{"context": ctx})
 }
 
 // handoffContext asks the owner Agent for the state of the working copy. The raw map is
