@@ -841,9 +841,11 @@ if grep -qE "deploy --stack-name af-ecs-engines .*(LlmModelS3Key|ImageModelS3Key
   fail "update.sh passed a parameter retired in ADR 0072 P6"
 fi
 # And 30-ingress still gets ImageTag and nothing else - the engine gate must not leak into the
-# call the comment above it says never to add a parameter to.
-grep -q "deploy --stack-name t-ingress .*--parameter-overrides ImageTag=9.9.9-dev-test --no-fail" "$LOG" \
-  || fail "the ingress deploy no longer overrides ImageTag alone"
+# call the comment above it says never to add a parameter to. The one exception is EfsBackup,
+# the data stack's backup state for the Console's warning (the stub's data stack is
+# Persistence=delete, so "off").
+grep -q "deploy --stack-name t-ingress .*--parameter-overrides ImageTag=9.9.9-dev-test EfsBackup=off --no-fail" "$LOG" \
+  || fail "the ingress deploy overrides something besides ImageTag and EfsBackup"
 grep -q "deploy --stack-name t-ingress .*CAPABILITY_NAMED_IAM" "$LOG" \
   || fail "update.sh deploys 30-ingress without CAPABILITY_NAMED_IAM (InsufficientCapabilitiesException)"
 iam_caps

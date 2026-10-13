@@ -682,6 +682,16 @@ fi
 # --- 6) ingress (parameters holding physical IDs get the new outputs) --------
 af_read_params 30-ingress
 af_param_override ImageTag "$TAG"
+# EFS backup state for the Console's warning, from the data stack this run just deployed. Only
+# written when the data stack could be read, never as an empty value.
+if [ "$AF_DRY" != 1 ]; then
+  data_persistence="$(af_stack_param "$AF_STACK_DATA" Persistence)"
+  data_vault="$(af_stack_output "$AF_STACK_DATA" EfsBackupVaultName)"
+  case "$data_persistence" in
+    retain) af_param_override EfsBackup "$([ -n "$data_vault" ] && echo present || echo missing)" ;;
+    delete) af_param_override EfsBackup off ;;
+  esac
+fi
 # Speech: pass the engine's real service name and DNS name, or nothing at all. Read from
 # the stack's outputs rather than the capture for the same reason as the launch template —
 # a rebuilt stack produces new values, and a stale one here is a CP that drives a service

@@ -232,6 +232,19 @@ describe("AdminTab deployment warnings", () => {
     expect(banner()?.textContent).toContain("AF_MASTER_KEY");
   });
 
+  it("shows the missing-EFS-backup warning, alongside any other", async () => {
+    respond(true, ["efs_backup_missing"]);
+    await mount();
+    const banners = () => [...host!.querySelectorAll('.settings-content [role="alert"]')];
+    expect(banners().map((b) => b.textContent)).toEqual([expect.stringContaining("EFS")]);
+    expect(banners()[0].textContent).toContain("EfsBackup");
+    act(() => root?.unmount());
+    host?.remove();
+    respond(true, ["plaintext_secrets", "efs_backup_missing"]);
+    await mount();
+    expect(banners().length).toBe(2);
+  });
+
   it("shows nothing when the deployment has a key, or the answer predates the field", async () => {
     respond(true, []);
     await mount();

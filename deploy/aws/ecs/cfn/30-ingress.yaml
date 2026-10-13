@@ -23,6 +23,11 @@ Parameters:
     Type: String
     Default: af-ecs-data
     Description: Name of the 10-data stack (EFS filesystem for workspace homes).
+  EfsBackup:
+    Type: String
+    Default: ""
+    AllowedValues: [ "", off, present, missing ]
+    Description: Daily EFS backup state of the data stack, set by update.sh/standup.sh (PARAMETERS.md).
   CustodianKmsKeyArn:
     Type: String
     Default: ""
@@ -324,19 +329,14 @@ Parameters:
   SuperAdminEmails:
     Type: String
     Default: ""
-    Description: SUPER_ADMIN_EMAILS (comma-separated). Read once at task start and
-      treated as the only source of truth - an account removed from this list also
-      loses the role in the database on the next start. Changing it needs a redeploy.
+    Description: SUPER_ADMIN_EMAILS (comma-separated), the only source of truth; read at task start (PARAMETERS.md).
   AfProvision:
     Type: String
     Default: invite
     AllowedValues: [ invite, auto ]
     Description: >-
-      AF_PROVISION - what happens to somebody who signs in with no tenant membership yet.
-      invite (the default here) = they wait for an admin; auto = they are given the default
-      tenant on the spot, so AF_OAUTH_ALLOWED_* is the only gate. A tenant's own
-      auto_join_domains is checked BEFORE either. Switching to invite does not evict anyone
-      already working. PARAMETERS.md.
+      AF_PROVISION - what a sign-in with no tenant membership gets: invite = waits for
+      an admin, auto = the default tenant. PARAMETERS.md.
   AuthMode:
     Type: String
     Default: oauth
@@ -902,6 +902,7 @@ Resources:
             - { Name: AF_ECS_CLUSTER, Value: !ImportValue { "Fn::Sub": "${PlatformStackName}-ClusterName" } }
             - { Name: AF_ECS_SUBNETS, Value: !ImportValue { "Fn::Sub": "${NetworkStackName}-PrivateSubnets" } }
             - { Name: AF_ECS_SECURITY_GROUP, Value: !ImportValue { "Fn::Sub": "${NetworkStackName}-WsSgId" } }
+            - { Name: AF_EFS_BACKUP, Value: !Ref EfsBackup }
             - { Name: AF_ECS_EFS_ID, Value: !ImportValue { "Fn::Sub": "${DataStackName}-EfsId" } }
             - { Name: AF_ECS_NAMESPACE_ARN, Value: !ImportValue { "Fn::Sub": "${PlatformStackName}-NamespaceArn" } }
             - { Name: AF_ECS_EXEC_ROLE, Value: !ImportValue { "Fn::Sub": "${PlatformStackName}-ExecRoleArn" } }

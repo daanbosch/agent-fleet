@@ -28,12 +28,31 @@ func (m *manager) plaintextSecrets() bool {
 	return m.authMode != "dev" && (len(m.master32) == 0 || m.custodian == nil)
 }
 
+// deploymentWarnEfsBackupMissing is the code for an ECS deployment on Persistence=retain whose
+// data stack has no daily EFS backup plan; the Console renders it as
+// admin.deploy_warn_efs_backup_missing.
+const deploymentWarnEfsBackupMissing = "efs_backup_missing"
+
+const efsBackupMissingLog = "WARNING: the data stack runs Persistence=retain but has no daily EFS backup " +
+	"(vault and plan were added to 10-data in 0.26.0); see deploy/aws/ecs/README.md, \"EFS backup and restore\""
+
+// efsBackupMissing reports AF_EFS_BACKUP=missing on an ECS runtime. The ingress stack carries
+// that marker (update.sh / standup.sh fill it from the data stack's outputs), so the CP needs
+// no AWS permission to know. Anything else, including an unset or empty marker, means "not
+// known to be missing": when in doubt answer false, a false alarm teaches operators to ignore it.
+func efsBackupMissing(runtime, marker string) bool {
+	return (runtime == "ecs" || runtime == "ecs-ec2") && marker == "missing"
+}
+
 // deploymentWarnings lists the deployment-level problems a super_admin must see. Never nil,
 // so the wire always carries an array.
 func (m *manager) deploymentWarnings() []string {
 	out := []string{}
 	if m.plaintextSecrets() {
 		out = append(out, deploymentWarnPlaintextSecrets)
+	}
+	if m.efsBackupMissing {
+		out = append(out, deploymentWarnEfsBackupMissing)
 	}
 	return out
 }
