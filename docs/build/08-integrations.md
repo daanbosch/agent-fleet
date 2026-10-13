@@ -141,6 +141,50 @@ as git**, and it self-heals across rotation because it fetches each time.
   (capped at 500, most recently updated first). The old `?role=member` listing answers
   410.
 
+### Making `bkt` work without a separate login
+
+`bkt` (the Bitbucket CLI, [avivsinai/bitbucket-cli](https://github.com/avivsinai/bitbucket-cli))
+is the Bitbucket counterpart of `gh` and is wrapped the same way: the real binary is
+`/usr/local/libexec/bkt`, and `/usr/local/bin/bkt` is `workspace/bkt-auth-wrapper.sh`. It has
+no keychain to log in to in a container, but it takes `BKT_TOKEN` / `BKT_HOST` /
+`BKT_AUTH_METHOD` / `BKT_USERNAME` from the environment, which is what the wrapper fills in
+for one `exec` of the real binary:
+
+- **OAuth connection**: `git credential fill` for `bitbucket.org` (the helper has refreshed
+  the token if it was within two minutes of expiry) answers `x-token-auth` + the access token,
+  and the wrapper sets `BKT_AUTH_METHOD=bearer`.
+- **Pasted API token**: git cannot carry this one — the helper rewrites the Atlassian email
+  to `x-bitbucket-api-token-auth`, and the REST API accepts only email + token as Basic. When
+  the helper answers that username, the wrapper asks `workspace-agent bkt-cred`
+  (`workspace/agent/bkt_cred.go`), which prints the stored email and token for the
+  `bitbucket.org` API-token connection and nothing else (no OAuth connection, no other host,
+  no app password), and sets `BKT_AUTH_METHOD=basic` + `BKT_USERNAME`.
+- **Fails closed**: if either helper errors or answers nothing, `bkt` runs with no injected
+  auth. The token is never an argument, never written to a file, and exists only in the
+  environment of that one `bkt` process.
+
+**Limits worth knowing:**
+
+- **Scopes**: the token carries what the tenant's OAuth consumer (or the pasted API token)
+  was granted; `bkt` cannot widen it. For `bkt pr` and `bkt pipeline` to work, the OAuth
+  consumer needs `repository`, `pullrequest:write` (for creating and merging; `pullrequest`
+  reads only) and `pipeline` (`pipeline:write` to trigger), plus `account`. A pasted API token
+  needs the granular equivalents (`read:repository:bitbucket`, `read:pullrequest:bitbucket` /
+  `write:pullrequest:bitbucket`, `read:pipeline:bitbucket`, `read:user:bitbucket`); one without
+  the pull-request scopes lists repositories and branches but answers 403 to `bkt pr list`.
+- **Data Center and any other host are the user's own setup**, the same as GitHub Enterprise.
+  Connections accept only `bitbucket.org`, so nothing is injected for them. Because
+  injecting `BKT_HOST` would override a user's contexts, the wrapper runs `bkt` unchanged
+  when `BKT_TOKEN` or `BKT_HOST` is already set **or** bkt's own `config.yml` exists
+  (`bkt auth login`, `bkt context create`).
+- **Cloud only**: injection is for `https://bitbucket.org`.
+- **Unverified**: whether Bitbucket Cloud accepts a *user* OAuth access token as a bearer for
+  user-scoped commands (`bkt`'s README only shows bearer with resource access tokens) has not
+  been exercised against a real OAuth connection; the API-token path has.
+- **Pin**: `BKT_VERSION` in the Dockerfile; the tarball must match the release's
+  `checksums.txt`. It is not in the agent-CLI drift/pin-bump tooling, like `gh`; the image
+  smoke (`deploy/local/e2e-smoke.sh`) checks the pinned version.
+
 ### 8.4.1 The OAuth apps belong to **the tenant**
 
 The apps are rows in `tenant_git_oauth` — one each for `github`, `bitbucket` and `jira`

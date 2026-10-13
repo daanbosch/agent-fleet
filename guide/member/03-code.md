@@ -27,6 +27,22 @@ with a token works in the meantime and is not a lesser connection.
 After connecting, git authentication applies **transparently** to every git operation. You will
 never be asked for a token on each clone or push.
 
+## Use `gh` and `bkt` in a session
+
+Once GitHub is connected, `gh` in a session is already signed in. Once Bitbucket Cloud
+(bitbucket.org) is connected, so is `bkt`, the Bitbucket CLI: `bkt pr list`, `bkt pr create`,
+`bkt pipeline` and so on need no `auth login`. Both use your saved connection and renew it
+the way git does.
+
+- **Scopes**: `bkt` can do only what the connection was granted. For pull requests and
+  pipelines the Bitbucket OAuth app needs `repository`, `pullrequest:write`, `pipeline` and
+  `account`; a pasted API token needs the matching `read:` / `write:` scopes (for example
+  `read:pullrequest:bitbucket`). A token without the pull-request scopes can list repositories
+  but gets `403 Forbidden` from `bkt pr list`. The OAuth app's scopes are set by the tenant administrator.
+- **Bitbucket Data Center** (or any host other than bitbucket.org) is not connected through
+  Settings. Set it up yourself (`bkt auth login`, or `BKT_HOST` and `BKT_TOKEN`); the
+  wrapper then leaves `bkt` alone.
+
 ## Clone a repository
 
 Open **"Add"** in the **Repositories** section of the left pane and pick **Git** under **Kind**.

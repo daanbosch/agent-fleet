@@ -171,6 +171,14 @@ var subcommands = []subcommand{
 		run:     runCredHelper,
 	},
 	{
+		// The pasted-API-token REST credential for the PATH wrapper at /usr/local/bin/bkt;
+		// the one case `git credential fill` cannot express. See bkt_cred.go.
+		name:    "bkt-cred",
+		summary: "Bitbucket API-token email and token for the bkt wrapper",
+		hidden:  true,
+		run:     runBktCred,
+	},
+	{
 		// Transparent SVN auth: the PATH shim at /usr/local/bin/svn re-enters this binary,
 		// which fills in the credential and execs the real svn — so the process svn's caller
 		// sees is still svn. See svn_wrapper.go.

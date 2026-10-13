@@ -27,6 +27,23 @@ OAuth（デバイスフロー）は、表示された**コードをコピー**�
 git の認証は接続後、すべての git 操作に**透過的に使われます**。クローンや push のたびに
 トークンを聞かれることはありません。
 
+## セッションで `gh` と `bkt` を使う
+
+GitHub を接続していれば、セッションの `gh` はサインイン済みです。Bitbucket Cloud
+（bitbucket.org）を接続していれば、Bitbucket CLI の `bkt` も同様で、`bkt pr list`・
+`bkt pr create`・`bkt pipeline` などに `auth login` は要りません。どちらも保存済みの接続を使い、
+git と同じ要領で更新されます。
+
+- **スコープ**: `bkt` は接続に与えられた権限の範囲でしか動きません。プルリクエストと
+  パイプラインには、Bitbucket の OAuth アプリに `repository`・`pullrequest:write`・`pipeline`・
+  `account` が、貼り付けた API トークンには対応する `read:` / `write:` スコープ（例:
+  `read:pullrequest:bitbucket`）が必要です。プルリクエストのスコープが無いトークンは
+  リポジトリ一覧は取れても `bkt pr list` が `403 Forbidden` になります。OAuth アプリのスコープは
+  テナント管理者が設定します。
+- **Bitbucket Data Center**（bitbucket.org 以外のホスト）は設定画面からは接続できません。
+  自分で設定してください（`bkt auth login`、または `BKT_HOST` と `BKT_TOKEN`）。設定があると
+  ラッパーは `bkt` に手を出しません。
+
 ## リポジトリをクローンする
 
 左ペイン **リポジトリ** の **「追加」** を開き、**種類**で **Git** を選びます。取得元は2つです。
