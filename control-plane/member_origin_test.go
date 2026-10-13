@@ -358,7 +358,7 @@ func TestHashedUploadIsSignedByBodyHash(t *testing.T) {
 			req.Header.Set(k, v)
 		}
 		rec := httptest.NewRecorder()
-		proxy.rest(rec, req, res)
+		proxy.rest(deadlineRecorder{rec}, req, res)
 		return rec.Code
 	}
 	mp := "multipart/form-data; boundary=B"
@@ -392,6 +392,12 @@ func TestHashedUploadIsSignedByBodyHash(t *testing.T) {
 		t.Fatalf("claims = %+v", c)
 	}
 }
+
+// deadlineRecorder is a ResponseRecorder that, like the real server's writer, accepts read
+// deadlines (the hashed upload refuses to start without being able to set one).
+type deadlineRecorder struct{ *httptest.ResponseRecorder }
+
+func (deadlineRecorder) SetReadDeadline(time.Time) error { return nil }
 
 // slowBody delivers its bytes, waits, then ends; doneAt is when it ended.
 type slowBody struct {
@@ -437,7 +443,7 @@ func TestHashedUploadTimingLimitsAndCleanup(t *testing.T) {
 		req.Header.Set("Content-Type", "multipart/form-data; boundary=B")
 		req.Header.Set(memberOriginConsoleHeader, "1")
 		rec := httptest.NewRecorder()
-		proxy.rest(rec, req, res)
+		proxy.rest(deadlineRecorder{rec}, req, res)
 		return rec.Code
 	}
 	empty := func(when string) {
@@ -504,13 +510,18 @@ func TestHashedUploadStallFreesTheSlot(t *testing.T) {
 	oldIdle := memberOriginUploadIdle
 	memberOriginUploadIdle = 300 * time.Millisecond
 	defer func() { memberOriginUploadIdle = oldIdle }()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { proxy.rest(w, r, res) }))
+	// The production wrappers, outermost first (main.go): they hide the connection unless they
+	// Unwrap, and browsers send Accept-Encoding: gzip on a POST too.
+	srv := httptest.NewServer(logRequests(gzipMiddleware(etagJSON(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy.rest(w, r, res)
+	})))))
 	defer srv.Close()
 
 	post := func(body io.Reader) (int, error) {
 		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/agents/memory/import", body)
 		req.Header.Set("Content-Type", "multipart/form-data; boundary=B")
 		req.Header.Set(memberOriginConsoleHeader, "1")
+		req.Header.Set("Accept-Encoding", "gzip")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return 0, err
@@ -543,5 +554,19 @@ func TestHashedUploadStallFreesTheSlot(t *testing.T) {
 	}()
 	if code, err := post(pr2); err != nil || code != http.StatusOK {
 		t.Fatalf("slow upload: %d %v", code, err)
+	}
+}
+
+// Without a way to set a read deadline the upload is refused rather than left unbounded.
+func TestHashedUploadRefusedWhenNoDeadlineCanBeSet(t *testing.T) {
+	proxy, res, _, cleanup := newFSProxyTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer cleanup()
+	req := httptest.NewRequest(http.MethodPost, "https://console.example/api/agents/memory/import", strings.NewReader("x"))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=B")
+	req.Header.Set(memberOriginConsoleHeader, "1")
+	rec := httptest.NewRecorder() // no SetReadDeadline
+	proxy.rest(rec, req, res)
+	if rec.Code != http.StatusInternalServerError || uploadsActive != 0 {
+		t.Fatalf("code %d, slots %d", rec.Code, uploadsActive)
 	}
 }

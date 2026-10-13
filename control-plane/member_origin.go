@@ -287,7 +287,9 @@ func (p *progressReader) Read(b []byte) (int, error) {
 	if d.After(p.deadline) {
 		d = p.deadline
 	}
-	_ = p.rc.SetReadDeadline(d) // unsupported on a recorder; the real server supports it
+	if err := p.rc.SetReadDeadline(d); err != nil {
+		return 0, err
+	}
 	return p.r.Read(b)
 }
 
@@ -373,6 +375,12 @@ func (m *manager) hashedUploadMark(w http.ResponseWriter, r *http.Request, res *
 		idle: memberOriginUploadIdle, deadline: time.Now().Add(memberOriginUploadTotal)}
 	n, err := io.Copy(io.MultiWriter(f, h), pr)
 	_ = pr.rc.SetReadDeadline(time.Time{})
+	if errors.Is(err, http.ErrNotSupported) {
+		// No deadline could be set (a wrapper hides the connection): a stalled upload would hold
+		// its slot for good, so it is not accepted at all.
+		log.Printf("member upload refused: the response writer %T cannot set a read deadline", w)
+		return fail(&apiError{http.StatusInternalServerError, "internal", "could not bound the upload"})
+	}
 	if err != nil {
 		if pr.expired || errors.Is(err, os.ErrDeadlineExceeded) {
 			return fail(&apiError{http.StatusRequestTimeout, "upload_timeout", "the upload stalled or took too long"})
