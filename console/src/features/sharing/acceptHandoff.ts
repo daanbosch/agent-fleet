@@ -9,6 +9,13 @@
 // it resumes (handoff_take_lost). A launch that fails gives the take back, so the offer is
 // pending again; a launch that succeeds settles it as accepted with the take's token.
 //
+// A launch whose create got no definite answer (no answer, a gateway's page) keeps the take
+// (#2040): the session may exist, and giving the offer back would let the sender start the
+// same work. The CP settles the take itself whenever it saw the Agent's answer, and the next
+// press reconciles the rest: it sends the lost launch's token, and the CP either gives an
+// unconfirmed take back and takes afresh, or asks the recipient's Agent about the confirmed
+// create and accepts the session it finds (status "accepted" with its name).
+//
 // The CP still never launches anything (decision 3): the recipient's own Console creates the
 // session in their own workspace, through the launch callback, between the take and the
 // accept. The take happens on the launch press, not when the dialog opens, so a dialog that is
@@ -20,9 +27,15 @@ import { apiJSON, errText } from "../../core/api/client.ts";
 import { t } from "../../lib/i18n/index.ts";
 import type { LaunchResult } from "../repos/LaunchModal.tsx";
 import type { HandoffTake } from "../repos/useStartWork.ts";
+import { useSessionsStore } from "../sessions/store.ts";
 import { useHandoffStore } from "./handoffStore.ts";
 
 const offerPath = (id: string, verb: string) => `api/session-handoff-offers/${encodeURIComponent(id)}/${verb}`;
+
+// The token of each offer's launch whose outcome is unknown, sent with the next take. Kept in
+// memory only: after a reload the CP still reconciles a confirmed take on its own, and an
+// unconfirmed one lapses after its take window.
+const lostTakes = new Map<string, string>();
 
 // The CP names the offer's status in offerStatus. Never read `status`: the API client stamps
 // it with the HTTP status on every error (apiResult), so the CP's string never arrives there.
@@ -35,6 +48,7 @@ interface HandoffErrorBody {
 /** Why a take was refused, in the recipient's words. */
 function takeRefusal(e: HandoffErrorBody | undefined): string {
   if (e?.code === "handoff_being_taken") return t("handoff.take_busy");
+  if (e?.code === "handoff_launch_unknown") return t("handoff.take_unknown");
   if (e?.code === "handoff_already_decided") {
     switch (e.offerStatus) {
       case "withdrawn":
@@ -62,18 +76,34 @@ export async function launchFromHandoffOffer(
   launch: (take: HandoffTake) => Promise<LaunchResult>,
   notify: (msg: string) => void,
 ): Promise<LaunchResult> {
-  const taken = await apiJSON(offerPath(offerId, "take"), "POST", {}).catch(() => ({ error: {} }));
+  const prev = lostTakes.get(offerId);
+  const taken = await apiJSON(offerPath(offerId, "take"), "POST", prev ? { token: prev } : {}).catch(() => ({ error: {} }));
   const token = typeof taken?.token === "string" ? taken.token : "";
+  if (taken?.status === "accepted" && typeof taken?.sessionName === "string" && taken.sessionName) {
+    // The lost launch did create its session; the CP has now accepted the offer with it.
+    lostTakes.delete(offerId);
+    notify(t("handoff.launch_recovered", { name: taken.sessionName }));
+    void useHandoffStore.getState().refresh();
+    void useSessionsStore.getState().refresh();
+    return { ok: true, name: taken.sessionName };
+  }
   if (!token) {
     notify(takeRefusal(taken?.error));
     void useHandoffStore.getState().refresh();
     return { ok: false };
   }
+  lostTakes.delete(offerId);
   let r: LaunchResult = { ok: false };
   try {
     r = await launch({ offerId, token });
+  } catch {
+    // A launch that threw part-way may have created its session.
+    r = { ok: false, unknown: true };
   } finally {
-    if (r.ok) {
+    if (r.unknown) {
+      lostTakes.set(offerId, token);
+      notify(t("handoff.launch_unknown"));
+    } else if (r.ok) {
       const d = await apiJSON(offerPath(offerId, "accept"), "POST", { sessionName: r.name || "", token }).catch(() => ({
         error: { message: t("err.network") },
       }));

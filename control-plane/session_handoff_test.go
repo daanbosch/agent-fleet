@@ -72,7 +72,7 @@ func newHandoffAPIFixture(t *testing.T, sessions []map[string]any) handoffAPIFix
 	}}}
 	share := newSessionShareAPI(mgr)
 	return handoffAPIFixture{
-		st: st, api: newSessionHandoffAPI(mgr, share), owner: owner, recipient: recipient, tenant: tenant,
+		st: st, api: newSessionHandoffAPI(mgr, share, false), owner: owner, recipient: recipient, tenant: tenant,
 		agentHits: hits,
 		res:       &resolved{ident: oi, mv: ownerViews[0], ws: ws, rt: stubRuntime{endpoint: agent.URL, token: "tok"}},
 	}

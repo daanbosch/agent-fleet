@@ -1012,9 +1012,18 @@ func (a workspaceAPI) sessionCreate(w http.ResponseWriter, r *http.Request, res 
 		a.sessionCreateThen(w, r, res, nil)
 		return
 	}
-	a.sessionCreateThen(w, r, res, func(ctx context.Context) *apiError {
-		return confirmHandoffTake(ctx, a.mgr.store, res.mv, *take)
+	confirmed := false
+	tw := &teeWriter{ResponseWriter: w}
+	a.sessionCreateThen(tw, r, res, func(ctx context.Context) *apiError {
+		if aerr := confirmHandoffTake(ctx, a.mgr.store, res.mv, *take); aerr != nil {
+			return aerr
+		}
+		confirmed = true
+		return nil
 	})
+	if confirmed {
+		settleHandoffCreate(r.Context(), a.mgr, res, *take, tw.status, tw.buf)
+	}
 }
 
 // sessionCreateThen is sessionCreate with one last check, run once the workspace is ready and

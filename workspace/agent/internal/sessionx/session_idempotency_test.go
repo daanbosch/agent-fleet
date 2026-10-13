@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/mcpx"
@@ -165,5 +166,46 @@ func TestCreateSessionDedupeHTTP(t *testing.T) {
 	do(t, srv, "GET", "/sessions-idempotency/cs_test", nil, http.StatusOK, &looked)
 	if looked.Name != first.Name {
 		t.Fatalf("lookup returned %q, want %q", looked.Name, first.Name)
+	}
+
+	// The ledger forgets the key (TTL, or the Agent restarted): the session's meta still
+	// answers it, and a key nothing was created under is not_created rather than unknown.
+	createLedger = &createSessionLedger{m: map[string]*createLedgerEntry{}}
+	looked = session.Session{}
+	do(t, srv, "GET", "/sessions-idempotency/cs_test", nil, http.StatusOK, &looked)
+	if looked.Name != first.Name {
+		t.Fatalf("lookup after the ledger forgot = %q, want %q", looked.Name, first.Name)
+	}
+	status, raw = roundtrip(t, srv, "GET", "/sessions-idempotency/cs_other", nil)
+	if status != http.StatusNotFound || !strings.Contains(string(raw), `"not_created"`) {
+		t.Fatalf("lookup of an unused key = %d %s, want 404 not_created", status, raw)
+	}
+}
+
+// TestIdempotencyLookupFallsBackToMeta is the lookup a lost create answer is reconciled with
+// after the ledger's TTL (issue #2040): the session is found through Meta.CreateKey, and only
+// a key no session carries answers not_created.
+func TestIdempotencyLookupFallsBackToMeta(t *testing.T) {
+	testguard.IsolateTmux(t)
+	t.Setenv("AF_SESSIONS_DIR", filepath.Join(t.TempDir(), "sessions"))
+	prevLedger := createLedger
+	createLedger = &createSessionLedger{m: map[string]*createLedgerEntry{}}
+	t.Cleanup(func() { createLedger = prevLedger })
+	session.WriteMeta(session.Meta{Name: "s-keyed", Kind: "shell", Dir: "/tmp", CreateKey: "handoff-o1-tok"})
+	session.WriteMeta(session.Meta{Name: "s-plain", Kind: "shell", Dir: "/tmp"})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /sessions-idempotency/{key}", HandleIdempotencyLookup)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	var looked session.Session
+	do(t, srv, "GET", "/sessions-idempotency/handoff-o1-tok", nil, http.StatusOK, &looked)
+	if looked.Name != "s-keyed" {
+		t.Fatalf("lookup = %q, want s-keyed", looked.Name)
+	}
+	status, raw := roundtrip(t, srv, "GET", "/sessions-idempotency/handoff-o1-other", nil)
+	if status != http.StatusNotFound || !strings.Contains(string(raw), `"not_created"`) {
+		t.Fatalf("lookup of an unused key = %d %s, want 404 not_created", status, raw)
 	}
 }

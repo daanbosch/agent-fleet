@@ -108,7 +108,7 @@ func newHandoffLife(t *testing.T) *handoffLife {
 	t.Cleanup(agent.Close)
 	rt := stubRuntime{endpoint: agent.URL, token: "tok"}
 	mgr := &manager{store: st, rts: map[string]cachedRT{f.owner.mv.MembershipID: {rt: rt, ws: ws}}}
-	f.api = newSessionHandoffAPI(mgr, newSessionShareAPI(mgr))
+	f.api = newSessionHandoffAPI(mgr, newSessionShareAPI(mgr), false)
 	f.ownerRes = &resolved{ident: f.owner.ident, mv: f.owner.mv, ws: ws, rt: rt}
 	f.shareID = "share-1"
 	if err := st.PutSessionShare(ctx, store.SessionShare{ID: f.shareID, TenantID: tenant.ID,
@@ -543,12 +543,25 @@ func TestHandoffCreateIsFencedByTheTake(t *testing.T) {
 	if len(rc.bodies) != 1 || rc.bodies[0]["handoff_take"] != nil || rc.bodies[0]["kind"] != "claude" {
 		t.Fatalf("the Agent received %v, want the create without handoff_take", rc.bodies)
 	}
-	if row := f.row(o.ID); row.TakeConfirmedAt == "" {
-		t.Fatalf("the create did not confirm the take: %+v", row)
+	// The CP saw the session created, so it settled the offer itself (#2040); the Console's
+	// own accept finds it done.
+	if row := f.row(o.ID); row.Status != "accepted" || row.AcceptedSessionName != "taken-over" {
+		t.Fatalf("the create did not settle the take: %+v", row)
 	}
-	backdate(o.ID) // the create was slow; the session exists
-	f.requireConflict(f.as(f.owner, f.api.withdraw, http.MethodDelete, o.ID, nil), "handoff_being_taken", "pending")
 	if rec := f.as(f.recipient, f.api.accept, http.MethodPost, o.ID, map[string]any{"sessionName": "taken-over", "token": token}); rec.Code != http.StatusOK {
+		t.Fatalf("accept after the create = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// A confirmed take whose create is slow, past the window: the session may exist, so
+	// the sender cannot withdraw under it.
+	slow := f.mustOffer(nil)
+	token = f.take(slow.ID)
+	if ok, err := f.st.ConfirmSessionHandoffTake(context.Background(), slow.ID, f.recipient.mv.MembershipID, token, store.NowTS()); err != nil || !ok {
+		t.Fatalf("confirm: ok=%v err=%v", ok, err)
+	}
+	backdate(slow.ID)
+	f.requireConflict(f.as(f.owner, f.api.withdraw, http.MethodDelete, slow.ID, nil), "handoff_being_taken", "pending")
+	if rec := f.as(f.recipient, f.api.accept, http.MethodPost, slow.ID, map[string]any{"sessionName": "slow", "token": token}); rec.Code != http.StatusOK {
 		t.Fatalf("accept after a slow create = %d %s", rec.Code, rec.Body.String())
 	}
 
@@ -556,8 +569,8 @@ func TestHandoffCreateIsFencedByTheTake(t *testing.T) {
 	// offer, and the release answers with that status.
 	o2 := f.mustOffer(nil)
 	token = f.take(o2.ID)
-	if rec := rc.create(t, map[string]any{"kind": "claude", "handoff_take": map[string]any{"offerId": o2.ID, "token": token}}); rec.Code != http.StatusCreated {
-		t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+	if ok, err := f.st.ConfirmSessionHandoffTake(context.Background(), o2.ID, f.recipient.mv.MembershipID, token, store.NowTS()); err != nil || !ok {
+		t.Fatalf("confirm: ok=%v err=%v", ok, err)
 	}
 	if err := f.st.DeleteSessionShare(context.Background(), f.shareID, f.owner.mv.MembershipID); err != nil {
 		t.Fatal(err)
@@ -569,7 +582,7 @@ func TestHandoffCreateIsFencedByTheTake(t *testing.T) {
 	}
 
 	// A create without a take is passed through untouched.
-	if rec := rc.create(t, map[string]any{"kind": "shell"}); rec.Code != http.StatusCreated || len(rc.bodies) != 3 {
+	if rec := rc.create(t, map[string]any{"kind": "shell"}); rec.Code != http.StatusCreated || len(rc.bodies) != 2 || rc.bodies[1]["idempotency_key"] != nil {
 		t.Fatalf("plain create = %d (%d bodies)", rec.Code, len(rc.bodies))
 	}
 }

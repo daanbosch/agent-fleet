@@ -205,7 +205,8 @@ func (s *SQL) TakeSessionHandoffOffer(ctx context.Context, id, recipientMembersh
 // immediately before the session create reaches the Agent. It holds only while the offer is
 // still pending under this very token, so a Console that took the offer, went quiet past
 // the take window and lost it — to the sender's withdraw or to another take — cannot start
-// the work when it resumes. Once confirmed, the take holds until it is accepted or released.
+// the work when it resumes. Once confirmed, the take holds until it is accepted, released, or
+// unconfirmed because the Agent refused the create (UnconfirmSessionHandoffTake).
 func (s *SQL) ConfirmSessionHandoffTake(ctx context.Context, id, recipientMembershipID, token, now string) (bool, error) {
 	if token == "" {
 		return false, nil
@@ -240,6 +241,59 @@ func (s *SQL) ReleaseSessionHandoffOffer(ctx context.Context, id, recipientMembe
 	}
 	n, err := res.RowsAffected()
 	return n == 1, err
+}
+
+// ReleaseUnconfirmedSessionHandoffTake gives back a take whose create never reached the Agent,
+// or was refused by it: the holder's next press after losing the create's answer (issue
+// #2040). A confirmed take is left alone, since its session may exist. Releasing the
+// unconfirmed one is safe even while its create is still on the way, because that create's
+// confirm needs this very token and fails once it is gone.
+func (s *SQL) ReleaseUnconfirmedSessionHandoffTake(ctx context.Context, id, recipientMembershipID, token string) (bool, error) {
+	if token == "" {
+		return false, nil
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE session_handoff_offer SET take_token='',taken_at='',take_confirmed_at=''
+		WHERE id=? AND recipient_membership_id=? AND status='pending' AND take_token=? AND take_confirmed_at=''`,
+		id, recipientMembershipID, token)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// UnconfirmSessionHandoffTake turns a confirmed take back into an unconfirmed one taken now,
+// after the Agent refused its create: no session came of it, so the take no longer has to
+// hold without a time limit (issue #2040). The Console still releases it, or retries the
+// create under the same token; if that Console is gone, the take lapses after
+// HandoffTakeWindow like any unconfirmed one.
+func (s *SQL) UnconfirmSessionHandoffTake(ctx context.Context, id, recipientMembershipID, token, now string) (bool, error) {
+	if token == "" {
+		return false, nil
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE session_handoff_offer SET take_confirmed_at='',taken_at=?
+		WHERE id=? AND recipient_membership_id=? AND status='pending' AND take_token=? AND take_confirmed_at<>''`,
+		now, id, recipientMembershipID, token)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// ConfirmedSessionHandoffTake returns the token of the confirmed take holding a pending offer
+// of this recipient: a launch whose create reached the Agent and whose outcome the CP never
+// learnt. The CP needs the token to ask the recipient's Agent what became of that create; it
+// is never sent to a client.
+func (s *SQL) ConfirmedSessionHandoffTake(ctx context.Context, id, recipientMembershipID string) (string, bool, error) {
+	var token string
+	err := s.db.QueryRowContext(ctx, `SELECT take_token FROM session_handoff_offer
+		WHERE id=? AND recipient_membership_id=? AND status='pending' AND take_token<>'' AND take_confirmed_at<>''`,
+		id, recipientMembershipID).Scan(&token)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	return token, err == nil, err
 }
 
 // AcceptSessionHandoffOffer settles a take as accepted once the session exists. It needs the

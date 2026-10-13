@@ -369,3 +369,75 @@ func TestHandoffUnshareKeepsAConfirmedLaunchFenced(t *testing.T) {
 		})
 	}
 }
+
+// After the Agent refuses a create, its take holds no longer than any unconfirmed one, so a
+// Console that never comes back does not pin the offer (issue #2040). The CP reads a confirmed
+// take's token back to look its create up; nothing else is held for that.
+func TestHandoffUnconfirmAndConfirmedToken(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range inboxStores(t) {
+		t.Run(name, func(t *testing.T) {
+			f := newHandoffFixtureOn(t, st)
+			old := time.Now().UTC().Add(-HandoffTakeWindow - time.Minute).Format(time.RFC3339)
+			must := func(want, ok bool, err error, what string) {
+				t.Helper()
+				if err != nil || ok != want {
+					t.Fatalf("%s: ok=%v err=%v, want %v", what, ok, err, want)
+				}
+			}
+			o := f.offer(t, "")
+			if _, err := st.CreateSessionHandoffOffer(ctx, o); err != nil {
+				t.Fatal(err)
+			}
+			_, held, err := st.ConfirmedSessionHandoffTake(ctx, o.ID, f.recipient.ID)
+			must(false, held, err, "token of an untaken offer")
+			ok, err := st.TakeSessionHandoffOffer(ctx, o.ID, f.recipient.ID, "tok", NowTS())
+			must(true, ok, err, "take")
+			_, held, err = st.ConfirmedSessionHandoffTake(ctx, o.ID, f.recipient.ID)
+			must(false, held, err, "token of an unconfirmed take")
+			ok, err = st.UnconfirmSessionHandoffTake(ctx, o.ID, f.recipient.ID, "tok", NowTS())
+			must(false, ok, err, "unconfirm an unconfirmed take")
+			ok, err = st.ConfirmSessionHandoffTake(ctx, o.ID, f.recipient.ID, "tok", old)
+			must(true, ok, err, "confirm")
+			token, held, err := st.ConfirmedSessionHandoffTake(ctx, o.ID, f.recipient.ID)
+			if err != nil || !held || token != "tok" {
+				t.Fatalf("confirmed token = %q held=%v err=%v", token, held, err)
+			}
+			_, held, err = st.ConfirmedSessionHandoffTake(ctx, o.ID, f.other.ID)
+			must(false, held, err, "another member reads the token")
+
+			ok, err = st.UnconfirmSessionHandoffTake(ctx, o.ID, f.recipient.ID, "other", NowTS())
+			must(false, ok, err, "unconfirm with another token")
+			ok, err = st.UnconfirmSessionHandoffTake(ctx, o.ID, f.recipient.ID, "tok", NowTS())
+			must(true, ok, err, "the Agent refused the create")
+			ok, err = st.TransitionSessionHandoffOffer(ctx, o.ID, "pending", "withdrawn", NowTS(), "")
+			must(false, ok, err, "withdraw inside the window after the refusal")
+			ok, err = st.ConfirmSessionHandoffTake(ctx, o.ID, f.recipient.ID, "tok", NowTS())
+			must(true, ok, err, "the Console retries the create under the same take")
+			ok, err = st.UnconfirmSessionHandoffTake(ctx, o.ID, f.recipient.ID, "tok", old)
+			must(true, ok, err, "refused again; the Console is gone")
+			ok, err = st.TransitionSessionHandoffOffer(ctx, o.ID, "pending", "withdrawn", NowTS(), "")
+			must(true, ok, err, "withdraw once the unconfirmed take lapsed")
+
+			// Only an unconfirmed take is given back by its holder's lost-answer press.
+			o2 := f.offer(t, "")
+			if _, err := st.CreateSessionHandoffOffer(ctx, o2); err != nil {
+				t.Fatal(err)
+			}
+			ok, err = st.TakeSessionHandoffOffer(ctx, o2.ID, f.recipient.ID, "lost", NowTS())
+			must(true, ok, err, "take")
+			ok, err = st.ConfirmSessionHandoffTake(ctx, o2.ID, f.recipient.ID, "lost", NowTS())
+			must(true, ok, err, "confirm")
+			ok, err = st.ReleaseUnconfirmedSessionHandoffTake(ctx, o2.ID, f.recipient.ID, "lost")
+			must(false, ok, err, "release a confirmed take as unconfirmed")
+			ok, err = st.UnconfirmSessionHandoffTake(ctx, o2.ID, f.recipient.ID, "lost", NowTS())
+			must(true, ok, err, "the Agent refused")
+			ok, err = st.ReleaseUnconfirmedSessionHandoffTake(ctx, o2.ID, f.recipient.ID, "other")
+			must(false, ok, err, "release with another token")
+			ok, err = st.ReleaseUnconfirmedSessionHandoffTake(ctx, o2.ID, f.recipient.ID, "lost")
+			must(true, ok, err, "release the unconfirmed take")
+			ok, err = st.ConfirmSessionHandoffTake(ctx, o2.ID, f.recipient.ID, "lost", NowTS())
+			must(false, ok, err, "the released take's late create")
+		})
+	}
+}

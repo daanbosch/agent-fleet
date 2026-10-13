@@ -1143,6 +1143,7 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: time.Now().Format(time.RFC3339), SSM: ssm,
 		Origin: origin, OriginConv: originConv, OriginSession: originSession,
 		Studio: studio, WorkItem: cleanWorkItemRef(req.WorkItem),
+		CreateKey: strings.TrimSpace(req.IdempotencyKey),
 	}
 	// pending from the first write of the meta: the pane must not offer a resend while the
 	// delivery below may still be typing (ADR 0100 decision 2).
@@ -1311,10 +1312,25 @@ func noteCreateOrigin(name string, req *CreateReq, spawnParent, origin string) {
 // 200 + the created session once done, 202 while still launching, or 404 if no such
 // create is (or is still) on record. The stdio MCP create_session tool polls this to
 // reconcile a timed-out POST instead of retrying it. GET /sessions-idempotency/{key}.
+//
+// Past the ledger's TTL, or after a restart, a session whose create carried the key
+// explicitly is still found through its meta (Meta.CreateKey). The 404 then says
+// not_created: no create under this key is running and no session carries it, so the
+// caller may treat the create as failed. An Agent from before that answers not_found,
+// which a caller must keep reading as "unknown".
 func HandleIdempotencyLookup(w http.ResponseWriter, r *http.Request) {
-	e, ok := createLedger.lookup(r.PathValue("key"))
+	key := r.PathValue("key")
+	e, ok := createLedger.lookup(key)
 	if !ok {
-		httpx.WriteErr(w, http.StatusNotFound, "not_found", "no create on record for this key")
+		if key != "" {
+			for _, m := range session.ListMetas() {
+				if m.CreateKey == key {
+					httpx.WriteJSON(w, http.StatusOK, wireSession(m, SessionAlive(m)))
+					return
+				}
+			}
+		}
+		httpx.WriteErr(w, http.StatusNotFound, "not_created", "no create on record for this key")
 		return
 	}
 	if e.state == createDone {
