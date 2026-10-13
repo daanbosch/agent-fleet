@@ -48,7 +48,7 @@ export const useHandoffStore = create<HandoffStore>((set) => ({
   received: [],
   receivedAt: 0,
   async refresh() {
-    const [owned] = await Promise.all([api("api/session-handoff-offers").catch(() => null), loadReceived("poll")]);
+    const [owned] = await Promise.all([api("api/session-handoff-offers").catch(() => null), loadReceived()]);
     set({ owned: owned && !owned.error && Array.isArray(owned.offers) ? owned.offers : [] });
   },
 }));
@@ -57,29 +57,25 @@ export const useHandoffStore = create<HandoffStore>((set) => ({
 // that they cannot undo each other: a read joins the one in flight instead of racing it, so a
 // response never lands after a newer one. With two requests in the air a slow one could put back
 // a list from before an offer arrived, and the badge would lose it.
-type ReceivedFlight = { origin: "poll" | "click"; done: Promise<HandoffOffer[] | null> };
-let receivedFlight: ReceivedFlight | null = null;
+let receivedFlight: Promise<HandoffOffer[] | null> | null = null;
 
 /** Reads the inbox, or joins the read already in flight. Resolves to null when it failed; a
  *  failed read keeps the last list, since the badge is the inventory and a dropped connection
  *  is no proof that the offers are gone. */
-function loadReceived(origin: ReceivedFlight["origin"]): Promise<HandoffOffer[] | null> {
-  if (receivedFlight) return receivedFlight.done;
-  const flight: ReceivedFlight = {
-    origin,
-    done: api("api/session-handoff-offers/received")
-      .catch(() => null)
-      .then((d) => {
-        const offers: HandoffOffer[] | null = d && !d.error && Array.isArray(d.offers) ? d.offers : null;
-        useHandoffStore.setState(offers ? { received: offers, receivedAt: Date.now() } : { receivedAt: 0 });
-        return offers;
-      })
-      .finally(() => {
-        if (receivedFlight === flight) receivedFlight = null;
-      }),
-  };
+function loadReceived(): Promise<HandoffOffer[] | null> {
+  if (receivedFlight) return receivedFlight;
+  const flight: Promise<HandoffOffer[] | null> = api("api/session-handoff-offers/received")
+    .catch(() => null)
+    .then((d) => {
+      const offers: HandoffOffer[] | null = d && !d.error && Array.isArray(d.offers) ? d.offers : null;
+      useHandoffStore.setState(offers ? { received: offers, receivedAt: Date.now() } : { receivedAt: 0 });
+      return offers;
+    })
+    .finally(() => {
+      if (receivedFlight === flight) receivedFlight = null;
+    });
   receivedFlight = flight;
-  return flight.done;
+  return flight;
 }
 
 /** How long a read inbox is trusted to say "pending" without asking again: one poll interval.
@@ -97,16 +93,17 @@ export function pendingHandoffCount(offers: HandoffOffer[]): number {
  *  returns only pending offers whose share is alive, so "closed" folds accepted, declined,
  *  withdrawn, expired and unshared together; telling them apart would need a route the
  *  recipient does not have. A list read within the poll interval that names the offer is
- *  trusted; otherwise the inbox is read. A read the poll started may predate the offer (the
- *  notification is pushed), so when that one lacks it, it is read once more. A read another
- *  click started is not: that click came after the notifications on screen had arrived. */
+ *  trusted; otherwise the inbox is read. A read that was already in flight, whoever started it,
+ *  may have been answered before the offer was created (the notification is pushed), so a click
+ *  that joined one and does not find its offer reads once more; clicks doing so share that read
+ *  too. A read this click started itself came after its notification, and its answer stands. */
 export async function receivedOfferState(offerId: string): Promise<"pending" | "closed" | "unknown"> {
   const listed = (offers: HandoffOffer[]) => offers.some((o) => o.id === offerId && o.status === "pending");
   const s = useHandoffStore.getState();
   if (s.receivedAt && Date.now() - s.receivedAt < RECEIVED_FRESH_MS && listed(s.received)) return "pending";
-  const joinedPoll = receivedFlight?.origin === "poll";
-  let offers = await loadReceived("click");
-  if (offers && joinedPoll && !listed(offers)) offers = await loadReceived("click");
+  const joined = receivedFlight !== null;
+  let offers = await loadReceived();
+  if (offers && joined && !listed(offers)) offers = await loadReceived();
   if (!offers) return "unknown";
   return listed(offers) ? "pending" : "closed";
 }
