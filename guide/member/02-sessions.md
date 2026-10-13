@@ -481,7 +481,7 @@ If a log is gone anyway (deleted before this setting existed, or by a lower valu
 **"Resume"** does not silently start an empty conversation under the old session. It shows
 **"This session's conversation log was deleted…"** with a **"Start a new conversation"** button;
 pressing it starts a fresh conversation in the same session (for a forked session, without
-copying its source again). A session that never exchanged a message resumes as before.
+copying its source again; an older log left behind is kept next to it with a `.superseded` suffix). A session that never exchanged a message resumes as before.
 Limit: a deleted log is recognised only for sessions Agent Fleet has a record of a finished turn
 for. An old session with no such record is indistinguishable from one that never talked, so if
 its log was already gone it still starts empty without a warning.

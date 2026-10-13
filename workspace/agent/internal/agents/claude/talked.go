@@ -2,6 +2,7 @@ package claude
 
 import (
 	"errors"
+	"os"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
@@ -42,11 +43,19 @@ func talkedID(slot string) (string, bool) {
 	if id := talked.Read(slot); id != "" {
 		return id, true
 	}
+	// The ledger's id is taken at face value, not through LiveSID: that falls back to the slot
+	// when the live log is missing, which is exactly the deletion being looked for.
+	recorded := func() string {
+		if live := sids.Read(slot); live != "" {
+			return live
+		}
+		return slot
+	}
 	if st, _ := status.Read(slot); st.TurnEnd {
-		return LiveSID(slot), true
+		return recorded(), true
 	}
 	if _, ok := status.ReadCompletionKey(slot); ok {
-		return LiveSID(slot), true
+		return recorded(), true
 	}
 	return "", false
 }
@@ -55,13 +64,23 @@ func talkedID(slot string) (string, bool) {
 func HadConversation(slot string) bool { _, ok := talkedID(slot); return ok }
 
 // StartFresh is the user's explicit choice to begin a new conversation in this slot: it drops
-// every trace that the old one existed, the marker and the pre-marker evidence alike.
+// every trace that the old one existed, the marker and the pre-marker evidence alike. A log
+// still on disk under the slot id (the older half of a drifted conversation) would otherwise
+// be resumed by the very next launch, so it is set aside as <name>.jsonl.superseded — kept,
+// not deleted, and outside claude's *.jsonl lookup.
 func StartFresh(slot string) {
+	for _, p := range rawJSONLPathsIn(slot, session.CWDForUUID(slot)) {
+		_ = os.Rename(p, p+".superseded")
+	}
 	talked.Remove(slot)
 	status.Remove(slot)
 	status.RemoveCompletionKey(slot)
 	sids.Remove(slot)
 }
+
+// LostTranscript is lostTranscript for callers outside the package: a fresh start may only be
+// honoured while the conversation is still lost, never to discard a log that is healthy.
+func LostTranscript(slot string) bool { return lostTranscript(slot) }
 
 // lostTranscript reports whether slot's conversation is known to have existed but its log
 // (under the id it was last written under) is gone or holds nothing resumable.

@@ -73,7 +73,13 @@ func startFresh(name string) {
 	if !ok || m.Kind != session.KindClaude {
 		return
 	}
-	claude.StartFresh(session.UUID(m.Dir, m.Name))
+	sid := session.UUID(m.Dir, m.Name)
+	// Only while the log is still lost: a stale ?fresh=1 (a toast left open, a second tab) must
+	// not set aside a conversation that has since become resumable.
+	if !claude.LostTranscript(sid) {
+		return
+	}
+	claude.StartFresh(sid)
 	UpdateSessionMeta(name, func(cur *session.Meta) bool {
 		if cur.ForkFrom == "" && cur.ForkAt == "" {
 			return false

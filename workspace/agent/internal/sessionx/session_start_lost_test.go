@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -44,5 +46,30 @@ func TestStartFreshDropsForkSource(t *testing.T) {
 	}
 	if claude.HadConversation(session.UUID(dir, "forked")) {
 		t.Fatal("conversation marker survived StartFresh")
+	}
+}
+
+// A stale ?fresh=1 must not touch a conversation that is healthy.
+func TestStartFreshIgnoredWhileLogIsHealthy(t *testing.T) {
+	t.Setenv("AF_SESSIONS_DIR", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	cfg := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", cfg)
+	dir := t.TempDir()
+	session.WriteMeta(session.Meta{Name: "healthy", Dir: dir, Kind: session.KindClaude, ForkFrom: "p"})
+	sid := session.UUID(dir, "healthy")
+	logDir := filepath.Join(cfg, "projects", "p")
+	_ = os.MkdirAll(logDir, 0o700)
+	p := filepath.Join(logDir, sid+".jsonl")
+	_ = os.WriteFile(p, []byte(`{"type":"user"}`+"\n"), 0o600)
+	claude.NoteTalked(sid)
+
+	startFresh("healthy")
+
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("healthy log was moved: %v", err)
+	}
+	if m, _ := session.ReadMeta("healthy"); m.ForkFrom != "p" {
+		t.Fatalf("meta changed: %+v", m)
 	}
 }
