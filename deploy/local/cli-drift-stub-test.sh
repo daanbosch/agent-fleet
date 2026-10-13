@@ -742,6 +742,9 @@ printf '1.4.8' > "$STUB_TESTED/red-muse"
 for d in "$STUB_ISSUES"/1[0-9][0-9]; do echo closed > "$d/state"; done
 sync_ok muse
 title_is muse "muse CLI: contract failed on 1.4.8"
+"$REPORT" failure muse unknown    # replaces the row in the open issue; the marker must still count
+sync_ok muse
+title_is muse "muse CLI: contract failed on 1.4.8"
 rm "$STUB_TESTED/red-muse"
 for d in "$STUB_ISSUES"/1[0-9][0-9]; do echo closed > "$d/state"; done
 sync_ok muse   # control: the same release without the marker is the watcher's to run

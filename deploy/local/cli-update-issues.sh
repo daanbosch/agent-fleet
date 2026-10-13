@@ -103,6 +103,9 @@ sync_kind() { # sync_kind <kind> <pin> <latest>
       sed -n '/^<!-- cli-contract-failures:begin -->$/,/^<!-- cli-contract-failures:end -->$/{/^- /p}' > "$WORK/rows"
   fi
   red_ver="$(sed -n "s/^- \`$kind\` \`\([^\`]*\)\`.*<!-- cli-contract-failure $kind -->.*/\1/p" "$WORK/rows" | tail -1)"
+  # An `unknown` row (a job that died before reading the version) replaces the kind's last
+  # row but says nothing about latest; it must not hide the marker below.
+  [ "$red_ver" != unknown ] || red_ver=""
   # The watcher's `red` marker says the same thing without a row: a failure recorded before
   # this issue existed, or a row a concurrent rewrite dropped. Never ignore it — the marker
   # also stops the watcher from running the contract again, so nothing else would ask.
