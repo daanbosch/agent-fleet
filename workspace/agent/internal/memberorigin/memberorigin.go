@@ -244,14 +244,26 @@ func VerifyHashAt(r *http.Request, bodySHA256 string, t time.Time) (Claims, erro
 // RequireUpload is Require for a multipart upload the mark signs by body hash. The body is spooled
 // into a file under dir() while it is hashed (it can be far over what the CP buffers), verified,
 // and handed to next from that file; the file is removed afterwards. Spooling happens before
-// verifying, so maxBody bounds what an unmarked caller can make the Agent write.
+// verifying, so maxBody bounds what a marked-looking caller can make the Agent write; a request
+// with no mark at all is refused before anything is written, and spool files an earlier crash left
+// behind are swept.
+//
+// Limit: the spool, and the handler's own temporary copy, are writable by any process of the
+// Agent's uid. The mark decides who may start an import; it does not protect the bytes taken in
+// from a same-uid rewrite between verifying and reading (the same limit as writing the store
+// directly, ADR 0113's threat model).
 func RequireUpload(maxBody int64, dir func() (string, error), next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimSpace(r.Header.Get(Header)) == "" {
+			httpx.WriteErr(w, http.StatusForbidden, CodeRequired, "this route accepts only a member's request relayed by the Control Plane")
+			return
+		}
 		d, err := dir()
 		if err != nil {
 			httpx.WriteErr(w, http.StatusInternalServerError, "internal", err.Error())
 			return
 		}
+		sweepSpool(d)
 		f, err := os.CreateTemp(d, "marked-upload-*")
 		if err != nil {
 			httpx.WriteErr(w, http.StatusInternalServerError, "internal", err.Error())
@@ -290,6 +302,19 @@ func RequireUpload(maxBody int64, dir func() (string, error), next http.Handler)
 		r.Body = io.NopCloser(f)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// sweepSpool removes spool files older than a request can run for: what a crashed Agent left.
+func sweepSpool(dir string) {
+	ents, _ := os.ReadDir(dir)
+	for _, e := range ents {
+		if !strings.HasPrefix(e.Name(), "marked-upload-") {
+			continue
+		}
+		if fi, err := e.Info(); err == nil && time.Since(fi.ModTime()) > time.Hour {
+			_ = os.Remove(dir + "/" + e.Name())
+		}
+	}
 }
 
 type ctxKey struct{}

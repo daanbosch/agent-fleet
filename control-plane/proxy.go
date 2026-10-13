@@ -232,8 +232,8 @@ func (a agentProxyAPI) rest(w http.ResponseWriter, r *http.Request, res *resolve
 		writeAPIErr(w, aerr)
 		return
 	}
-	if c, ok := body.(io.Closer); ok {
-		defer c.Close() // a spooled upload's file; the transport closes it too
+	if u, ok := body.(spooledUpload); ok {
+		defer u.Close() // the transport closes it too; this covers a request that never goes out
 	}
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, body)
 	if err != nil {

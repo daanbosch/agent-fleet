@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -390,4 +391,104 @@ func TestHashedUploadIsSignedByBodyHash(t *testing.T) {
 	if c.Path != "/agents/memory/import" || c.BodySHA256 != hex.EncodeToString(sum[:]) {
 		t.Fatalf("claims = %+v", c)
 	}
+}
+
+// slowBody delivers its bytes, waits, then ends; doneAt is when it ended.
+type slowBody struct {
+	r      io.Reader
+	wait   time.Duration
+	doneAt time.Time
+	fail   error
+}
+
+func (b *slowBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if err == io.EOF {
+		if b.fail != nil {
+			return n, b.fail
+		}
+		time.Sleep(b.wait)
+		b.doneAt = time.Now()
+	}
+	return n, err
+}
+
+// The mark's lifetime starts when the upload has been read, not when it began (a slow upload may
+// take longer than the mark lives); the spool is bounded, and nothing is left in the temp dir after
+// a success, an oversize body, a refusal or a dropped connection.
+func TestHashedUploadTimingLimitsAndCleanup(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	var gotMark string
+	proxy, res, _, cleanup := newFSProxyTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		gotMark = r.Header.Get(memberOriginHeader)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer cleanup()
+	t.Setenv(memberOriginKeyVersionEnv, "")
+	pub := memberOriginKey(proxy.mgr.tokenSignMaster(), 1).Public().(ed25519.PublicKey)
+	old := memberOriginUploadMax
+	memberOriginUploadMax = 1 << 10
+	defer func() { memberOriginUploadMax = old }()
+
+	send := func(body io.Reader) int {
+		req := httptest.NewRequest(http.MethodPost, "https://console.example/api/agents/memory/import", body)
+		req.Header.Set("Content-Type", "multipart/form-data; boundary=B")
+		req.Header.Set(memberOriginConsoleHeader, "1")
+		rec := httptest.NewRecorder()
+		proxy.rest(rec, req, res)
+		return rec.Code
+	}
+	empty := func(when string) {
+		t.Helper()
+		if left, _ := os.ReadDir(tmp); len(left) != 0 {
+			t.Fatalf("%s: %d spool files left", when, len(left))
+		}
+		if uploadsActive != 0 || len(uploadsByMember) != 0 {
+			t.Fatalf("%s: upload slots still held", when)
+		}
+	}
+
+	sb := &slowBody{r: strings.NewReader("small"), wait: 1200 * time.Millisecond}
+	if code := send(sb); code != http.StatusOK {
+		t.Fatalf("slow upload: %d", code)
+	}
+	if c := decodeMark(t, pub, gotMark); c.IssuedAt < sb.doneAt.Unix() {
+		t.Fatalf("iat %d is before the body was read (%d)", c.IssuedAt, sb.doneAt.Unix())
+	}
+	empty("after success")
+	if code := send(strings.NewReader(strings.Repeat("x", 2<<10))); code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize: %d", code)
+	}
+	empty("after 413")
+	if code := send(&slowBody{r: strings.NewReader("part"), fail: io.ErrUnexpectedEOF}); code != http.StatusBadRequest {
+		t.Fatalf("dropped connection: %d", code)
+	}
+	empty("after a dropped connection")
+
+	// One upload per membership, and a global bound.
+	if !acquireUploadSlot("mb-a") || acquireUploadSlot("mb-a") {
+		t.Fatal("a membership must hold one slot")
+	}
+	for i := 1; i < memberOriginUploadSlots; i++ {
+		if !acquireUploadSlot("mb-" + strconv.Itoa(i)) {
+			t.Fatalf("slot %d refused", i)
+		}
+	}
+	if acquireUploadSlot("mb-extra") {
+		t.Fatal("the global bound did not hold")
+	}
+	releaseUploadSlot("mb-a")
+	for i := 1; i < memberOriginUploadSlots; i++ {
+		releaseUploadSlot("mb-" + strconv.Itoa(i))
+	}
+	if !acquireUploadSlot(res.ws.MembershipID) {
+		t.Fatal("slot not free")
+	}
+	if code := send(strings.NewReader("x")); code != http.StatusTooManyRequests {
+		t.Fatalf("second upload of one member: %d", code)
+	}
+	releaseUploadSlot(res.ws.MembershipID)
+	empty("after the slot test")
 }

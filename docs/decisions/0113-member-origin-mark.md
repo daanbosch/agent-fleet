@@ -187,3 +187,16 @@ Follow-ups: #2076
 
 The table above is updated by this note: `import` is **gated**; `restore` and the three CLI routes are open for the
 reasons given here.
+
+Review notes on the above (same day):
+
+- The mark's lifetime for an upload starts when the CP has read the whole body, not when the request
+  began, so a slow upload is not signed already half-expired.
+- CP spooling is bounded (4 uploads at once, one per membership, 429 beyond) because the spool lives
+  on the CP's size-limited temp volume.
+- **A limit of the hashed form.** The Agent's spool, and the import handler's own temporary copy, are
+  writable by any process of the Agent's uid. The mark decides who may start an import; it does not
+  protect the bytes taken in from a same-uid rewrite between verification and reading. That is the
+  same limit as writing the store directly (Threat model, "What the mark does not do"), not a new
+  capability, and it is not closed in code: an open or unlinked descriptor is reachable through
+  `/proc/<pid>/fd` just the same.

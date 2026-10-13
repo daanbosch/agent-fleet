@@ -83,6 +83,10 @@ export const errors: Record<keyof typeof jaErrors, string> = {
   // that needs the Agent arrived. Not a failure — a "not yet", so it asks for a retry.
   "err.workspace_starting": "The workspace is still starting. Try again once it is ready.",
   "err.driver_unavailable": "Managed execution isn't available for this agent.",
+  "err.member_origin_required": "Only the Console can do this. It was not sent from your signed-in session.",
+  "err.member_origin_invalid": "The request could not be verified as yours (it may have expired). Try again.",
+  "err.member_origin_unavailable": "The workspace's agent just started or needs a restart. Try again in a minute.",
+  "err.too_many_uploads": "Another memory import is already running. Try again when it finishes.",
   "err.runtime_failed": "Couldn't start the agent. Wait a moment and try again.",
   // The line above is for failures that waiting fixes. A shared daemon that was not
   // started because the CLI is not signed in never fixes itself, so it gets its own

@@ -303,7 +303,23 @@ func TestRequireUploadVerifiesTheBodyHash(t *testing.T) {
 	if w := do(big, big, mp); w.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversize upload: %d", w.Code)
 	}
+	// No mark at all: refused before anything is written.
+	r := httptest.NewRequest(http.MethodPost, "/agents/memory/import", strings.NewReader("abc"))
+	r.Header.Set("Content-Type", mp)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), memberorigin.CodeRequired) {
+		t.Fatalf("unmarked upload: %d %s", w.Code, w.Body)
+	}
 	if left, _ := os.ReadDir(dir); len(left) != 0 {
 		t.Fatalf("%d spool files left behind", len(left))
+	}
+	// A spool a crashed Agent left behind is swept on the next upload.
+	stale := dir + "/marked-upload-stale"
+	_ = os.WriteFile(stale, []byte("x"), 0o600)
+	_ = os.Chtimes(stale, time.Now().Add(-2*time.Hour), time.Now().Add(-2*time.Hour))
+	do("abc", "abc", mp)
+	if _, err := os.Stat(stale); err == nil {
+		t.Fatal("stale spool file not swept")
 	}
 }

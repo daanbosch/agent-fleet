@@ -30,6 +30,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -72,7 +73,7 @@ var memberOriginHashedRoutes = map[string]bool{
 // memberOriginUploadMax bounds a hashed upload. The Agent's import limit is 64 MiB by default
 // (AF_MEMORY_IMPORT_MAX); this leaves room for that, a raised limit up to twice the default, and
 // the multipart framing. A larger body is refused here with 413 and nothing reaches the Agent.
-const memberOriginUploadMax = 130 << 20
+var memberOriginUploadMax int64 = 130 << 20 // a var so tests can lower it
 
 // memberOriginConsoleHeader must accompany a hashed upload. The body is multipart/form-data,
 // which a cross-origin page can send without a preflight, so unlike the JSON routes the content
@@ -212,7 +213,7 @@ func (m *manager) relayBody(r *http.Request, res *resolved) (io.Reader, string, 
 		return r.Body, "", nil
 	}
 	if memberOriginHashedRoute(r) {
-		return m.hashedUploadMark(r, res, time.Now())
+		return m.hashedUploadMark(r, res)
 	}
 	body, mark, aerr := m.memberOriginMark(r, res, time.Now())
 	if aerr != nil {
@@ -257,14 +258,51 @@ func memberOriginOriginCheck(r *http.Request) *apiError {
 	return nil
 }
 
-// spooledUpload is a hashed upload on disk; Close removes the file.
+// memberOriginNow is the clock the upload mark is taken from; a var so a test can watch it.
+var memberOriginNow = time.Now
+
+// Spooled uploads occupy the CP's temp volume (a size-limited emptyDir on Kubernetes, where
+// exceeding it evicts the Pod), so they are bounded: a few at once overall and one per membership.
+// A request over either bound is refused before anything is written.
+const memberOriginUploadSlots = 4
+
+var (
+	uploadMu        sync.Mutex
+	uploadsActive   int
+	uploadsByMember = map[string]bool{}
+)
+
+func acquireUploadSlot(membership string) bool {
+	uploadMu.Lock()
+	defer uploadMu.Unlock()
+	if uploadsActive >= memberOriginUploadSlots || uploadsByMember[membership] {
+		return false
+	}
+	uploadsActive++
+	uploadsByMember[membership] = true
+	return true
+}
+
+func releaseUploadSlot(membership string) {
+	uploadMu.Lock()
+	defer uploadMu.Unlock()
+	uploadsActive--
+	delete(uploadsByMember, membership)
+}
+
+// spooledUpload is a hashed upload on disk; the first Close removes the file and frees the slot.
 type spooledUpload struct {
 	*os.File
+	once       *sync.Once
+	membership string
 }
 
 func (u spooledUpload) Close() error {
 	err := u.File.Close()
-	_ = os.Remove(u.File.Name())
+	u.once.Do(func() {
+		_ = os.Remove(u.File.Name())
+		releaseUploadSlot(u.membership)
+	})
 	return err
 }
 
@@ -272,7 +310,7 @@ func (u spooledUpload) Close() error {
 // file (rewound; the relay closes it) with the mark over the hash. The same ownership and
 // same-origin checks as the JSON routes apply, with the custom header standing in for the JSON
 // content type.
-func (m *manager) hashedUploadMark(r *http.Request, res *resolved, now time.Time) (io.Reader, string, *apiError) {
+func (m *manager) hashedUploadMark(r *http.Request, res *resolved) (io.Reader, string, *apiError) {
 	if res.ws.MembershipID == "" || res.ws.MembershipID != res.mv.MembershipID {
 		return nil, "", &apiError{http.StatusForbidden, "forbidden", "only the workspace's own member can change its memory"}
 	}
@@ -285,13 +323,16 @@ func (m *manager) hashedUploadMark(r *http.Request, res *resolved, now time.Time
 	if aerr := memberOriginOriginCheck(r); aerr != nil {
 		return nil, "", aerr
 	}
+	if !acquireUploadSlot(res.ws.MembershipID) {
+		return nil, "", &apiError{http.StatusTooManyRequests, "too_many_uploads", "another memory import is in progress; try again when it finishes"}
+	}
 	f, err := os.CreateTemp("", "af-member-upload-*")
 	if err != nil {
+		releaseUploadSlot(res.ws.MembershipID)
 		return nil, "", &apiError{http.StatusInternalServerError, "internal", "could not buffer the upload"}
 	}
 	fail := func(aerr *apiError) (io.Reader, string, *apiError) {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
+		spooledUpload{f, new(sync.Once), res.ws.MembershipID}.Close()
 		return nil, "", aerr
 	}
 	h := sha256.New()
@@ -302,12 +343,13 @@ func (m *manager) hashedUploadMark(r *http.Request, res *resolved, now time.Time
 	if n > memberOriginUploadMax {
 		return fail(&apiError{http.StatusRequestEntityTooLarge, "too_large", "request body is too large"})
 	}
-	mark, aerr := m.memberOriginSignHash(res, r.Method, strings.TrimPrefix(r.URL.Path, "/api"), r.URL.RawQuery, hex.EncodeToString(h.Sum(nil)), now)
+	// Taken after the body is read: the mark lives 60 s and a slow upload can take longer than that.
+	mark, aerr := m.memberOriginSignHash(res, r.Method, strings.TrimPrefix(r.URL.Path, "/api"), r.URL.RawQuery, hex.EncodeToString(h.Sum(nil)), memberOriginNow())
 	if aerr != nil {
 		return fail(aerr)
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return fail(&apiError{http.StatusInternalServerError, "internal", "could not buffer the upload"})
 	}
-	return spooledUpload{f}, mark, nil
+	return spooledUpload{f, new(sync.Once), res.ws.MembershipID}, mark, nil
 }
