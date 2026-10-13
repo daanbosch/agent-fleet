@@ -401,7 +401,7 @@ func TestMemoryImportAPI(t *testing.T) {
 	_, cfgB, _ := memoryTestEnv(t)
 	t.Setenv("AGENT_TOKEN", "smoke-token")
 	h := httpx.RequireToken(buildMux())
-	if w := smokeDo(t, h, "POST", "/agents/memory/snapshots", "smoke-token", ""); w.Code != http.StatusOK {
+	if w := markedDo(t, h, "POST", "/agents/memory/snapshots", ""); w.Code != http.StatusOK {
 		t.Fatalf("seed: %d %s", w.Code, w.Body.String())
 	}
 
@@ -426,7 +426,7 @@ func TestMemoryImportAPI(t *testing.T) {
 		"importId": pv.ImportID,
 		"scope":    map[string]any{"projects": []string{slug}},
 	})
-	w = smokeDo(t, h, "POST", "/agents/memory/import/apply", "smoke-token", string(apply))
+	w = markedDo(t, h, "POST", "/agents/memory/import/apply", string(apply))
 	if w.Code != http.StatusOK {
 		t.Fatalf("apply: %d %s", w.Code, w.Body.String())
 	}
@@ -434,7 +434,7 @@ func TestMemoryImportAPI(t *testing.T) {
 		t.Fatalf("a.md after API import = %q", got)
 	}
 	// A malformed importId is a 400: the value becomes a ref name, so it is always validated.
-	if w := smokeDo(t, h, "POST", "/agents/memory/import/apply", "smoke-token", `{"importId":"x/../y","scope":{"all":true}}`); w.Code != http.StatusBadRequest {
+	if w := markedDo(t, h, "POST", "/agents/memory/import/apply", `{"importId":"x/../y","scope":{"all":true}}`); w.Code != http.StatusBadRequest {
 		t.Errorf("bad importId: %d %s", w.Code, w.Body.String())
 	}
 	// A request carrying no file is a 400.

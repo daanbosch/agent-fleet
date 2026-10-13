@@ -15,6 +15,9 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -68,6 +71,8 @@ func TestMemberWriteRoutesRequireTheMark(t *testing.T) {
 		"/agents/memory/entries/pin",
 		"/agents/memory/entries/revert",
 		"/agents/memory/entries/member-save",
+		"/agents/memory/snapshots",
+		"/agents/memory/import/apply",
 	} {
 		req := httptest.NewRequest(http.MethodPost, p, strings.NewReader(`{}`))
 		req.Header.Set("Authorization", "Bearer agent-token")
@@ -90,6 +95,8 @@ func TestMemberWriteRoutesAdmitAMarkedRequest(t *testing.T) {
 		"/agents/memory/entries/pin",
 		"/agents/memory/entries/revert",
 		"/agents/memory/entries/member-save",
+		"/agents/memory/import/apply",
+		"/agents/memory/snapshots",
 	} {
 		req := httptest.NewRequest(http.MethodPost, p, strings.NewReader(`{}`))
 		req.Header.Set("Authorization", "Bearer agent-token")
@@ -97,8 +104,65 @@ func TestMemberWriteRoutesAdmitAMarkedRequest(t *testing.T) {
 		s.Sign(req, []byte(`{}`))
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)
+		// A snapshot of an empty body is no validation error: it may succeed or fail on the
+		// store, but never on the mark.
+		if p == "/agents/memory/snapshots" {
+			if w.Code == http.StatusForbidden || strings.Contains(w.Body.String(), "member_origin") {
+				t.Errorf("%s with a mark: %d %s", p, w.Code, w.Body)
+			}
+			continue
+		}
 		if w.Code != http.StatusBadRequest || strings.Contains(w.Body.String(), "member_origin") {
 			t.Errorf("%s with a mark: %d %s", p, w.Code, w.Body)
 		}
+	}
+}
+
+// The CP signs exactly the routes the Agent requires a mark on. A route the Agent requires but the CP
+// does not sign locks the member out; one the CP signs but the Agent leaves open signs for nothing.
+// The two modules cannot import each other, so this reads the CP's table from its source and finds
+// the Agent's by asking the real mux: a POST with an unparsable body gets member_origin_required
+// from a wrapped route and a 400 from the handler of an open one, without touching the store.
+func TestMemberOriginRoutesAgreeWithTheControlPlane(t *testing.T) {
+	src, err := os.ReadFile("../../control-plane/member_origin.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	table := regexp.MustCompile(`(?s)var memberOriginRoutes = map\[string\]bool\{(.*?)\n\}`).FindSubmatch(src)
+	if table == nil {
+		t.Fatal("memberOriginRoutes not found in control-plane/member_origin.go")
+	}
+	var cp []string
+	for _, m := range regexp.MustCompile(`"(POST) /api(/[^"]+)":\s+true`).FindAllSubmatch(table[1], -1) {
+		cp = append(cp, string(m[1])+" "+string(m[2]))
+	}
+	if len(cp) == 0 {
+		t.Fatal("no route parsed from memberOriginRoutes")
+	}
+
+	golden, err := os.ReadFile("testdata/routes.golden")
+	if err != nil {
+		t.Fatal(err)
+	}
+	memberorigintest.Install(t)
+	mux := buildMux()
+	var agent []string
+	for _, line := range strings.Split(string(golden), "\n") {
+		method, path, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if !ok || method != http.MethodPost || !strings.HasPrefix(path, "/agents/memory/") {
+			continue
+		}
+		req := httptest.NewRequest(method, path, strings.NewReader("not json"))
+		req.Header.Set("Authorization", "Bearer agent-token")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if strings.Contains(w.Body.String(), memberorigin.CodeRequired) {
+			agent = append(agent, method+" "+path)
+		}
+	}
+	sort.Strings(cp)
+	sort.Strings(agent)
+	if strings.Join(cp, "\n") != strings.Join(agent, "\n") {
+		t.Fatalf("the CP signs\n%s\nthe Agent requires a mark on\n%s", strings.Join(cp, "\n"), strings.Join(agent, "\n"))
 	}
 }
