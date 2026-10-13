@@ -465,7 +465,8 @@ func TestTrashArchivesBackupWhenLogIsReplacedByStub(t *testing.T) {
 	if err := claude.BackupTranscript(m); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(jsonl, []byte(`{"type":"bridge-session"}`+"\n"), 0o600); err != nil {
+	// Not even a complete line: the substring "user" is present, a conversation is not.
+	if err := os.WriteFile(jsonl, []byte(`{"type":"user","message":"INCOMPLETE`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var out struct{ Archive string }

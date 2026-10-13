@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -195,36 +196,28 @@ func BackupTranscript(m session.Meta) error {
 			return err
 		}
 	}
-	live, liveInfo, err := newestLiveLog(slot, id, haveProject)
-	if err != nil || live == "" {
-		return err
-	}
-	// Whatever project the live log is in, a backup at least as new wins: an old log left in
-	// another project directory must not replace a newer conversation whose original is gone.
-	if haveInfo != nil && !liveInfo.ModTime().After(haveInfo.ModTime()) {
-		return nil
-	}
-	project := filepath.Base(filepath.Dir(live))
-	dstDir := filepath.Join(slotDir, project)
-	if err := os.MkdirAll(dstDir, 0o700); err != nil {
-		return err
-	}
-	tmp, err := copyPreserving(live, slotDir, ".tmp-*")
-	if errors.Is(err, errSourceChanged) {
-		return nil // being written to: the next attempt copies the settled log
-	}
+	cands, swept, err := liveCandidates(slot, id, haveProject, false)
 	if err != nil {
 		return err
 	}
-	// Judged on the copy, not on the original it was taken from.
-	if !completeTranscript(tmp) {
-		_ = os.Remove(tmp)
-		return nil
-	}
-	if err := os.Rename(tmp, filepath.Join(dstDir, id+".jsonl")); err != nil {
-		_ = os.Remove(tmp)
+	published, project, err := backupFromCandidates(cands, slotDir, id, haveInfo)
+	if err != nil {
 		return err
 	}
+	if !published && !swept {
+		// Every cheap candidate was a stub or incomplete: the conversation may have moved to a
+		// project the hints do not name, so look everywhere once before giving up.
+		if cands, _, err = liveCandidates(slot, id, haveProject, true); err != nil {
+			return err
+		}
+		if published, project, err = backupFromCandidates(cands, slotDir, id, haveInfo); err != nil {
+			return err
+		}
+	}
+	if !published || project == "" {
+		return nil // nothing taken (or nothing newer to take)
+	}
+	dstDir := filepath.Join(slotDir, project)
 	// Keep one copy per slot: whatever else is in the slot directory (an older id after a drift,
 	// another project directory, a leftover temp file) is superseded by the file just placed.
 	entries, err := os.ReadDir(slotDir)
@@ -251,43 +244,128 @@ func BackupTranscript(m session.Meta) error {
 	return errors.Join(errs...)
 }
 
-// newestLiveLog finds the log with this id to back up, as cheaply as the answer allows: the
-// launch directory's project and the project the backup came from are single Lstats, and only
-// when neither holds it is every project directory swept. A log that is not even a
-// conversation by its markers is skipped here; the copy is validated properly afterwards.
-func newestLiveLog(slot, id, haveProject string) (string, fs.FileInfo, error) {
+// fullSweepEvery bounds how stale the cheap candidates may be: a hint that names an existing
+// log is not proof it is the newest, so every slot gets a sweep of all project directories
+// (Lstats only, no reads) this often, and at once whenever the hints find nothing usable.
+const fullSweepEvery = 10 * time.Minute
+
+var lastSweep = struct {
+	mu sync.Mutex
+	m  map[string]time.Time
+}{m: map[string]time.Time{}}
+
+// liveCandidates lists the logs with this id worth considering: the launch directories'
+// projects and the backup's project (single Lstats), plus every project directory when sweep is
+// asked for, when nothing cheap exists, or when the last sweep is old. swept says whether it did.
+func liveCandidates(slot, id, haveProject string, sweep bool) ([]string, bool, error) {
 	var cands []string
-	if p := guessProjectPath(session.CWDForUUID(slot), id+".jsonl"); p != "" {
-		cands = append(cands, p)
-	} else if haveProject != "" {
-		p := filepath.Join(ConfigDir(), "projects", haveProject, id+".jsonl")
+	seen := map[string]bool{}
+	add := func(p string) error {
+		if seen[p] {
+			return nil
+		}
 		if _, err := os.Lstat(p); err == nil {
+			seen[p] = true
 			cands = append(cands, p)
 		} else if !errors.Is(err, fs.ErrNotExist) {
-			return "", nil, err
+			return err
+		}
+		return nil
+	}
+	root := filepath.Join(ConfigDir(), "projects")
+	for _, cwd := range session.CWDCandidatesForUUID(slot) {
+		if err := add(filepath.Join(root, projectKey(cwd), id+".jsonl")); err != nil {
+			return nil, false, err
 		}
 	}
-	if len(cands) == 0 {
-		var err error
-		if cands, err = exactLogs(id); err != nil {
-			return "", nil, err
+	if haveProject != "" {
+		if err := add(filepath.Join(root, haveProject, id+".jsonl")); err != nil {
+			return nil, false, err
 		}
 	}
-	var best string
-	var bestInfo fs.FileInfo
+	lastSweep.mu.Lock()
+	due := time.Since(lastSweep.m[slot]) >= fullSweepEvery
+	lastSweep.mu.Unlock()
+	if !sweep && len(cands) > 0 && !due {
+		return cands, false, nil
+	}
+	all, err := exactLogs(id)
+	if err != nil {
+		return nil, false, err
+	}
+	lastSweep.mu.Lock()
+	lastSweep.m[slot] = time.Now()
+	lastSweep.mu.Unlock()
+	for _, p := range all {
+		if !seen[p] {
+			seen[p] = true
+			cands = append(cands, p)
+		}
+	}
+	return cands, true, nil
+}
+
+// backupFromCandidates tries the candidates newest first and publishes the first whose copy is
+// a complete conversation and newer than the existing backup, returning its project directory.
+// published=false means only stubs or incomplete logs were found (worth looking further);
+// published=true with an empty project means the question is settled with nothing to take:
+// nothing newer, or the log is still being written.
+func backupFromCandidates(cands []string, slotDir, id string, haveInfo fs.FileInfo) (published bool, project string, err error) {
+	type cand struct {
+		path string
+		fi   fs.FileInfo
+	}
+	var cs []cand
 	for _, p := range cands {
 		fi, err := os.Stat(p)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return "", nil, err
+			return false, "", err
 		}
-		if best == "" || fi.ModTime().After(bestInfo.ModTime()) {
-			best, bestInfo = p, fi
-		}
+		cs = append(cs, cand{p, fi})
 	}
-	return best, bestInfo, nil
+	sort.Slice(cs, func(i, j int) bool { return cs[i].fi.ModTime().After(cs[j].fi.ModTime()) })
+	for _, c := range cs {
+		// Whatever project the log is in, a backup at least as new wins: an old log left in
+		// another project directory must not replace a newer conversation whose original is gone.
+		if haveInfo != nil && !c.fi.ModTime().After(haveInfo.ModTime()) {
+			return true, "", nil // nothing newer: settled, not a miss
+		}
+		proj := filepath.Base(filepath.Dir(c.path))
+		if err := os.MkdirAll(filepath.Join(slotDir, proj), 0o700); err != nil {
+			return false, "", err
+		}
+		tmp, err := copyPreserving(c.path, slotDir, ".tmp-*")
+		if errors.Is(err, errSourceChanged) {
+			return true, "", nil // being written to: the next attempt copies the settled log
+		}
+		if err != nil {
+			return false, "", err
+		}
+		// Judged on the copy, not on the original it was taken from, and its mtime (the
+		// inode actually copied) is compared again: the file at the path may have been swapped
+		// for an older log between the choice and the open.
+		ti, serr := os.Stat(tmp)
+		if serr != nil || !completeTranscript(tmp) {
+			_ = os.Remove(tmp)
+			if serr != nil {
+				return false, "", serr
+			}
+			continue
+		}
+		if haveInfo != nil && !ti.ModTime().After(haveInfo.ModTime()) {
+			_ = os.Remove(tmp)
+			return true, "", nil
+		}
+		if err := os.Rename(tmp, filepath.Join(slotDir, proj, id+".jsonl")); err != nil {
+			_ = os.Remove(tmp)
+			return false, "", err
+		}
+		return true, proj, nil
+	}
+	return false, "", nil
 }
 
 // backupRetry spaces the background attempts per slot: the session list polls every few
@@ -496,7 +574,12 @@ func HasCurrentLog(m session.Meta) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return resumablePaths(logs), nil
+	for _, p := range logs {
+		if completeTranscript(p) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ArchiveBackup returns the backed-up log of a session whose own log is gone, for the cleanup

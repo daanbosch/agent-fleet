@@ -375,3 +375,38 @@ func TestSetAsideStubRefusesConversation(t *testing.T) {
 		t.Fatalf("conversation touched: %q", got)
 	}
 }
+
+// A newer conversation outside the cwd's project is found even though the hint names an older
+// complete log; a stub at the hint does not hide a good log elsewhere.
+func TestBackupFindsConversationOutsideHint(t *testing.T) {
+	cfg, m, sid, logPath := backupFixture(t, "bk-hint")
+	past := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(logPath, past, past); err != nil {
+		t.Fatal(err)
+	}
+	other := writeSlotJSONL(t, cfg, "elsewhere", sid)
+	if err := os.WriteFile(other, []byte(`{"type":"user"}`+"\n"+`{"type":"assistant","new":1}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lastSweep.mu.Lock()
+	delete(lastSweep.m, sid)
+	lastSweep.mu.Unlock()
+	mustBackup(t, m)
+	slotDir, _ := backupSlotDir(sid)
+	bp, _, _ := backupFile(slotDir, sid)
+	if got, _ := os.ReadFile(bp); !strings.Contains(string(got), `"new":1`) {
+		t.Fatalf("the newer log outside the hint was not backed up: %q", got)
+	}
+
+	// Stub at the hint, good log elsewhere, no backup yet.
+	cfg2, m2, sid2, log2 := backupFixture(t, "bk-hint-stub")
+	if err := os.WriteFile(log2, []byte(`{"type":"bridge-session"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeSlotJSONL(t, cfg2, "elsewhere", sid2)
+	mustBackup(t, m2)
+	slotDir2, _ := backupSlotDir(sid2)
+	if bp2, _, _ := backupFile(slotDir2, sid2); bp2 == "" {
+		t.Fatal("a stub at the hint blocked the first backup")
+	}
+}
