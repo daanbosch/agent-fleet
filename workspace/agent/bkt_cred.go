@@ -10,13 +10,19 @@ package main
 // connection is served by `git credential fill` (bearer), so it prints nothing here.
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/secrets"
 )
+
+// bktCredStoreWait bounds the wait for the store: the wrapper blocks on this process, so a
+// writer wedged on the lock must cost bkt a delay, not a hang (the git helper does the same).
+var bktCredStoreWait = 30 * time.Second
 
 // runBktCred is `workspace-agent bkt-cred`: no arguments, no stdin.
 func runBktCred(_ []string) { bktCredGet(os.Stdout) }
@@ -25,7 +31,9 @@ func runBktCred(_ []string) { bktCredGet(os.Stdout) }
 // API-token connection, or nothing (an unreadable store, an OAuth connection, no
 // connection, or a stored user that is not an Atlassian email).
 func bktCredGet(w io.Writer) {
-	s, err := secrets.Load()
+	ctx, cancel := context.WithTimeout(context.Background(), bktCredStoreWait)
+	defer cancel()
+	s, err := secrets.LoadContext(ctx)
 	if err != nil || s.Bitbucket != nil {
 		return
 	}

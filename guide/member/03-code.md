@@ -35,9 +35,10 @@ Once GitHub is connected, `gh` in a session is already signed in. Once Bitbucket
 the way git does.
 
 - **Scopes**: `bkt` can do only what the connection was granted. For pull requests and
-  pipelines the Bitbucket OAuth app needs `repository`, `pullrequest:write`, `pipeline` and
-  `account`; a pasted API token needs the matching `read:` / `write:` scopes (for example
-  `read:pullrequest:bitbucket`). A token without the pull-request scopes can list repositories
+  pipelines the Bitbucket OAuth app needs `repository`, `pullrequest:write`, `pipeline` (read)
+  and `account`, plus `pipeline:write` to start or stop a pipeline; a pasted API token needs the
+  matching `read:` / `write:` scopes (for example `read:pullrequest:bitbucket`, and
+  `write:pipeline:bitbucket` to start or stop a pipeline — write does not imply read). A token without the pull-request scopes can list repositories
   but gets `403 Forbidden` from `bkt pr list`. The OAuth app's scopes are set by the tenant administrator.
 - **Bitbucket Data Center** (or any host other than bitbucket.org) is not connected through
   Settings. Set it up yourself (`bkt auth login`, or `BKT_HOST` and `BKT_TOKEN`); the

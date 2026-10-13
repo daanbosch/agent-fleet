@@ -157,9 +157,9 @@ CP ネイティブ実装。フロー・許可リスト・プロバイダ・authG
 - **スコープ**: トークンの権限はテナントの OAuth consumer（または貼付した API トークン）に
   付与されたもので、`bkt` は広げられない。`bkt pr` と `bkt pipeline` を使うには、OAuth
   consumer に `repository`、`pullrequest:write`（作成・マージ用。`pullrequest` は読み取りのみ）、
-  `pipeline`（実行は `pipeline:write`）と `account` が要る。貼付の API トークンには同等の細粒度
+  `pipeline`（読み取り）と `account` が要り、パイプラインの開始・停止にはさらに `pipeline:write` が要る。貼付の API トークンには同等の細粒度
   スコープ（`read:repository:bitbucket`、`read:pullrequest:bitbucket` /
-  `write:pullrequest:bitbucket`、`read:pipeline:bitbucket`、`read:user:bitbucket`）が要る。
+  `write:pullrequest:bitbucket`、`read:pipeline:bitbucket`、`read:user:bitbucket`、パイプラインの開始・停止には `write:pipeline:bitbucket`。write は read を含まない）が要る。
   PR のスコープが無いトークンはリポジトリやブランチの一覧は取れても `bkt pr list` が 403 になる。
 - **Data Center などの他ホストは利用者自身の設定**（GitHub Enterprise と同じ）。接続が
   受け付けるのは `bitbucket.org` だけなので、それ以外には何も注入しない。`BKT_HOST` を

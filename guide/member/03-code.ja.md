@@ -35,9 +35,10 @@ GitHub を接続していれば、セッションの `gh` はサインイン済�
 git と同じ要領で更新されます。
 
 - **スコープ**: `bkt` は接続に与えられた権限の範囲でしか動きません。プルリクエストと
-  パイプラインには、Bitbucket の OAuth アプリに `repository`・`pullrequest:write`・`pipeline`・
-  `account` が、貼り付けた API トークンには対応する `read:` / `write:` スコープ（例:
-  `read:pullrequest:bitbucket`）が必要です。プルリクエストのスコープが無いトークンは
+  パイプラインには、Bitbucket の OAuth アプリに `repository`・`pullrequest:write`・`pipeline`（読み取り）・
+  `account` が、パイプラインの開始・停止にはさらに `pipeline:write` が必要です。貼り付けた API トークンには
+  対応する `read:` / `write:` スコープ（例: `read:pullrequest:bitbucket`、パイプラインの開始・停止には
+  `write:pipeline:bitbucket`。write は read を含みません）が必要です。プルリクエストのスコープが無いトークンは
   リポジトリ一覧は取れても `bkt pr list` が `403 Forbidden` になります。OAuth アプリのスコープは
   テナント管理者が設定します。
 - **Bitbucket Data Center**（bitbucket.org 以外のホスト）は設定画面からは接続できません。

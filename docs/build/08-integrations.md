@@ -168,9 +168,9 @@ for one `exec` of the real binary:
 - **Scopes**: the token carries what the tenant's OAuth consumer (or the pasted API token)
   was granted; `bkt` cannot widen it. For `bkt pr` and `bkt pipeline` to work, the OAuth
   consumer needs `repository`, `pullrequest:write` (for creating and merging; `pullrequest`
-  reads only) and `pipeline` (`pipeline:write` to trigger), plus `account`. A pasted API token
+  reads only) and `pipeline` (read), plus `account`; starting or stopping a pipeline also needs `pipeline:write`. A pasted API token
   needs the granular equivalents (`read:repository:bitbucket`, `read:pullrequest:bitbucket` /
-  `write:pullrequest:bitbucket`, `read:pipeline:bitbucket`, `read:user:bitbucket`); one without
+  `write:pullrequest:bitbucket`, `read:pipeline:bitbucket`, `read:user:bitbucket`, and `write:pipeline:bitbucket` to start or stop a pipeline — write does not imply read); one without
   the pull-request scopes lists repositories and branches but answers 403 to `bkt pr list`.
 - **Data Center and any other host are the user's own setup**, the same as GitHub Enterprise.
   Connections accept only `bitbucket.org`, so nothing is injected for them. Because

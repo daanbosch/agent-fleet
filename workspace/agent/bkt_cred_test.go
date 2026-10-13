@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/secrets"
 )
@@ -56,4 +57,35 @@ func TestBktCredServesNothingElse(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A writer holding the store lock must not hang the wrapper: after the bounded wait the
+// subcommand answers nothing and bkt runs without injected auth.
+func TestBktCredGivesUpOnAWedgedStore(t *testing.T) {
+	seedBktStore(t, func(s *secrets.Data) {
+		s.Git["bitbucket.org"] = secrets.GitEntry{User: "me@example.com", Token: "fake-api-token"}
+	})
+	old := bktCredStoreWait
+	bktCredStoreWait = 200 * time.Millisecond
+	t.Cleanup(func() { bktCredStoreWait = old })
+
+	held, release := make(chan struct{}), make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = secrets.Update(func(*secrets.Data) error { close(held); <-release; return nil })
+	}()
+	<-held
+	got := make(chan string, 1)
+	go func() { got <- bktCredOut() }()
+	select {
+	case out := <-got:
+		if out != "" {
+			t.Fatalf("answered %q, want nothing", out)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("bkt-cred still waiting on the store lock")
+	}
+	close(release)
+	<-done
 }
