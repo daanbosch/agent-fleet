@@ -20,7 +20,7 @@ const until = async (cond, what) => {
 };
 
 // A fake opencode 2 context: records the tool hook and exposes an event stream the test feeds.
-const v2Host = () => {
+const v2Host = (sessions = {}) => {
   const hooks = {};
   const queue = [];
   let wake = () => {};
@@ -32,6 +32,13 @@ const v2Host = () => {
     },
     ctx: {
       tool: { hook: async (name, cb) => void (hooks[name] = cb) },
+      // Like ctx.session.get: the session's info, a rejection for one that does not exist.
+      session: {
+        get: async ({ sessionID }) => {
+          if (!(sessionID in sessions)) throw new Error("Session.NotFoundError");
+          return { id: sessionID, ...sessions[sessionID] };
+        },
+      },
       event: {
         subscribe: ({ signal }) => (async function* () {
           while (!signal.aborted) {
@@ -147,6 +154,25 @@ assert.equal(ids.size, 3, "plugin ids must be distinct");
   await settle(6, "five more transitions");
   assert.deepEqual(states(), "working idle working idle working idle".split(" ").map(line));
   cleanup();
+
+  // The stream is live-only: a subagent resumed after a restart never shows its session.created.
+  // It must still be recognised (ctx.session.get), and a lookup that fails must change nothing.
+  {
+    const before = states().length;
+    const h2 = v2Host({ ses_root: {}, ses_old_child: { parentID: "ses_root" } });
+    const stop = mods.status.setup(h2.ctx);
+    h2.push(
+      ev("session.execution.started", { sessionID: "ses_root" }),
+      ev("session.execution.started", { sessionID: "ses_old_child" }),
+      ev("session.execution.succeeded", { sessionID: "ses_old_child" }),
+      ev("session.execution.started", { sessionID: "ses_unknown" }),
+      ev("session.execution.succeeded", { sessionID: "ses_unknown" }),
+    );
+    await settle(before + 1, "working");
+    assert.deepEqual(states().slice(before), [line("working")], "an unseen subagent must not flip the badge");
+    assert.equal(ocid(), "ses_root", "an unseen subagent must not take over the slot");
+    stop();
+  }
 
   // v1: idle on session.idle, working on message.*, a trailing message.* right after idle ignored.
   const before = states().length;

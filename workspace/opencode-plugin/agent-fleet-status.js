@@ -50,15 +50,23 @@ const bridge = () => {
   const sidDir = process.env.HOME ? join(process.env.HOME, ".config/agent-fleet/opencode-sid") : null;
   let cur = "";
   let idleAt = 0;
+  let queue = Promise.resolve();
   const set = (state) => {
     if (!sid || state === cur) return;
     cur = state;
-    // Fire-and-forget; absolute path so it resolves regardless of the plugin's PATH.
-    try {
-      execFile(AGENT_BIN, ["session-status", state, sid], () => {});
-    } catch {
-      /* ignore */
-    }
+    // Fire-and-forget, but one at a time: separate processes finish in any order, and a
+    // working that lands after its idle leaves the badge stuck. Absolute path so it resolves
+    // regardless of the plugin's PATH.
+    queue = queue.then(
+      () =>
+        new Promise((resolve) => {
+          try {
+            execFile(AGENT_BIN, ["session-status", state, sid], () => resolve());
+          } catch {
+            resolve();
+          }
+        }),
+    );
   };
   const recordOcid = (ocid) => {
     if (!sid || !ocid || !sidDir) return;
@@ -100,26 +108,42 @@ const bridge = () => {
   };
 
   // opencode 2: the payload is under `data`. A subagent's own execution would otherwise flip
-  // the badge to idle while the parent still works, so sessions created with a parent are
-  // left out of both the state and the recorded id.
-  const children = new Set();
-  const onV2 = (event) => {
+  // the badge to idle while the parent still works, and pin the slot to the subagent's id, so
+  // child sessions are left out of both. The event stream is live-only: a subagent resumed after
+  // a restart or reload never shows its session.created here, so an unseen id is looked up
+  // (`lookup` = ctx.session.get). A failed lookup leaves the state and the id alone.
+  const childOf = new Map(); // session id -> is a subagent session
+  const isChild = async (id, lookup) => {
+    if (childOf.has(id)) return childOf.get(id);
+    try {
+      const info = await lookup({ sessionID: id });
+      childOf.set(id, Boolean(info && info.parentID));
+      return childOf.get(id);
+    } catch {
+      return null;
+    }
+  };
+  const onV2 = async (event, lookup) => {
     const t = event && event.type;
     const data = event && event.data;
     if (!t || !data || typeof data.sessionID !== "string") return;
-    if (t === "session.created" && data.parentID) children.add(data.sessionID);
-    if (children.has(data.sessionID)) return;
     if (t === "session.created") {
-      recordOcid(data.sessionID);
-    } else if (t === "session.execution.started") {
-      recordOcid(data.sessionID);
-      set("working");
-    } else if (
+      childOf.set(data.sessionID, Boolean(data.parentID));
+      if (!data.parentID) recordOcid(data.sessionID);
+      return;
+    }
+    const working = t === "session.execution.started";
+    const done =
       t === "session.execution.succeeded" ||
       t === "session.execution.failed" ||
       t === "session.execution.interrupted" ||
-      t === "session.idle"
-    ) {
+      t === "session.idle";
+    if (!working && !done) return;
+    if ((await isChild(data.sessionID, lookup)) !== false) return;
+    if (working) {
+      recordOcid(data.sessionID);
+      set("working");
+    } else {
       idle();
     }
   };
@@ -134,7 +158,7 @@ export default {
     const ac = new AbortController();
     void (async () => {
       try {
-        for await (const event of ctx.event.subscribe({ signal: ac.signal })) onV2(event);
+        for await (const event of ctx.event.subscribe({ signal: ac.signal })) await onV2(event, (input) => ctx.session.get(input));
       } catch {
         /* aborted on unload, or the stream ended */
       }
