@@ -442,7 +442,7 @@ func sendTurn(addr, ses, dir string, req *http.Request, st agents.ThreadSettings
 	_ = json.Unmarshal(promptBody, &userMsg)
 	gen := Serve().Generation()
 	seen, misses := false, 0
-	started := time.Now()
+	lastLive := time.Now() // the last moment the turn was known to be alive or not yet due
 	for {
 		m, err := activeSessions(addr, dir)
 		// A new generation means the daemon this turn ran on is gone, whatever the new one
@@ -451,26 +451,29 @@ func sendTurn(addr, ses, dir string, req *http.Request, st agents.ThreadSettings
 		if Serve().Generation() != gen {
 			return nil, errors.New("opencode serve was replaced during the turn")
 		}
-		switch {
-		case err != nil:
+		running := err == nil && m[ses] != ""
+		if running {
+			seen, misses, lastLive = true, 0, time.Now()
+		} else if err != nil {
 			if misses++; misses >= v2PollMisses {
 				return nil, err
 			}
-		case m[ses] != "":
-			seen, misses = true, 0
-		default:
-			// Not running: either it ended, or it has not started. An idle message newer than
-			// our input says which, and what the outcome was.
-			if kind, e, ok := v2LatestOutcome(addr, ses, userMsg.Data.ID); ok {
-				return v2OutcomeResponse(kind, e), nil
-			}
-			if seen {
-				// Gone from the list but no outcome recorded yet: give the record a moment.
+		}
+		// The record of THIS input's execution decides, whether or not the session is running:
+		// a queued input behind it may already have started the next execution, and only
+		// the first idle message after our input is ours. Only an explicit outcome ends the
+		// turn; a record that cannot be read or does not appear is unknown, never success.
+		if err == nil && (!running || seen) {
+			kind, e, found, oerr := v2OutcomeFor(addr, ses, userMsg.Data.ID)
+			switch {
+			case oerr != nil:
 				if misses++; misses >= v2PollMisses {
-					return v2OutcomeResponse("succeeded", nil), nil
+					return nil, fmt.Errorf("opencode v2 turn outcome unreadable: %w", oerr)
 				}
-			} else if time.Since(started) > v2StartWithin {
-				return nil, errors.New("opencode v2 turn state unknown: the session never ran")
+			case found:
+				return v2OutcomeResponse(kind, e), nil
+			case !running && time.Since(lastLive) > v2StartWithin:
+				return nil, errors.New("opencode v2 turn state unknown: no outcome was recorded")
 			}
 		}
 		select {

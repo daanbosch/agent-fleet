@@ -91,7 +91,8 @@ func (d *v2Daemon) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		q := r.URL.Query()
-		if q.Get("order") == "desc" {
+		desc := q.Get("order") == "desc" || strings.HasPrefix(q.Get("cursor"), "desc:")
+		if desc {
 			rev := make([]string, len(msgs))
 			for i, m := range msgs {
 				rev[len(msgs)-1-i] = m
@@ -104,13 +105,13 @@ func (d *v2Daemon) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		off := 0
 		if c := q.Get("cursor"); c != "" {
-			off, _ = strconv.Atoi(c)
+			off, _ = strconv.Atoi(strings.TrimPrefix(c, "desc:")) // the cursor remembers its order, like the real one
 		}
 		end := min(off+limit, len(msgs))
 		if off > len(msgs) {
 			off = len(msgs)
 		}
-		js(`{"data":[` + strings.Join(msgs[off:end], ",") + `],"cursor":{"previous":"p","next":"` + strconv.Itoa(end) + `"}}`)
+		js(`{"data":[` + strings.Join(msgs[off:end], ",") + `],"cursor":{"previous":"p","next":"` + map[bool]string{true: "desc:", false: ""}[desc] + strconv.Itoa(end) + `"}}`)
 	case strings.HasPrefix(p, "/api/session/") && strings.HasSuffix(p, "/inbox"):
 		id := strings.TrimSuffix(strings.TrimPrefix(p, "/api/session/"), "/inbox")
 		if b, ok := d.inbox[id]; ok {
@@ -704,6 +705,7 @@ func TestV2RunTurnLandsTheExplicitOutcome(t *testing.T) {
 			d := newTurnDaemon(t)
 			d.setIdle(tc.outcome, tc.err)
 			h := newTestHandle(t, d.f.srv)
+			h.ocSid = "sid-v2run-" + strings.NewReplacer(" ", "-", "/", "-").Replace(tc.name)
 			h.ses = "ses_1"
 			h.mu.Lock()
 			h.tq().Accept(memberInput("go", "msg_go"))
@@ -745,5 +747,87 @@ func TestV2TargetOnlyForAManagedSessionOnAV2Daemon(t *testing.T) {
 	}
 	if _, ok := v2TargetFor(terminal); ok {
 		t.Fatal("a Terminal session was routed to af's daemon")
+	}
+}
+
+// The first idle message after OUR input ends our turn. A queued input's execution that starts
+// right behind it (still running here, with a different result later) must not be read instead.
+func TestV2TurnTakesItsOwnExecutionsOutcomeNotALaterOnes(t *testing.T) {
+	for _, fillers := range []int{0, 450} { // 450: our idle is past the first page of the newest-first read
+		d := newTurnDaemon(t)
+		d.setActive("ses_1") // the queued input's execution is running the whole time
+		msgs := []string{
+			`{"id":"msg_4","type":"idle","outcome":"failed","time":{"created":4},"error":{"type":"provider.internal","message":"before our input","status":500}}`,
+			`{"id":"msg_6","type":"idle","outcome":"failed","time":{"created":6},"error":` + authErr + `}`,
+		}
+		for i := 0; i < fillers; i++ {
+			msgs = append(msgs, fmt.Sprintf(`{"id":"msg_7%04d","type":"user","text":"q","time":{"created":7}}`, i))
+		}
+		msgs = append(msgs, `{"id":"msg_9","type":"idle","outcome":"succeeded","time":{"created":9}}`)
+		d.mu.Lock()
+		d.messages["ses_1"] = msgs
+		d.mu.Unlock()
+		res, err := v2Turn(t, d.f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if me, ok := outcomeOf(t, res); !ok || me.Name != "provider.auth" {
+			t.Fatalf("fillers=%d: outcome = %+v %v, want the first execution's 401", fillers, me, ok)
+		}
+	}
+}
+
+// A record that cannot be read says nothing about the outcome: it must never become a success.
+func TestV2TurnWithUnreadableOutcomeIsUnknown(t *testing.T) {
+	d := newTurnDaemon(t)
+	var calls int
+	inner := d.f.srv.Config.Handler
+	d.f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/message") {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/active") {
+			calls++
+			if calls == 1 {
+				_, _ = w.Write([]byte(`{"data":{"ses_1":{"type":"running"}}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"data":{}}`))
+			return
+		}
+		inner.ServeHTTP(w, r)
+	})
+	res, err := v2Turn(t, d.f)
+	if err == nil {
+		res.Body.Close()
+		t.Fatal("an unreadable outcome was returned as a finished turn")
+	}
+}
+
+// The session list polls state for every slot in turn: a daemon that hangs on one endpoint must
+// cost the whole list one timeout, not one per slot.
+func TestV2HungDaemonCostsOneTimeoutNotOnePerSlot(t *testing.T) {
+	d := newV2Daemon(t)
+	d.addSession(t, "ses_a", "", "1000", "")
+	inner := d.f.srv.Config.Handler
+	d.f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/active") {
+			time.Sleep(400 * time.Millisecond)
+		}
+		inner.ServeHTTP(w, r)
+	})
+	pt, pd := v2StateTimeout, v2DownFor
+	v2StateTimeout, v2DownFor = 80*time.Millisecond, time.Minute
+	t.Cleanup(func() { v2StateTimeout, v2DownFor = pt, pd })
+	m := v2Meta(t, "ses_a")
+	start := time.Now()
+	for i := 0; i < 5; i++ {
+		if got := LiveState(m); got != "" {
+			t.Fatalf("hung daemon read %q, want unknown", got)
+		}
+	}
+	if el := time.Since(start); el > 250*time.Millisecond {
+		t.Fatalf("5 readers took %v: each paid the timeout", el)
 	}
 }

@@ -40,7 +40,9 @@ package opencode
 // route can be plugged in later without touching the readers.
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -77,8 +79,54 @@ type statusError int
 
 func (e statusError) Error() string { return fmt.Sprintf("opencode api: HTTP %d", int(e)) }
 
+// v2StateTimeout bounds one state read, and v2DownFor how long a daemon that failed one is not
+// asked again. The session list reads state synchronously, one slot after another, so without a
+// shared verdict a hung daemon costs every slot (and every concurrent poll) a full client timeout.
+var (
+	v2StateTimeout = 3 * time.Second
+	v2DownFor      = 2 * time.Second
+)
+
+var v2Down = struct {
+	mu    sync.Mutex
+	until map[string]time.Time
+}{until: map[string]time.Time{}}
+
+var errV2Down = errors.New("opencode api: daemon recently unreachable")
+
+// get is a state read: short, and refused at once while the daemon is known to be down. A
+// transport failure (not an HTTP status) marks it down for v2DownFor.
 func (t apiTarget) get(path string, out any) error {
-	res, err := t.Client.Get(t.Addr + path)
+	v2Down.mu.Lock()
+	down := time.Now().Before(v2Down.until[t.Addr])
+	v2Down.mu.Unlock()
+	if down {
+		return errV2Down
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), v2StateTimeout)
+	defer cancel()
+	err := t.getCtx(ctx, path, out)
+	var se statusError
+	if err != nil && !errors.As(err, &se) {
+		v2Down.mu.Lock()
+		v2Down.until[t.Addr] = time.Now().Add(v2DownFor)
+		v2Down.mu.Unlock()
+	}
+	return err
+}
+
+// getTurn is the read a waiting turn makes: the client's own timeout, and no down verdict, since
+// the turn counts its own consecutive failures.
+func (t apiTarget) getTurn(path string, out any) error {
+	return t.getCtx(context.Background(), path, out)
+}
+
+func (t apiTarget) getCtx(ctx context.Context, path string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", t.Addr+path, nil)
+	if err != nil {
+		return err
+	}
+	res, err := t.Client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -204,7 +252,7 @@ func (t apiTarget) v2Session(m session.Meta) (*v2SessionInfo, error) {
 		switch err := t.get(sessionPath(id), &w); {
 		case err == nil:
 			return &w.Data, nil
-		case err != statusError(http.StatusNotFound):
+		case !errors.Is(err, statusError(http.StatusNotFound)):
 			return nil, err
 		}
 	}
@@ -262,30 +310,37 @@ var v2ActiveCache struct {
 	addr string
 	at   time.Time
 	m    map[string]bool
+	err  error
 }
 
 // active is the set of sessions the daemon is running; an idle session is not listed (measured).
+// The answer, a failure included, is shared for v2ActiveTTL; the lock is not held over the request.
 func (t apiTarget) active() (map[string]bool, error) {
 	c := &v2ActiveCache
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.m != nil && c.addr == t.Addr && time.Since(c.at) < v2ActiveTTL {
-		return c.m, nil
+	if c.addr == t.Addr && time.Since(c.at) < v2ActiveTTL && (c.m != nil || c.err != nil) {
+		m, err := c.m, c.err
+		c.mu.Unlock()
+		return m, err
 	}
+	c.mu.Unlock()
 	var w struct {
 		Data map[string]struct {
 			Type string `json:"type"`
 		} `json:"data"`
 	}
-	if err := t.get("/api/session/active", &w); err != nil {
-		return nil, err
+	err := t.get("/api/session/active", &w)
+	var m map[string]bool
+	if err == nil {
+		m = make(map[string]bool, len(w.Data))
+		for id, s := range w.Data {
+			m[id] = s.Type != "" && s.Type != "idle"
+		}
 	}
-	m := make(map[string]bool, len(w.Data))
-	for id, s := range w.Data {
-		m[id] = s.Type != "" && s.Type != "idle"
-	}
-	c.addr, c.at, c.m = t.Addr, time.Now(), m
-	return m, nil
+	c.mu.Lock()
+	c.addr, c.at, c.m, c.err = t.Addr, time.Now(), m, err
+	c.mu.Unlock()
+	return m, err
 }
 
 // liveStateV2 is liveState on the API: working while the daemon lists the session as running,
@@ -750,22 +805,46 @@ func v2OutcomeBody(kind string, e *v2Err) string {
 	return string(b)
 }
 
-// v2LatestOutcome reads the outcome of the execution that ended the turn whose input had id
-// after: the newest idle message newer than it. ok=false while there is none yet.
-func v2LatestOutcome(addr, ses, after string) (kind string, e *v2Err, ok bool) {
+// v2OutcomeFor finds how the execution that took the input with id after ended: the OLDEST idle
+// message newer than it, so a queued input's execution that follows is never taken for this one.
+// It pages back from the newest message until it passes the input. found=false with a nil error
+// means no execution of this input has ended yet; an error means the record could not be read,
+// which says nothing about the outcome.
+func v2OutcomeFor(addr, ses, after string) (kind string, e *v2Err, found bool, err error) {
 	if after == "" {
-		return "", nil, false
+		return "", nil, false, nil
 	}
-	var w struct {
-		Data []v2Msg `json:"data"`
-	}
-	if (apiTarget{Addr: addr, Client: serveClient}).get(sessionPath(ses)+"/message?order=desc&limit=20", &w) != nil {
-		return "", nil, false
-	}
-	for _, m := range w.Data {
-		if m.Type == "idle" && m.ID > after {
-			return m.Outcome, m.Error, true
+	t := apiTarget{Addr: addr, Client: serveClient}
+	path := sessionPath(ses) + "/message?order=desc&limit=" + fmt.Sprint(v2PageSize)
+	var oldest *v2Msg
+	for page := 0; page < 50; page++ {
+		var w struct {
+			Data   []v2Msg `json:"data"`
+			Cursor struct {
+				Next string `json:"next"`
+			} `json:"cursor"`
 		}
+		if err := t.getTurn(path, &w); err != nil {
+			return "", nil, false, err
+		}
+		passed := false
+		for i := range w.Data { // newest first
+			m := &w.Data[i]
+			if m.ID <= after {
+				passed = true
+				continue
+			}
+			if m.Type == "idle" {
+				oldest = m
+			}
+		}
+		if passed || len(w.Data) < v2PageSize || w.Cursor.Next == "" {
+			break
+		}
+		path = sessionPath(ses) + "/message?limit=" + fmt.Sprint(v2PageSize) + "&cursor=" + url.QueryEscape(w.Cursor.Next)
 	}
-	return "", nil, false
+	if oldest == nil {
+		return "", nil, false, nil
+	}
+	return oldest.Outcome, oldest.Error, true, nil
 }

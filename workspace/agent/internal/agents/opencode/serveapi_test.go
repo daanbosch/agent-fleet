@@ -399,6 +399,25 @@ func TestV2TurnWaitsForActiveToClear(t *testing.T) {
 	prev := v2PollEvery
 	v2PollEvery = 5 * time.Millisecond
 	t.Cleanup(func() { v2PollEvery = prev })
+	inner := f.srv.Config.Handler
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/message"):
+			if polls.Load() > 3 { // the execution has ended: its idle message exists
+				_, _ = w.Write([]byte(`{"data":[{"id":"msg_9","type":"idle","outcome":"succeeded"}]}`))
+			} else {
+				_, _ = w.Write([]byte(`{"data":[]}`))
+			}
+		case strings.HasSuffix(r.URL.Path, "/prompt"):
+			b, _ := io.ReadAll(r.Body)
+			f.mu.Lock()
+			f.bodies["POST "+r.URL.RequestURI()] = string(b)
+			f.mu.Unlock()
+			_, _ = w.Write([]byte(`{"data":{"id":"msg_5"}}`))
+		default:
+			inner.ServeHTTP(w, r)
+		}
+	})
 
 	in := agents.TurnInput{Prompt: " hello ", Attachments: []string{"/tmp/a b.png"}}
 	st := agents.ThreadSettings{Model: "prov/mod", Mode: "plan", Effort: "high"}
