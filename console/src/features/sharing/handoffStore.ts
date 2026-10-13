@@ -66,10 +66,26 @@ export const useHandoffStore = create<HandoffStore>((set) => ({
   received: [],
   receivedAt: 0,
   async refresh() {
+    const gen = generation;
     const [owned] = await Promise.all([api("api/session-handoff-offers").catch(() => null), loadReceived()]);
+    if (gen !== generation) return;
     set({ owned: owned && !owned.error && Array.isArray(owned.offers) ? owned.offers : [] });
   },
 }));
+
+// Bumped by resetHandoffs: an answer asked under an earlier tenant or account is dropped, or a
+// read still in flight at a switch would put the previous tenant's offers back on screen.
+let generation = 0;
+
+/** Forgets every offer at a tenant or account switch and reads again under the new one. The
+ *  offers carry titles, prompts and addresses of the previous tenant, and a fresh receivedAt
+ *  would otherwise keep refreshReceivedIfStale from asking again. */
+export function resetHandoffs(): void {
+  generation++;
+  receivedFlight = null;
+  useHandoffStore.setState({ owned: [], received: [], receivedAt: 0 });
+  void useHandoffStore.getState().refresh();
+}
 
 // The inbox is read by the poll and by a notification click, and both go through loadReceived so
 // that they cannot undo each other: a read joins the one in flight instead of racing it, so a
@@ -82,9 +98,11 @@ let receivedFlight: Promise<HandoffOffer[] | null> | null = null;
  *  is no proof that the offers are gone. */
 function loadReceived(): Promise<HandoffOffer[] | null> {
   if (receivedFlight) return receivedFlight;
+  const gen = generation;
   const flight: Promise<HandoffOffer[] | null> = api("api/session-handoff-offers/received")
     .catch(() => null)
     .then((d) => {
+      if (gen !== generation) return null;
       const offers: HandoffOffer[] | null = d && !d.error && Array.isArray(d.offers) ? d.offers : null;
       useHandoffStore.setState(offers ? { received: offers, receivedAt: Date.now() } : { receivedAt: 0 });
       return offers;

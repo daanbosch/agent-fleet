@@ -138,7 +138,8 @@ export function InboxModal({ onClose }: { onClose: () => void }) {
 
 function ReceivedList({ items, onClose }: { items: InboxItem[]; onClose: () => void }) {
   const tr = useT();
-  // The route lists only offers still pending; the filter keeps a decided one out between reads.
+  // The route lists only offers still pending, including recovery-only rows a confirmed take
+  // still holds; the filter keeps a decided one out between reads.
   const offers = useHandoffStore((s) => s.received).filter((o) => o.status === "pending");
   const waiting = waitingItems(items);
   const mine = assignedItems(items);

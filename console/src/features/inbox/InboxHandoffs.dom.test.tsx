@@ -28,6 +28,7 @@ vi.mock("../../core/api/client.ts", () => ({
 const { InboxModal } = await import("./InboxModal.tsx");
 const { InboxButton } = await import("./InboxButton.tsx");
 const { useInboxStore } = await import("./store.ts");
+const { useTenantStore } = await import("../../core/store/tenant.ts");
 const { useHandoffStore } = await import("../sharing/handoffStore.ts");
 const { useLaunchSeed, useLaunchTarget, useReposStore } = await import("../repos/store.ts");
 const { ToastProvider } = await import("../../ui/ToastProvider.tsx");
@@ -193,5 +194,51 @@ describe("the inbox badge", () => {
     received = [];
     await act(async () => useHandoffStore.getState().refresh());
     expect(badge()).toBe("");
+  });
+});
+
+// A member of two tenants switches: the previous tenant's handoffs (titles, prompts, addresses)
+// and a launch seeded from one of them must not follow into the new tenant (#2085 review).
+describe("a tenant switch", () => {
+  async function renderButton() {
+    vi.stubGlobal("fetch", () => new Promise(() => undefined));
+    await act(async () => {
+      root!.render(
+        <ToastProvider>
+          <InboxButton />
+        </ToastProvider>,
+      );
+    });
+    await flush();
+  }
+  const badge = () => host.querySelector(".inbox-badge")?.textContent ?? "";
+  const tenantBefore = useTenantStore.getState().tenant;
+  afterEach(() => useTenantStore.setState({ tenant: tenantBefore }));
+
+  it("drops the previous tenant's handoffs and reads the route again, even with a fresh list", async () => {
+    received = [OFFER];
+    await renderButton();
+    expect(badge()).toBe("1");
+    useHandoffStore.setState({ received: [OFFER], receivedAt: Date.now() });
+    api.mockClear();
+    received = [];
+    await act(async () => useTenantStore.setState({ tenant: "tenant-b-" + Math.random() }));
+    await flush();
+    expect(useHandoffStore.getState().received).toEqual([]);
+    expect(badge()).toBe("");
+    expect(api).toHaveBeenCalledWith("api/session-handoff-offers/received");
+    await act(async () => host.querySelector<HTMLButtonElement>(".inbox-btn")!.click());
+    await flush();
+    expect(section()).toBeNull();
+  });
+
+  it("drops a launch seeded from a handoff", async () => {
+    await renderButton();
+    useLaunchSeed.getState().set("Continue the work.", "Carry on", "", "", "offer-1");
+    useLaunchTarget.getState().open({ name: "private", path: "/r/private" } as never);
+    await act(async () => useTenantStore.setState({ tenant: "tenant-c-" + Math.random() }));
+    await flush();
+    expect(useLaunchSeed.getState().handoffOfferId).toBe("");
+    expect(useLaunchTarget.getState().target).toBeNull();
   });
 });

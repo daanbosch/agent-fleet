@@ -15,7 +15,7 @@ import { useToast } from "../../ui/ToastProvider.tsx";
 import { useT } from "../../lib/i18n/index.ts";
 import { useTenantStore } from "../../core/store/tenant.ts";
 import { useLaunchSeed, useLaunchTarget } from "../repos/store.ts";
-import { pendingHandoffCount, startHandoffPolling, useHandoffStore } from "../sharing/handoffStore.ts";
+import { pendingHandoffCount, resetHandoffs, startHandoffPolling, useHandoffStore } from "../sharing/handoffStore.ts";
 import { inboxBadge, onInboxScopeChange, setInboxScope, startInboxChannel, useInboxStore } from "./store.ts";
 import { InboxModal } from "./InboxModal.tsx";
 import "./inbox.css";
@@ -36,13 +36,14 @@ export function InboxButton() {
   const user = useTenantStore((s) => s.whoami?.user ?? "");
   const scope = user + "|" + tenant;
   // A tenant or account switch drops the previous scope's inbox at once: list, badge, stream,
-  // the open dialog with its drafts, and a launch seeded from one of its requests.
+  // the open dialog with its drafts, its handoffs, and any pending launch seed. A seed from a
+  // request, a handoff or anything else names an item of the previous tenant, and launching it
+  // under the new one would send that id where it does not exist.
   useEffect(() => {
     onInboxScopeChange(() => {
-      if (useLaunchSeed.getState().inboxItemId) {
-        useLaunchSeed.getState().clear();
-        useLaunchTarget.getState().clear();
-      }
+      useLaunchSeed.getState().clear();
+      useLaunchTarget.getState().clear();
+      resetHandoffs();
     });
     return () => onInboxScopeChange(null);
   }, []);
