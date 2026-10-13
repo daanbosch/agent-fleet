@@ -40,8 +40,10 @@ type handoffFakeAgent struct {
 	reserved  map[string]bool
 	refused   map[string]bool
 	abandoned map[string]bool
-	bodies    []map[string]any
-	srv       *httptest.Server
+	// reserveFails: the Agent cannot record a key (503 naming it).
+	reserveFails bool
+	bodies       []map[string]any
+	srv          *httptest.Server
 }
 
 func newHandoffFakeAgent(t *testing.T) *handoffFakeAgent {
@@ -114,6 +116,12 @@ func newHandoffFakeAgent(t *testing.T) *handoffFakeAgent {
 				return
 			}
 			key := keyOf(r.URL.Path, "reserve")
+			if f.reserveFails {
+				w.Header().Set(createKeyHeader, key)
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = io.WriteString(w, `{"error":{"code":"create_outcome_unknown"}}`)
+				return
+			}
 			f.reserved[key] = true
 			w.Header().Set(createKeyHeader, key)
 			_, _ = io.WriteString(w, `{"status":"reserved"}`)
@@ -450,9 +458,35 @@ func TestHandoffUnreservedKeyStaysUnknown(t *testing.T) {
 		t.Fatal("an Agent without reserve recorded the key")
 	}
 	h.agent.set("ok", "agent")
+	// A resend under the used take (an older tab, a retry) is refused before the Agent, and
+	// in particular reserves nothing there: a reservation would vouch for the key.
+	h.requireCode(h.create(token), http.StatusConflict, "handoff_take_used")
+	h.agent.mu.Lock()
+	reserved = h.agent.reserved[handoffCreateKey(h.offer, token)]
+	h.agent.mu.Unlock()
+	if reserved {
+		t.Fatal("a resend under a used take reserved its key on the updated Agent")
+	}
 	rec, _ := h.take()
 	h.requireCode(rec, http.StatusConflict, "handoff_launch_unknown")
 	h.requireCode(h.withdraw(), http.StatusConflict, "handoff_being_taken")
+}
+
+// TestHandoffFailedReserveSendsNothing: when the recipient's Agent cannot record the key, the
+// create is not sent, and the take, confirmed a moment before, goes back.
+func TestHandoffFailedReserveSendsNothing(t *testing.T) {
+	h := newHandoffRecovery(t)
+	h.agent.mu.Lock()
+	h.agent.reserveFails = true
+	h.agent.mu.Unlock()
+	h.requireCode(h.create(h.mustTake()), http.StatusBadGateway, "handoff_reserve_failed")
+	if len(h.agent.bodies) != 0 {
+		t.Fatalf("the create was sent: %v", h.agent.bodies)
+	}
+	if o := h.row(); o.Status != "pending" || o.TakenAt != "" {
+		t.Fatalf("after a failed reserve: %+v, want no take", o)
+	}
+	h.requireCode(h.withdraw(), http.StatusOK, "")
 }
 
 // TestHandoffAgentErrorIsARefusal: an answer carrying the Agent's create headers is the

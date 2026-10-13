@@ -39,3 +39,28 @@ func TestLogRequestsRedactsLoginAttempts(t *testing.T) {
 		t.Fatalf("access log:\n%s", out)
 	}
 }
+
+// A create's idempotency key never reaches the access log: a handoff launch's key carries the
+// recipient's take token (issue #2040).
+func TestLogRequestsRedactsIdempotencyKeys(t *testing.T) {
+	const key = "handoff-offer-private-take-token"
+	var buf bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(old) })
+	h := LogRequests(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	for _, target := range []string{
+		"/sessions-idempotency/" + key,
+		"/sessions-idempotency/" + key + "/reserve",
+		"/sessions-idempotency/" + key + "/abandon",
+	} {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", target, nil))
+	}
+	out := buf.String()
+	if strings.Contains(out, "private-take-token") {
+		t.Fatalf("the key reached the access log:\n%s", out)
+	}
+	if strings.Count(out, "/sessions-idempotency/ref:") != 3 || !strings.Contains(out, "/reserve") || !strings.Contains(out, "/abandon") {
+		t.Fatalf("access log:\n%s", out)
+	}
+}

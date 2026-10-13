@@ -573,12 +573,12 @@ func takeHandoffFence(r *http.Request) (*handoffTakeRef, *apiError) {
 	return &take, nil
 }
 
-// reserveHandoffCreate records the take's key on the recipient's Agent before the take is
-// confirmed and the create sent (issue #2040). The reservation is what lets the Agent later
+// reserveHandoffCreate records the take's key on the recipient's Agent after the take is
+// confirmed and before the create is sent (issue #2040). The reservation is what lets the Agent later
 // answer "not created" for the key (reconcileTake): a key it has no record of may have been
 // created under by an Agent that kept none, so its absence proves nothing. An Agent without
 // the route (no key header on its 404) gets the create anyway, and an unknown outcome there
-// stays unknown. Any other failure refuses the create; nothing is confirmed yet.
+// stays unknown. Any other failure refuses the create, and the caller gives the take back.
 func reserveHandoffCreate(ctx context.Context, res *resolved, take handoffTakeRef) *apiError {
 	key := handoffCreateKey(take.OfferID, take.Token)
 	failed := &apiError{http.StatusBadGateway, "handoff_reserve_failed", "your workspace could not record the launch; nothing was started"}
