@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -281,6 +282,29 @@ func (s *SQL) UpdateSessionSharePermission(ctx context.Context, id, owner, permi
 	return n == 1, err
 }
 
+// catalogWriteBatch is how many rows one multi-row statement carries. 19 columns per row
+// keeps a batch far below both SQLite's and Postgres' bind-parameter limits.
+const catalogWriteBatch = 200
+
+// catalogRowChanged reports whether the Agent's view of a session differs from its stored
+// row in any column the sync maintains. id, created_at and owner are fixed at insert, and
+// last_seen is the sync's own clock: comparing it would rewrite every row on every sync.
+func catalogRowChanged(old, cur SharedSessionCatalog) bool {
+	return old.Kind != cur.Kind || old.Dir != cur.Dir || old.Repo != cur.Repo ||
+		old.WorkingCopyID != cur.WorkingCopyID || old.Title != cur.Title || old.Label != cur.Label ||
+		old.State != cur.State || old.Archived != cur.Archived || old.Worktree != cur.Worktree ||
+		old.Parent != cur.Parent || old.ParentWorkingCopyID != cur.ParentWorkingCopyID ||
+		old.Branch != cur.Branch || old.Activity != cur.Activity
+}
+
+// ReplaceSharedSessionCatalog makes the stored catalog of one workspace equal to `in`.
+//
+// It runs under the owner's membership row lock, which every share change also takes, so its
+// cost is latency on the owner's share dialogs. It therefore reads the stored rows once and
+// writes only the difference, batched: an unchanged inventory is a handful of statements no
+// matter how many sessions the member has (measured for 1,200 rows: 2,403 statements before,
+// see TestReplaceSharedSessionCatalogWritesOnlyTheDiff). last_seen is stamped only on rows
+// that are inserted or changed.
 func (s *SQL) ReplaceSharedSessionCatalog(ctx context.Context, workspaceID, owner string, in []SharedSessionCatalog) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -293,60 +317,106 @@ func (s *SQL) ReplaceSharedSessionCatalog(ctx context.Context, workspaceID, owne
 	if err = ensureSessionShareOwnerIdle(ctx, tx, owner, ownerLeaseNowTS()); err != nil {
 		return err
 	}
-	keep := map[string]bool{}
-	for _, r := range in {
-		keep[r.Name] = true
-		var existing string
-		_ = tx.QueryRowContext(ctx, `SELECT id FROM shared_session_catalog WHERE workspace_id=? AND name=?`, workspaceID, r.Name).Scan(&existing)
-		if existing == "" {
-			existing = r.ID
-		}
-		archived := 0
-		if r.Archived {
-			archived = 1
-		}
-		worktree := 0
-		if r.Worktree {
-			worktree = 1
-		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO shared_session_catalog
-			(id,workspace_id,owner_membership_id,name,kind,dir,repo,working_copy_id,title,label,created_at,state,archived,last_seen,worktree,parent,parent_working_copy_id,branch,activity)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(workspace_id,name) DO UPDATE SET
-			kind=excluded.kind,dir=excluded.dir,repo=excluded.repo,working_copy_id=excluded.working_copy_id,
-			title=excluded.title,label=excluded.label,state=excluded.state,archived=excluded.archived,last_seen=excluded.last_seen,
-			worktree=excluded.worktree,parent=excluded.parent,parent_working_copy_id=excluded.parent_working_copy_id,
-			branch=excluded.branch,activity=excluded.activity`,
-			existing, workspaceID, owner, r.Name, r.Kind, r.Dir, r.Repo, r.WorkingCopyID, r.Title,
-			r.Label, r.CreatedAt, r.State, archived, r.LastSeen, worktree, r.Parent, r.ParentWorkingCopyID, r.Branch, r.Activity)
-		if err != nil {
-			return err
-		}
-	}
-	rows, err := tx.QueryContext(ctx, `SELECT name FROM shared_session_catalog WHERE workspace_id=?`, workspaceID)
+	rows, err := tx.QueryContext(ctx, `SELECT id,workspace_id,owner_membership_id,name,kind,dir,repo,
+		working_copy_id,title,label,created_at,state,archived,last_seen,worktree,parent,parent_working_copy_id,branch,activity
+		FROM shared_session_catalog WHERE workspace_id=?`, workspaceID)
 	if err != nil {
 		return err
 	}
-	var stale []string
+	stored := map[string]SharedSessionCatalog{}
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		r, _, err := scanCatalog(rows)
+		if err != nil {
 			rows.Close()
 			return err
 		}
+		stored[r.Name] = r
+	}
+	// A read cut short must not pass for the full catalog: every row it missed would be
+	// swept below as stale, its session-scoped share rules with it.
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	keep := make(map[string]bool, len(in))
+	var write []SharedSessionCatalog
+	for _, r := range in {
+		if keep[r.Name] {
+			continue // the first occurrence wins, as the per-row upsert did
+		}
+		keep[r.Name] = true
+		if old, ok := stored[r.Name]; !ok || catalogRowChanged(old, r) {
+			write = append(write, r)
+		}
+	}
+	for len(write) > 0 {
+		n := min(len(write), catalogWriteBatch)
+		if err = upsertCatalogRows(ctx, tx, workspaceID, owner, write[:n]); err != nil {
+			return err
+		}
+		write = write[n:]
+	}
+	var stale []string
+	for name := range stored {
 		if !keep[name] {
 			stale = append(stale, name)
 		}
 	}
-	rows.Close()
-	for _, name := range stale {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM session_share WHERE owner_membership_id=? AND scope_type='session' AND scope_key=?`, owner, name); err != nil {
+	for len(stale) > 0 {
+		n := min(len(stale), catalogWriteBatch)
+		names, marks := make([]any, 0, n), make([]string, 0, n)
+		for _, name := range stale[:n] {
+			names = append(names, name)
+			marks = append(marks, "?")
+		}
+		list := strings.Join(marks, ",")
+		if _, err := tx.ExecContext(ctx, `DELETE FROM session_share WHERE owner_membership_id=? AND scope_type='session' AND scope_key IN (`+list+`)`,
+			append([]any{owner}, names...)...); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM shared_session_catalog WHERE workspace_id=? AND name=?`, workspaceID, name); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM shared_session_catalog WHERE workspace_id=? AND name IN (`+list+`)`,
+			append([]any{workspaceID}, names...)...); err != nil {
 			return err
 		}
+		stale = stale[n:]
 	}
 	return tx.Commit()
+}
+
+// upsertCatalogRows writes one batch. A row that already exists keeps its id (proposals and
+// handoff offers point at it), created_at and owner; the update list is the same column set
+// catalogRowChanged compares, plus last_seen.
+func upsertCatalogRows(ctx context.Context, tx *sqlTx, workspaceID, owner string, batch []SharedSessionCatalog) error {
+	var q strings.Builder
+	q.WriteString(`INSERT INTO shared_session_catalog
+		(id,workspace_id,owner_membership_id,name,kind,dir,repo,working_copy_id,title,label,created_at,state,archived,last_seen,worktree,parent,parent_working_copy_id,branch,activity)
+		VALUES `)
+	args := make([]any, 0, len(batch)*19)
+	for i, r := range batch {
+		if i > 0 {
+			q.WriteString(",")
+		}
+		q.WriteString("(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+		archived, worktree := 0, 0
+		if r.Archived {
+			archived = 1
+		}
+		if r.Worktree {
+			worktree = 1
+		}
+		args = append(args, r.ID, workspaceID, owner, r.Name, r.Kind, r.Dir, r.Repo, r.WorkingCopyID, r.Title,
+			r.Label, r.CreatedAt, r.State, archived, r.LastSeen, worktree, r.Parent, r.ParentWorkingCopyID, r.Branch, r.Activity)
+	}
+	q.WriteString(` ON CONFLICT(workspace_id,name) DO UPDATE SET
+		kind=excluded.kind,dir=excluded.dir,repo=excluded.repo,working_copy_id=excluded.working_copy_id,
+		title=excluded.title,label=excluded.label,state=excluded.state,archived=excluded.archived,last_seen=excluded.last_seen,
+		worktree=excluded.worktree,parent=excluded.parent,parent_working_copy_id=excluded.parent_working_copy_id,
+		branch=excluded.branch,activity=excluded.activity`)
+	_, err := tx.ExecContext(ctx, q.String(), args...)
+	return err
 }
 
 func scanCatalog(row interface{ Scan(...any) error }) (SharedSessionCatalog, bool, error) {

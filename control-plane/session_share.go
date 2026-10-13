@@ -36,6 +36,10 @@ const (
 	shareForcedCatalogTTL = 3 * time.Second
 )
 
+// sharePutSyncedHook, when set by a test, runs in put between the catalog sync and taking
+// the share lock — the window in which another sync can overtake this one.
+var sharePutSyncedHook func()
+
 type shareReadWindow struct {
 	at time.Time
 	n  int
@@ -57,10 +61,9 @@ func newSessionShareAPI(m *manager) sessionShareAPI {
 // freshCatalog reports whether this owner's inventory was reconciled recently enough to
 // skip another round trip, and stamps it when it isn't.
 //
-// syncCatalogLocked costs two HTTP calls into the owner's Workspace Agent
-// (/sessions/catalog + /repos) plus a full ReplaceSharedSessionCatalog, under a per-owner
-// mutex. Running that on EVERY transcript poll — once per recipient every couple of
-// seconds — was the dominant cost of reading a shared session, and the reason the first
+// A sync costs HTTP calls into the owner's Workspace Agent (/sessions/catalog, and /repos
+// when its cache is stale) plus a catalog write. Running that on EVERY transcript poll —
+// once per recipient every couple of seconds — was the dominant cost of reading a shared session, and the reason the first
 // screenful took so long to appear.
 //
 // This throttles ONLY the inventory reconciliation. Authorization is unaffected:
@@ -128,94 +131,10 @@ type repoInfo struct {
 	branch   string
 }
 
+// syncCatalog reconciles the owner's catalog, joining a sync already in flight.
 func (a sessionShareAPI) syncCatalog(ctx context.Context, res *resolved) error {
-	lock := a.mgr.shareLockFor(res.mv.MembershipID)
-	lock.Lock()
-	defer lock.Unlock()
-	_, err := a.syncCatalogLocked(ctx, res)
+	_, err := a.mgr.syncOwnerCatalog(ctx, res, catalogSyncNeed{})
 	return err
-}
-
-// syncCatalogLocked reconciles the inventory and also returns the /repos content it read,
-// because the caller (put) needs the same information to confirm the share target exists —
-// returning it saves another round trip to the Agent. The map is nil when the Agent could
-// not answer /repos (inventory unknown).
-func (a sessionShareAPI) syncCatalogLocked(ctx context.Context, res *resolved) (map[string]repoInfo, error) {
-	if res.rt.State(ctx) != "running" {
-		return nil, nil
-	}
-	sessions, err := readAgentCatalog(ctx, res.rt)
-	if err != nil {
-		return nil, err
-	}
-	// worktree/parent (the recipient's project/worktree tree display, docs/log/59) is
-	// per-working-copy, so it is looked up from /repos keyed by working_copy_id. When that
-	// read fails (a momentarily unreachable Agent), the catalog sync still proceeds: the
-	// side information is simply left empty on a new row, following the same "do nothing on
-	// a transient error" rule as the stale-rule pruning below (byWorkingCopy == nil).
-	var byWorkingCopy map[string]repoInfo
-	if reposBody, reposErr := agentText(ctx, res.rt, http.MethodGet, "/repos", nil); reposErr == nil {
-		var inventory struct {
-			Repos []struct {
-				Name          string `json:"name"`
-				WorkingCopyID string `json:"workingCopyId"`
-				Worktree      bool   `json:"worktree"`
-				Parent        string `json:"parent"`
-				Branch        string `json:"branch"`
-			} `json:"repos"`
-		}
-		if json.Unmarshal([]byte(reposBody), &inventory) == nil {
-			byWorkingCopy = map[string]repoInfo{}
-			// Parent is a folder name, so build a name -> workingCopyId map first.
-			wcByName := map[string]string{}
-			for _, repo := range inventory.Repos {
-				if !repo.Worktree {
-					wcByName[repo.Name] = repo.WorkingCopyID
-				}
-			}
-			for _, repo := range inventory.Repos {
-				info := repoInfo{worktree: repo.Worktree, parent: repo.Parent, branch: repo.Branch}
-				if repo.Worktree {
-					info.parentWC = wcByName[repo.Parent]
-				}
-				byWorkingCopy[repo.WorkingCopyID] = info
-			}
-		}
-	}
-	now := store.NowTS()
-	rows := make([]store.SharedSessionCatalog, 0, len(sessions))
-	for _, s := range sessions {
-		// state is liveness (running/stopped), activity is the Agent's live state (working /
-		// question / …). Keeping the last activity on a stopped session would read as "it
-		// stopped mid-turn", so activity is only carried while the session is alive.
-		state, activity := "stopped", ""
-		if s.Alive {
-			state, activity = "running", s.State
-		}
-		info := byWorkingCopy[s.WorkingCopyID]
-		rows = append(rows, store.SharedSessionCatalog{ID: store.NewID(), WorkspaceID: res.ws.ID,
-			OwnerMembershipID: res.mv.MembershipID, Name: s.Name, Kind: s.Kind, Dir: s.Dir, Repo: s.Repo,
-			WorkingCopyID: s.WorkingCopyID, Title: s.Title, Label: s.Label, CreatedAt: s.CreatedAt,
-			State: state, Archived: s.Archived, LastSeen: now, Worktree: info.worktree, Parent: info.parent,
-			ParentWorkingCopyID: info.parentWC, Branch: info.branch, Activity: activity})
-	}
-	if err := a.mgr.store.ReplaceSharedSessionCatalog(ctx, res.ws.ID, res.mv.MembershipID, rows); errors.Is(err, store.ErrSessionShareOwnerBusy) {
-		return byWorkingCopy, nil // another CP replica is applying an already-authorized operation
-	} else if err != nil {
-		return byWorkingCopy, err
-	}
-	// A deleted working copy terminates its dynamic rule. Only prune after a
-	// successful live inventory, never on a transient Agent error.
-	if byWorkingCopy == nil {
-		return nil, nil
-	}
-	shares, _ := a.mgr.store.ListSessionSharesByOwner(ctx, res.mv.MembershipID)
-	for _, share := range shares {
-		if _, live := byWorkingCopy[share.ScopeKey]; share.ScopeType != "session" && !live {
-			_ = a.mgr.store.DeleteSessionSharesByScope(ctx, res.mv.MembershipID, share.ScopeType, share.ScopeKey)
-		}
-	}
-	return byWorkingCopy, nil
 }
 
 func memberByUserKey(ctx context.Context, st store.Store, tenantID, key string) (store.MemberInfo, bool, error) {
@@ -318,17 +237,28 @@ func (a sessionShareAPI) put(w http.ResponseWriter, r *http.Request, res *resolv
 		writeAPIErr(w, &apiError{http.StatusBadRequest, "share_self", "cannot share with yourself"})
 		return
 	}
-	shareLock := a.mgr.shareLockFor(res.mv.MembershipID)
-	shareLock.Lock()
-	defer shareLock.Unlock()
 	if res.rt.State(r.Context()) != "running" {
 		writeAPIErr(w, &apiError{http.StatusConflict, "workspace_not_running", "owner workspace must be running to create a share"})
 		return
 	}
-	repos, err := a.syncCatalogLocked(r.Context(), res)
+	// The sync reads the Agent outside the share lock, so another sync may apply a newer
+	// inventory before the lock is taken. The target check below therefore reads only what
+	// is current under the lock: the catalog rows (a session row present now is swept with
+	// this rule if a later sync finds the session gone) and the newest applied /repos
+	// (a working copy a later sync saw vanish, and pruned rules for, must not get a new one).
+	repos, err := a.mgr.syncOwnerCatalog(r.Context(), res, catalogSyncNeed{exact: true, liveRepos: in.Scope.Type != "session"})
 	if err != nil {
 		writeAPIErr(w, catalogSyncAPIError(err))
 		return
+	}
+	if sharePutSyncedHook != nil {
+		sharePutSyncedHook()
+	}
+	shareLock := a.mgr.shareLockFor(res.mv.MembershipID)
+	shareLock.Lock()
+	defer shareLock.Unlock()
+	if repos != nil { // nil: this put's own live /repos read failed, so the target is unknown
+		repos = a.mgr.appliedRepos(res.mv.MembershipID)
 	}
 	catalog, err := a.mgr.store.ListSharedSessionCatalogByOwner(r.Context(), res.mv.MembershipID)
 	if err != nil {
@@ -527,10 +457,10 @@ func (a sessionShareAPI) listReceived(w http.ResponseWriter, r *http.Request, _ 
 		if e == nil {
 			wsState = res.rt.State(r.Context())
 		}
-		// Put the inventory reconciliation behind the per-owner throttle. A sync makes two
-		// round trips to the Agent while holding the owner's share lock, so running it on
-		// every 5s poll left share creation/removal (which takes the same lock) queued behind
-		// it. All that can lag here is noticing that the owner deleted or archived a session,
+		// Put the inventory reconciliation behind the per-owner throttle. A sync reads the
+		// owner's Agent (and /repos when its cache is stale), so running it on every 5s poll
+		// from every recipient's tab was a standing load on somebody else's Workspace. All
+		// that can lag here is noticing that the owner deleted or archived a session,
 		// and the freshness of the state badge; effectivePermission below still evaluates the
 		// ACL from the database on every request.
 		if e == nil && wsState == "running" && !a.freshCatalog(owner, ttl) {
@@ -985,6 +915,15 @@ func (a sessionShareAPI) approve(w http.ResponseWriter, r *http.Request, ident s
 		writeAPIErr(w, &apiError{409, "owner_workspace_stopped", "owner workspace is stopped"})
 		return
 	}
+	// Reconcile before taking the share lock: the sync needs that lock for its write. The
+	// claim below re-checks the catalog row and the rw rule in the database, so a change
+	// landing between the two is still seen.
+	if p.Status == "pending" {
+		if _, err := a.mgr.syncOwnerCatalog(r.Context(), res, catalogSyncNeed{exact: true}); err != nil {
+			writeAPIErr(w, catalogSyncAPIError(err))
+			return
+		}
+	}
 	shareLock := a.mgr.shareLockFor(p.OwnerMembershipID)
 	shareLock.Lock()
 	defer shareLock.Unlock()
@@ -1023,10 +962,6 @@ func (a sessionShareAPI) approve(w http.ResponseWriter, r *http.Request, ident s
 	}
 	if p.Status != "pending" {
 		writeAPIErr(w, &apiError{409, "proposal_already_decided", "proposal was already decided"})
-		return
-	}
-	if _, err := a.syncCatalogLocked(r.Context(), res); err != nil {
-		writeAPIErr(w, catalogSyncAPIError(err))
 		return
 	}
 	body, err := a.openProposal(r.Context(), p)

@@ -710,6 +710,7 @@ export const sessions: Record<keyof typeof jaSessions, string> = {
   "handoff.share_first": "Share this session",
   "handoff.send": "Send handoff",
   "handoff.send_failed": "Could not send the handoff",
+  "handoff.send_timeout": "The handoff did not answer in time. Check your sent handoffs before sending again.",
   "handoff.load_failed": "Could not load handoff recipients",
   "handoff.state_pending": "Handed off to {who} — waiting",
   "handoff.state_accepted": "{who} took this over",

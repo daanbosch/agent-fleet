@@ -46,6 +46,11 @@ export const sharing = {
   "share.create": "共有",
   "share.unshare": "解除",
   "share.save_failed": "共有設定を保存できませんでした",
+  "share.saving": "共有しています…",
+  "share.save_timeout": "共有の応答がありません。共有一覧で作成されたかを確認してください。",
+  "share.unshare_failed": "共有を解除できませんでした",
+  "share.permission_failed": "権限を変更できませんでした",
+  "share.request_timeout": "応答がありません。一覧を更新して現在の状態を確認してください。",
   "share.exposure_warning": "会話全文（プロンプト、Agent の回答、ツール出力）を共有します。会話内の秘密情報は自動検出できません。共有先は表示内容を保存でき、共有解除後も相手側のコピーは回収できません。RW の入力は所有者承認後にだけ Agent へ送信されます。",
   "share.marks_warning": "会話に引いたマーカーも共有されます。RW の共有先は自分でもマーカーを引けます（Agent には届かないため、承認を経ずに反映されます）。作成者のサインイン ID は、あなたにも他の共有先にも表示されます。",
 };

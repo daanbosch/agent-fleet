@@ -115,6 +115,7 @@ export const errors: Record<keyof typeof jaErrors, string> = {
   "err.catalog_sync_failed": "The workspace is running, but its session list could not be read. Try again in a moment.",
   "err.catalog_too_large": "This workspace has too many sessions for the session list to be read. Delete sessions you no longer need (archived ones count too).",
   "err.share_target_not_found": "The share target could not be found.",
+  "err.share_operation_in_progress": "An approved operation is running, so the share could not be changed. Try again in a moment.",
   "err.owner_session_archived": "The owner archived this session, so it is no longer listed for recipients. It comes back if they restore it.",
   "err.settings_change_failed": "Couldn't change the setting.",
   "err.bad_path": "The file path is invalid.",

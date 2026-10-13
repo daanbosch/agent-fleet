@@ -232,3 +232,9 @@
   display: inline-flex;
   align-items: center;
 }
+
+/* The share dialog's submit button while the request runs: Button has no spin prop, so the
+   icon it renders takes the same animation Icon's spin uses. */
+.share-busy .codicon {
+  animation: codicon-spin 1.2s steps(12) infinite;
+}

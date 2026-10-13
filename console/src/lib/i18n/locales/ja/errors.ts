@@ -114,6 +114,7 @@ export const errors = {
   "err.catalog_sync_failed": "ワークスペースは起動していますが、セッション一覧を読み取れませんでした。しばらくしてから再度お試しください。",
   "err.catalog_too_large": "このワークスペースはセッションが多すぎるため、セッション一覧を読み取れません。不要なセッション（アーカイブ済みも含む）を削除してください。",
   "err.share_target_not_found": "共有対象が見つかりませんでした。",
+  "err.share_operation_in_progress": "承認済みの操作を実行中のため、共有を変更できませんでした。少し待ってから再度お試しください。",
   "err.owner_session_archived": "所有者がこのセッションをアーカイブしました。共有先の一覧からは外れています（所有者が復元すればまた表示されます）。",
   "err.settings_change_failed": "設定を変更できませんでした",
   "err.bad_path": "ファイルパスが不正です",

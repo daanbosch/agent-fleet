@@ -33,6 +33,7 @@ type manager struct {
 	buildLocks             map[string]*sync.Mutex // per-membership first-resolve serialization
 	startLocks             map[string]*sync.Mutex // per-workspace start/recreate serialization
 	shareLocks             map[string]*sync.Mutex // per-owner share ACL/catalog/approval serialization
+	catalogSync            *catalogSyncer         // per-owner coalesced catalog syncs (session_catalog_sync.go)
 	activityLocks          map[string]*sync.Mutex
 	activityProtectedUntil map[string]time.Time
 	store                  store.Store

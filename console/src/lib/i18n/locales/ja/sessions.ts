@@ -720,6 +720,7 @@ export const sessions = {
   "handoff.share_first": "このセッションを共有する",
   "handoff.send": "引き継ぎを送る",
   "handoff.send_failed": "引き継ぎを送れませんでした",
+  "handoff.send_timeout": "引き継ぎの応答がありません。送信済みかを確認してから再送してください。",
   "handoff.load_failed": "引き継ぎ先を取得できませんでした",
   "handoff.state_pending": "{who} へ引き継ぎ中（受領待ち）",
   "handoff.state_accepted": "{who} が引き継ぎました",

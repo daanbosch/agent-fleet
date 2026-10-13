@@ -15,7 +15,10 @@ import { createRoot, type Root } from "react-dom/client";
 const api = vi.fn();
 const apiJSON = vi.fn(async (..._args: unknown[]) => ({}) as Record<string, unknown>);
 vi.mock("../../core/api/client.ts", () => ({
-  api: (path: string) => api(path),
+  // The send goes through api() with a deadline (boundedRequest); route a JSON write to the
+  // apiJSON spy so the body assertions below read the same either way.
+  api: (path: string, opts?: RequestInit) =>
+    opts?.method && opts.method !== "GET" ? apiJSON(path, opts.method, JSON.parse(String(opts.body))) : api(path),
   apiJSON: (path: string, method: string, body: unknown) => apiJSON(path, method, body),
   errText: (e: unknown) => String((e as { message?: string })?.message ?? e),
   getTenant: () => "",
