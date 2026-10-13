@@ -1,6 +1,7 @@
 package opencode
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 
@@ -24,6 +25,9 @@ func envOr(key, def string) string {
 // there's no token to inject. Caveat: multiple opencode slots in the SAME dir share
 // --continue's "most recent" target.
 func buildProgram(model, mode string, ocid string, fork bool) string {
+	if installedMajor() >= 2 {
+		return buildProgramV2(model, mode, ocid, fork)
+	}
 	// Env (AF_SESSION_SID + provider API keys) is carried on LaunchPlan.Env and
 	// injected by tmux `new-session -e`: prefixing NAME='value' onto the command
 	// put the keys into /proc/*/cmdline and pane_start_command in plaintext.
@@ -62,4 +66,90 @@ func buildProgram(model, mode string, ocid string, fork bool) string {
 		parts = append(parts, "--agent", agent)
 	}
 	return strings.Join(parts, " ")
+}
+
+// buildProgramV2 is the launch line for opencode 2. Measured on 2.0.28: the TUI takes only
+// --standalone, --server, --auto, --continue, --session and --prompt, so --model, --agent and
+// --fork (v1 TUI flags, `opencode run` only on v2) are replaced by what v2 does support.
+//
+//   - --standalone: a private server per TUI. A bare v2 `opencode` instead joins one per-user
+//     background service that inherited the environment of whichever session started it, so
+//     AF_SESSION_SID (status plugin, slot id capture), the session-scoped engine token and the
+//     provider keys would all be the starter's. docs/log/119 holds the RSS comparison with
+//     --server against af's own serve.
+//   - model and agent of a fresh session ride OPENCODE_CONFIG_CONTENT (model, default_agent);
+//     neither is a secret, so the command string is fine.
+//   - a session that already exists keeps its own model and agent whatever the config says
+//     (measured), so a resume sets them through the API before the TUI attaches.
+//   - a fork is made through the API too, and the TUI then resumes the copy.
+//
+// The API calls use `opencode api --standalone`, a one-shot private server (~1 s each), run
+// in the pane so a failure is visible there. The line must stay a plain sequence whose exit
+// status is the TUI's: the caller appends the exit recorder after it.
+func buildProgramV2(model, mode, ocid string, fork bool) string {
+	agent := ""
+	switch mode {
+	case "plan":
+		agent = "plan"
+	case "normal":
+		agent = "build"
+	}
+	tui := []string{"opencode", "--standalone", envOr("AGENT_OPENCODE_FLAGS", "--auto")}
+	if ocid == "" {
+		if cfg := freshSessionConfig(model, agent); cfg != "" {
+			tui = append([]string{"OPENCODE_CONFIG_CONTENT=" + session.ShellQuote(cfg)}, tui...)
+		}
+		return strings.Join(tui, " ")
+	}
+
+	ses := session.ShellQuote(ocid)
+	var pre []string
+	target := `"$AF_OC_SES"`
+	if fork {
+		pre = append(pre, `AF_OC_SES=$(opencode api --standalone POST /api/session/`+ses+`/fork -d '{}' | grep -o '"id":"ses_[A-Za-z0-9]*"' | head -n 1 | cut -d'"' -f4)`)
+	} else {
+		pre = append(pre, "AF_OC_SES="+ses)
+	}
+	api := func(sub, body string) string {
+		return `opencode api --standalone POST /api/session/` + target + "/" + sub + " -d " + session.ShellQuote(body) + " >/dev/null 2>&1"
+	}
+	var switches []string
+	if prov, id, ok := splitModel(model); ok {
+		ref := map[string]string{"providerID": prov, "id": id}
+		if base, variant, found := strings.Cut(id, "#"); found && base != "" && variant != "" {
+			ref["id"], ref["variant"] = base, variant
+		}
+		b, _ := json.Marshal(map[string]any{"model": ref})
+		switches = append(switches, api("model", string(b)))
+	}
+	if agent != "" {
+		b, _ := json.Marshal(map[string]string{"agent": agent})
+		switches = append(switches, api("agent", string(b)))
+	}
+	if !fork && len(switches) == 0 {
+		return strings.Join(append(tui, "--session", ses), " ")
+	}
+	run := append(switches, strings.Join(append(tui, "--session", target), " "))
+	if !fork {
+		return strings.Join(append(pre, run...), "; ")
+	}
+	return strings.Join(pre, "; ") + `; if [ -z "$AF_OC_SES" ]; then echo "agent-fleet: opencode fork failed" >&2; sleep 5; false; else ` +
+		strings.Join(run, "; ") + "; fi"
+}
+
+// freshSessionConfig is the inline config that picks the model and primary agent of a
+// session that does not exist yet; empty when neither is chosen.
+func freshSessionConfig(model, agent string) string {
+	cfg := map[string]string{}
+	if _, _, ok := splitModel(model); ok {
+		cfg["model"] = strings.TrimSpace(model)
+	}
+	if agent != "" {
+		cfg["default_agent"] = agent
+	}
+	if len(cfg) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(cfg)
+	return string(b)
 }

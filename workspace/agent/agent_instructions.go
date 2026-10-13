@@ -235,6 +235,12 @@ func instrState() instrStateWire {
 			t.Delivery, t.Path = deliveryCompose, codex.AgentsPath()
 			t.Applied = fileHasBlock(t.Path, "user-notes") == want
 		case "opencode":
+			if opencode.UserInstructionsInAgentsMD() {
+				// opencode 2 does not apply the config's `instructions` array.
+				t.Delivery, t.Path = deliveryCompose, opencode.AgentsPath()
+				t.Applied = fileHasBlock(t.Path, "user-notes") == want
+				break
+			}
 			t.Delivery, t.Path = deliveryConfig, instrOpencodeFile()
 			t.Applied = fileExists(t.Path) == want && opencodeRefers(t.Path) == want
 		case "copilot":

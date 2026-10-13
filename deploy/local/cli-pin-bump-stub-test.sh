@@ -206,6 +206,7 @@ run_bump() {
 }
 code_is()  { [ "$rc" = "$1" ] || fail "expected exit $1, got $rc"; }
 out_has()  { grep -qxF -- "$1" "$WORK/gh_out" || fail "GITHUB_OUTPUT missing: $1"; }
+out_hasnt() { if grep -qxF -- "$1" "$WORK/gh_out"; then fail "GITHUB_OUTPUT must not contain: $1"; fi; }
 body_has() { grep -qF -- "$1" "$WORK/body.md" || fail "PR body missing: $1"; }
 body_hasnt() { if grep -qF -- "$1" "$WORK/body.md"; then fail "PR body must not contain: $1"; fi; }
 # The complete set of lines that differ, as `+ARG k=v`, sorted. Every assertion on the
@@ -406,5 +407,37 @@ run_bump
 code_is 0
 out_has "bumped=claude,codex,agy,cursor,kiro,muse"
 body_has "(https://evil.example/run)"
+
+echo "== case 12: opencode never bumps across a major, however well the newer line tested =="
+# The package, the server API, the plugin API and the TUI flags all change at 2.0, so the
+# bump PR reports it and leaves the pin. Case 12b is the control: the same issue state with a
+# latest inside the pin's major must bump, otherwise "opencode stayed" could mean it was never
+# looked at.
+cp "$ROOT/workspace/Dockerfile" "$DF"
+issue_with "$L_MUSE"
+add_tested() { # add_tested <kind> <version>
+  jq --arg k "$1" --arg v "$2" '.comments += [{body: ("<!-- cli-release-state tested " + $k + "=" + $v + " -->"),
+    url: "https://github.com/k-k1/agent-fleet/issues/4#c20", author: {login: "github-actions"}, authorAssociation: "NONE"}]' \
+    "$STUB_ISSUE" > "$WORK/i" && mv "$WORK/i" "$STUB_ISSUE"
+}
+add_tested opencode 2.0.28
+STUB_LATEST_OPENCODE=2.0.28 run_bump
+code_is 0
+
+! grep -qE "^bumped=.*opencode" "$WORK/gh_out" || fail "opencode was bumped across a major"
+for l in $(changed_lines); do
+  case "$l" in *OPENCODE_VERSION*) fail "OPENCODE_VERSION moved across a major: $l" ;; esac
+done
+body_has "| opencode | \`$P_OPENCODE\` | \`2.0.28\` | a new major (${P_OPENCODE%%.*} -> 2): the cut-over is manual"
+out_has "incomplete=false"
+
+echo "== case 12b: CONTROL -- a newer release of the pin's own major is bumped =="
+cp "$ROOT/workspace/Dockerfile" "$DF"
+L_OC="${P_OPENCODE%%.*}.99.0"
+add_tested opencode "$L_OC"
+STUB_LATEST_OPENCODE="$L_OC" run_bump
+code_is 0
+grep -qE '^bumped=.*opencode' "$WORK/gh_out" || fail "opencode did not bump within its major"
+expect_changed "${BUMP_OK[@]}" "${MUSE_OK[@]}" "+ARG OPENCODE_VERSION=$L_OC"
 
 echo "OK: cli-pin-bump.sh bumps only tested kinds, refuses bad checksums, and is idempotent"

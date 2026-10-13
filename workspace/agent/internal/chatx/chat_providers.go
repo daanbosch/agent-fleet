@@ -826,9 +826,7 @@ func (opencodeChat) Send(ctx context.Context, c *ChatConversation, prompt string
 	cmd := exec.CommandContext(ctx, "opencode", args...)
 	cmd.Dir = dir
 	env := opencode.Env()
-	if cfg := opencodeChatConfig(c); cfg != "" {
-		env = append(env, "OPENCODE_CONFIG="+cfg)
-	}
+	env = append(env, opencodeConfigEnv(opencodeChatConfig(c))...)
 	cmd.Env = envWith(env...)
 	out, err := cmd.Output()
 	// Parse BEFORE the error branch: a failed run still prints its events, and both the
@@ -881,6 +879,26 @@ func (opencodeChat) Send(ctx context.Context, c *ChatConversation, prompt string
 // deny also beats whatever the user's global opencode config says.
 func opencodeChatPolicy() map[string]any {
 	return map[string]any{"edit": "deny", "bash": "deny"}
+}
+
+// opencodeConfigEnv hands a config file to `opencode run`. opencode 1 reads it from
+// OPENCODE_CONFIG. opencode 2 ignores that variable (measured on 2.0.28: a `model` in it is
+// not used, and a deny rule in it does not stop the shell tool) but reads
+// OPENCODE_CONFIG_CONTENT, so there the same JSON also rides inline. Without it a one-shot,
+// which has no project config, would run with the read-only posture silently gone, and a chat
+// would lose its af MCP server. Empty path: no variables.
+func opencodeConfigEnv(path string) []string {
+	if path == "" {
+		return nil
+	}
+	env := []string{"OPENCODE_CONFIG=" + path}
+	if opencode.InstalledMajor() < 2 {
+		return env
+	}
+	if b, err := os.ReadFile(path); err == nil {
+		env = append(env, "OPENCODE_CONFIG_CONTENT="+strings.TrimSpace(string(b)))
+	}
+	return env
 }
 
 // opencodeChatDir prepares the working dir for a chat's opencode run, with an
@@ -2057,9 +2075,7 @@ func OneShotHeadlessRun(ctx context.Context, feature string, tier OneShotTier, p
 		// one that takes effect (merge precedence measured on 1.18.7: project >
 		// OPENCODE_CONFIG > global — see opencodeChatDir). If it cannot be written the run
 		// goes bare as before, degrading on a broken home rather than breaking title/reply.
-		if cfg := OpencodeOneShotConfig(); cfg != "" {
-			env = append(env, "OPENCODE_CONFIG="+cfg)
-		}
+		env = append(env, opencodeConfigEnv(OpencodeOneShotConfig())...)
 		// NOTE: deliberately NOT auto-picking a cheap model here (docs/log/46 §1-a-2). opencode's
 		// catalog is a LISTING, not an entitlement: `opencode/claude-haiku-4-5` is listed and
 		// selectable, yet running it returns "Unexpected server error" on an account without

@@ -340,9 +340,14 @@ ARG CLAUDE_CODE_VERSION=2.1.296
 ARG OPENCODE_VERSION=1.19.0
 ARG CODEX_VERSION=0.162.1
 ARG COPILOT_VERSION=1.0.96
+# opencode's npm package follows the pin's major: `opencode-ai` for 1.x, `@opencode/cli` for
+# 2.x (which also installs an `opencode2` bin). The pin stays 1.x until the v2 cut-over (#2101);
+# changing OPENCODE_VERSION across the major is the whole switch. entrypoint.sh,
+# deploy/local/cli-drift-check.sh and .github/workflows/release-gate.yml apply the same rule.
 RUN if [ "${BAKE_AGENT_CLIS}" = "1" ]; then \
+      case "${OPENCODE_VERSION%%.*}" in 0|1) oc_pkg=opencode-ai ;; *) oc_pkg=@opencode/cli ;; esac; \
       npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-        "opencode-ai@${OPENCODE_VERSION}" \
+        "${oc_pkg}@${OPENCODE_VERSION}" \
         "@openai/codex@${CODEX_VERSION}" \
         "@github/copilot@${COPILOT_VERSION}" \
       && claude --version && opencode --version && codex --version && copilot --version; \
@@ -602,7 +607,8 @@ ENV DISABLE_AUTOUPDATER=1
 # ~/.local shadow) — both unwanted in the version-pinned model. Disable it via env;
 # explicit `opencode upgrade` still works. (codex, by contrast, only *notifies* on
 # startup by default and self-writes only on explicit `codex update` / opt-in
-# autoUpdate, so it needs no analogous flag.)
+# autoUpdate, so it needs no analogous flag.) opencode 2 has the `update` config key for the
+# same thing (`"disable"`); entrypoint.sh seeds it when the installed major is 2.
 ENV OPENCODE_DISABLE_AUTOUPDATE=true
 
 # Muse Code の自己更新封殺（ADR 0095 決定 8）。**配布イメージは muse を配らない**

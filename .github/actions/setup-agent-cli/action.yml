@@ -87,6 +87,13 @@ runs:
           spec="$VERSION"
         fi
 
+        # opencode 2 is a different npm package (@opencode/cli); `latest` stays on opencode-ai,
+        # the line the pin is on, and a 2.x spec (the pin after the cut-over, or an explicit
+        # version) selects the new one.
+        if [ "$AGENT" = opencode ]; then
+          case "${spec%%.*}" in [2-9]|[1-9][0-9]*) pkg="@opencode/cli" ;; esac
+        fi
+
         echo "spec=$spec" >> "$GITHUB_OUTPUT"
         echo "pkg=$pkg" >> "$GITHUB_OUTPUT"
         echo "$AGENT spec: $spec（version 入力 = $VERSION）"

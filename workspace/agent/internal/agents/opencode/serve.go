@@ -10,8 +10,8 @@ package opencode
 //     random per-generation OPENCODE_SERVER_PASSWORD that both majors read (measured on
 //     1.19.0 and 2.0.28: 401 without it, SSE included); serveapi.go's transport adds it to
 //     every client, and the file it is kept in lets a restarted Agent adopt the daemon. The
-//     TUI route never attaches to this daemon (buildProgram opens its own store), so no
-//     TUI path needs the password. The password is not a boundary against the agent itself:
+//     TUI route never attaches to this daemon (buildProgram opens its own store; on v2 it
+//     passes --standalone for a private server), so no TUI path needs the password. The password is not a boundary against the agent itself:
 //     the serve process environment and the file are readable by the same uid.
 //   - Major version: the pin is v1, but a probe also recognises v2 and the driver then
 //     routes to /api/* (serveapi.go holds the table and the measured differences).
@@ -87,7 +87,8 @@ var supervisor = &Supervisor{}
 // dependents is the total number of things that need the shared daemon.
 //
 // The TUI route of opencode does not use serve (buildProgram connects directly to its own
-// SQLite store), so unlike codex only managed handles are counted. The OAuth device flow
+// SQLite store; on v2 it runs a private --standalone server, never this one), so unlike codex
+// only managed handles are counted. The OAuth device flow
 // is the one exception: it is the only path that starts the daemon while still
 // unconnected, so unless it counts as demand for its duration, the daemon gets folded up
 // from under a login in progress.
