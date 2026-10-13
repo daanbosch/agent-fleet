@@ -93,12 +93,23 @@ var mcpSourceSession string
 // line with mcpSourceSession's rule that a native id must never decide ownership.
 const mcpCallerSIDArg = "_af_caller_sid"
 
+// mcpCallerSIDMetaKey is where opencode 2 itself puts the calling session id, in the tools/call
+// `params._meta` (measured: 2.0.28 sends it on every call, 1.19.0 never does).
+// opencode 2 cannot use the stamp: its client drops arguments a closed inputSchema does not
+// declare after the plugin hook has run, and af's schemas are closed. The model cannot write
+// `_meta`, so unlike the stamped argument it needs no plugin to be believed.
+const mcpCallerSIDMetaKey = "ai.opencode/sessionID"
+
 // mcpCallerSID is mcpCallerSIDArg's value for the tools/call being handled, "" outside one.
 // One variable is enough because RunStdio dispatches serially — but only the dispatch goroutine
 // may read it: the tools/list watcher runs beside a call (a generate_image call holds the loop
 // for minutes), so everything that builds the list resolves its owner through
 // mcpListOwningSession, which never looks here.
 var mcpCallerSID string
+
+// mcpCallerFromMeta says mcpCallerSID came from params._meta rather than the stamped argument.
+// Same lifetime and same single-reader rule as mcpCallerSID.
+var mcpCallerFromMeta bool
 
 // mcpPeerMessagingEnabled adds ONLY the two session-to-session messaging tools to the
 // session-side server (docs/log/58 / ADR 0041 decision 3). Enabled by `--self-report
@@ -2752,13 +2763,20 @@ type mcpCallArgs struct {
 
 func mcpStdioCall(req mcpReq) []byte {
 	var p struct {
-		Name string          `json:"name"`
-		Args json.RawMessage `json:"arguments"`
+		Name string                     `json:"name"`
+		Args json.RawMessage            `json:"arguments"`
+		Meta map[string]json.RawMessage `json:"_meta"`
 	}
 	_ = json.Unmarshal(req.Params, &p)
 	// Taken out before anything decodes or forwards p.Args (the memo tools relay it verbatim).
 	p.Args, mcpCallerSID = takeCallerSID(p.Args)
-	defer func() { mcpCallerSID = "" }()
+	mcpCallerFromMeta = false
+	if mcpCallerSID == "" { // the stamp wins: it is what opencode 1 delivers and what was trusted first
+		if mcpCallerSID = metaCallerSID(p.Meta); mcpCallerSID != "" {
+			mcpCallerFromMeta = true
+		}
+	}
+	defer func() { mcpCallerSID, mcpCallerFromMeta = "", false }()
 	// The session-side advertised set IS the scope boundary (see
 	// selfReportOnly()/sessionChromiumEnabled()). Refuse every unadvertised name here
 	// too, or a client that guesses names could reach fleet read/write handlers from any
@@ -3889,6 +3907,14 @@ func takeCallerSID(args json.RawMessage) (json.RawMessage, string) {
 	return rest, sid
 }
 
+// metaCallerSID is the session id opencode 2 sent in the call's `_meta`, "" when absent or not
+// a string (a non-string is nobody's session id, same as in takeCallerSID).
+func metaCallerSID(meta map[string]json.RawMessage) string {
+	var sid string
+	_ = json.Unmarshal(meta[mcpCallerSIDMetaKey], &sid)
+	return sid
+}
+
 // mcpCallerSession resolves the opencode session id stamped on this call to the AF session
 // that owns it. The id arrives as a tool argument, so the model can write one too (the plugin
 // overwrites it, but a member can remove the plugin): it is only ever a key. It must equal
@@ -3897,7 +3923,7 @@ func takeCallerSID(args json.RawMessage) (json.RawMessage, string) {
 // (no stamp, no match, a stopped match, a failed probe) reports ok=false and leaves the
 // decision to the cwd fallback, which is what the call would have got without the plugin.
 func mcpCallerSession(cwd string) (string, bool) {
-	if mcpCallerSID == "" || !mcpCallerStampTrusted() {
+	if mcpCallerSID == "" || !mcpCallerTrusted() {
 		return "", false
 	}
 	var found []string
@@ -3940,7 +3966,20 @@ func mcpCallerSession(cwd string) (string, bool) {
 // through the environment is only as good as the config that delivers it; this check closes the
 // cases where nobody chose to lie.
 func mcpCallerStampTrusted() bool {
-	return mcpreg.IsRotatedAFServerName(os.Getenv(mcpreg.AFServerKeyEnv)) && opencode.CallerPluginCurrent()
+	return mcpCallerKeyRotated() && opencode.CallerPluginCurrent()
+}
+
+func mcpCallerKeyRotated() bool {
+	return mcpreg.IsRotatedAFServerName(os.Getenv(mcpreg.AFServerKeyEnv))
+}
+
+// mcpCallerTrusted is mcpCallerStampTrusted for the call being handled: an id from `_meta` was
+// written by opencode, not by the model or a plugin, so only the rotated key is asked of it.
+func mcpCallerTrusted() bool {
+	if mcpCallerFromMeta {
+		return mcpCallerKeyRotated()
+	}
+	return mcpCallerStampTrusted()
 }
 
 // mcpStampedFolderSessions is who can be calling this MCP child when the answer only arrives
