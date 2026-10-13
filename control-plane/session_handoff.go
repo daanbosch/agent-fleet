@@ -181,9 +181,9 @@ func handoffOfferDTO(o store.SessionHandoffOffer, recipientKey string) handoffOf
 // row is absent, which is not an error — the caller decides what it means (a read takes it
 // as "not shared with anyone yet", a write answers 404).
 //
-// How often it syncs decides how this behaves. syncCatalogLocked is two round trips to the
-// owner Agent (/sessions/catalog and /repos), and /repos runs git per working copy, so it
-// gets heavier with every worktree. That is why shared reads are thinned through
+// How often it syncs decides how this behaves. A sync is a round trip to the owner Agent's
+// /sessions/catalog, plus /repos when its cache is stale, and /repos runs git per working
+// copy, so it gets heavier with every worktree. That is why shared reads are thinned through
 // freshCatalog (see the note in session_share.go): running it on every read, such as
 // populating the recipient list, leaves the modal apparently stuck on "loading". So reads go
 // through the same throttle.
@@ -194,11 +194,7 @@ func handoffOfferDTO(o store.SessionHandoffOffer, recipientKey string) handoffOf
 // already-shared new session is "not shared with anyone yet".
 func (a sessionHandoffAPI) catalogForOwnedSession(r *http.Request, res *resolved, name string, exact bool) (store.SharedSessionCatalog, bool, *apiError) {
 	if exact || !a.share.freshCatalog(res.mv.MembershipID, shareCatalogTTL) {
-		lock := a.mgr.shareLockFor(res.mv.MembershipID)
-		lock.Lock()
-		_, err := a.share.syncCatalogLocked(r.Context(), res)
-		lock.Unlock()
-		if err != nil {
+		if _, err := a.mgr.syncOwnerCatalog(r.Context(), res, catalogSyncNeed{exact: exact}); err != nil {
 			a.share.invalidateCatalog(res.mv.MembershipID) // a failed sync must not count as fresh
 			return store.SharedSessionCatalog{}, false, catalogSyncAPIError(err)
 		}

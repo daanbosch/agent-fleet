@@ -250,12 +250,7 @@ func (a inboxAPI) attachableSession(r *http.Request, mv store.MembershipView, at
 			if aerr != nil || res.mv.MembershipID != mv.MembershipID || res.rt.State(ctx) != "running" {
 				return c, false, &apiError{http.StatusConflict, "workspace_not_running", "your workspace must be running to attach your session"}
 			}
-			share := newSessionShareAPI(a.mgr)
-			lock := a.mgr.shareLockFor(mv.MembershipID)
-			lock.Lock()
-			_, serr := share.syncCatalogLocked(ctx, res)
-			lock.Unlock()
-			if serr != nil {
+			if _, serr := a.mgr.syncOwnerCatalog(ctx, res, catalogSyncNeed{exact: true}); serr != nil {
 				return c, false, catalogSyncAPIError(serr)
 			}
 			if c, ok, err = find(); err != nil {
