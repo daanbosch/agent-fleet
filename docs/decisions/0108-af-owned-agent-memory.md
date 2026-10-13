@@ -630,8 +630,10 @@ What it does, and what it decided:
   New objects are written before any ref moves, so a crash there leaves garbage only; a marker file
   written before the refs move (it names the path and the purged blobs) makes the next purge or the next start
   of the snapshot loop finish the job with the same code as a first run — rebuild the index, put the memory's
-  staging file back to the live text, gc — and the marker stays until every purged blob is verified gone. The marker also records the ref moves, so a crash
-  before the ref transaction committed is recognised (a ref still at its old value) and the purge simply runs again.
+  staging file back to the live text, gc — and the marker stays until every purged blob is verified gone. The marker also records the ref moves, so a recovery can
+  tell what a crash left. `update-ref --stdin` is atomic per ref, not across refs: all refs old means nothing
+  happened and the purge runs again; a mix is rolled forward to the recorded values (compare-and-set, stale
+  `.lock` files of the dead git removed); a value the purge cannot account for keeps the marker and an error.
 
 What it does not do: it cannot reach copies outside the repo (exports, a session's own files), and a session
 with a shell can still read the store's files directly, as in decision 8.

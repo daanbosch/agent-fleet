@@ -459,13 +459,11 @@ func agentMemPurgeResume() error {
 	}
 	var p agentMemPurgePending
 	_ = json.Unmarshal(b, &p) // unreadable: still reset the index and collect
-	for _, m := range p.Refs {
-		cur, _ := memoryGitRun("rev-parse", "--verify", "--quiet", m.Name)
-		if m.Old != m.New && cur == m.Old {
-			// The transaction is atomic and this ref was not moved, so none was: nothing was
-			// rewritten, and the purge can simply be run again.
-			return os.Remove(agentMemPurgePendingPath())
-		}
+	if err := agentMemPurgeSettleRefs(p.Refs); err != nil {
+		return err
+	}
+	if len(p.Refs) > 0 && !agentMemPurgeRefsMoved(p.Refs) {
+		return os.Remove(agentMemPurgePendingPath())
 	}
 	if _, _, err := agentMemPurgeFinish(p); err != nil {
 		return err
@@ -545,6 +543,19 @@ var (
 	memoryUploadsMu     sync.Mutex
 	memoryActiveUploads = map[string]bool{}
 )
+
+// memoryCreateUpload creates the upload file and registers it in one critical section, so the
+// sweep (which holds the same mutex) never sees it created but unregistered.
+func memoryCreateUpload() (*os.File, error) {
+	memoryUploadsMu.Lock()
+	defer memoryUploadsMu.Unlock()
+	f, err := os.CreateTemp(memoryWorkDir(), "upload-*")
+	if err != nil {
+		return nil, err
+	}
+	memoryActiveUploads[f.Name()] = true
+	return f, nil
+}
 
 func memoryTrackUpload(path string) {
 	memoryUploadsMu.Lock()
@@ -828,4 +839,65 @@ func dropTrailerLines(msg, prefix string) string {
 		}
 	}
 	return strings.Join(keep, "\n") + "\n"
+}
+
+func agentMemPurgeDescends(cur, anc string) bool {
+	_, err := memoryGitRun("merge-base", "--is-ancestor", anc, cur)
+	return err == nil
+}
+
+// agentMemPurgeRefsMoved says whether any recorded ref is at its new value.
+func agentMemPurgeRefsMoved(moves []agentMemPurgeRefMove) bool {
+	for _, m := range moves {
+		cur, _ := memoryGitRun("rev-parse", "--verify", "--quiet", m.Name)
+		if cur != m.Old && (cur == m.New || (m.New != "" && cur != "" && agentMemPurgeDescends(cur, m.New))) {
+			return true
+		}
+	}
+	return false
+}
+
+// agentMemPurgeSettleRefs completes a ref transaction a crash cut part-way. git update-ref
+// --stdin is atomic per ref, not across refs: a killed git can leave some refs new and the rest
+// old. All old means nothing happened (the caller drops the marker); a mix is rolled forward to the
+// recorded values, compare-and-set against the old ones; any other value is not ours to
+// overwrite and keeps the marker with an error. Callers hold the locks, so a .lock file of a dead
+// git is stale and removed.
+func agentMemPurgeSettleRefs(moves []agentMemPurgeRefMove) error {
+	if !agentMemPurgeRefsMoved(moves) {
+		return nil
+	}
+	var tx bytes.Buffer
+	tx.WriteString("start\n")
+	pending := 0
+	for _, m := range moves {
+		cur, _ := memoryGitRun("rev-parse", "--verify", "--quiet", m.Name)
+		switch {
+		case cur == m.New:
+		case m.New != "" && cur != "" && cur != m.Old && agentMemPurgeDescends(cur, m.New):
+			// Writes made since the crash moved the ref on from the rewritten value.
+		case cur == m.Old:
+			pending++
+			_ = os.Remove(filepath.Join(memoryRepoDir(), filepath.FromSlash(m.Name)+".lock"))
+			if m.New == "" {
+				fmt.Fprintf(&tx, "delete %s %s\n", m.Name, m.Old)
+			} else {
+				fmt.Fprintf(&tx, "update %s %s %s\n", m.Name, m.New, m.Old)
+			}
+		default:
+			return memoryErrf(http.StatusInternalServerError, errCodeMemorySnapshotFailed,
+				"an interrupted purge found a ref at an unexpected value; it was left as it is")
+		}
+	}
+	if pending == 0 {
+		return nil
+	}
+	_ = os.Remove(filepath.Join(memoryRepoDir(), "packed-refs.lock"))
+	tx.WriteString("prepare\ncommit\n")
+	cmd := memoryGit("update-ref", "--stdin")
+	cmd.Stdin = &tx
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("finish moving the refs: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }

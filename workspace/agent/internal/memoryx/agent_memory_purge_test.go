@@ -796,3 +796,118 @@ func TestAgentMemoryPurgeSweepsYoungOrphanUploadsButNotActiveOnes(t *testing.T) 
 		t.Fatal("an upload being received was removed")
 	}
 }
+
+// git update-ref --stdin is atomic per ref, not across refs: a killed git can leave some refs new
+// and the rest old. The recovery must roll those forward, not call the purge "never ran".
+func partialRefFixture(t *testing.T) (purgeFixture, map[string]string) {
+	t.Helper()
+	f := purgeSetup(t)
+	before := map[string]string{}
+	out, _ := memoryGitRun("for-each-ref", "--format=%(refname) %(objectname)")
+	for _, l := range strings.Split(out, "\n") {
+		if n, sha, ok := strings.Cut(l, " "); ok {
+			before[n] = sha
+		}
+	}
+	agentMemPurgeFault = func(s string) error {
+		if s == "refs" {
+			return errors.New("simulated crash")
+		}
+		return nil
+	}
+	t.Cleanup(func() { agentMemPurgeFault = nil })
+	if _, err := purgeDo(t, f, "a"); err == nil {
+		t.Fatal("expected the simulated crash")
+	}
+	agentMemPurgeFault = nil
+	return f, before
+}
+
+func TestAgentMemoryPurgeRollsForwardAPartialRefUpdate(t *testing.T) {
+	f, before := partialRefFixture(t)
+	// The crash state: main already moved, the import ref is back at its old value.
+	imp := "refs/imports/20261004T090000Z/main"
+	if _, err := memoryGitRun("update-ref", imp, before[imp]); err != nil {
+		t.Fatal(err)
+	}
+	// ...and the dead git's lock file on the other ref.
+	if _, err := memoryGitRun("update-ref", "refs/premigrate/20261004T090000Z", before["refs/premigrate/20261004T090000Z"]); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(memoryRepoDir()+"/refs/premigrate/20261004T090000Z.lock", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ResumeMemoryPurge()
+	if objectExists(f.oldBlob) || allObjectsContain(t, "Hollowbrook") {
+		t.Fatal("the partial update was treated as 'nothing happened'; the old text is still there")
+	}
+	if _, err := os.Stat(agentMemPurgePendingPath()); err == nil {
+		t.Fatal("marker left")
+	}
+	fsckClean(t)
+}
+
+func TestAgentMemoryPurgeKeepsTheMarkerOnAnUnexpectedRef(t *testing.T) {
+	_, before := partialRefFixture(t)
+	imp := "refs/imports/20261004T090000Z/main"
+	if _, err := memoryGitRun("update-ref", imp, before[imp]); err != nil {
+		t.Fatal(err)
+	}
+	// Someone moved the other ref to a value the purge never recorded.
+	empty, _ := memoryGitRun("hash-object", "-t", "tree", "/dev/null")
+	stranger, err := memoryGitRun("commit-tree", "-m", "unrelated", empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := memoryGitRun("update-ref", "refs/premigrate/20261004T090000Z", stranger); err != nil {
+		t.Fatal(err)
+	}
+	ResumeMemoryPurge()
+	if _, err := os.Stat(agentMemPurgePendingPath()); err != nil {
+		t.Fatal("an unrecognised ref state dropped the marker")
+	}
+	got, _ := memoryGitRun("rev-parse", imp)
+	if got != before[imp] {
+		t.Fatal("the recovery overwrote refs it could not account for")
+	}
+}
+
+// The upload file is created and registered in one critical section: a sweep running at any
+// moment sees either no file or a registered one.
+func TestAgentMemoryUploadIsNeverSweptBetweenCreateAndRegister(t *testing.T) {
+	_ = purgeSetup(t)
+	if err := os.MkdirAll(memoryWorkDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if err := agentMemPurgeSweepWork(); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		f, err := memoryCreateUpload()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(f.Name()); err != nil {
+			t.Fatalf("a sweep removed a live upload: %v", err)
+		}
+		_ = f.Close()
+		memoryUntrackUpload(f.Name())
+		_ = os.Remove(f.Name())
+	}
+	close(stop)
+	wg.Wait()
+}

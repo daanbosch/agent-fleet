@@ -279,13 +279,12 @@ func HandleMemoryImport(w http.ResponseWriter, r *http.Request) {
 		if part.FormName() != "file" || part.FileName() == "" {
 			continue
 		}
-		f, cerr := os.CreateTemp(memoryWorkDir(), "upload-*")
+		f, cerr := memoryCreateUpload()
 		if cerr != nil {
 			httpx.WriteErr(w, http.StatusInternalServerError, errCodeMemoryImportFailed, cerr.Error())
 			return
 		}
 		tmp = f.Name()
-		memoryTrackUpload(tmp)
 		n, werr := io.Copy(f, io.LimitReader(part, max+1))
 		_ = f.Close()
 		if werr != nil || n > max {
