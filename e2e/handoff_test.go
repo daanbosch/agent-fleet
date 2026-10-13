@@ -12,10 +12,12 @@
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMemberHandoff(t *testing.T) {
@@ -78,7 +80,7 @@ func TestMemberHandoff(t *testing.T) {
 	}
 
 	// From a never-pushed branch: pushed, upstream recorded, offer carries the pushed head.
-	first := createOffer(t, a, pushFirst(offerBody, rc))
+	first := createPushOffer(t, a, pushFirst(offerBody, rc))
 	head := a.shell(aGit, "git rev-parse HEAD")
 	if first.HeadSha != head || remoteHead() != head {
 		t.Fatalf("first offer head %s, origin %s, want both at %s", first.HeadSha, remoteHead(), head)
@@ -104,7 +106,7 @@ func TestMemberHandoff(t *testing.T) {
 	if got := remoteHead(); got != first.HeadSha {
 		t.Fatalf("origin %s = %s after a stale push-then-send, want %s", branch, got, first.HeadSha)
 	}
-	offer := createOffer(t, a, pushFirst(offerBody, rc))
+	offer := createPushOffer(t, a, pushFirst(offerBody, rc))
 	if offer.Status != "pending" || offer.Branch != branch || offer.HeadSha != head || offer.RepoRemote != repoURL {
 		t.Fatalf("offer = %+v, want pending %s@%s from %s", offer, branch, head, repoURL)
 	}
@@ -337,6 +339,35 @@ func createOffer(t *testing.T, m *member, body map[string]any) handoffOffer {
 	if o.ID == "" {
 		t.Fatalf("offer created without an id")
 	}
+	return o
+}
+
+// createPushOffer is createOffer for a "push, then send". The Agent accepts the CP's
+// member-origin mark only once it has been up past its restart fence (about 30 s, ADR 0113),
+// and the scenario reaches the push seconds after starting the workspace; that refusal is
+// waited out, any other one fails with the Agent's own reason and message.
+func createPushOffer(t *testing.T, m *member, body map[string]any) handoffOffer {
+	t.Helper()
+	b := withKey(body, "ackWarning", true)
+	var o handoffOffer
+	waitFor(t, 90*time.Second, m.name+" push, then send", func() (bool, string) {
+		code, raw := m.do(http.MethodPost, "/api/session-handoff-offers", b)
+		if code == http.StatusCreated {
+			if err := json.Unmarshal(raw, &o); err != nil || o.ID == "" {
+				t.Fatalf("offer created without an id: %s", truncate(raw))
+			}
+			return true, ""
+		}
+		var env map[string]any
+		_ = json.Unmarshal(raw, &env)
+		c, reason := apiErr(env)
+		e, _ := env["error"].(map[string]any)
+		if c == "handoff_push_failed" && reason == "member_origin_unavailable" {
+			return false, fmt.Sprintf("%v", e["message"])
+		}
+		t.Fatalf("push, then send refused: %d %s/%s: %v", code, c, reason, e["message"])
+		return false, ""
+	})
 	return o
 }
 
