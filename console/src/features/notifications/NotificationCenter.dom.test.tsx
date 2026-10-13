@@ -10,9 +10,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 const apiJSON = vi.fn(async (..._args: unknown[]) => ({}));
+const api = vi.fn(async (..._args: unknown[]): Promise<unknown> => ({}));
 vi.mock("../../core/api/client.ts", async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   apiJSON: (...args: unknown[]) => apiJSON(...args),
+  api: (...args: unknown[]) => api(...args),
 }));
 
 const { NotificationCenter } = await import("./NotificationCenter.tsx");
@@ -53,6 +55,8 @@ const seenCalls = () => apiJSON.mock.calls.filter((c) => c[0] === "api/notificat
 beforeEach(() => {
   localStorage.clear();
   apiJSON.mockClear();
+  api.mockReset();
+  api.mockImplementation(async () => ({}));
   useToastLog.setState({ items: [] });
   useNotificationStore.setState({ items: [unseenEvent()], maxSeq: 7, unseenCount: 1, sourceState: "ready", initialized: true });
   host = document.createElement("div");
@@ -94,6 +98,23 @@ describe("acknowledging notifications", () => {
     const btn = host.querySelector<HTMLButtonElement>(".notification-readall");
     expect(btn?.disabled).toBe(true);
     expect(btn?.title).toBe(t("noti.mark_all_read"));
+  });
+});
+
+describe("a handoff offer that is no longer pending (#2041)", () => {
+  it("is marked read with its own reason, not the session warning", async () => {
+    const offer: FleetNotification = {
+      seq: 7, id: "handoff-offer-o1-m2", kind: "handoff-offer", target: { type: "shared-session", id: "cat-1" },
+      displayName: "Carry on", payload: { offerId: "o1", catalogId: "cat-1" }, createdAt: "2026-09-22T00:00:00Z", seen: false,
+    };
+    useNotificationStore.setState({ items: [offer] });
+    api.mockImplementation(async (path) => (path === "api/session-handoff-offers/received" ? { offers: [] } : {}));
+    await render();
+    await click(".notification-btn");
+    await click(".notification-item");
+    expect(seenCalls()).toEqual([["api/notifications/seen", "POST", { throughSeq: undefined, eventIds: ["handoff-offer-o1-m2"] }]]);
+    expect(document.body.textContent).toContain(t("noti.handoff_closed"));
+    expect(document.body.textContent).not.toContain(t("noti.session_not_in_list"));
   });
 });
 

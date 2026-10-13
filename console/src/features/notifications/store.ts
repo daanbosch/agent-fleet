@@ -15,6 +15,7 @@ import { openSessionChat, openSessionChatSplit, openSessionTerminal, openSession
 import { openChat } from "../chat/open.ts";
 import { openRepoScm } from "../scm/open.ts";
 import { openSharedSession } from "../sharing/open.ts";
+import { receivedOfferState } from "../sharing/handoffStore.ts";
 import { useSchedulesStore } from "../schedules/store.ts";
 import { destinationShown, opensConversation, unseenConversationEventIDs, unseenSessionEventIDs } from "./read.ts";
 import { notificationWording } from "./wording.ts";
@@ -116,6 +117,9 @@ export interface NotificationOpenResult {
   // about sessions, and showing it for the first tells the reader to look for something that
   // was never involved.
   noDestination?: boolean;
+  // handoffClosed marks a handoff offer that is no longer pending. The reason has already been
+  // toasted, so the caller must not add the session warning on top.
+  handoffClosed?: boolean;
 }
 
 // conversationReachable folds a chatGet result into "may this conversation be opened as is".
@@ -164,10 +168,6 @@ export async function openNotificationTarget(n: FleetNotification, split: boolea
     openRepoScm(n.payload.repo);
     return { opened: true };
   }
-  // A handoff received from another member (docs/log/77). Its destination is the shared view,
-  // not one of our own sessions, so it must not fall through to the session resolution below.
-  // It stops opening once the share is revoked, which is correct: the offer derives from the
-  // share ACL, and when the ACL is gone so is the content.
   // af-aws-exec's login request (ADR 0102): its destination is the login modal. Only the id is
   // read; the modal shows what the Agent lists for it, and nothing for an id it does not list.
   if (n.kind === "aws-login-required" && typeof n.payload.requestId === "string" && n.payload.requestId) {
@@ -190,7 +190,19 @@ export async function openNotificationTarget(n: FleetNotification, split: boolea
     void useAwsLoginStore.getState().openProfile(n.payload.profile);
     return { opened: true };
   }
+  // A handoff received from another member (docs/log/77). Its destination is the shared view,
+  // where the pending offer's banner accepts it, not one of our own sessions, so it must not
+  // fall through to the session resolution below. An offer that is no longer pending has no
+  // destination (§77.10): after an unshare the shared view only says "no access", and in every
+  // other closed state the inbox has dropped the row too, so the click says so instead of
+  // opening a view with nothing to accept. The caller marks it read either way. When the inbox
+  // cannot be read the shared view is opened as before, since it re-checks for itself.
   if (n.kind === "handoff-offer" && typeof n.payload.catalogId === "string" && n.payload.catalogId) {
+    const offerId = typeof n.payload.offerId === "string" ? n.payload.offerId : "";
+    if (offerId && (await receivedOfferState(offerId)) === "closed") {
+      toast(tr("noti.handoff_closed"), { kind: "warn" });
+      return { opened: false, handoffClosed: true };
+    }
     openSharedSession(n.payload.catalogId, split);
     return { opened: true };
   }
