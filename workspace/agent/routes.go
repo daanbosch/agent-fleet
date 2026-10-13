@@ -500,6 +500,10 @@ func buildMux() *http.ServeMux {
 	mux.HandleFunc("GET /agents/memory/entries/member-search", memoryx.HandleAgentMemoryMemberSearch)
 	mux.HandleFunc("GET /agents/memory/entries/member-latest", memoryx.HandleAgentMemoryMemberLatest)
 	mux.HandleFunc("GET /agents/memory/entries/member-forgotten", memoryx.HandleAgentMemoryMemberForgotten)
+	// The member's purge of one memory's past revisions from the history (#1982): a read-only
+	// preview, and the rewrite behind the mark. No MCP tool reaches either.
+	mux.HandleFunc("GET /agents/memory/entries/purge-preview", memoryx.HandleAgentMemoryPurgePreview)
+	mux.Handle("POST /agents/memory/entries/purge", memberorigin.Require(memoryx.MemberWriteMaxRequest, http.HandlerFunc(memoryx.HandleAgentMemoryPurge)))
 	// One-time import of claude's own auto-memory (ADR 0108 decision 6 step 1). Not
 	// /agents/memory/import: that is the bundle import of the 0022 history.
 	mux.HandleFunc("GET /agents/memory/claude-import", memoryx.HandleAgentMemoryClaudeSources)

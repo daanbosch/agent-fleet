@@ -44,6 +44,7 @@ func TestMemberOriginRoutesAreTheMemberWrites(t *testing.T) {
 	want := []string{
 		"POST /api/agents/memory/entries/member-save",
 		"POST /api/agents/memory/entries/pin",
+		"POST /api/agents/memory/entries/purge",
 		"POST /api/agents/memory/entries/revert",
 		"POST /api/agents/memory/import/apply",
 		"POST /api/agents/memory/snapshots",

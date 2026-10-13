@@ -361,3 +361,34 @@ func HandleAgentMemoryPin(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.WriteJSON(w, http.StatusOK, res)
 }
+
+// HandleAgentMemoryPurgePreview says what purging one memory's past revisions would rewrite. It
+// changes nothing and carries no memory text, so it is not behind the member-origin mark.
+func HandleAgentMemoryPurgePreview(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	out, err := agentMemPurgePreview(q.Get("scope"), q.Get("project"), q.Get("name"))
+	if err != nil {
+		agentMemWriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+// HandleAgentMemoryPurge rewrites the history to drop one memory's past revisions. The history
+// is the member's to rewrite, so it answers only a request the CP marked as theirs (ADR 0113); no
+// MCP tool reaches it.
+func HandleAgentMemoryPurge(w http.ResponseWriter, r *http.Request) {
+	if !memberorigin.RefuseUnverified(w, r) {
+		return
+	}
+	var req agentMemPurgeReq
+	if !httpx.DecodeJSON(w, r, &req) {
+		return
+	}
+	res, err := agentMemPurge(req)
+	if err != nil {
+		agentMemWriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, res)
+}

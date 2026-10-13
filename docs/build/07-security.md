@@ -418,7 +418,8 @@ returns the result without storing the token.
 
 Where a route must accept only the member's own Console request, the CP marks it
 ([decisions/0113](../decisions/0113-member-origin-mark.md)). Today that is the member-only memory writes:
-`entries/pin`, `entries/revert` (which also forgets) and `entries/member-save`.
+`entries/pin`, `entries/revert` (which also forgets), `entries/member-save` and `entries/purge` (the history
+purge, #1982).
 
 - **Asymmetric, because the Agent cannot keep a secret from its sessions** (same uid, §7.2). The CP signs
   with an Ed25519 key derived from the token-signing master; the Agent is started with the public keys only

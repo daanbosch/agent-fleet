@@ -127,7 +127,7 @@ func agentContractFamilies() []contractFamily {
 			tsPath:  "../../console/src/features/settings/memory/memoryTypes.ts",
 			tsName:  "MemoryChange",
 			tsKeys: keySet("commit", "at", "op", "scope", "project", "name", "authorKind",
-				"authorSession", "revertOf", "latest", "live", "revertible"),
+				"authorSession", "revertOf", "latest", "live", "revertible", "purgedBefore"),
 			tsOnly: map[string]string{},
 			goOnly: map[string]string{},
 		},
@@ -233,6 +233,7 @@ var agentMemChangeViewBinding = map[string]string{
 	"Commit": "commit", "At": "at", "Op": "op", "Scope": "scope", "Project": "project",
 	"Name": "name", "AuthorKind": "authorKind", "AuthorSession": "authorSession",
 	"RevertOf": "revertOf", "Latest": "latest", "Live": "live", "Revertible": "revertible",
+	"PurgedBefore": "purgedBefore",
 }
 
 var memoryImportPreviewBinding = map[string]string{

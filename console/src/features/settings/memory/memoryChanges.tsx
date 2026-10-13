@@ -210,7 +210,9 @@ export function AgentMemorySection({ reload, onChanged }: { reload: number; onCh
                 <span className="muted">{tr("mem.af_not_latest")}</span>
               ) : (
                 <>
-                  {selected.revertible ? (
+                  {selected.purgedBefore ? (
+                    <span className="muted">{tr("mem.pg_not_revertible")}</span>
+                  ) : selected.revertible ? (
                     <button type="button" disabled={busy} onClick={() => void act(selected, false)}>
                       {tr("mem.af_revert")}
                     </button>

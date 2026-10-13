@@ -387,6 +387,15 @@ describe("MemoryBrowserPanel", () => {
     });
   });
 
+  it("opens the purge dialog for a forgotten memory and asks for its preview, calling no write", async () => {
+    await setValue(select(), "project:" + project.id);
+    const purge = Array.from(document.body.querySelectorAll<HTMLButtonElement>(".mem-br-row button")).at(-2);
+    expect(purge?.textContent).toMatch(/Purge history|履歴から消去/);
+    await click(purge);
+    expect(api).toHaveBeenCalledWith(expect.stringContaining("api/agents/memory/entries/purge-preview?scope=project"));
+    expect(apiJSON).not.toHaveBeenCalled();
+  });
+
   it("saves an edit at the revision it read, and shows secret findings without saving", async () => {
     await click(text("View") ?? text("表示"));
     await click(text("Edit") ?? text("編集"));

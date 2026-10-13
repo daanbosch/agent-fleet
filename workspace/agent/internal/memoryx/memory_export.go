@@ -207,6 +207,19 @@ func HandleMemoryExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The scan and the file are made from one state of the repo: a purge (agent_memory_purge.go)
+	// rewrites history and collects garbage under this lock, and an export racing it would fail
+	// on a vanished object or carry a revision that was purged a moment before it was packed.
+	memorySnapshotMu.Lock()
+	unlocked := false
+	unlock := func() {
+		if !unlocked {
+			unlocked = true
+			memorySnapshotMu.Unlock()
+		}
+	}
+	defer unlock()
+
 	findings, err := memoryExportScan(format)
 	if err != nil {
 		httpx.WriteErr(w, http.StatusInternalServerError, errCodeMemoryExportFailed, err.Error())
@@ -236,6 +249,7 @@ func HandleMemoryExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer os.Remove(path) // always drop the temporary: no plaintext export may be left behind
+	unlock()
 
 	f, err := os.Open(path)
 	if err != nil {

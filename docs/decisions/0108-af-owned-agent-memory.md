@@ -591,3 +591,42 @@ until #2014. `entries/member-save` (create or edit, the tools' own revision chec
 limits, not gated by the switch, no new project) is back in Settings > Agent memory, and the CP audits it as
 `memory.entry.save`. What the mark does not change: a session with a shell can still write the store's files
 directly (decision 8's reasoning stands); the mark governs the Agent's routes, not the files.
+
+## Note (2026-10-14): the member can purge a memory's past revisions from history (open question 3, #1982)
+
+Open question 3 is answered. `memory_forget` still only hides a memory; a separate, member-only action
+rewrites the 0022 history so the text of its past revisions is gone from this workspace. It is a Console
+action behind the member-origin mark ([0113](0113-member-origin-mark.md)) — `POST /agents/memory/entries/purge`,
+signed by the CP and audited as `memory.entry.purge` with the project id only — and no MCP tool reaches it.
+`GET …/entries/purge-preview` is the read-only confirmation: counts, commit ids, the affected refs and the secret
+scanner's findings (rule, path, line, masked hint), never the text. The purge is bound to the preview by a
+plan id (a hash of the refs it saw) and by the memory's name typed again, so a history that moved in between
+asks to be reviewed again.
+
+What it does, and what it decided:
+
+- **Which revisions.** `af/<scope dir>/<name>.md` is removed from every commit on every ref. The current
+  revision is the exception: the commits at the tip of `main` that already hold the tip's text keep it, so
+  the published state and the history agree. A leak in the current text is purged by saving the memory
+  again first. A forgotten memory has no current revision, so everything goes, the forget record included.
+- **Snapshots and other refs.** All of them are rewritten, not left or dropped: `main`, `refs/imports/*`
+  (imported lineages) and `refs/premigrate/*` (rescue copies of a replaced lineage). Commits that held only
+  this memory are dropped and the rest re-linked with their author, dates and message; signatures do not
+  survive a rewrite. A ref of any other kind makes the purge refuse rather than leave the text reachable.
+- **Unreachable objects.** After the refs move in one transaction, the index is rebuilt from the new tip
+  (it can name a staged old revision), the reflogs are expired and `gc --prune=now` runs; then each purged
+  blob is looked up and the purge reports success only if it is gone from disk. A text that another path
+  holds byte for byte stays (counted as shared).
+- **Bundles already exported** cannot be recalled. The Console dialog and the guide say so and tell the
+  member to delete those copies. An export racing a purge is serialised with it.
+- **The changes list.** The memory's own change commits go with the revisions. The newest kept change carries
+  `AF-Purged-Before`, the list marks it `purgedBefore`, and reverting it fails with a conflict that says the
+  earlier revisions were purged; without the marker the missing earlier side would read as "this change
+  created the memory" and the revert would delete it. Forgetting it still works. Other memories' history and
+  their revert are untouched.
+- **Concurrency and crashes.** The purge holds the store and snapshot locks for its whole run, like a write.
+  New objects are written before any ref moves, so a crash there leaves garbage only; a marker file
+  written before the refs move makes the next purge (or the next start of the snapshot loop) finish the gc.
+
+What it does not do: it cannot reach copies outside the repo (exports, a session's own files), and a session
+with a shell can still read the store's files directly, as in decision 8.

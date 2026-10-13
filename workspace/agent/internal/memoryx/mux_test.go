@@ -62,6 +62,8 @@ var memoryTestRoutes = map[string]http.HandlerFunc{
 	"GET /agents/memory/entries/member-search":    HandleAgentMemoryMemberSearch,
 	"GET /agents/memory/entries/member-latest":    HandleAgentMemoryMemberLatest,
 	"GET /agents/memory/entries/member-forgotten": HandleAgentMemoryMemberForgotten,
+	"GET /agents/memory/entries/purge-preview":    HandleAgentMemoryPurgePreview,
+	"POST /agents/memory/entries/purge":           HandleAgentMemoryPurge,
 
 	"GET /agents/memory/claude-import":         HandleAgentMemoryClaudeSources,
 	"GET /agents/memory/claude-import/preview": HandleAgentMemoryClaudePreview,
@@ -80,6 +82,7 @@ var memberOnlyTestRoutes = map[string]bool{
 	"POST /agents/memory/entries/pin":         true,
 	"POST /agents/memory/entries/revert":      true,
 	"POST /agents/memory/entries/member-save": true,
+	"POST /agents/memory/entries/purge":       true,
 	"POST /agents/memory/snapshots":           true,
 	"POST /agents/memory/import/apply":        true,
 }

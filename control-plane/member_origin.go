@@ -54,6 +54,7 @@ var memberOriginRoutes = map[string]bool{
 	"POST /api/agents/memory/entries/pin":         true,
 	"POST /api/agents/memory/entries/revert":      true,
 	"POST /api/agents/memory/entries/member-save": true,
+	"POST /api/agents/memory/entries/purge":       true,
 	// The 0022 history routes only the Console calls (ADR 0113, 2026-10-13 note): a manual
 	// snapshot and the apply step of a bundle import.
 	"POST /api/agents/memory/snapshots":    true,

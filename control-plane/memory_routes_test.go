@@ -32,6 +32,8 @@ func TestMemoryRoutesProxiedByCP(t *testing.T) {
 		{"GET", "/api/agents/memory/entries/list", "GET /api/agents/memory/entries/list"},
 		{"POST", "/api/agents/memory/entries/pin", "POST /api/agents/memory/entries/pin"},
 		{"POST", "/api/agents/memory/entries/member-save", "POST /api/agents/memory/entries/member-save"},
+		{"GET", "/api/agents/memory/entries/purge-preview", "GET /api/agents/memory/entries/purge-preview"},
+		{"POST", "/api/agents/memory/entries/purge", "POST /api/agents/memory/entries/purge"},
 		{"GET", "/api/agents/memory/entries/member-read", "GET /api/agents/memory/entries/member-read"},
 		{"GET", "/api/agents/memory/claude-import", "GET /api/agents/memory/claude-import"},
 		{"GET", "/api/agents/memory/claude-import/preview", "GET /api/agents/memory/claude-import/preview"},
@@ -115,6 +117,15 @@ func TestMemorySnapshotIsAudited(t *testing.T) {
 	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/entries/member-save?project=%2Fhome%2Fdev", nil)
 	if action, target, ok = auditActionTarget(req); !ok || action != "memory.entry.save" || target != "" {
 		t.Fatalf("auditActionTarget(member-save, bad hint) = (%q, %q, ok=%v), want memory.entry.save with an empty target", action, target, ok)
+	}
+	// A purge of a memory's history is audited by project id only; the memory name never reaches the ledger.
+	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/entries/purge?project=agent-fleet-0123456789ab&name=ghp_secretlooking", nil)
+	if action, target, ok = auditActionTarget(req); !ok || action != "memory.entry.purge" || target != "agent-fleet-0123456789ab" {
+		t.Fatalf("auditActionTarget(purge) = (%q, %q, ok=%v), want memory.entry.purge/agent-fleet-0123456789ab", action, target, ok)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/entries/purge?project=%2Fhome%2Fdev", nil)
+	if action, target, ok = auditActionTarget(req); !ok || action != "memory.entry.purge" || target != "" {
+		t.Fatalf("auditActionTarget(purge, bad hint) = (%q, %q, ok=%v), want memory.entry.purge with an empty target", action, target, ok)
 	}
 	// The claude-memory import is audited; only an id-shaped project hint reaches the ledger.
 	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/claude-import?project=agent-fleet-0123456789ab", nil)

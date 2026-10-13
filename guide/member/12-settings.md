@@ -289,6 +289,24 @@ Version control over the memory an agent accumulates by itself (claude's auto-me
     them only with that signature, so a session in the workspace cannot make them as you. A workspace started
     before this was available refuses them until you restart it, and for about half a minute after a
     workspace starts they ask you to try again in a minute.
+  - **Purge history…**: **Forget** only hides a memory; its earlier text stays in the history and in every export.
+    **Purge history…** (on a memory row and on a forgotten one) deletes a memory's past revisions from this
+    workspace for good. A dialog first lists what will be rewritten, without showing any text: how many of the
+    memory's change records go, how many other snapshots carry a past revision, which histories are touched
+    (the main history, imported histories, rescue copies of an earlier history) and what the secret scan
+    reports in those past revisions (rule, line and a masked hint only). You then type the memory's name to
+    confirm. What happens: the memory's file is removed from every commit of every history and the commits
+    that held only it are dropped; the unreachable objects are garbage-collected and each purged revision is
+    checked to be gone from disk. The memory's **current text stays**, so the memory and its history still agree; if the
+    current text is what must go, edit the memory first and then purge, which makes the old text a past
+    revision. A forgotten memory loses every revision, including the forget record, and cannot be restored
+    afterwards. Other memories' history, and their revert, are untouched. After a purge the memory's remaining
+    change cannot be reverted (there is nothing earlier to go back to); you can still forget it. **Exports you
+    already made cannot be recalled**: a bundle (full history) or archive you downloaded, or copied
+    elsewhere, still holds the old text, so delete those copies yourself. A purge asks for the Control Plane's
+    signature like revert and save, so a session cannot start one, and the Control Plane records it as
+    `memory.entry.purge` with the project only, never the memory's name or text. If the history changes between the
+    preview and the confirmation, the purge asks you to review it again.
   - **Import from Claude Code**: below the list, brings the memory Claude Code kept for a project into Agent
     Fleet memory, once. Pick a project and you see what would happen before anything is written: **new**,
     **newer in Claude** (will overwrite the Agent Fleet copy, even one you edited since; both times are shown),

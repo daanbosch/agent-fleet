@@ -104,6 +104,25 @@ export interface MemoryChange {
   /** The history holds the memory's text on at least one side of this change. A forget of a
    *  file that was never committed has none, so there is nothing to bring back. */
   revertible: boolean;
+  /** The memory's earlier revisions were purged from the history (#1982): this change cannot
+   *  be reverted, only the memory forgotten. */
+  purgedBefore?: boolean;
+}
+
+/** What purging one memory's past revisions would rewrite (#1982). No memory text. */
+export interface PurgePreview {
+  scope: string;
+  project?: MemoryChangeProject;
+  name: string;
+  live: boolean;
+  keepsCurrent: boolean;
+  nothing: boolean;
+  changes: { commit: string; at: string; op: string; authorKind: string }[];
+  changesTotal: number;
+  snapshots: number;
+  refs: { name: string; kind: "main" | "branch" | "import" | "rescue"; affected: number }[];
+  findings: SecretFinding[];
+  plan: string;
 }
 /** One change's diff from the Agent, scanned first: withheld carries masked findings instead. */
 export interface ChangeDiff {
