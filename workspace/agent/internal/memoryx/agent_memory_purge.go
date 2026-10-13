@@ -31,6 +31,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -372,6 +373,9 @@ func agentMemPurgePreview(scope, project, name string) (agentMemPurgePreviewWire
 	}
 	agentMemMu.RLock()
 	defer agentMemMu.RUnlock()
+	// One consistent set of refs: an import or a snapshot adds to it under this lock.
+	memorySnapshotMu.Lock()
+	defer memorySnapshotMu.Unlock()
 	if !memoryHasCommits() {
 		return agentMemPurgePreviewWire{Scope: scope, Name: name, Nothing: true, Changes: []agentMemPurgeChange{},
 			Refs: []agentMemPurgeRef{}, Findings: []memorySecretFinding{}}, nil
@@ -430,16 +434,114 @@ func (c purgeRawCommit) render() []byte {
 	return []byte(b.String())
 }
 
-// agentMemPurgeResume finishes a gc that a crash cut short. Callers hold the locks.
+// agentMemPurgePending is the marker written before the refs move: what a recovery needs to
+// finish the job without the old history, which is gone by then.
+type agentMemPurgePending struct {
+	Path  string   `json:"path"` // af/<scope dir>/<name>.md
+	Blobs []string `json:"blobs"`
+}
+
+// agentMemPurgeResume finishes a purge a crash or a failed check cut short. The marker stays
+// until every purged blob is verified gone. Callers hold the locks.
 func agentMemPurgeResume() error {
-	if _, err := os.Stat(agentMemPurgePendingPath()); err != nil {
+	b, err := os.ReadFile(agentMemPurgePendingPath())
+	if err != nil {
 		return nil
 	}
-	if err := agentMemPurgeCollect(); err != nil {
+	var p agentMemPurgePending
+	_ = json.Unmarshal(b, &p) // unreadable: still reset the index and collect
+	if _, _, err := agentMemPurgeFinish(p); err != nil {
 		return err
 	}
 	_ = os.Remove(agentMemPurgePendingPath())
 	return nil
+}
+
+// agentMemPurgeFinish does everything after the refs moved, so a first run and a recovery are the
+// same code: rebuild the index (it can name a staged old revision, which gc would protect), put
+// the memory's staging file back to the live text (a leftover old one would be committed by the
+// next snapshot), expire the reflogs, gc, and verify each purged blob is gone. A blob that
+// remains is accepted only as another path's byte-identical text.
+func agentMemPurgeFinish(p agentMemPurgePending) (removed, shared int, err error) {
+	if memoryHasCommits() {
+		_, err = memoryGitRun("read-tree", memoryBranch)
+	} else {
+		_, err = memoryGitRun("read-tree", "--empty")
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("reset the index: %w", err)
+	}
+	if rel, ok := strings.CutPrefix(p.Path, agentMemRepoPrefix+"/"); ok && rel != "" {
+		stg := filepath.Join(memoryStagingDir(), agentMemRepoPrefix, filepath.FromSlash(rel))
+		data, live, rerr := agentMemReadFile(filepath.Join(agentMemDir(), filepath.FromSlash(rel)))
+		switch {
+		case rerr != nil:
+			return 0, 0, rerr
+		case live:
+			if err := os.MkdirAll(filepath.Dir(stg), 0o700); err != nil {
+				return 0, 0, err
+			}
+			if err := os.WriteFile(stg, data, 0o600); err != nil {
+				return 0, 0, err
+			}
+		default:
+			if err := os.Remove(stg); err != nil && !os.IsNotExist(err) {
+				return 0, 0, err
+			}
+		}
+	}
+	if err := agentMemPurgeCollect(); err != nil {
+		return 0, 0, err
+	}
+	if err := agentMemPurgeStage("gc"); err != nil {
+		return 0, 0, err
+	}
+	var elsewhere map[string]bool
+	for _, b := range p.Blobs {
+		if _, cerr := memoryGitRun("cat-file", "-e", b); cerr != nil {
+			removed++
+			continue
+		}
+		if elsewhere == nil {
+			elsewhere = map[string]bool{}
+			out, rerr := memoryGitRun("rev-list", "--objects", "--all")
+			if rerr != nil {
+				return 0, 0, rerr
+			}
+			for _, l := range strings.Split(out, "\n") {
+				sha, path, _ := strings.Cut(l, " ")
+				if path != "" && path != p.Path {
+					elsewhere[sha] = true
+				}
+			}
+		}
+		if !elsewhere[b] {
+			return 0, 0, memoryErrf(http.StatusInternalServerError, errCodeMemorySnapshotFailed,
+				"the history was rewritten but a purged revision is still on disk; it will be retried")
+		}
+		shared++
+	}
+	return removed, shared, nil
+}
+
+// agentMemPurgeSweepWork removes the transfer temporaries an interrupted export or import left in
+// the work dir; they can hold the old history. Exports and imports build theirs under the snapshot
+// lock, which the caller holds, so only an upload still being received (not yet under it) is spared.
+func agentMemPurgeSweepWork() {
+	ents, _ := os.ReadDir(memoryWorkDir())
+	for _, e := range ents {
+		n := e.Name()
+		switch {
+		case strings.HasPrefix(n, "export-"), strings.HasPrefix(n, "import-"):
+		case strings.HasPrefix(n, "upload-"):
+			if info, err := e.Info(); err != nil || time.Since(info.ModTime()) < 10*time.Minute {
+				continue
+			}
+		default:
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(memoryWorkDir(), n))
+	}
 }
 
 // ResumeMemoryPurge runs the pending gc of an interrupted purge, if there is one.
@@ -485,6 +587,7 @@ func agentMemPurge(req agentMemPurgeReq) (agentMemPurgeResult, error) {
 	if err := agentMemPurgeResume(); err != nil {
 		return agentMemPurgeResult{}, err
 	}
+	agentMemPurgeSweepWork()
 	res := agentMemPurgeResult{Scope: req.Scope, Name: req.Name}
 	if !memoryHasCommits() {
 		return res, memoryErrf(http.StatusConflict, errCodeMemoryConflict, "there is no history to purge")
@@ -582,7 +685,8 @@ func agentMemPurge(req agentMemPurgeReq) (agentMemPurgeResult, error) {
 	if err := os.MkdirAll(memoryWorkDir(), 0o700); err != nil {
 		return res, err
 	}
-	if err := os.WriteFile(agentMemPurgePendingPath(), []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600); err != nil {
+	marker, _ := json.Marshal(agentMemPurgePending{Path: s.path, Blobs: s.purged})
+	if err := os.WriteFile(agentMemPurgePendingPath(), marker, 0o600); err != nil {
 		return res, err
 	}
 	var tx bytes.Buffer
@@ -609,47 +713,12 @@ func agentMemPurge(req agentMemPurgeReq) (agentMemPurgeResult, error) {
 		return res, err
 	}
 
-	// The index still names the old blobs; rebuild it from the new tip before the gc looks.
-	if memoryHasCommits() {
-		_, err = memoryGitRun("read-tree", memoryBranch)
-	} else {
-		_, err = memoryGitRun("read-tree", "--empty")
-	}
+	removed, shared, err := agentMemPurgeFinish(agentMemPurgePending{Path: s.path, Blobs: s.purged})
 	if err != nil {
-		return res, fmt.Errorf("reset the index: %w", err)
-	}
-	if err := agentMemPurgeCollect(); err != nil {
-		return res, err
-	}
-	if err := agentMemPurgeStage("gc"); err != nil {
 		return res, err
 	}
 	_ = os.Remove(agentMemPurgePendingPath())
-
-	// Say it only if it is true: look for each purged blob.
-	var shared map[string]bool
-	for _, b := range s.purged {
-		if _, err := memoryGitRun("cat-file", "-e", b); err != nil {
-			res.BlobsRemoved++
-			continue
-		}
-		if shared == nil {
-			shared = map[string]bool{}
-			out, err := memoryGitRun("rev-list", "--objects", "--all")
-			if err != nil {
-				return res, err
-			}
-			for _, l := range strings.Split(out, "\n") {
-				sha, _, _ := strings.Cut(l, " ")
-				shared[sha] = true
-			}
-		}
-		if !shared[b] {
-			return res, memoryErrf(http.StatusInternalServerError, errCodeMemorySnapshotFailed,
-				"the history was rewritten but a purged revision is still on disk; run the purge again")
-		}
-		res.BlobsShared++
-	}
+	res.BlobsRemoved, res.BlobsShared = removed, shared
 	log.Printf("agent memory: purge: %d commit(s) dropped, %d rewritten, %d ref(s) moved", res.CommitsDropped, res.CommitsRewritten, res.RefsRewritten+res.RefsDeleted)
 	return res, nil
 }

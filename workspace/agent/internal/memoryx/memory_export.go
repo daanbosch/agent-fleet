@@ -249,9 +249,11 @@ func HandleMemoryExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer os.Remove(path) // always drop the temporary: no plaintext export may be left behind
-	unlock()
 
+	// Opened under the lock: a purge removes leftover export files, and an open descriptor is
+	// what keeps this one streaming after that.
 	f, err := os.Open(path)
+	unlock()
 	if err != nil {
 		httpx.WriteErr(w, http.StatusInternalServerError, errCodeMemoryExportFailed, err.Error())
 		return

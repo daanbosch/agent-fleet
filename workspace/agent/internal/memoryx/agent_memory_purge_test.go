@@ -557,3 +557,164 @@ func TestAgentMemoryPurgeDropsAStagedOldRevision(t *testing.T) {
 	}
 	fsckClean(t)
 }
+
+// stageOldRevision leaves the old text in the bare repo's index and, when restore is false, in the
+// staging file too (a snapshot that died between add and commit).
+func stageOldRevision(t *testing.T, f purgeFixture, restore bool) string {
+	t.Helper()
+	staging := memoryStagingDir() + "/af/projects/" + f.pid + "/a.md"
+	cur, err := os.ReadFile(staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, _ := memoryGitRun("show", f.oldBlob)
+	if err := os.WriteFile(staging, []byte(old+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := memoryGitRun("add", "--", "af"); err != nil {
+		t.Fatal(err)
+	}
+	if restore {
+		if err := os.WriteFile(staging, cur, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return staging
+}
+
+// Recovery is the same code as the first run: a crash right after the refs moved, with an old
+// revision staged, and no save in between to refresh the index.
+func TestAgentMemoryPurgeRecoveryRebuildsTheIndex(t *testing.T) {
+	f := purgeSetup(t)
+	stageOldRevision(t, f, true)
+	agentMemPurgeFault = func(s string) error {
+		if s == "refs" {
+			return errors.New("simulated crash")
+		}
+		return nil
+	}
+	t.Cleanup(func() { agentMemPurgeFault = nil })
+	if _, err := purgeDo(t, f, "a"); err == nil {
+		t.Fatal("expected the simulated crash")
+	}
+	agentMemPurgeFault = nil
+	ResumeMemoryPurge()
+	if objectExists(f.oldBlob) || allObjectsContain(t, "Hollowbrook") {
+		t.Fatal("recovery left the old revision behind")
+	}
+	if _, err := os.Stat(agentMemPurgePendingPath()); err == nil {
+		t.Fatal("marker left after a verified recovery")
+	}
+	fsckClean(t)
+}
+
+// A failed check keeps the marker, and the retry works without the old history to rediscover.
+func TestAgentMemoryPurgeKeepsTheMarkerUntilVerified(t *testing.T) {
+	f := purgeSetup(t)
+	if _, err := memoryGitRun("gc", "--quiet"); err != nil {
+		t.Fatal(err)
+	}
+	packs, _ := os.ReadDir(memoryRepoDir() + "/objects/pack")
+	var keep []string
+	for _, e := range packs {
+		if strings.HasSuffix(e.Name(), ".pack") {
+			k := memoryRepoDir() + "/objects/pack/" + strings.TrimSuffix(e.Name(), ".pack") + ".keep"
+			if err := os.WriteFile(k, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			keep = append(keep, k)
+		}
+	}
+	if len(keep) == 0 {
+		t.Fatal("fixture: no pack")
+	}
+	if _, err := purgeDo(t, f, "a"); err == nil {
+		t.Fatal("a purge that left the text on disk reported success")
+	}
+	if _, err := os.Stat(agentMemPurgePendingPath()); err != nil {
+		t.Fatal("the marker was dropped before verification")
+	}
+	for _, k := range keep {
+		_ = os.Remove(k)
+	}
+	ResumeMemoryPurge()
+	if objectExists(f.oldBlob) || allObjectsContain(t, "Hollowbrook") {
+		t.Fatal("the retry did not remove the text")
+	}
+	if _, err := os.Stat(agentMemPurgePendingPath()); err == nil {
+		t.Fatal("marker left")
+	}
+}
+
+// An import racing the purge waits for it; it cannot add refs behind the rewrite.
+func TestAgentMemoryPurgeSerialisesWithImportPrepare(t *testing.T) {
+	f := purgeSetup(t)
+	made, err := memoryExportBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := t.TempDir() + "/old.bundle"
+	if err := os.Rename(made, bundle); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	agentMemPurgeFault = func(s string) error {
+		if s == "objects" {
+			go func() {
+				_, err := memoryImportPrepare(bundle, "x.bundle", time.Now())
+				done <- err
+			}()
+			select {
+			case <-done:
+				t.Error("the import ran while the purge held the lock")
+			case <-time.After(400 * time.Millisecond):
+			}
+		}
+		return nil
+	}
+	t.Cleanup(func() { agentMemPurgeFault = nil })
+	res, err := purgeDo(t, f, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentMemPurgeFault = nil
+	if res.BlobsShared != 0 || objectExists(f.oldBlob) {
+		t.Fatalf("result = %+v", res)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Without restoring the staging file, the next snapshot would commit the old text again.
+func TestAgentMemoryPurgeResyncsStaging(t *testing.T) {
+	f := purgeSetup(t)
+	staging := stageOldRevision(t, f, false)
+	if _, err := purgeDo(t, f, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(staging); strings.Contains(string(b), "Hollowbrook") {
+		t.Fatal("staging still holds the old text")
+	}
+	if _, err := memorySnapshot(memoryTriggerManual, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if objectExists(f.oldBlob) || allObjectsContain(t, "Hollowbrook") {
+		t.Fatal("a snapshot brought the old text back")
+	}
+}
+
+// Transfer temporaries the Agent itself left behind are part of the history it holds.
+func TestAgentMemoryPurgeSweepsOrphanTransferFiles(t *testing.T) {
+	f := purgeSetup(t)
+	bundle, err := memoryExportBundle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := purgeDo(t, f, "a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(bundle); err == nil {
+		t.Fatal("an orphan export bundle survived the purge")
+	}
+}

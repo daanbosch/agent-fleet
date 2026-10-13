@@ -618,7 +618,9 @@ What it does, and what it decided:
   blob is looked up and the purge reports success only if it is gone from disk. A text that another path
   holds byte for byte stays (counted as shared).
 - **Bundles already exported** cannot be recalled. The Console dialog and the guide say so and tell the
-  member to delete those copies. An export racing a purge is serialised with it.
+  member to delete those copies. Copies the Agent itself holds are different: export, bundle import and
+  the purge are serialised on one lock, and the purge removes leftover `export-*`, `import-*` and stale
+  `upload-*` files from the work dir.
 - **The changes list.** The memory's own change commits go with the revisions. The newest kept change carries
   `AF-Purged-Before`, the list marks it `purgedBefore`, and reverting it fails with a conflict that says the
   earlier revisions were purged; without the marker the missing earlier side would read as "this change
@@ -626,7 +628,9 @@ What it does, and what it decided:
   their revert are untouched.
 - **Concurrency and crashes.** The purge holds the store and snapshot locks for its whole run, like a write.
   New objects are written before any ref moves, so a crash there leaves garbage only; a marker file
-  written before the refs move makes the next purge (or the next start of the snapshot loop) finish the gc.
+  written before the refs move (it names the path and the purged blobs) makes the next purge or the next start
+  of the snapshot loop finish the job with the same code as a first run — rebuild the index, put the memory's
+  staging file back to the live text, gc — and the marker stays until every purged blob is verified gone.
 
 What it does not do: it cannot reach copies outside the repo (exports, a session's own files), and a session
 with a shell can still read the store's files directly, as in decision 8.

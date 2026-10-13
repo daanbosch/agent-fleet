@@ -303,7 +303,8 @@ Version control over the memory an agent accumulates by itself (claude's auto-me
     afterwards. Other memories' history, and their revert, are untouched. After a purge the memory's remaining
     change cannot be reverted (there is nothing earlier to go back to); you can still forget it. **Exports you
     already made cannot be recalled**: a bundle (full history) or archive you downloaded, or copied
-    elsewhere, still holds the old text, so delete those copies yourself. A purge asks for the Control Plane's
+    elsewhere, still holds the old text, so delete those copies yourself. Temporary export or upload files an
+    interrupted transfer left inside the workspace are removed by the purge. A purge asks for the Control Plane's
     signature like revert and save, so a session cannot start one, and the Control Plane records it as
     `memory.entry.purge` with the project only, never the memory's name or text. If the history changes between the
     preview and the confirmation, the purge asks you to review it again.
