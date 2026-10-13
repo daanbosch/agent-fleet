@@ -7,6 +7,14 @@ package main
 const (
 	errCodeQuotaSessions = "quota_sessions"
 
+	// The owner's workspace is running but its session catalog could not be read
+	// (catalogSyncAPIError). Distinct from workspace_not_running, which sends the owner to
+	// start a workspace that is already up.
+	errCodeCatalogSyncFailed = "catalog_sync_failed"
+	// The same sync, refused because the catalog exceeds agentCatalogMaxBytes. Permanent
+	// until sessions are deleted, so it must not share catalog_sync_failed's "try again".
+	errCodeCatalogTooLarge = "catalog_too_large"
+
 	// An irreversible admin action refused because its request could not be written to the
 	// audit log first (store.BeginIrreversible). internal/tenantsrv emits the same literal.
 	errCodeAuditUnavailable = "audit_unavailable"

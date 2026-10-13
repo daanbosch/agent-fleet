@@ -54,6 +54,9 @@ func wireGoldenTypes() []struct {
 	}{
 		// GET /sessions — the upstream CP's sessionWire decodes as is.
 		{"session.Session", reflect.TypeOf(session.Session{})},
+		// GET /sessions/catalog — the sharing inventory CP's catalog sync decodes into
+		// sessionWire; a key lost here silently empties a column of shared_session_catalog.
+		{"session.CatalogEntry", reflect.TypeOf(session.CatalogEntry{})},
 		// GET /repos, GET /repos/{name}/status — CP is a pass-through proxy, so this is the
 		// only place that holds the repository wire.
 		{"Repo", reflect.TypeOf(gitx.Repo{})},

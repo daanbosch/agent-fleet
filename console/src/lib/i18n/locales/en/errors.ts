@@ -112,6 +112,8 @@ export const errors: Record<keyof typeof jaErrors, string> = {
   "err.member_not_found": "That recipient isn't a member of this tenant. Pick one from the search results.",
   "err.share_self": "You can't share with yourself.",
   "err.workspace_not_running": "The owner's workspace must be running.",
+  "err.catalog_sync_failed": "The workspace is running, but its session list could not be read. Try again in a moment.",
+  "err.catalog_too_large": "This workspace has too many sessions for the session list to be read. Delete sessions you no longer need (archived ones count too).",
   "err.share_target_not_found": "The share target could not be found.",
   "err.owner_session_archived": "The owner archived this session, so it is no longer listed for recipients. It comes back if they restore it.",
   "err.settings_change_failed": "Couldn't change the setting.",

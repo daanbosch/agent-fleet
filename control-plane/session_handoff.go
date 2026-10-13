@@ -200,7 +200,7 @@ func (a sessionHandoffAPI) catalogForOwnedSession(r *http.Request, res *resolved
 		lock.Unlock()
 		if err != nil {
 			a.share.invalidateCatalog(res.mv.MembershipID) // a failed sync must not count as fresh
-			return store.SharedSessionCatalog{}, false, &apiError{http.StatusConflict, "workspace_not_running", "owner workspace must be running to hand off"}
+			return store.SharedSessionCatalog{}, false, catalogSyncAPIError(err)
 		}
 	}
 	rows, err := a.mgr.store.ListSharedSessionCatalogByOwner(r.Context(), res.mv.MembershipID)

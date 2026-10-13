@@ -144,14 +144,8 @@ func (a sessionShareAPI) syncCatalogLocked(ctx context.Context, res *resolved) (
 	if res.rt.State(ctx) != "running" {
 		return nil, nil
 	}
-	body, err := agentText(ctx, res.rt, http.MethodGet, "/sessions/catalog", nil)
+	sessions, err := readAgentCatalog(ctx, res.rt)
 	if err != nil {
-		return nil, err
-	}
-	var wire struct {
-		Sessions []sessionWire `json:"sessions"`
-	}
-	if err := json.Unmarshal([]byte(body), &wire); err != nil {
 		return nil, err
 	}
 	// worktree/parent (the recipient's project/worktree tree display, docs/log/59) is
@@ -189,8 +183,8 @@ func (a sessionShareAPI) syncCatalogLocked(ctx context.Context, res *resolved) (
 		}
 	}
 	now := store.NowTS()
-	rows := make([]store.SharedSessionCatalog, 0, len(wire.Sessions))
-	for _, s := range wire.Sessions {
+	rows := make([]store.SharedSessionCatalog, 0, len(sessions))
+	for _, s := range sessions {
 		// state is liveness (running/stopped), activity is the Agent's live state (working /
 		// question / …). Keeping the last activity on a stopped session would read as "it
 		// stopped mid-turn", so activity is only carried while the session is alive.
@@ -333,7 +327,7 @@ func (a sessionShareAPI) put(w http.ResponseWriter, r *http.Request, res *resolv
 	}
 	repos, err := a.syncCatalogLocked(r.Context(), res)
 	if err != nil {
-		writeAPIErr(w, &apiError{http.StatusConflict, "workspace_not_running", "owner workspace must be running to create a share"})
+		writeAPIErr(w, catalogSyncAPIError(err))
 		return
 	}
 	catalog, err := a.mgr.store.ListSharedSessionCatalogByOwner(r.Context(), res.mv.MembershipID)
@@ -587,7 +581,7 @@ func (a sessionShareAPI) authorizeCatalog(ctx context.Context, mv store.Membersh
 	if res.rt.State(ctx) == "running" && !a.freshCatalog(c.OwnerMembershipID, shareCatalogTTL) {
 		if err := a.syncCatalog(ctx, res); err != nil {
 			a.invalidateCatalog(c.OwnerMembershipID) // failed sync must not count as fresh
-			return c, nil, &apiError{502, "owner_workspace_unreachable", "owner workspace inventory is unavailable"}
+			return c, nil, catalogSyncAPIError(err)
 		}
 		c, ok, err = a.mgr.store.GetSharedSessionCatalog(ctx, id)
 		if err != nil {
@@ -1032,7 +1026,7 @@ func (a sessionShareAPI) approve(w http.ResponseWriter, r *http.Request, ident s
 		return
 	}
 	if _, err := a.syncCatalogLocked(r.Context(), res); err != nil {
-		writeAPIErr(w, &apiError{502, "owner_workspace_unreachable", "owner workspace inventory is unavailable"})
+		writeAPIErr(w, catalogSyncAPIError(err))
 		return
 	}
 	body, err := a.openProposal(r.Context(), p)
