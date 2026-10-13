@@ -470,7 +470,7 @@ func buildMux() *http.ServeMux {
 	// an independent lineage first, and only the selected range is then applied to live (P3).
 	mux.HandleFunc("GET /agents/memory/export", memoryx.HandleMemoryExport)
 	mux.HandleFunc("POST /agents/memory/import", memoryx.HandleMemoryImport)
-	mux.Handle("POST /agents/memory/import/apply", memberorigin.Require(memoryx.MemberWriteMaxRequest, http.HandlerFunc(memoryx.HandleMemoryImportApply)))
+	mux.Handle("POST /agents/memory/import/apply", memberorigin.Require(memoryx.HistoryApplyMaxRequest, http.HandlerFunc(memoryx.HandleMemoryImportApply)))
 	// AF-owned agent memory (ADR 0108): what the af MCP memory tools call. Not proxied by the
 	// CP: agents reach it on loopback, and the Console's view of it is a separate set of routes.
 	mux.HandleFunc("GET /agents/memory/entries", memoryx.HandleAgentMemoryIndex)

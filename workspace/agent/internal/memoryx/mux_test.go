@@ -88,7 +88,11 @@ func buildMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	for pattern, h := range memoryTestRoutes {
 		if memberOnlyTestRoutes[pattern] {
-			mux.Handle(pattern, memberorigin.Require(MemberWriteMaxRequest, h))
+			limit := int64(MemberWriteMaxRequest)
+			if pattern == "POST /agents/memory/import/apply" {
+				limit = HistoryApplyMaxRequest
+			}
+			mux.Handle(pattern, memberorigin.Require(limit, h))
 			continue
 		}
 		mux.HandleFunc(pattern, h)

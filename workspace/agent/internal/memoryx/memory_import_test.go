@@ -500,3 +500,24 @@ func memoryMultipart(t *testing.T, name, path string) ([]byte, string) {
 	}
 	return buf.Bytes(), mw.FormDataContentType()
 }
+
+// A marked import/apply naming thousands of slugs is past the save limit but inside what the CP
+// signs, and must reach the handler (here: a 400 for the unknown import, never a 413).
+func TestImportApplyAcceptsALargeSelection(t *testing.T) {
+	h := buildMux()
+	slug := strings.Repeat("a", 255)
+	projects, _ := json.Marshal(func() []string {
+		out := make([]string, 5300)
+		for i := range out {
+			out[i] = slug
+		}
+		return out
+	}())
+	body := `{"importId":"x","scope":{"projects":` + string(projects) + `}}`
+	if len(body) <= MemberWriteMaxRequest {
+		t.Fatalf("body %d does not exceed the save limit", len(body))
+	}
+	if w := markedDo(t, h, "POST", "/agents/memory/import/apply", body); w.Code == http.StatusRequestEntityTooLarge {
+		t.Fatalf("large selection refused: %d %s", w.Code, w.Body)
+	}
+}

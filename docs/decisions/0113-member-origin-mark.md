@@ -160,4 +160,7 @@ Decision 8 therefore still holds for the imports: their `member` author is the r
 Gated routes are listed identically on both sides; `TestMemberOriginRoutesAgreeWithTheControlPlane`
 (Agent module) reads the CP's table and probes the real mux, so a one-sided change fails.
 
+`import/apply` buffers up to 2 MiB (the CP's own cap on a body it signs), not the save limit: its body lists
+every selected slug, and a large bundle can exceed the save limit.
+
 Follow-ups: #2076

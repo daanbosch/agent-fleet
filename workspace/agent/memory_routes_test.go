@@ -13,11 +13,14 @@ package main
 // TestMemoryRoutesMatchAgentRouteTable in internal/memoryx/mux_test.go.
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -120,22 +123,44 @@ func TestMemberWriteRoutesAdmitAMarkedRequest(t *testing.T) {
 
 // The CP signs exactly the routes the Agent requires a mark on. A route the Agent requires but the CP
 // does not sign locks the member out; one the CP signs but the Agent leaves open signs for nothing.
-// The two modules cannot import each other, so this reads the CP's table from its source and finds
+// The two modules cannot import each other, so this reads the CP's table from its parsed source and finds
 // the Agent's by asking the real mux: a POST with an unparsable body gets member_origin_required
 // from a wrapped route and a 400 from the handler of an open one, without touching the store.
 func TestMemberOriginRoutesAgreeWithTheControlPlane(t *testing.T) {
-	src, err := os.ReadFile("../../control-plane/member_origin.go")
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "../../control-plane/member_origin.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	table := regexp.MustCompile(`(?s)var memberOriginRoutes = map\[string\]bool\{(.*?)\n\}`).FindSubmatch(src)
-	if table == nil {
-		t.Fatal("memberOriginRoutes not found in control-plane/member_origin.go")
-	}
+	// Read the map literal's real elements: a commented-out or false entry is not signed.
 	var cp []string
-	for _, m := range regexp.MustCompile(`"(POST) /api(/[^"]+)":\s+true`).FindAllSubmatch(table[1], -1) {
-		cp = append(cp, string(m[1])+" "+string(m[2]))
-	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		vs, ok := n.(*ast.ValueSpec)
+		if !ok || len(vs.Names) != 1 || vs.Names[0].Name != "memberOriginRoutes" || len(vs.Values) != 1 {
+			return true
+		}
+		lit, ok := vs.Values[0].(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		for _, e := range lit.Elts {
+			kv, ok := e.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			k, _ := kv.Key.(*ast.BasicLit)
+			v, _ := kv.Value.(*ast.Ident)
+			if k == nil || v == nil || v.Name != "true" {
+				continue
+			}
+			route, err := strconv.Unquote(k.Value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cp = append(cp, strings.Replace(route, " /api/", " /", 1))
+		}
+		return false
+	})
 	if len(cp) == 0 {
 		t.Fatal("no route parsed from memberOriginRoutes")
 	}
