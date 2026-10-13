@@ -739,6 +739,7 @@ export const sessions = {
   "handoff.banner_open": "内容を見て引き継ぐ",
   "handoff.take_withdrawn": "送り手がこの引き継ぎを取り下げました。セッションは起動していません。",
   "handoff.take_expired": "この引き継ぎは期限切れか、共有が解除されています。セッションは起動していません。",
+  "handoff.take_unavailable": "この引き継ぎは共有が解除されたか、元のセッションがアーカイブされています。セッションは起動していません。",
   "handoff.take_declined": "この引き継ぎは辞退済みです。セッションは起動していません。",
   "handoff.take_accepted": "この引き継ぎは受領済みです。セッションは起動していません。",
   "handoff.take_busy": "この引き継ぎは別の画面で起動中です。セッションは起動していません。",

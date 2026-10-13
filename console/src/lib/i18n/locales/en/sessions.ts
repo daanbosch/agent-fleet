@@ -729,6 +729,7 @@ export const sessions: Record<keyof typeof jaSessions, string> = {
   "handoff.banner_open": "Review and take it over",
   "handoff.take_withdrawn": "The sender withdrew this handoff. No session was started.",
   "handoff.take_expired": "This handoff expired or is no longer shared with you. No session was started.",
+  "handoff.take_unavailable": "This handoff is no longer shared with you, or its session was archived. No session was started.",
   "handoff.take_declined": "This handoff was declined. No session was started.",
   "handoff.take_accepted": "This handoff was already taken over. No session was started.",
   "handoff.take_busy": "This handoff is being launched from another window. No session was started.",

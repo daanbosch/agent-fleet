@@ -154,7 +154,7 @@ type handoffOfferInboxWire struct {
 	// recipient's inbox carries it.
 	TakeRev string `json:"takeRev,omitempty"`
 	// RecoveryOnly marks an offer the inbox lists only because the recipient's confirmed take
-	// still holds it after an unshare or archive (ListRecoverableSessionHandoffTakes): it
+	// still holds it after an unshare or archive (ListReceivedSessionHandoffOffers): it
 	// carries no body or coordinates, and nothing launches from it.
 	RecoveryOnly bool `json:"recoveryOnly,omitempty"`
 }
@@ -463,55 +463,40 @@ func (a sessionHandoffAPI) listOwned(w http.ResponseWriter, r *http.Request, _ s
 // the prompt leaves CP.
 func (a sessionHandoffAPI) listReceived(w http.ResponseWriter, r *http.Request, _ store.Identity, mv store.MembershipView) {
 	a.expireDue(r.Context())
-	rows, err := a.mgr.store.ListSessionHandoffOffersByRecipient(r.Context(), mv.MembershipID)
-	if err != nil {
-		writeAPIErr(w, internalErr(err))
-		return
-	}
-	recoverable, err := a.mgr.store.ListRecoverableSessionHandoffTakes(r.Context(), mv.MembershipID)
+	// One snapshot: each row's takeRev comes from the take read with that row, so a row never
+	// pairs one take's state with a later take's revision.
+	rows, err := a.mgr.store.ListReceivedSessionHandoffOffers(r.Context(), mv.MembershipID)
 	if err != nil {
 		writeAPIErr(w, internalErr(err))
 		return
 	}
 	keys := a.userKeys(r.Context(), mv.TenantID)
 	out := []any{}
-	for _, o := range rows {
-		out = append(out, handoffOfferInboxWire{
+	for _, row := range rows {
+		o := row.SessionHandoffOffer
+		rev := ""
+		if row.ConfirmedTakeToken != "" {
+			rev = handoffTakeRev(row.ConfirmedTakeToken)
+		}
+		wire := handoffOfferInboxWire{
 			handoffOfferWire:  handoffOfferDTO(o, keys[o.RecipientMembershipID]),
 			OwnerUserKey:      keys[o.OwnerMembershipID],
-			Prompt:            a.open(r.Context(), o),
 			SourceSessionKind: o.SourceSessionKind,
-			TakeRev:           a.takeRevOf(r.Context(), o, mv),
-		})
-	}
-	// A take whose offer the inbox no longer lists (unshared or archived) would otherwise pin
-	// it with no way back for anyone. It is shown for the give-back only: no body, no
-	// coordinates to launch from.
-	for _, o := range recoverable {
-		d := handoffOfferDTO(o, keys[o.RecipientMembershipID])
-		d.Branch, d.RepoRemote, d.HeadSha = "", "", ""
-		out = append(out, handoffOfferInboxWire{
-			handoffOfferWire:  d,
-			OwnerUserKey:      keys[o.OwnerMembershipID],
-			SourceSessionKind: o.SourceSessionKind,
-			TakeRev:           a.takeRevOf(r.Context(), o, mv),
-			RecoveryOnly:      true,
-		})
+			TakeRev:           rev,
+			RecoveryOnly:      row.RecoveryOnly,
+		}
+		if row.RecoveryOnly {
+			// A take whose offer the inbox no longer lists (unshared or archived) would otherwise
+			// pin it with no way back for anyone. It is shown for the give-back only: no body, no
+			// coordinates to launch from.
+			wire.Branch, wire.RepoRemote, wire.HeadSha = "", "", ""
+		} else {
+			wire.Prompt = a.open(r.Context(), o)
+		}
+		out = append(out, wire)
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	writeJSON(w, http.StatusOK, map[string]any{"offers": out})
-}
-
-// takeRevOf is the TakeRev of the recipient's confirmed take on o, "" when none holds it.
-func (a sessionHandoffAPI) takeRevOf(ctx context.Context, o store.SessionHandoffOffer, mv store.MembershipView) string {
-	if o.TakeConfirmedAt == "" {
-		return ""
-	}
-	token, held, err := a.mgr.store.ConfirmedSessionHandoffTake(ctx, o.ID, mv.MembershipID)
-	if err != nil || !held {
-		return ""
-	}
-	return handoffTakeRev(token)
 }
 
 func (a sessionHandoffAPI) userKeys(ctx context.Context, tenantID string) map[string]string {
@@ -577,12 +562,29 @@ func (a sessionHandoffAPI) writeUndecidable(w http.ResponseWriter, ctx context.C
 		status = o.Status
 	}
 	if status == "pending" {
+		take := store.HandoffTakeState(o, time.Now())
+		if take == "" && !a.launchable(ctx, o) {
+			// Unshared or archived with no take left: still pending for the sender, but nothing
+			// may launch from it any more (TakeSessionHandoffOffer).
+			writeHandoffErr(w, http.StatusConflict, "handoff_unavailable", "the handoff is no longer shared with you or its session was archived", offerStatusDetail(status))
+			return
+		}
 		d := offerStatusDetail(status)
-		d["takeState"] = store.HandoffTakeState(o, time.Now())
+		d["takeState"] = take
 		writeHandoffErr(w, http.StatusConflict, "handoff_being_taken", "the recipient is starting a session from this handoff", d)
 		return
 	}
 	writeHandoffErr(w, http.StatusConflict, "handoff_already_decided", "the handoff was already decided", offerStatusDetail(status))
+}
+
+// launchable mirrors the store's handoffLaunchable for an answer's wording: the body is there
+// and the source session is listed and not archived.
+func (a sessionHandoffAPI) launchable(ctx context.Context, o store.SessionHandoffOffer) bool {
+	if o.Ciphertext == "" {
+		return false
+	}
+	c, ok, err := a.mgr.store.GetSharedSessionCatalog(ctx, o.CatalogID)
+	return err == nil && ok && !c.Archived
 }
 
 // offerStatusDetail names the offer's status in an error. The Console reads offerStatus:

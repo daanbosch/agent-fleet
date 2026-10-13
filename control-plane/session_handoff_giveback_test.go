@@ -523,3 +523,93 @@ func TestHandoffLateReportAfterTheSourceIsDeleted(t *testing.T) {
 		})
 	})
 }
+
+// receivedHookStore runs hook once, right after the received list was read from the store and
+// before the route derives anything from it: the gap a second read would race.
+type receivedHookStore struct {
+	store.Store
+	once sync.Once
+	hook func()
+}
+
+func (s *receivedHookStore) ListReceivedSessionHandoffOffers(ctx context.Context, membershipID string) ([]store.ReceivedHandoffOffer, error) {
+	rows, err := s.Store.ListReceivedSessionHandoffOffers(ctx, membershipID)
+	s.once.Do(s.hook)
+	return rows, err
+}
+
+// TestHandoffReceivedRevisionNamesTheRowsTake (review F2-R2): the inbox row read under take A,
+// with A given back and B confirmed (and gone unknown) before the answer is built, carries A's
+// revision, so the give-back it leads to is refused as stale instead of releasing B.
+func TestHandoffReceivedRevisionNamesTheRowsTake(t *testing.T) {
+	handoffDialects(t, func(t *testing.T, h *handoffRecovery) {
+		ctx := context.Background()
+		h.agent.set("drop", "old")
+		_ = h.create(h.mustTake())
+		h.ageTake()
+		old := time.Now().UTC().Add(-store.HandoffTakeWindow - time.Minute).Format(time.RFC3339)
+		b := h.members["b"]
+		h.mgr.store = &receivedHookStore{Store: h.st, hook: func() {
+			a, held, err := h.st.ConfirmedSessionHandoffTake(ctx, h.offer, b)
+			if err != nil || !held {
+				t.Errorf("A: held=%v err=%v", held, err)
+				return
+			}
+			if ok, err := h.st.GiveBackUnknownSessionHandoffTake(ctx, h.offer, b, a, time.Now()); err != nil || !ok {
+				t.Errorf("give back A: ok=%v err=%v", ok, err)
+			}
+			if ok, err := h.st.TakeSessionHandoffOffer(ctx, h.offer, b, "B", old); err != nil || !ok {
+				t.Errorf("take B: ok=%v err=%v", ok, err)
+			}
+			if ok, err := h.st.ConfirmSessionHandoffTake(ctx, h.offer, b, "B", old); err != nil || !ok {
+				t.Errorf("confirm B: ok=%v err=%v", ok, err)
+			}
+		}}
+		body := h.confirmed() // the received answer whose row was read under A
+		if body["takeRev"] == nil || body["takeRev"] == handoffTakeRev("B") {
+			t.Fatalf("the row read under A carries %v, want A's revision", body["takeRev"])
+		}
+		h.requireTakeState(h.giveBack("b", body), "handoff_give_back_stale", "unknown")
+		if token, held, _ := h.st.ConfirmedSessionHandoffTake(ctx, h.offer, b); !held || token != "B" {
+			t.Fatalf("B was released by a give-back confirmed against A: held=%v token=%q", held, token)
+		}
+		h.requireCode(h.giveBack("b", h.confirmed()), http.StatusOK, "")
+	})
+}
+
+// TestHandoffRecoveryRowNeverLaunches (review F5): an archived offer whose take is confirmed is
+// a recovery row; a Console that ignores recoveryOnly (an older tab) presses launch on it, the
+// reconcile finds nothing was created and gives the take back, and no new take is handed out:
+// nothing launches.
+func TestHandoffRecoveryRowNeverLaunches(t *testing.T) {
+	handoffDialects(t, func(t *testing.T, h *handoffRecovery) {
+		ctx := context.Background()
+		h.agent.set("drop", "agent") // nothing created, the key reserved: abandon answers not_created
+		_ = h.create(h.mustTake())
+		h.ageTake()
+		cats, err := h.st.ListSharedSessionCatalogByOwner(ctx, h.members["a"])
+		if err != nil || len(cats) != 1 {
+			t.Fatalf("catalog = %v err=%v", cats, err)
+		}
+		cats[0].Archived = true
+		if err := h.st.ReplaceSharedSessionCatalog(ctx, "ws-a", h.members["a"], cats); err != nil {
+			t.Fatal(err)
+		}
+		if row := h.inboxRow(); row == nil || row["recoveryOnly"] != true || row["prompt"] != "" {
+			t.Fatalf("the inbox row is %v, want a recovery row", row)
+		}
+		h.agent.set("ok", "agent")
+		rec, out := h.take() // an old Console's press: body {}
+		h.requireCode(rec, http.StatusConflict, "handoff_unavailable")
+		if out.Token != "" {
+			t.Fatalf("a recovery row yielded a launch token: %s", rec.Body.String())
+		}
+		if o := h.row(); o.Status != "pending" || o.TakenAt != "" {
+			t.Fatalf("after the press: %+v, want pending and untaken", o)
+		}
+		if h.agent.count() != 0 {
+			t.Fatalf("sessions=%d, want none", h.agent.count())
+		}
+		h.requireCode(h.withdraw(), http.StatusOK, "")
+	})
+}

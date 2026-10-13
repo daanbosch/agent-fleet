@@ -178,19 +178,27 @@ func TestHandoffRecoverableTakesOutliveUnshareAndArchive(t *testing.T) {
 			old := time.Now().UTC().Add(-HandoffTakeWindow - time.Minute).Format(time.RFC3339)
 			count := func(what string, inbox, recovery int) {
 				t.Helper()
-				in, err := st.ListSessionHandoffOffersByRecipient(ctx, f.recipient.ID)
+				rows, err := st.ListReceivedSessionHandoffOffers(ctx, f.recipient.ID)
 				if err != nil {
 					t.Fatal(err)
 				}
-				rec, err := st.ListRecoverableSessionHandoffTakes(ctx, f.recipient.ID)
+				in, rec := 0, 0
+				for _, r := range rows {
+					if r.RecoveryOnly {
+						rec++
+					} else {
+						in++
+					}
+				}
+				legacy, err := st.ListSessionHandoffOffersByRecipient(ctx, f.recipient.ID)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(in) != inbox || len(rec) != recovery {
-					t.Fatalf("%s: inbox=%d recovery=%d, want %d and %d", what, len(in), len(rec), inbox, recovery)
+				if in != inbox || rec != recovery || len(legacy) != inbox {
+					t.Fatalf("%s: inbox=%d (legacy %d) recovery=%d, want %d and %d", what, in, len(legacy), rec, inbox, recovery)
 				}
-				if other, _ := st.ListRecoverableSessionHandoffTakes(ctx, f.other.ID); len(other) != 0 {
-					t.Fatalf("%s: another member's recovery list holds %d", what, len(other))
+				if other, _ := st.ListReceivedSessionHandoffOffers(ctx, f.other.ID); len(other) != 0 {
+					t.Fatalf("%s: another member's received list holds %d", what, len(other))
 				}
 			}
 			o := f.offer(t, "")
@@ -208,6 +216,15 @@ func TestHandoffRecoverableTakesOutliveUnshareAndArchive(t *testing.T) {
 				t.Fatal(err)
 			}
 			count("confirmed, archived", 0, 1)
+			// A recovery row never yields a launch (review F5): with the take gone (as after a
+			// reconcile's not_created), a new take of the archived offer is refused.
+			if ok, err := st.ReleaseSessionHandoffOffer(ctx, o.ID, f.recipient.ID, "tok"); err != nil || !ok {
+				t.Fatalf("release: ok=%v err=%v", ok, err)
+			}
+			if ok, err := st.TakeSessionHandoffOffer(ctx, o.ID, f.recipient.ID, "fresh", NowTS()); err != nil || ok {
+				t.Fatalf("an archived offer was taken afresh: ok=%v err=%v", ok, err)
+			}
+			f.confirmedTakeRaw(t, o, "tok", old)
 			if ok, err := st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, "tok", time.Now()); err != nil || !ok {
 				t.Fatalf("give back after archive: ok=%v err=%v", ok, err)
 			}
@@ -249,6 +266,60 @@ func TestHandoffRecoverableTakesOutliveUnshareAndArchive(t *testing.T) {
 			count("given back, unshared", 0, 0)
 			if got, _, _ := st.GetSessionHandoffOffer(ctx, u2.ID); got.Status != "expired" {
 				t.Fatalf("after giving back an unshared offer: %+v, want expired", got)
+			}
+		})
+	}
+}
+
+// confirmedTakeRaw puts a confirmed take on o directly, for an offer TakeSessionHandoffOffer
+// rightly refuses (archived): the state a take confirmed before the archive leaves behind.
+func (f handoffFixture) confirmedTakeRaw(t *testing.T, o SessionHandoffOffer, token, at string) {
+	t.Helper()
+	if _, err := f.st.DB().ExecContext(context.Background(),
+		`UPDATE session_handoff_offer SET take_token=?, taken_at=?, take_confirmed_at=? WHERE id=?`, token, at, at, o.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The received list derives each row's take from the row itself (review F2-R2): the token comes
+// from the same SELECT, so a row read under take A carries A's token even if B replaced A
+// right after, and only a confirmed take's token is read.
+func TestHandoffReceivedRowCarriesItsOwnTake(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range inboxStores(t) {
+		t.Run(name, func(t *testing.T) {
+			f := newHandoffFixtureOn(t, st)
+			old := time.Now().UTC().Add(-HandoffTakeWindow - time.Minute).Format(time.RFC3339)
+			o := f.offer(t, "")
+			if _, err := st.CreateSessionHandoffOffer(ctx, o); err != nil {
+				t.Fatal(err)
+			}
+			token := func() string {
+				t.Helper()
+				rows, err := st.ListReceivedSessionHandoffOffers(ctx, f.recipient.ID)
+				if err != nil || len(rows) != 1 {
+					t.Fatalf("received = %v err=%v", rows, err)
+				}
+				return rows[0].ConfirmedTakeToken
+			}
+			if _, err := st.TakeSessionHandoffOffer(ctx, o.ID, f.recipient.ID, "u", NowTS()); err != nil {
+				t.Fatal(err)
+			}
+			if tok := token(); tok != "" {
+				t.Fatalf("an unconfirmed take's token was read: %q", tok)
+			}
+			_, _ = st.ReleaseSessionHandoffOffer(ctx, o.ID, f.recipient.ID, "u")
+			f.confirmedTake(t, o, "A", old)
+			rows, _ := st.ListReceivedSessionHandoffOffers(ctx, f.recipient.ID)
+			if _, err := st.GiveBackUnknownSessionHandoffTake(ctx, o.ID, f.recipient.ID, "A", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			f.confirmedTake(t, o, "B", old)
+			if rows[0].ConfirmedTakeToken != "A" || rows[0].TakeConfirmedAt != old {
+				t.Fatalf("the row read under A carries %q", rows[0].ConfirmedTakeToken)
+			}
+			if tok := token(); tok != "B" {
+				t.Fatalf("a fresh read carries %q, want B", tok)
 			}
 		})
 	}

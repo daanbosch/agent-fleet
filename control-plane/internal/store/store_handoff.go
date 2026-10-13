@@ -183,8 +183,9 @@ func (s *SQL) TransitionSessionHandoffOffer(ctx context.Context, id, from, to, d
 }
 
 // TakeSessionHandoffOffer reserves a pending offer for its recipient before the launch
-// (issue #2020). taken=false means it is no longer pending, has run past its deadline, or
-// a take still holds it. Together with the guard on TransitionSessionHandoffOffer this makes
+// (issue #2020). taken=false means it is no longer pending, has run past its deadline, is no
+// longer launchable (unshared or archived: a recovery row must never yield a launch, whatever
+// a Console renders), or a take still holds it. Together with the guard on TransitionSessionHandoffOffer this makes
 // the sender's withdraw and the recipient's take exclusive: whichever lands first wins, the
 // other changes nothing (ADR 0057 decision 6).
 func (s *SQL) TakeSessionHandoffOffer(ctx context.Context, id, recipientMembershipID, token, now string) (bool, error) {
@@ -192,7 +193,7 @@ func (s *SQL) TakeSessionHandoffOffer(ctx context.Context, id, recipientMembersh
 		return false, nil
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE session_handoff_offer SET take_token=?,taken_at=?,take_confirmed_at=''
-		WHERE id=? AND recipient_membership_id=? AND status='pending' AND expires_at>?`+handoffNotHeld,
+		WHERE id=? AND recipient_membership_id=? AND status='pending' AND expires_at>?`+handoffLaunchable+handoffNotHeld,
 		token, now, id, recipientMembershipID, now, handoffTakeStale())
 	if err != nil {
 		return false, err
@@ -338,28 +339,57 @@ func (s *SQL) GiveBackUnknownSessionHandoffTake(ctx context.Context, id, recipie
 	return n == 1, err
 }
 
-// ListRecoverableSessionHandoffTakes returns the recipient's pending offers that a confirmed take
-// of theirs still holds although the inbox no longer lists them: the share was revoked (body
-// erased) or the source session archived. Nothing else can release such a take — the sender's
-// withdraw and expiry wait for it — so the recipient must still see it to give it back
-// (issue #2058). The caller shows them without body or coordinates, and nothing launches
-// from them.
-func (s *SQL) ListRecoverableSessionHandoffTakes(ctx context.Context, membershipID string) ([]SessionHandoffOffer, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+handoffOfferCols+` FROM session_handoff_offer
-		WHERE recipient_membership_id=? AND status='pending' AND take_token<>'' AND take_confirmed_at<>''
-		  AND (ciphertext='' OR NOT EXISTS (SELECT 1 FROM shared_session_catalog c
-		              WHERE c.id=session_handoff_offer.catalog_id AND c.archived=0))
+// handoffLaunchable is the condition "the recipient can still launch from this offer": its body
+// is there (not erased by an unshare) and its source session is not archived. It is the inbox's
+// own filter, so a new take is never handed out for an offer the inbox does not show.
+const handoffLaunchable = ` AND ciphertext<>'' AND EXISTS (SELECT 1 FROM shared_session_catalog c
+		WHERE c.id=session_handoff_offer.catalog_id AND c.archived=0)`
+
+// ReceivedHandoffOffer is one row of the recipient's received list. ConfirmedTakeToken is the
+// token of the recipient's confirmed take as read in the same SELECT as the row, so a revision
+// derived from it names the take the row shows and never a later one; it is "" when no
+// confirmed take holds the offer, and it never leaves the CP.
+type ReceivedHandoffOffer struct {
+	SessionHandoffOffer
+	// RecoveryOnly: listed only because the recipient's confirmed take still holds an offer the
+	// inbox would otherwise drop (unshared or archived).
+	RecoveryOnly       bool
+	ConfirmedTakeToken string
+}
+
+// ListReceivedSessionHandoffOffers is the recipient's received list in one snapshot: the inbox's
+// offers (ListSessionHandoffOffersByRecipient's filter) plus, as recovery rows, pending offers
+// a confirmed take of theirs still holds although the share was revoked (body erased) or the
+// source session archived. Nothing else can release such a take — the sender's withdraw and
+// expiry wait for it — so the recipient must still see it to give it back (issue #2058). The
+// caller shows recovery rows without body or coordinates, and TakeSessionHandoffOffer never
+// hands out a launch for them.
+func (s *SQL) ListReceivedSessionHandoffOffers(ctx context.Context, membershipID string) ([]ReceivedHandoffOffer, error) {
+	launchable := `(1=1` + handoffLaunchable + `)`
+	rows, err := s.db.QueryContext(ctx, `SELECT `+handoffOfferCols+`,
+		CASE WHEN `+launchable+` THEN 0 ELSE 1 END,
+		CASE WHEN take_confirmed_at<>'' THEN take_token ELSE '' END
+		FROM session_handoff_offer
+		WHERE recipient_membership_id=? AND status='pending'
+		  AND (`+launchable+` OR (take_token<>'' AND take_confirmed_at<>''))
 		ORDER BY created_at DESC`, membershipID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []SessionHandoffOffer{}
+	out := []ReceivedHandoffOffer{}
 	for rows.Next() {
-		r, _, err := scanHandoffOffer(rows)
-		if err != nil {
+		var r ReceivedHandoffOffer
+		var recovery int
+		o := &r.SessionHandoffOffer
+		if err := rows.Scan(&o.ID, &o.TenantID, &o.CatalogID, &o.OwnerMembershipID, &o.RecipientMembershipID,
+			&o.Title, &o.Ciphertext, &o.KeyRef, &o.RepoRemote, &o.Branch, &o.HeadSha,
+			&o.SourceSessionName, &o.SourceSessionKind, &o.Status, &o.CreatedAt, &o.ExpiresAt,
+			&o.DecidedAt, &o.AcceptedSessionName, &o.TakenAt, &o.TakeConfirmedAt,
+			&recovery, &r.ConfirmedTakeToken); err != nil {
 			return nil, err
 		}
+		r.RecoveryOnly = recovery == 1
 		out = append(out, r)
 	}
 	return out, rows.Err()
