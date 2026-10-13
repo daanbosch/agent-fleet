@@ -40,6 +40,12 @@ describe("i18n runtime", () => {
     expect(tMaybe("err.quota_sessions")).toBe(en["err.quota_sessions"]);
   });
 
+  it("has an actionable message for the title_empty code (model returned no title)", () => {
+    // HandleSuggestTitle answers 422 title_empty; errText shows err.<code>.
+    expect(ja["err.title_empty"]).toBeTruthy();
+    expect(en["err.title_empty"]).toBeTruthy();
+  });
+
   it("exposes ja + en as supported locales", () => {
     expect(SUPPORTED_LOCALES).toContain("ja");
     expect(SUPPORTED_LOCALES).toContain("en");

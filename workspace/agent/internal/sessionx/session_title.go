@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -41,10 +42,13 @@ const (
 	// mid-turn/mid-tool-call snapshot (claude appends the assistant line, then
 	// tool_use/tool_result lines, in quick succession within one logical turn).
 	titleIdleThreshold = 45 * time.Second
-	// titleGenBackoff bounds how often a PERSISTENTLY failing generation (bad model
-	// name, CLI hiccup, ...) is retried — without it, a poll every 1.2-3s would retry
-	// on literally every tick forever.
-	titleGenBackoff = 5 * time.Minute
+	// titleGenBackoff is the first wait after a failed automatic generation; each further
+	// consecutive failure doubles it up to titleGenBackoffMax. Without a wait, a poll every
+	// 1.2-3s would retry on every tick forever; without growth, a transcript the model will not
+	// title (a content-dependent refusal) cost one call every 5 minutes for as long as the
+	// Console stayed open (#2061).
+	titleGenBackoff    = 5 * time.Minute
+	titleGenBackoffMax = 2 * time.Hour
 	// SyncSuggestBudget bounds a suggestion the Console waits for in one silent request: the
 	// AWS ingress drops a request that has sent no byte for idle_timeout.timeout_seconds (60 s,
 	// deploy/aws/ecs/cfn/30-ingress.yaml), so a model answering at 59 s succeeded here and
@@ -57,9 +61,10 @@ const (
 	autoTitleGenTimeout = 60 * time.Second
 )
 
-// titleGenState tracks, per session name, whether a generation is currently running
-// and (on failure) when the next attempt may start. In-memory only — reset on Agent
-// restart, which just means one extra attempt after a restart; harmless.
+// titleGenState tracks, per session name, whether a generation is currently running,
+// when the next automatic attempt may start after failures, and how many turns the
+// conversation had when it last failed. In-memory only — reset on Agent restart, which just
+// means one extra attempt after a restart; harmless.
 var (
 	titleGenMu    sync.Mutex
 	titleGenState = map[string]titleGenEntry{}
@@ -68,6 +73,8 @@ var (
 type titleGenEntry struct {
 	inFlight    bool
 	nextAttempt time.Time
+	fails       int // consecutive automatic failures; sets the backoff length
+	failTurns   int // conversation size at the last failure
 }
 
 // titleGenReady is the cheap (no parse) pre-check called before the expensive full-
@@ -80,14 +87,33 @@ func titleGenReady(name string) bool {
 	return !e.inFlight && time.Now().After(e.nextAttempt)
 }
 
-// titleGenClaim atomically re-checks + claims, closing the race between two
-// concurrent polls (the Console's 1.2s tick can overlap a slow LLM call) both
-// passing titleGenReady and both spawning a generation.
-func titleGenClaim(name string) bool {
+// titleGenClaim atomically re-checks + claims for the automatic trigger, closing the race
+// between two concurrent polls (the Console's 1.2s tick can overlap a slow LLM call) both
+// passing titleGenReady and both spawning a generation. A conversation that has grown since
+// the last failure starts the backoff over: new turns are new input for the model.
+func titleGenClaim(name string, turns int) bool {
 	titleGenMu.Lock()
 	defer titleGenMu.Unlock()
 	e := titleGenState[name]
 	if e.inFlight || !time.Now().After(e.nextAttempt) {
+		return false
+	}
+	if turns > e.failTurns {
+		e.fails = 0
+	}
+	e.inFlight = true
+	titleGenState[name] = e
+	return true
+}
+
+// titleGenClaimManual claims for a user's button press. It refuses only a generation that is
+// really running: the failure backoff throttles the automatic trigger, and a person asking
+// again must never be told "already in progress" about a wait they cannot see.
+func titleGenClaimManual(name string) bool {
+	titleGenMu.Lock()
+	defer titleGenMu.Unlock()
+	e := titleGenState[name]
+	if e.inFlight {
 		return false
 	}
 	e.inFlight = true
@@ -95,13 +121,35 @@ func titleGenClaim(name string) bool {
 	return true
 }
 
-func titleGenDone(name string, ok bool) {
+// titleGenDone releases an automatic claim; a failure doubles the wait (capped).
+func titleGenDone(name string, ok bool, turns int) {
 	titleGenMu.Lock()
 	defer titleGenMu.Unlock()
 	e := titleGenState[name]
 	e.inFlight = false
-	if !ok {
-		e.nextAttempt = time.Now().Add(titleGenBackoff)
+	if ok {
+		e.fails, e.nextAttempt = 0, time.Time{}
+	} else {
+		wait := titleGenBackoff
+		for i := 0; i < e.fails && wait < titleGenBackoffMax; i++ {
+			wait *= 2
+		}
+		e.fails++
+		e.failTurns = turns
+		e.nextAttempt = time.Now().Add(min(wait, titleGenBackoffMax))
+	}
+	titleGenState[name] = e
+}
+
+// titleGenReleaseManual releases a manual claim. A success clears the backoff (the model can
+// title this conversation after all); a failure leaves the automatic schedule untouched.
+func titleGenReleaseManual(name string, ok bool) {
+	titleGenMu.Lock()
+	defer titleGenMu.Unlock()
+	e := titleGenState[name]
+	e.inFlight = false
+	if ok {
+		e.fails, e.nextAttempt = 0, time.Time{}
 	}
 	titleGenState[name] = e
 }
@@ -113,10 +161,11 @@ func titleGenDone(name string, ok bool) {
 // checked the cheap session.Meta fields (Title == "", SuggestedTitle == "",
 // !SuggestedTitleDismissed) and autoTitleSuggestEnabled() before computing turns.
 func maybeSuggestTitle(name string, turns []transcript.Turn, idleFor time.Duration) {
-	if len(withoutStudioPersona(turns)) < minTitleSuggestTurns || idleFor < titleIdleThreshold {
+	n := len(withoutStudioPersona(turns))
+	if n < minTitleSuggestTurns || idleFor < titleIdleThreshold {
 		return
 	}
-	if !titleGenClaim(name) {
+	if !titleGenClaim(name, n) {
 		return
 	}
 	go generateSessionTitle(name, turns)
@@ -128,14 +177,20 @@ func maybeSuggestTitle(name string, turns []transcript.Turn, idleFor time.Durati
 // already have been resolved.
 func generateSessionTitle(name string, turns []transcript.Turn) {
 	ok := false
-	defer func() { titleGenDone(name, ok) }()
+	nturns := len(withoutStudioPersona(turns))
+	defer func() { titleGenDone(name, ok, nturns) }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), autoTitleGenTimeout)
 	defer cancel()
 	ctx = usagex.WithTag(ctx, usagex.Tag{Feature: usagex.FeatureTitleSession, Trigger: usagex.TriggerAuto, Ref: name})
 	title, err := titleSuggestLLM(ctx, turns)
 	if err != nil || title == "" {
-		return // ok stays false -> backoff before the next attempt
+		// ok stays false -> backoff before the next attempt. The error text is the CLI's, never
+		// the conversation; an empty title is already logged with the reply length.
+		if err != nil {
+			log.Printf("title: automatic suggestion for %s failed: %v", name, err)
+		}
+		return
 	}
 	ok = true
 
@@ -210,7 +265,12 @@ func runTitleSuggestLLM(ctx context.Context, turns []transcript.Turn) (string, e
 	if err != nil {
 		return "", fmt.Errorf("title generation failed: %w", err)
 	}
-	return CleanSuggestedTitle(reply), nil
+	title := CleanSuggestedTitle(reply)
+	if title == "" {
+		// Length only: the reply may quote the conversation.
+		log.Printf("title: model reply cleaned to empty (reply length %d bytes)", len(reply))
+	}
+	return title, nil
 }
 
 const (
@@ -732,21 +792,23 @@ func HandleAcceptSuggestedTitle(w http.ResponseWriter, r *http.Request) {
 var (
 	errNoTitleContent = errors.New("not enough conversation yet")
 	errTitleGenBusy   = errors.New("a title generation is already in progress")
+	// errTitleNoUsable: the model answered but nothing usable was left of the reply (empty, or
+	// all preamble/labels) — distinct from a CLI failure so the Console can say so.
+	errTitleNoUsable = errors.New("title generation produced no usable title")
 )
 
-// generateTitleNow runs the headless LLM synchronously under the shared in-flight/
-// backoff guard (titleGenClaim/titleGenDone) used by the automatic trigger too, so
-// a manual request and a concurrent automatic one can't double-fire for the same
-// session.
+// generateTitleNow runs the headless LLM synchronously under the in-flight guard shared
+// with the automatic trigger, so a manual request and a concurrent automatic one can't
+// double-fire for the same session. It does not honour the automatic failure backoff.
 func generateTitleNow(ctx context.Context, name string, turns []transcript.Turn, item *session.WorkItemRef) (string, error) {
 	if len(withoutStudioPersona(turns)) == 0 {
 		return "", errNoTitleContent
 	}
-	if !titleGenClaim(name) {
+	if !titleGenClaimManual(name) {
 		return "", errTitleGenBusy
 	}
 	succeeded := false
-	defer func() { titleGenDone(name, succeeded) }()
+	defer func() { titleGenReleaseManual(name, succeeded) }()
 
 	ctx = usagex.WithTag(ctx, usagex.Tag{Feature: usagex.FeatureTitleSession, Trigger: usagex.TriggerManual, Ref: name})
 	title, err := titleSuggestLLM(ctx, turns)
@@ -755,8 +817,8 @@ func generateTitleNow(ctx context.Context, name string, turns []transcript.Turn,
 	}
 	if title == "" {
 		// The call succeeded but the reply was all preamble/label (CleanSuggestedTitle
-		// dropped every line) — a plain failure, not a nil-wrapping %!w(<nil>).
-		return "", errors.New("title generation produced no usable title")
+		// dropped every line).
+		return "", errTitleNoUsable
 	}
 	succeeded = true
 	return withWorkItemKey(title, item), nil
@@ -768,6 +830,8 @@ func writeTitleGenErr(w http.ResponseWriter, err error) {
 		httpx.WriteErr(w, http.StatusBadRequest, "no_content", "not enough conversation yet to suggest a title")
 	case errors.Is(err, errTitleGenBusy):
 		httpx.WriteErr(w, http.StatusConflict, "busy", "a title generation is already in progress")
+	case errors.Is(err, errTitleNoUsable):
+		httpx.WriteErr(w, http.StatusUnprocessableEntity, "title_empty", "the model returned no usable title")
 	default:
 		httpx.WriteErr(w, http.StatusInternalServerError, "generation_failed", "title generation failed")
 	}

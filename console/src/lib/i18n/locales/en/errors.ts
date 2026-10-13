@@ -205,6 +205,7 @@ export const errors: Record<keyof typeof jaErrors, string> = {
   "err.fork_bad_anchor": "That branch point can't be used. Reload the chat and try again.",
   "err.title_feature_disabled": "This AI feature is off (turn it on under \"Features that use AI assistance\" in Settings > AI assistance).",
   "err.title_no_content": "Not enough conversation yet (try again after a few exchanges).",
+  "err.title_empty": "The model returned no usable title for this conversation (it may have declined this content). Type a title by hand instead.",
   "err.translate_disabled": "Answer translation is off (turn it on in Settings > AI assistance).",
   "err.translate_empty": "There is no text to translate.",
   "err.translate_too_long": "This answer is too long to translate.",

@@ -203,6 +203,7 @@ export const errors = {
   "err.fork_bad_anchor": "この分岐点は使えません。チャットを読み込み直してからやり直してください",
   "err.title_feature_disabled": "この AI 補助機能がオフです（設定 > AI 補助の「AI 補助生成を使う機能」でオンにしてください）",
   "err.title_no_content": "会話がまだ足りません（数往復してから試してください）",
+  "err.title_empty": "この会話からはAIが件名を返せませんでした（内容によっては応答を控えることがあります）。件名は手入力してください",
   "err.translate_disabled": "回答の翻訳がオフです（設定 > AI 補助でオンにしてください）",
   "err.translate_empty": "翻訳する本文がありません",
   "err.translate_too_long": "この回答は長すぎて翻訳できません",
