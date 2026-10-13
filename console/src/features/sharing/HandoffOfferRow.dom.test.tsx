@@ -186,3 +186,30 @@ describe("the received handoff row", () => {
     });
   });
 });
+
+// The sender is named by e-mail, as the recipient's shared-sessions list names them (#2075).
+describe("HandoffOfferRow names the sender", () => {
+  const repos = [{ name: "private", path: "/r/private" }];
+  const fromAlice = { ...offer, ownerUserKey: "alice-example-com", ownerEmail: "alice@example.com" };
+
+  it("by e-mail when the CP sends one", async () => {
+    await render(repos, false, fromAlice);
+    expect(host.textContent).toContain(t("handoff.from", { who: "alice@example.com" }));
+    expect(host.textContent).not.toContain("alice-example-com");
+  });
+
+  it("by e-mail in the give-back question and answer", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    apiJSON.mockResolvedValue({ status: "pending" });
+    await render(repos, false, { ...fromAlice, takeState: "unknown", takeRev: "rev-a" });
+    await act(async () => giveBackButton()!.click());
+    expect(confirm).toHaveBeenCalledWith(t("handoff.give_back_confirm", { who: "alice@example.com" }));
+    expect(document.body.textContent).toContain(t("handoff.give_back_done", { who: "alice@example.com" }));
+    confirm.mockRestore();
+  });
+
+  it("by the key when there is no e-mail", async () => {
+    await render(repos, false, offer);
+    expect(host.textContent).toContain(t("handoff.from", { who: "alice" }));
+  });
+});
