@@ -633,7 +633,9 @@ What it does, and what it decided:
   staging file back to the live text, gc — and the marker stays until every purged blob is verified gone. The marker also records the ref moves, so a recovery can
   tell what a crash left. `update-ref --stdin` is atomic per ref, not across refs: all refs old means nothing
   happened and the purge runs again; a mix is rolled forward to the recorded values (compare-and-set, stale
-  `.lock` files of the dead git removed); a value the purge cannot account for keeps the marker and an error.
+  `.lock` files of the dead git removed); every ref is checked against both recorded values before anything is decided, and a value the purge cannot
+  account for (a ref at neither) keeps the marker and an error. The dead git's own lock files are removed only if
+  they belong to a recorded ref, are not older than the marker and no process holds them open.
 
 What it does not do: it cannot reach copies outside the repo (exports, a session's own files), and a session
 with a shell can still read the store's files directly, as in decision 8.

@@ -911,3 +911,121 @@ func TestAgentMemoryUploadIsNeverSweptBetweenCreateAndRegister(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+func strangerCommit(t *testing.T) string {
+	t.Helper()
+	empty, _ := memoryGitRun("hash-object", "-t", "tree", "/dev/null")
+	c, err := memoryGitRun("commit-tree", "-m", "unrelated", empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// Every ref is judged against both recorded values before anything is decided: a main that was
+// moved to an unrelated commit after the crash is neither "done" nor "never ran".
+func TestAgentMemoryPurgeUnknownMainKeepsTheMarker(t *testing.T) {
+	for _, resetOthers := range []bool{false, true} {
+		f, before := partialRefFixture(t)
+		_ = f
+		if resetOthers {
+			for _, r := range []string{"refs/imports/20261004T090000Z/main", "refs/premigrate/20261004T090000Z"} {
+				if _, err := memoryGitRun("update-ref", r, before[r]); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		stranger := strangerCommit(t)
+		if _, err := memoryGitRun("update-ref", "refs/heads/"+memoryBranch, stranger); err != nil {
+			t.Fatal(err)
+		}
+		ResumeMemoryPurge()
+		if _, err := os.Stat(agentMemPurgePendingPath()); err != nil {
+			t.Fatalf("resetOthers=%v: the marker was dropped for a ref in an unknown state", resetOthers)
+		}
+		if got, _ := memoryGitRun("rev-parse", memoryBranch); got != stranger {
+			t.Fatalf("resetOthers=%v: the recovery overwrote main", resetOthers)
+		}
+		if _, err := agentMemPurgePreview(agentMemScopeProject, f.pid, "a"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := agentMemPurge(agentMemPurgeReq{Scope: agentMemScopeProject, Project: f.pid, Name: "a", Plan: "x", Confirm: "a"}); err == nil {
+			t.Fatalf("resetOthers=%v: a new purge ran over an unresolved one", resetOthers)
+		}
+	}
+}
+
+// A crash after the purge's update-ref took its locks but before it moved anything leaves the
+// refs old and the locks behind. Those are the purge's own and are cleared; the purge then runs.
+func TestAgentMemoryPurgeClearsItsOwnStaleLocks(t *testing.T) {
+	f := purgeSetup(t)
+	agentMemPurgeFault = func(s string) error {
+		if s == "marker" {
+			return errors.New("simulated crash")
+		}
+		return nil
+	}
+	t.Cleanup(func() { agentMemPurgeFault = nil })
+	if _, err := purgeDo(t, f, "a"); err == nil {
+		t.Fatal("expected the simulated crash")
+	}
+	agentMemPurgeFault = nil
+	for _, l := range []string{"refs/heads/main.lock", "refs/imports/20261004T090000Z/main.lock", "packed-refs.lock"} {
+		if err := os.WriteFile(memoryRepoDir()+"/"+l, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ResumeMemoryPurge()
+	if _, err := os.Stat(memoryRepoDir() + "/refs/heads/main.lock"); err == nil {
+		t.Fatal("the purge's own stale lock was left")
+	}
+	if _, err := os.Stat(agentMemPurgePendingPath()); err == nil {
+		t.Fatal("marker left after a verified 'nothing ran'")
+	}
+	if _, err := purgeDo(t, f, "a"); err != nil {
+		t.Fatalf("purge after clearing the locks: %v", err)
+	}
+	fsckClean(t)
+}
+
+// A lock someone else holds, or one older than the marker, is never deleted.
+func TestAgentMemoryPurgeNeverDeletesAnotherWritersLock(t *testing.T) {
+	f := purgeSetup(t)
+	agentMemPurgeFault = func(s string) error {
+		if s == "marker" {
+			return errors.New("simulated crash")
+		}
+		return nil
+	}
+	t.Cleanup(func() { agentMemPurgeFault = nil })
+	_, _ = purgeDo(t, f, "a")
+	agentMemPurgeFault = nil
+	lock := memoryRepoDir() + "/refs/heads/main.lock"
+
+	// Held open by a live process (here, this one).
+	held, err := os.OpenFile(lock, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ResumeMemoryPurge()
+	if _, err := os.Stat(lock); err != nil {
+		t.Fatal("a lock with a live holder was deleted")
+	}
+	if _, err := os.Stat(agentMemPurgePendingPath()); err != nil {
+		t.Fatal("marker dropped while a foreign lock stands")
+	}
+	_ = held.Close()
+
+	// Closed, but older than the marker: not made by this purge.
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(lock, old, old); err != nil {
+		t.Fatal(err)
+	}
+	ResumeMemoryPurge()
+	if _, err := os.Stat(lock); err != nil {
+		t.Fatal("a lock older than the marker was deleted")
+	}
+	if _, err := os.Stat(agentMemPurgePendingPath()); err != nil {
+		t.Fatal("marker dropped while a foreign lock stands")
+	}
+}

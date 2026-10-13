@@ -459,11 +459,16 @@ func agentMemPurgeResume() error {
 	}
 	var p agentMemPurgePending
 	_ = json.Unmarshal(b, &p) // unreadable: still reset the index and collect
-	if err := agentMemPurgeSettleRefs(p.Refs); err != nil {
-		return err
-	}
-	if len(p.Refs) > 0 && !agentMemPurgeRefsMoved(p.Refs) {
-		return os.Remove(agentMemPurgePendingPath())
+	if len(p.Refs) > 0 {
+		moved, err := agentMemPurgeSettleRefs(p.Refs)
+		if err != nil {
+			return err
+		}
+		if !moved {
+			// Every ref is verified to be at its old value and the purge's own stale locks are
+			// gone: nothing ran, and the purge can be run again.
+			return os.Remove(agentMemPurgePendingPath())
+		}
 	}
 	if _, _, err := agentMemPurgeFinish(p); err != nil {
 		return err
@@ -846,58 +851,130 @@ func agentMemPurgeDescends(cur, anc string) bool {
 	return err == nil
 }
 
-// agentMemPurgeRefsMoved says whether any recorded ref is at its new value.
-func agentMemPurgeRefsMoved(moves []agentMemPurgeRefMove) bool {
-	for _, m := range moves {
-		cur, _ := memoryGitRun("rev-parse", "--verify", "--quiet", m.Name)
-		if cur != m.Old && (cur == m.New || (m.New != "" && cur != "" && agentMemPurgeDescends(cur, m.New))) {
-			return true
-		}
+// Ref states in a recovery.
+const (
+	purgeRefOld = iota
+	purgeRefNew
+	purgeRefUnknown
+)
+
+func agentMemPurgeRefState(m agentMemPurgeRefMove) int {
+	cur, _ := memoryGitRun("rev-parse", "--verify", "--quiet", m.Name)
+	switch {
+	case cur == m.New:
+		return purgeRefNew
+	case cur == m.Old:
+		return purgeRefOld
+	case m.New != "" && cur != "" && agentMemPurgeDescends(cur, m.New):
+		return purgeRefNew // writes made since the crash moved it on from the rewritten value
 	}
-	return false
+	return purgeRefUnknown
 }
 
-// agentMemPurgeSettleRefs completes a ref transaction a crash cut part-way. git update-ref
-// --stdin is atomic per ref, not across refs: a killed git can leave some refs new and the rest
-// old. All old means nothing happened (the caller drops the marker); a mix is rolled forward to the
-// recorded values, compare-and-set against the old ones; any other value is not ours to
-// overwrite and keeps the marker with an error. Callers hold the locks, so a .lock file of a dead
-// git is stale and removed.
-func agentMemPurgeSettleRefs(moves []agentMemPurgeRefMove) error {
-	if !agentMemPurgeRefsMoved(moves) {
-		return nil
-	}
-	var tx bytes.Buffer
-	tx.WriteString("start\n")
-	pending := 0
+// agentMemPurgeSettleRefs completes a ref transaction a crash cut part-way and reports whether any
+// ref had moved. git update-ref --stdin is atomic per ref, not across refs: a killed git can leave
+// some refs new and the rest old. Every ref is checked against both its recorded values first: one
+// at neither keeps the marker with an error and nothing is touched. All old means nothing ran; a
+// mix is rolled forward to the recorded values, compare-and-set against the old ones. The dead
+// git's own stale locks on the refs still to move are cleared first (agentMemPurgeClearLocks).
+func agentMemPurgeSettleRefs(moves []agentMemPurgeRefMove) (bool, error) {
+	var pending []agentMemPurgeRefMove
+	moved := false
 	for _, m := range moves {
-		cur, _ := memoryGitRun("rev-parse", "--verify", "--quiet", m.Name)
-		switch {
-		case cur == m.New:
-		case m.New != "" && cur != "" && cur != m.Old && agentMemPurgeDescends(cur, m.New):
-			// Writes made since the crash moved the ref on from the rewritten value.
-		case cur == m.Old:
-			pending++
-			_ = os.Remove(filepath.Join(memoryRepoDir(), filepath.FromSlash(m.Name)+".lock"))
-			if m.New == "" {
-				fmt.Fprintf(&tx, "delete %s %s\n", m.Name, m.Old)
-			} else {
-				fmt.Fprintf(&tx, "update %s %s %s\n", m.Name, m.New, m.Old)
-			}
+		switch agentMemPurgeRefState(m) {
+		case purgeRefNew:
+			moved = true
+		case purgeRefOld:
+			pending = append(pending, m)
 		default:
-			return memoryErrf(http.StatusInternalServerError, errCodeMemorySnapshotFailed,
+			return false, memoryErrf(http.StatusInternalServerError, errCodeMemorySnapshotFailed,
 				"an interrupted purge found a ref at an unexpected value; it was left as it is")
 		}
 	}
-	if pending == 0 {
-		return nil
+	if len(pending) == 0 {
+		return moved, nil
 	}
-	_ = os.Remove(filepath.Join(memoryRepoDir(), "packed-refs.lock"))
+	if err := agentMemPurgeClearLocks(pending); err != nil {
+		return false, err
+	}
+	if !moved {
+		return false, nil
+	}
+	var tx bytes.Buffer
+	tx.WriteString("start\n")
+	for _, m := range pending {
+		if m.New == "" {
+			fmt.Fprintf(&tx, "delete %s %s\n", m.Name, m.Old)
+		} else {
+			fmt.Fprintf(&tx, "update %s %s %s\n", m.Name, m.New, m.Old)
+		}
+	}
 	tx.WriteString("prepare\ncommit\n")
 	cmd := memoryGit("update-ref", "--stdin")
 	cmd.Stdin = &tx
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("finish moving the refs: %v: %s", err, strings.TrimSpace(string(out)))
+		return false, fmt.Errorf("finish moving the refs: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return true, nil
+}
+
+// agentMemPurgeLockHeld says whether any process has path open. A live git keeps its lock file
+// open until it renames it; a dead one's is closed. Unreadable /proc entries mean "cannot tell",
+// reported as held.
+var agentMemPurgeLockHeld = func(path string) (bool, error) {
+	pids, err := os.ReadDir("/proc")
+	if err != nil {
+		return true, err
+	}
+	for _, e := range pids {
+		if e.Name() == "" || e.Name()[0] < '0' || e.Name()[0] > '9' {
+			continue
+		}
+		fds, err := os.ReadDir(filepath.Join("/proc", e.Name(), "fd"))
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue // exited meanwhile
+			}
+			return true, err
+		}
+		for _, fd := range fds {
+			if t, err := os.Readlink(filepath.Join("/proc", e.Name(), "fd", fd.Name())); err == nil && t == path {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// agentMemPurgeClearLocks removes the lock files this purge's own update-ref left. A lock is ours
+// only if it is one of the recorded refs' (or packed-refs), it is not older than the marker (which
+// is written just before the transaction), and no process holds it open; any other lock belongs to
+// someone else and is never deleted — the recovery then fails and the marker stays.
+func agentMemPurgeClearLocks(moves []agentMemPurgeRefMove) error {
+	st, err := os.Stat(agentMemPurgePendingPath())
+	if err != nil {
+		return err
+	}
+	locks := []string{filepath.Join(memoryRepoDir(), "packed-refs.lock")}
+	for _, m := range moves {
+		locks = append(locks, filepath.Join(memoryRepoDir(), filepath.FromSlash(m.Name)+".lock"))
+	}
+	for _, l := range locks {
+		info, err := os.Lstat(l)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		held, herr := agentMemPurgeLockHeld(l)
+		if herr != nil || held || info.ModTime().Before(st.ModTime()) {
+			return memoryErrf(http.StatusInternalServerError, errCodeMemorySnapshotFailed,
+				"a ref is locked by something other than the interrupted purge; it was left as it is")
+		}
+		if err := os.Remove(l); err != nil {
+			return err
+		}
 	}
 	return nil
 }
