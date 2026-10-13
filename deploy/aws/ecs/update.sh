@@ -225,6 +225,17 @@ if [ -n "$ENGINES_STACK" ]; then
   fi
 fi
 echo "      5. $STACK (30-ingress, ImageTag=$VERSION)"
+
+# --- 0) EFS backup preflight (read-only, advisory) ---------------------------------------
+# 10-data is not part of this update, so a data stack older than 0.26.0 stays without the EFS
+# backup vault and plan. Said before anything runs and again at the end, where it is not lost
+# in the deploy output. Never blocks: the upgrade itself does not touch the data stack.
+# shellcheck source=deploy/aws/ecs/efs-backup-check.sh
+. "$HERE/efs-backup-check.sh"
+# A failed read of the ingress stack is "unknown", never the default name (that could be another
+# deployment's data stack).
+DATA_STACK="$(af_efs_backup_data_stack "$STACK")" || DATA_STACK=""
+af_efs_backup_check "$DATA_STACK" "$PROFILE" "$REGION"
 # The pin only applies to the copy above. Said here, before anything runs, so a pin that would
 # otherwise do nothing is not mistaken for one that was checked.
 if [ -n "$COMFY_DIGEST" ] && { [ "$COMFY_REPAIR" != 1 ] || [ "$COMFY_PULLED" != 1 ]; }; then
@@ -711,6 +722,13 @@ if [ -n "${running// /}" ]; then
 else
   echo "No workspaces are running (the next Start picks up the new image)."
 fi
+
+case "${AF_EFS_BACKUP_VERDICT:-}" in
+  ok|skip|"") ;;
+  *) echo
+     echo "REMINDER: ${DATA_STACK:-the data stack} still has no confirmed daily EFS backup (see the warning at the top;"
+     echo "          README \"EFS backup and restore\", \"Turning it on\")." >&2 ;;
+esac
 
 if [ -n "${golden_stale// /}" ]; then
   cat <<EOF
