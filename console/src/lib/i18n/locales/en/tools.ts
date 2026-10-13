@@ -937,6 +937,7 @@ export const tools: Record<keyof typeof jaTools, string> = {
   "mem.pm_done": "Moved {n} memories",
   "mem.pm_done_skipped": "Moved {n} memories, skipped {skipped} (changed since the preview)",
   "mem.pm_stopped": "The move stopped at {name} after moving {n} memories; {pending} were not tried. {name} is now in both projects, nothing is lost: preview and move again to finish. ({error})",
+  "mem.pm_stopped_failed": "The move stopped at {name} after moving {n} memories; {pending} were not tried. {name} was not moved and is still in the old project. Nothing is lost: preview and move again to finish. ({error})",
   "mem.pm_failed": "Could not confirm the result. The preview has been re-read; run the move again to finish it, nothing is lost.",
   "mem.mi_title": "Import from muse",
   "mem.mi_intro": "Brings muse's memory into Agent Fleet memory, once: a working copy's project notes (.agents/memory), muse's own notes for a working copy (personal project), and muse's notes for every project (personal, only into your user-wide memory and only if you tick the box). Nothing is written until you confirm. A memory you forgot here is never brought back, a file the secret scan flags is skipped and listed, and a muse note never replaces an Agent Fleet memory that was saved or edited here since. A note needs no frontmatter: its name is the file name (a/b.md becomes a--b), its description is its first line, and it has no type. While the Agent Fleet memory switch is on, muse's own memory is turned off for new muse sessions.",

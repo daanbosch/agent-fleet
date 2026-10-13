@@ -32,6 +32,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/gitx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/projcfg"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 )
 
@@ -110,66 +111,105 @@ func agentMemRootGoneProbe(repos, rel string) bool {
 	return false
 }
 
-// Bounds of the search for live working copies: how deep under ~/repos a repository may sit and how
-// many directories one search reads. Past either, the answer is "incomplete" and nothing is
-// called orphaned, because a live working copy may have been missed.
-const (
-	agentMemLiveDepth  = 3
-	agentMemLiveBudget = 3000
+var (
+	// agentMemLiveBudget bounds the directories one search reads, agentMemLiveTimeout its time.
+	// Past either the answer is "incomplete" and nothing is called orphaned.
+	agentMemLiveBudget  = 20000
+	agentMemLiveTimeout = 10 * time.Second
 )
 
+// agentMemLiveSkip are directories whose content is never a working copy worth the reads.
+var agentMemLiveSkip = map[string]bool{
+	".git": true, "node_modules": true, "target": true, "dist": true, "build": true,
+	".venv": true, "__pycache__": true, ".cache": true,
+}
+
 // agentMemLiveProjects maps the working copies to their projects, by id: every directory under
-// ~/repos (nested ones and symlinked ones included, down to agentMemLiveDepth) that holds a
-// .git or .svn entry, and every session's working directory. A project with a live working
-// copy is never orphaned, whatever its recorded root says. complete=false says the search was cut
-// short by its bounds.
-func agentMemLiveProjects() (live map[string]*agentMemProject, complete bool) {
+// ~/repos with a .git or .svn entry, found at any depth, inside other working copies and behind
+// symlinks included, and every session's working directory. A project with a live working copy
+// is never orphaned, whatever its recorded root says. complete=false says something could not be
+// ruled out: a directory that could not be read, a repository whose identity could not be
+// resolved, or the budget or time of the search ran out.
+func agentMemLiveProjects() (map[string]*agentMemProject, bool) {
+	type result struct {
+		live     map[string]*agentMemProject
+		complete bool
+	}
+	done := make(chan result, 1)
+	go func() {
+		l, c := agentMemLiveSearch()
+		done <- result{l, c}
+	}()
+	select {
+	case r := <-done:
+		return r.live, r.complete
+	case <-time.After(agentMemLiveTimeout):
+		return map[string]*agentMemProject{}, false
+	}
+}
+
+func agentMemLiveSearch() (live map[string]*agentMemProject, complete bool) {
 	live = map[string]*agentMemProject{}
+	complete = true
 	add := func(dir string) {
-		if p := agentMemProjectFor(dir); p != nil && live[p.ID] == nil {
+		p := agentMemProjectFor(dir)
+		if p == nil {
+			return
+		}
+		if p.VCS == projcfg.VCSGit {
+			if _, key := agentMemGitIdentity(dir); key == "" {
+				// The id would be derived from the path, not the repository: it cannot be compared.
+				complete = false
+			}
+		}
+		if live[p.ID] == nil {
 			live[p.ID] = p
 		}
 	}
-	complete = true
-	type node struct {
-		dir   string
-		depth int
-	}
-	queue := []node{{gitx.ReposRoot(), 0}}
+	visited := map[string]bool{}
+	queue := []string{gitx.ReposRoot()}
 	reads := 0
 	for len(queue) > 0 {
-		n := queue[0]
+		dir := queue[0]
 		queue = queue[1:]
+		if real, err := filepath.EvalSymlinks(dir); err == nil {
+			if visited[real] {
+				continue
+			}
+			visited[real] = true
+		}
 		if reads++; reads > agentMemLiveBudget {
 			complete = false
 			break
 		}
-		ents, err := os.ReadDir(n.dir)
+		ents, err := os.ReadDir(dir)
 		if err != nil {
-			if n.depth == 0 {
-				complete = false
-			}
+			// Not knowing what is below is not knowing there is nothing below.
+			complete = false
 			continue
 		}
 		for _, e := range ents {
-			d := filepath.Join(n.dir, e.Name())
-			if st, err := os.Stat(d); err != nil || !st.IsDir() {
+			if agentMemLiveSkip[e.Name()] {
 				continue
 			}
-			if _, err := os.Lstat(filepath.Join(d, ".git")); err == nil {
-				add(d)
-				continue
-			}
-			if _, err := os.Lstat(filepath.Join(d, ".svn")); err == nil {
-				add(d)
-				continue
-			}
-			if n.depth+1 < agentMemLiveDepth {
-				queue = append(queue, node{d, n.depth + 1})
-			} else if sub, err := os.ReadDir(d); err != nil || len(sub) > 0 {
-				// A directory at the depth limit with content may hold a repository below it.
+			d := filepath.Join(dir, e.Name())
+			st, err := os.Stat(d)
+			switch {
+			case err != nil && !errors.Is(err, fs.ErrNotExist):
 				complete = false
+				continue
+			case err != nil || !st.IsDir():
+				continue // a dangling link or a file
 			}
+			for _, marker := range []string{".git", ".svn"} {
+				if _, err := os.Lstat(filepath.Join(d, marker)); err == nil {
+					add(d)
+					break
+				} else if !errors.Is(err, fs.ErrNotExist) {
+					complete = false
+				}
+			}
+			queue = append(queue, d)
 		}
 	}
 	for _, m := range session.ListMetas() {

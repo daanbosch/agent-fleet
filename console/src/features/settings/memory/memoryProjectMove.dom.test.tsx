@@ -179,7 +179,8 @@ describe("ProjectMovePanel", () => {
     expect(apiJSON).toHaveBeenCalledTimes(1);
   });
 
-  it("reports what a move that broke off did, and stops", async () => {
+  it("counts the batches not sent as not tried, and says a partial memory is in both projects", async () => {
+    // 120 previewed: the first batch of 50 stops at mem-1 (48 left in it), 70 are never sent.
     apiJSON.mockResolvedValueOnce({
       error: { code: "snapshot_failed", message: "the move stopped" },
       results: [
@@ -196,8 +197,30 @@ describe("ProjectMovePanel", () => {
     expect(apiJSON).toHaveBeenCalledTimes(1);
     const text = document.body.textContent ?? "";
     expect(text).toContain("stopped at mem-1");
-    expect(text).toContain("moving 1 memories");
-    expect(text).toContain("48 were not tried");
+    expect(text).toContain("after moving 1 memories");
+    expect(text).toContain("118 were not tried");
+    expect(text).toContain("mem-1 is now in both projects");
+  });
+
+  it("says a failed memory was not moved, and keeps the count of earlier batches", async () => {
+    apiJSON
+      .mockResolvedValueOnce({ results: Array.from({ length: 50 }, (_, i) => ({ name: `mem-${i}`, result: "moved" })) })
+      .mockResolvedValueOnce({
+        error: { code: "snapshot_failed", message: "the move stopped" },
+        results: [{ name: "mem-50", result: "failed" }],
+        stopped: "mem-50",
+        pending: Array.from({ length: 49 }, (_, i) => `mem-${i + 51}`),
+      });
+    await mount();
+    await pickBoth();
+    await act(async () => applyButton().click());
+    await flush();
+    expect(apiJSON).toHaveBeenCalledTimes(2);
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("after moving 50 memories");
+    expect(text).toContain("69 were not tried"); // 49 in the batch + 20 never sent
+    expect(text).toContain("mem-50 was not moved and is still in the old project");
+    expect(text).not.toContain("in both projects");
   });
 
   it("ignores a slow preview for a choice that was replaced", async () => {

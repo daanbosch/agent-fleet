@@ -102,10 +102,15 @@ export function ProjectMovePanel({ reload, onChanged }: { reload: number; onChan
         if (res?.error) {
           // A move that broke off still says what it did: finished ones are counted, the one it
           // stopped at has its copy in both projects, and the rest were not tried.
-          const pending = ((res.pending as string[] | undefined) ?? []).length;
+          // Not tried: what the Agent says it left in this batch, and every later batch not sent.
+          const results = (res.results ?? []) as MoveResultItem[];
+          const pending = ((res.pending as string[] | undefined) ?? []).length + Math.max(0, todo.length - (at + MOVE_BATCH));
+          const stopped = results.find((r) => r.name === res.stopped);
+          // Only a partial one has its copy in both projects; a failed one was never written.
+          const key = stopped?.result === "partial" ? "mem.pm_stopped" : "mem.pm_stopped_failed";
           toast(
             res.stopped
-              ? tr("mem.pm_stopped", { n: counts.moved, name: res.stopped, pending, error: errDetail(res.error) })
+              ? tr(key, { n: counts.moved, name: res.stopped, pending, error: errDetail(res.error) })
               : errDetail(res.error),
           );
           return;

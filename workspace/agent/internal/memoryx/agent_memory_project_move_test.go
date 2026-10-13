@@ -604,12 +604,6 @@ func TestAgentMemoryMoveRefusesAProjectWithANestedLiveWorktree(t *testing.T) {
 			t.Fatal("listed as orphaned")
 		}
 	}
-	// A directory deeper than the search reaches makes the answer incomplete: nothing is orphaned.
-	deep := filepath.Join(home, "repos", "d1", "d2", "d3", "d4")
-	memoryMkdirAll(t, deep)
-	if _, complete := agentMemLiveProjects(); complete {
-		t.Fatal("a search that did not reach everything must say so")
-	}
 }
 
 // A move that breaks off answers with what was done: the finished memory, the half-done one with
@@ -635,5 +629,109 @@ func TestAgentMemoryMoveStoppedAnswerCarriesTheResults(t *testing.T) {
 	}
 	if !strings.Contains(string(b), `"error"`) || !strings.Contains(string(b), "nothing was lost") {
 		t.Fatalf("the error is missing: %s", b)
+	}
+}
+
+// nestedWorktreeFixture makes a project "old" (git metadata outside ~/repos) with a memory, adds a
+// live worktree of it at repos/<rel>, removes old and returns the orphan candidate's id and the
+// target's id.
+func nestedWorktreeFixture(t *testing.T, home, rel string) (orphan, to string) {
+	t.Helper()
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	old := filepath.Join(home, "repos", "old")
+	memoryMkdirAll(t, old)
+	memoryMkdirAll(t, filepath.Join(home, "git-metadata"))
+	git(old, "init", "--quiet", "-b", "main", "--separate-git-dir="+filepath.Join(home, "git-metadata", "old"))
+	git(old, "commit", "--quiet", "--allow-empty", "-m", "init")
+	session.WriteMeta(session.Meta{Name: "claude-old", Dir: old, Kind: "claude"})
+	c := agentMemCallerT(t, "claude-old")
+	agentMemSaveN(t, c, "a", "project", time.Now())
+	nested := filepath.Join(home, "repos", filepath.FromSlash(rel))
+	memoryMkdirAll(t, filepath.Dir(nested))
+	git(old, "worktree", "add", "--quiet", "-b", "nested", nested)
+	if err := os.RemoveAll(old); err != nil {
+		t.Fatal(err)
+	}
+	if p := agentMemProjectFor(nested); p == nil || p.ID != c.Project.ID {
+		t.Fatalf("setup: the nested worktree is not the same project: %+v", p)
+	}
+	return c.Project.ID, agentMemCallerT(t, "claude-main").Project.ID
+}
+
+func assertNotOrphaned(t *testing.T, orphan, to string) {
+	t.Helper()
+	if code, _, b := moveDo(t, orphan, to, "", "a"); code != http.StatusConflict {
+		t.Fatalf("moving out of a project that may have a live working copy: %d %s", code, b)
+	}
+	out, _ := agentMemMemberProjects()
+	for _, r := range out.Projects {
+		if r.Project.ID == orphan && r.Orphaned {
+			t.Fatal("listed as orphaned")
+		}
+	}
+	if len(projectNames(t, orphan)) != 1 {
+		t.Fatal("the memory left the source")
+	}
+}
+
+// A live worktree placed inside another live repository is found: the search goes into working
+// copies too. Stopping at the first .git hid it.
+func TestAgentMemoryMoveRefusesAWorktreeInsideAnotherRepo(t *testing.T) {
+	home, _, _ := agentMemTestEnv(t)
+	orphan, to := nestedWorktreeFixture(t, home, "demo/live")
+	live, _ := agentMemLiveProjects()
+	if live[orphan] == nil {
+		t.Fatal("the worktree inside demo was not found")
+	}
+	assertNotOrphaned(t, orphan, to)
+}
+
+// A directory that cannot be read leaves the answer incomplete, so nothing is orphaned: an
+// unreadable subtree may hold the live working copy.
+func TestAgentMemoryMoveUnreadableDirectoryMakesTheSearchIncomplete(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads everything")
+	}
+	home, _, _ := agentMemTestEnv(t)
+	orphan, to := nestedWorktreeFixture(t, home, "group/live")
+	group := filepath.Join(home, "repos", "group")
+	if err := os.Chmod(group, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(group, 0o755) })
+	if _, err := os.ReadDir(group); err == nil {
+		t.Skip("directory permissions are not enforced here")
+	}
+	if _, complete := agentMemLiveProjects(); complete {
+		t.Fatal("an unreadable directory must make the search incomplete")
+	}
+	assertNotOrphaned(t, orphan, to)
+}
+
+// The budget and the time of the search are limits: past either, nothing is orphaned.
+func TestAgentMemoryLiveSearchLimits(t *testing.T) {
+	home, _, _ := agentMemTestEnv(t)
+	memoryMkdirAll(t, filepath.Join(home, "repos", "a", "b", "c"))
+	oldB, oldT := agentMemLiveBudget, agentMemLiveTimeout
+	t.Cleanup(func() { agentMemLiveBudget, agentMemLiveTimeout = oldB, oldT })
+	if _, complete := agentMemLiveProjects(); !complete {
+		t.Fatal("a small tree is searched completely")
+	}
+	agentMemLiveBudget = 2
+	if _, complete := agentMemLiveProjects(); complete {
+		t.Fatal("a search past its budget must say so")
+	}
+	agentMemLiveBudget, agentMemLiveTimeout = oldB, time.Nanosecond
+	if _, complete := agentMemLiveProjects(); complete {
+		t.Fatal("a search past its time must say so")
 	}
 }
