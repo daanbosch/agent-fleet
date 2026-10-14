@@ -919,6 +919,8 @@ export const tools: Record<keyof typeof jaTools, string> = {
   "mem.pm_title": "Move memories of a project that no longer exists",
   "mem.pm_intro": "A project is tied to the folder of its repository. If the folder was renamed, moved or cloned again, the old project keeps its memories but no session can reach them. Pick that project and the one that replaces it; nothing is written until you confirm. A memory whose name is taken in the target is skipped or renamed, never overwritten.",
   "mem.pm_none": "Every project with memories still has its working copy.",
+  "mem.pm_suggest": "{from} has memories but no working copy, and {to} is a checkout of the same repository. You can move them over.",
+  "mem.pm_suggest_review": "Review the move",
   "mem.pm_from": "Move from",
   "mem.pm_to": "Move into",
   "mem.pm_pick": "Choose a project…",

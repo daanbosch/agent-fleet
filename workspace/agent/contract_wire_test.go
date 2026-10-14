@@ -140,7 +140,7 @@ func agentContractFamilies() []contractFamily {
 			binding: agentMemProjectRowBinding,
 			tsPath:  "../../console/src/features/settings/memory/memoryTypes.ts",
 			tsName:  "ProjectRow",
-			tsKeys:  keySet("project", "count", "withheld", "orphaned", "live"),
+			tsKeys:  keySet("project", "count", "withheld", "orphaned", "live", "mergeInto"),
 			tsOnly:  map[string]string{},
 			goOnly:  map[string]string{},
 		},
@@ -283,7 +283,7 @@ var agentMemChangeViewBinding = map[string]string{
 }
 
 var agentMemProjectRowBinding = map[string]string{
-	"Project": "project", "Count": "count", "Withheld": "withheld", "Orphaned": "orphaned", "Live": "live",
+	"Project": "project", "Count": "count", "Withheld": "withheld", "Orphaned": "orphaned", "Live": "live", "MergeInto": "mergeInto",
 }
 
 var agentMemMoveItemBinding = map[string]string{

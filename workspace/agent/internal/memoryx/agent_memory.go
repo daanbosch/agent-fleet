@@ -114,6 +114,10 @@ type agentMemProject struct {
 	Root    string `json:"root"`
 	VCS     string `json:"vcs"`
 	Display string `json:"display"`
+	// Remote is the normalised origin URL ("host/owner/repo", no credentials), "" when the
+	// repository has none or it predates the field. It is not part of the project's identity: it
+	// only lets the Console suggest moving an orphan's memories into a live project (#2110).
+	Remote string `json:"remote,omitempty"`
 }
 
 // agentMemCaller is who is asking: the author of a write and the scope of a read.
@@ -180,7 +184,13 @@ func agentMemProjectWith(label, vcsDir string, run agentMemGitRunner) *agentMemP
 	if r, err := filepath.Rel(repos, root); err == nil && !strings.HasPrefix(r, "..") {
 		display = filepath.ToSlash(r)
 	}
-	return &agentMemProject{ID: agentMemProjectID(key), Root: root, VCS: vcs, Display: display}
+	p := &agentMemProject{ID: agentMemProjectID(key), Root: root, VCS: vcs, Display: display}
+	if vcs == projcfg.VCSGit {
+		if raw, err := run("remote", "get-url", "origin"); err == nil {
+			p.Remote = agentMemNormalizeRemote(raw)
+		}
+	}
+	return p
 }
 
 // agentMemGitIdentity returns the repository's main working tree (for display) and its key:
@@ -1092,19 +1102,80 @@ func agentMemForget(c agentMemCaller, req agentMemForgetReq, now time.Time) (age
 // nothing when it is there already.
 func agentMemProjectInfoChange(p agentMemProject) ([]agentMemChange, error) {
 	info := agentMemProjectInfoRel(p)
-	if _, ok, _ := agentMemReadFile(filepath.Join(agentMemDir(), filepath.FromSlash(info))); ok {
-		return nil, nil
+	old, exists, _ := agentMemReadFile(filepath.Join(agentMemDir(), filepath.FromSlash(info)))
+	if exists {
+		return agentMemProjectInfoAddRemote(info, old, p)
 	}
 	b, _ := json.MarshalIndent(p, "", "  ")
 	// The root path comes from a folder name anyone can choose; it is committed too.
 	// Raw values as well as the JSON: JSON escapes the quotes the generic rule needs.
 	if f := agentMemScanText("project", p.Root+"\n"+p.Display+"\n"+string(b)); len(f) > 0 {
-		return nil, &agentMemSecretErr{Findings: f}
+		if p.Remote == "" {
+			return nil, &agentMemSecretErr{Findings: f}
+		}
+		// The remote is a convenience: whatever in it the scan flags must not stop the first
+		// memory of the project from being saved.
+		p.Remote = ""
+		return agentMemProjectInfoChange(p)
 	}
 	return []agentMemChange{{Rel: info, Data: append(b, '\n')}}, nil
 }
 
+// agentMemProjectInfoAddRemote adds the remote to a record written before the field existed
+// (#2110) by splicing one member into the stored bytes: the fields, their order and anything a
+// newer version wrote stay exactly as they were. A record that already has a "remote" member, is
+// not the object of this project, or would fail the scan is left alone. Not worth failing a save for.
+func agentMemProjectInfoAddRemote(info string, old []byte, p agentMemProject) ([]agentMemChange, error) {
+	if p.Remote == "" || !agentMemRemoteOK(p.Remote) {
+		return nil, nil
+	}
+	var members map[string]json.RawMessage
+	if json.Unmarshal(old, &members) != nil {
+		return nil, nil
+	}
+	var id string
+	if _, has := members["remote"]; has || json.Unmarshal(members["id"], &id) != nil || id != p.ID {
+		return nil, nil
+	}
+	body := bytes.TrimRight(old, " \t\r\n")
+	if len(body) < 2 || body[len(body)-1] != '}' || len(members) == 0 {
+		return nil, nil
+	}
+	rem, _ := json.Marshal(p.Remote)
+	next := append(bytes.TrimRight(body[:len(body)-1], " \t\r\n"), []byte(",\n  \"remote\": "+string(rem)+"\n}\n")...)
+	// The raw bytes hide what a JSON escape spells (\u0067hp_…), so the decoded keys and strings
+	// of the whole record, unknown members and nesting included, are scanned too.
+	decoded, ok := agentMemJSONStrings(next)
+	if !ok || len(agentMemScanText("project", string(next)+"\n"+decoded)) > 0 {
+		return nil, nil
+	}
+	return []agentMemChange{{Rel: info, Data: next}}, nil
+}
+
+// agentMemJSONStrings joins every object key and string value of a JSON document, decoded, as the
+// token stream gives them: a key repeated in one object is not collapsed, so the earlier value is
+// scanned too. ok=false when the document does not parse.
+func agentMemJSONStrings(data []byte) (string, bool) {
+	var b strings.Builder
+	dec := json.NewDecoder(bytes.NewReader(data))
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return b.String(), true
+		}
+		if err != nil {
+			return "", false
+		}
+		if s, ok := tok.(string); ok {
+			b.WriteString(s + "\n")
+		}
+	}
+}
+
 func agentMemProjectInfoRel(p agentMemProject) string { return "projects/" + p.ID + "/project.json" }
+
+// agentMemOpProjectInfo is the op of the project.json backfill commit.
+const agentMemOpProjectInfo = "project-info"
 
 // agentMemChange is one file of a write, relative to the store (= relative to af/ in the repo).
 type agentMemChange struct {
@@ -1202,9 +1273,13 @@ func agentMemApplyLocked(changes []agentMemChange, op, memRel string, c agentMem
 			return "", fmt.Errorf("stage agent memory: %w", err)
 		}
 	}
+	trigger := memoryTriggerAgentMemory
+	if op == agentMemOpProjectInfo {
+		trigger = memoryTriggerAgentMemoryMeta
+	}
 	msg := fmt.Sprintf("agent-memory: %s %s (%s)\n\nAF-Trigger: %s\nAF-Op: %s\nAF-Memory: %s\nAF-Author-Kind: %s\nAF-Author-Session: %s\n",
 		op, memRel, now.Format(time.RFC3339),
-		memoryTriggerAgentMemory, op, agentMemRepoPrefix+"/"+memRel, c.Kind, c.Session)
+		trigger, op, agentMemRepoPrefix+"/"+memRel, c.Kind, c.Session)
 	for _, t := range extra {
 		msg += t + "\n"
 	}

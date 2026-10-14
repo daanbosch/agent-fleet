@@ -689,3 +689,34 @@ What it does, and what it decided:
 
 What it does not do: it cannot reach copies outside the repo (exports, a session's own files), and a session
 with a shell can still read the store's files directly, as in decision 8.
+
+## Note (2026-10-14): suggesting the move when a new project's remote matches an orphan's (#2110)
+
+The part the #1984 note left undone. It is a suggestion in the Console and nothing more: no move happens
+unless the member opens the usual preview and confirms it.
+
+- **`project.json` gains `remote`.** It is the repository's `origin` URL reduced to `host/owner/repo`: ssh,
+  scp-like, https, a trailing `.git` or `/` and an ssh/https port all collapse to one form, the host is
+  lower-cased, the path keeps its case. Userinfo is dropped before anything is built, so a token in a URL never
+  reaches the file (a test checks it). Only spellings known to name the same repository are
+  unified: ssh and scp-like remotes are recorded for github.com, gitlab.com, bitbucket.org and codeberg.org
+  alone, because on a generic ssh server `host:team/repo` is relative to the login home and
+  `ssh://host/team/repo` is absolute; any other host is recorded for http(s) remotes only. A remote that does
+  not name a repository on a host (a local path, `file://`, `git://`) is not recorded either: two checkouts of
+  a path say nothing about each other. A remote the secret scan flags is never recorded, listed or read back
+  from a hand-edited record. The field is not part of
+  the project's identity (the id is still the `git-common-dir`) and is `omitempty`, so every older
+  `project.json` loads as before. A value read back is checked against the normalised form again, since the
+  store can be edited by hand. A path in the remote that the secret scan flags drops only the remote, never
+  the project's first memory.
+- **Backfill.** A write from a working copy adds the remote to an existing record that lacks it, keeping the
+  other fields. The Agent also does it once at start for every project with a working copy now, in a single
+  commit (`AF-Op: project-info`, author unknown, its own `AF-Trigger: project-record` so the changes list neither
+  shows it nor counts it against its limit). The record is extended by splicing one member into its stored
+  bytes; its other fields, their order and any field a newer version wrote stay as they were. An orphan whose root is
+  gone before it was recorded simply has none and is never suggested; nothing fails on it.
+- **The rule.** `GET entries/projects` sets `mergeInto` on an orphaned row when exactly one live project, other
+  than the orphan, has the same non-empty remote. Two live projects with the remote (two clones of one
+  repository) give no suggestion: a guess between them is wrong half the time, and the member can still
+  pick either in the move panel. The Console shows the suggestion above the pickers; its button fills them
+  and loads the preview.
