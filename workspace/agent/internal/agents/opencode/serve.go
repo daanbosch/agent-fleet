@@ -329,7 +329,10 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 	// unless the new daemon proves it holds this one, so a failed start (or an Ensure that
 	// raced a slow-but-alive daemon) cannot lock the Agent out of it.
 	prevPassword := servePassword()
-	password, err := nextServePassword(prevPassword, sharedDaemonWanted())
+	// Decided once, from this start's reading: the password policy and the environment flag must
+	// agree, and a second read could see the switch after it flipped.
+	sharedWanted := sharedTUIFor(spec) || sharedTerminals() > 0
+	password, err := nextServePassword(prevPassword, sharedWanted)
 	if err != nil {
 		return "", 0, fmt.Errorf("opencode serve のパスワードを用意できません: %w", err)
 	}
@@ -346,7 +349,7 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 	// auth variables come last: a duplicate key keeps its final value.
 	cmd.Env = append(append(withoutEnv(os.Environ(), "AF_SESSION_SID", "AF_SESSION_NAME"), spec.Env()...),
 		"OPENCODE_SERVER_USERNAME="+serveUser, "OPENCODE_SERVER_PASSWORD="+password)
-	if sharedDaemonWanted() {
+	if sharedWanted {
 		// Tells the plugins this is af's shared server: no AF_SESSION_SID here, sessions are told
 		// apart by metadata, and shell commands wait for their environment (agent-fleet-shared.js).
 		cmd.Env = append(cmd.Env, sharedServeEnv+"=1")

@@ -1,6 +1,7 @@
 package opencode
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -615,4 +616,51 @@ func TestOffReadingMajorDoesNotReadTheSwitchAgain(t *testing.T) {
 	if strings.Contains(plan.Program, "--standalone") || strings.Contains(strings.Join(plan.Env, " "), "OPENCODE_DB") {
 		t.Fatalf("a 1.x launch got 2.x flags or database: %q %v", plan.Program, plan.Env)
 	}
+}
+
+// One start decides "shared daemon" once: the password policy and AF_OPENCODE_SHARED_SERVE come
+// from the same answer. The switch flips while ensure builds the child's environment (the engine
+// environment is read there); the daemon must still be started the shared way.
+func TestEnsureDecidesTheSharedDaemonOncePerStart(t *testing.T) {
+	home := optInHome(t)
+	stubUsagePref(t, UsageFree)
+	t.Setenv(standaloneEnv, "")
+	exe := installFakeV2(t)
+	envLog := filepath.Join(home, "child-env")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\nenv > "+envLog+"\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetWantsV2(true); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(serveAddrEnv, "http://127.0.0.1:"+freePortForTest(t))
+	oldTimeout := serveStartTimeout
+	serveStartTimeout = 1500 * time.Millisecond
+	oldEngine := EngineEnv
+	EngineEnv = func(string) []string { _ = SetWantsV2(false); return nil }
+	t.Cleanup(func() { serveStartTimeout, EngineEnv = oldTimeout, oldEngine })
+
+	s := &Supervisor{}
+	t.Cleanup(s.Shutdown)
+	_, _, _ = s.Ensure() // the fake never answers; only the environment it was started with matters
+	b, err := os.ReadFile(envLog)
+	if err != nil {
+		t.Fatalf("the daemon was never started: %v", err)
+	}
+	if !strings.Contains(string(b), sharedServeEnv+"=1") {
+		t.Fatalf("the daemon started for a 2.x reading lost %s after the switch flipped:\n%s", sharedServeEnv, b)
+	}
+	if !strings.Contains(string(b), "OPENCODE_DB="+V2DBPath()) {
+		t.Fatalf("the daemon lost its database override:\n%s", b)
+	}
+}
+
+func freePortForTest(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	return strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
 }

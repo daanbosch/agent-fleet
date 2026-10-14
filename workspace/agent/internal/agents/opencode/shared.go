@@ -100,7 +100,7 @@ func sharedTerminals() int { return len(terminalSlots()) }
 
 // sharedDaemonWanted is whether the daemon has to be started the shared way (a stable password,
 // the plugins' shared mode): a launch that will attach to it, or a pane that already is.
-func sharedDaemonWanted() bool { return sharedTUI() || sharedTerminals() > 0 }
+func sharedDaemonWanted() bool { return sharedTUIFor(CurrentLaunch()) || sharedTerminals() > 0 }
 
 // --- API calls ---------------------------------------------------------------------
 
