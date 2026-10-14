@@ -1104,14 +1104,7 @@ func agentMemProjectInfoChange(p agentMemProject) ([]agentMemChange, error) {
 	info := agentMemProjectInfoRel(p)
 	old, exists, _ := agentMemReadFile(filepath.Join(agentMemDir(), filepath.FromSlash(info)))
 	if exists {
-		// A record written before the remote was kept gets it added on the next write from a
-		// working copy (#2110); everything else in it stays as it was. Not worth failing a save for.
-		var rec agentMemProject
-		if p.Remote == "" || json.Unmarshal(old, &rec) != nil || rec.ID != p.ID || agentMemRemoteOK(rec.Remote) {
-			return nil, nil
-		}
-		rec.Remote = p.Remote
-		p = rec
+		return agentMemProjectInfoAddRemote(info, old, p)
 	}
 	b, _ := json.MarshalIndent(p, "", "  ")
 	// The root path comes from a folder name anyone can choose; it is committed too.
@@ -1120,18 +1113,46 @@ func agentMemProjectInfoChange(p agentMemProject) ([]agentMemChange, error) {
 		if p.Remote == "" {
 			return nil, &agentMemSecretErr{Findings: f}
 		}
-		if exists {
-			return nil, nil
-		}
-		// The remote is a convenience: a path in it that looks like a secret must not stop the
-		// first memory of the project from being saved.
+		// The remote is a convenience: whatever in it the scan flags must not stop the first
+		// memory of the project from being saved.
 		p.Remote = ""
 		return agentMemProjectInfoChange(p)
 	}
 	return []agentMemChange{{Rel: info, Data: append(b, '\n')}}, nil
 }
 
+// agentMemProjectInfoAddRemote adds the remote to a record written before the field existed
+// (#2110) by splicing one member into the stored bytes: the fields, their order and anything a
+// newer version wrote stay exactly as they were. A record that already has a "remote" member, is
+// not the object of this project, or would fail the scan is left alone. Not worth failing a save for.
+func agentMemProjectInfoAddRemote(info string, old []byte, p agentMemProject) ([]agentMemChange, error) {
+	if p.Remote == "" || !agentMemRemoteOK(p.Remote) {
+		return nil, nil
+	}
+	var members map[string]json.RawMessage
+	if json.Unmarshal(old, &members) != nil {
+		return nil, nil
+	}
+	var id string
+	if _, has := members["remote"]; has || json.Unmarshal(members["id"], &id) != nil || id != p.ID {
+		return nil, nil
+	}
+	body := bytes.TrimRight(old, " \t\r\n")
+	if len(body) < 2 || body[len(body)-1] != '}' || len(members) == 0 {
+		return nil, nil
+	}
+	rem, _ := json.Marshal(p.Remote)
+	next := append(bytes.TrimRight(body[:len(body)-1], " \t\r\n"), []byte(",\n  \"remote\": "+string(rem)+"\n}\n")...)
+	if len(agentMemScanText("project", string(next))) > 0 {
+		return nil, nil
+	}
+	return []agentMemChange{{Rel: info, Data: next}}, nil
+}
+
 func agentMemProjectInfoRel(p agentMemProject) string { return "projects/" + p.ID + "/project.json" }
+
+// agentMemOpProjectInfo is the op of the project.json backfill commit.
+const agentMemOpProjectInfo = "project-info"
 
 // agentMemChange is one file of a write, relative to the store (= relative to af/ in the repo).
 type agentMemChange struct {
@@ -1229,9 +1250,13 @@ func agentMemApplyLocked(changes []agentMemChange, op, memRel string, c agentMem
 			return "", fmt.Errorf("stage agent memory: %w", err)
 		}
 	}
+	trigger := memoryTriggerAgentMemory
+	if op == agentMemOpProjectInfo {
+		trigger = memoryTriggerAgentMemoryMeta
+	}
 	msg := fmt.Sprintf("agent-memory: %s %s (%s)\n\nAF-Trigger: %s\nAF-Op: %s\nAF-Memory: %s\nAF-Author-Kind: %s\nAF-Author-Session: %s\n",
 		op, memRel, now.Format(time.RFC3339),
-		memoryTriggerAgentMemory, op, agentMemRepoPrefix+"/"+memRel, c.Kind, c.Session)
+		trigger, op, agentMemRepoPrefix+"/"+memRel, c.Kind, c.Session)
 	for _, t := range extra {
 		msg += t + "\n"
 	}

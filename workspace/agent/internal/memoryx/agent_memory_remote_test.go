@@ -1,6 +1,7 @@
 package memoryx
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,7 +39,17 @@ func TestAgentMemoryNormalizeRemote(t *testing.T) {
 			t.Errorf("normalize(%q) = %q, want none", in, got)
 		}
 	}
-	if agentMemNormalizeRemote("git@a.example:x/y.git") == agentMemNormalizeRemote("git@a.example:x/z.git") {
+	// A generic ssh server reads "host:team/repo" relative to the login home and
+	// "ssh://host/team/repo" as absolute: they must not be made equal, so ssh is not recorded there.
+	for _, in := range []string{"git@forge.invalid:team/repo.git", "ssh://git@forge.invalid/team/repo.git", "alice@forge.invalid:team/repo", "git://forge.invalid/team/repo"} {
+		if got := agentMemNormalizeRemote(in); got != "" {
+			t.Errorf("normalize(%q) = %q, want none", in, got)
+		}
+	}
+	if got := agentMemNormalizeRemote("https://forge.invalid:8443/team/repo.git"); got != "forge.invalid/team/repo" {
+		t.Errorf("https on a generic host = %q", got)
+	}
+	if agentMemNormalizeRemote("git@github.com:x/y.git") == agentMemNormalizeRemote("git@github.com:x/z.git") {
 		t.Error("different repositories must not match")
 	}
 }
@@ -103,6 +114,93 @@ func TestAgentMemorySecretLookingRemoteDoesNotBlockTheSave(t *testing.T) {
 	agentMemSaveN(t, c, "one", "project", time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC))
 	if got := projectJSON(t, c.Project.ID); strings.Contains(got, "ghp_") {
 		t.Errorf("the secret-looking remote was recorded: %s", got)
+	}
+	// Nor does it leave through the caller, the projects list or a stored record read back.
+	if c.Project.Remote != "" {
+		t.Errorf("caller carries %q", c.Project.Remote)
+	}
+	out, err := agentMemMemberProjects()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := json.Marshal(out); strings.Contains(string(b), "ghp_") {
+		t.Errorf("projects list leaks the token: %s", b)
+	}
+	// A hand-edited record naming the token is not trusted either.
+	bad := strings.Replace(projectJSON(t, c.Project.ID), `"display"`, `"remote": "github.com/ghp_0123456789abcdefghijklmnopqrstuvwxyzAB/x", "display"`, 1)
+	if err := os.WriteFile(filepath.Join(agentMemDir(), "projects", c.Project.ID, "project.json"), []byte(bad), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if p := agentMemProjectInfo(c.Project.ID); p.Remote != "" {
+		t.Errorf("stored record handed out %q", p.Remote)
+	}
+}
+
+// A live project that has no memory yet must not list a flagged remote either.
+func TestAgentMemoryLiveProjectNeverListsASecretRemote(t *testing.T) {
+	home, _, _ := agentMemTestEnv(t)
+	remoteRepo(t, home, "livesec", "https://github.com/ghp_0123456789abcdefghijklmnopqrstuvwxyzAB/x.git")
+	out, err := agentMemMemberProjects()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := json.Marshal(out); strings.Contains(string(b), "ghp_") {
+		t.Errorf("projects list leaks the token: %s", b)
+	}
+}
+
+// The backfill splices one member into the stored bytes: order, spacing and fields it does not
+// know stay, whether it runs from a write or at start.
+func TestAgentMemoryBackfillKeepsTheRecordAsItWas(t *testing.T) {
+	home, _, _ := agentMemTestEnv(t)
+	dir := remoteRepo(t, home, "keep", "")
+	c := agentMemCallerT(t, "claude-keep")
+	now := time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC)
+	agentMemSaveN(t, c, "one", "project", now)
+	path := filepath.Join(agentMemDir(), "projects", c.Project.ID, "project.json")
+	orig := "{\n  \"display\": \"keep\",\n  \"id\": \"" + c.Project.ID + "\",\n  \"future\": {\"a\": [1, 2]},\n  \"root\": \"" + dir + "\"\n}\n"
+	if err := os.WriteFile(path, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	remoteGit(t, dir, "remote", "add", "origin", "git@github.com:k-k1/keep.git")
+	check := func(how string) {
+		t.Helper()
+		got := projectJSON(t, c.Project.ID)
+		want := strings.TrimSuffix(orig, "\n}\n") + ",\n  \"remote\": \"github.com/k-k1/keep\"\n}\n"
+		if got != want {
+			t.Errorf("%s: record =\n%s\nwant\n%s", how, got, want)
+		}
+	}
+	agentMemBackfillRemotes(now.Add(time.Hour))
+	check("backfill")
+
+	// The same through the next write, from a record that has no remote yet.
+	if err := os.WriteFile(path, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c = agentMemCallerT(t, "claude-keep")
+	agentMemSaveN(t, c, "two", "project", now.Add(2*time.Hour))
+	check("write")
+}
+
+// The backfill commit is no memory change: the changes list keeps its limit and withholds nothing.
+func TestAgentMemoryBackfillCommitDoesNotDisturbTheChangesList(t *testing.T) {
+	home, _, _ := agentMemTestEnv(t)
+	dir := remoteRepo(t, home, "lst", "")
+	c := agentMemCallerT(t, "claude-lst")
+	now := time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC)
+	agentMemSaveN(t, c, "one", "project", now)
+	remoteGit(t, dir, "remote", "add", "origin", "git@github.com:k-k1/lst.git")
+	agentMemBackfillRemotes(now.Add(time.Hour))
+	if !strings.Contains(projectJSON(t, c.Project.ID), "remote") {
+		t.Fatal("the backfill did not run")
+	}
+	w, err := agentMemListChanges(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(w.Changes) != 1 || w.Withheld != 0 {
+		t.Errorf("changes=%d withheld=%d", len(w.Changes), w.Withheld)
 	}
 }
 

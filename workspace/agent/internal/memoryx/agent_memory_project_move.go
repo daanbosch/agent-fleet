@@ -300,7 +300,7 @@ func agentMemBackfillRemotes(now time.Time) {
 		return
 	}
 	unknown := agentMemCaller{Session: agentMemUnknown, Kind: agentMemUnknown}
-	if _, err := agentMemApplyLocked(changes, "project-info", "projects", unknown, now); err != nil {
+	if _, err := agentMemApplyLocked(changes, agentMemOpProjectInfo, "projects", unknown, now); err != nil {
 		log.Printf("agent memory: record project remotes: %s", agentMemErrKind(err))
 	}
 }

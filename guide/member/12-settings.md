@@ -394,7 +394,7 @@ Version control over the memory an agent accumulates by itself (claude's auto-me
     it with a **Review the move** button, which only fills in the two choices and shows the preview. Nothing moves
     until you confirm. With two such working copies of the repository there is no suggestion; pick the target
     yourself. Agent Fleet remembers the remote of each project, without any password or token from the URL;
-    a project whose working copy was already gone has none and is never suggested.
+    a project whose working copy was already gone has none and is never suggested. For ssh addresses only the large hosting services (GitHub, GitLab, Bitbucket, Codeberg) are recognised; on any other server only https addresses are compared.
   - **From a terminal**: `af-memory export-sources`, `af-memory export --project <id|name> --dry-run` (preview) and
     `af-memory export --project <id|name> [--overwrite <name>]...` (write back).
 
