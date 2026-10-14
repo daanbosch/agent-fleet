@@ -109,6 +109,7 @@ var Entries = []string{
 	"agy-sid",
 	"agy-prelaunch",
 	"agy-brain-prelaunch",
+	"agy-hook",
 	"codex-msgledger",
 	"opencode-msgledger",
 	"copilot-msgledger",

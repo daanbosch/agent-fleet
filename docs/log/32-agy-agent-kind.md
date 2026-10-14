@@ -770,6 +770,39 @@ kind 追加の影響が投入経路以外にも及ぶため、workspace `mcp_std
 agy セッション作成 → sessions 一覧に kind=agy で出現 → `sessions/usage` が
 cumulative 全 0（トークン情報なし）で返ることを確認。agent 384・CP 147 全緑。
 
+### lifecycle hooks を会話 ID と working/idle の第一信号にする（2026-10-15、#2156）
+
+agy 1.3.5 の `~/.gemini/config/hooks.json`（#1079 の実測で判明）を、Terminal（CLI）の agy の
+(a) 会話 UUID と (b) working/idle の第一信号に使う。従来の brain 差分・cwd マップ・DB と pane の
+判定はそのまま fallback に残す。実装は `internal/agents/agy/hooks.go`。
+
+**実測（実機の agy 1.3.5、隔離 HOME、数ターン）**
+
+- 書式は SessionStart / PreInvocation / Stop が **ハンドラの直接配列**
+  （`[{"type":"command","command":…,"timeout":N}]`）。`{matcher, hooks:[…]}` のグループ形で書くと
+  SessionStart / PreInvocation / Stop は **発火しない**（PreToolUse だけがグループ形）。
+- hook の子は agy の環境を継承する。pane に渡した `AF_SESSION_NAME` がそのまま見えた
+  （#2157 の「`ANTIGRAVITY_*` はこれだけ」は agy 側の変数の話）。これでスロットを推測なしで特定できる。
+- 1 ターン: SessionStart → PreInvocation(0) → … → Stop(`fullyIdle:true`, `terminationReason:NO_TOOL_CALL`)。
+  ツールを使うターンは PreInvocation(n) と PreToolUse（`stepIdx`, `toolCall`）が交互に来て、最後に Stop。
+- **Esc でキャンセルしたターンは PreInvocation の後に Stop が来ない**（8 秒待っても）。hook の working は
+  キャンセルで取り残されるので、pane の idle フッタと `staleAfter`（#1811）の上限を hook の working にも掛ける。
+- 未測定: PreToolUse が権限の応答前に来るか。DB の question / permission を hook より優先することで、
+  どちらでも permission カードが消えない形にした。
+
+**設計判断**
+
+- hook → agent: `workspace-agent agy-hook <Event>`（codex の `session-status` と同じ形）。`$AF_SESSION_NAME` →
+  `ReadMeta` → スロット sid で、`agy-hook/<sid>.json` に {会話 ID, state, at} を書く。env が無い（ユーザーが手で
+  起動した agy）・kind が agy でない場合は何もしない。stdout は常に `{}`、失敗でも exit 0。
+- hooks.json への書き込み: 名前 `agent-fleet` のエントリだけを持ち、他の名前は触らない（merge by name）。
+  起動のたびに `BuildLaunch` が再主張する（コマンドにこのバイナリのパスが入るため）。内容が同じなら書かない、
+  一時ファイル + rename、symlink は辿って実体に書く。JSON でないファイルは触らずログして fallback。
+- fallback の順序: 会話 ID は hook → cwd マップ → brain 差分。state は DB の question / permission →
+  hook（idle は信じる。working は 1 時間未満かつ pane の idle フッタが無いときだけ）→ 従来の DB 判定。
+  別会話の hook 記録（採用済み UUID と不一致）は無視する。起動時（`BuildLaunch`）に記録を消す。
+- スコープ外: 権限・質問への応答、RPC。Managed 化は #2155。
+
 ### ミラーの ContextBar（context 充填率）MVP — `/context` スクレイプ（2026-07-20）
 
 agy の転写（`transcript_full.jsonl`）にも他の永続状態にも token 数が一切無い
