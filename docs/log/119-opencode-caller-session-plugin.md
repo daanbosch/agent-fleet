@@ -311,3 +311,41 @@ Review round 5 (#2123): deleting a fork copy that failed to be claimed took no a
 that claimed it in between (the source's pane sees the copy under the inherited tag). The cleanup now
 takes the session's exclusive claim record again first: if another pane holds it the copy is theirs
 and stays, and while the cleanup holds it nobody can claim the copy before the DELETE is done.
+
+## 2026-10-14 — opt-in to opencode 2 beside the pinned 1.x (#2133)
+
+One workspace can run opencode 2 while the image keeps `opencode-ai@1.19.0` and everyone else stays
+on it. `workspace-agent install-opencode2 [version]` installs `@opencode/cli` into the private npm
+prefix `~/.local/share/agent-fleet/opencode2` (default `2.0.28`, the version #2102–#2123 were
+measured on; nothing goes on PATH, so the pinned `opencode` is not shadowed). `workspace-agent
+opencode-major 2|1` flips the switch (a file in the state directory; `AF_OPENCODE_MAJOR=1|2` in the
+Agent's environment wins). Choosing 2 without the binary changes nothing.
+
+Measured on 2.0.28, linux x64, isolated HOME:
+- `npm install` leaves 806 MB (every libc/baseline platform package is an optional dependency and
+  the postinstall copies the matching binary to `bin/opencode.exe`); the installer prunes the
+  `@opencode/cli-*` packages after the version check and 202 MB remain. The pruned binary runs.
+- `opencode2 models` against a copy of a 1.19.0 home changed `opencode.db`, its WAL and its SHM
+  (in-place migration, v1 tables never written again) and added `service.json`. `OPENCODE_DB` is
+  the only data override the binary has (`strings`: no data/state/cache variable). With it set the
+  1.x database, WAL and SHM stay byte-identical across a Managed turn and a Terminal turn on 2.x
+  (`TestContractOptInRunsV2BesideV1WithoutTouchingV1Data`). The directory of `OPENCODE_DB` must
+  exist (ENOENT on start otherwise); `~/.local/share/opencode/log/opencode.log` is appended by both
+  majors, and the model cache and `state/locks` are shared and format-compatible.
+- `XDG_DATA_HOME` would isolate everything, but it would also reach the shell tool of every v2
+  session, so it is not used. `OPENCODE_DB` is likewise kept out of the shell environment af PUTs
+  for a Terminal session: 1.19.0 also honours it, and a 1.x `opencode` run from a session would
+  write 1.x tables into the 2.x database. A managed session's shell still inherits the serve's
+  environment; that remainder is accepted.
+- Config and plugins under `~/.config/opencode` stay shared (already dual-major, #2118); the only
+  v2 write there is `service.json` (`disabled: true`, seeded by `opencode-major 2` and at boot),
+  which 1.19.0 does not read (a 1.x session list after the 2.x run is unchanged).
+
+Consequences: the 2.x database starts empty, so a session created on 1.x is not resumable on 2.x
+(the shared Terminal route starts a new conversation, the standalone route errors) and the other
+way round. The supervised serve records how it was started (`launchKey`); `ensure` replaces a
+daemon started under the other setting (drain, stop, re-resume, as for a key change) and an adopted
+one by the pid in `opencode-serve.json` (written only while the opt-in is on). Panes launched on
+1.x are never counted as attached to the serve (their stale `opencode-mode` record is cleared).
+Open Terminal panes keep the opencode they started with; a 2.x pane loses its server when the
+serve is replaced and must be relaunched.

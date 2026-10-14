@@ -43,6 +43,12 @@ var UsagePref = func() string { return UsageOff }
 // should already have stopped the caller, but if env() is reached on its own it must
 // leave no billing or outbound path behind.
 func env() []string {
+	return CurrentLaunch().Env()
+}
+
+// keyEnv is the provider keys and the engine token: what env documents, before the opt-in's
+// own variables are added.
+func keyEnv() []string {
 	if UsagePref() == UsageOff {
 		return nil
 	}
@@ -89,7 +95,7 @@ func Env() []string { return env() }
 // "supported" field, which distinguishes "old image, binary missing" from "binary
 // present but not connected".
 func Available() bool {
-	_, err := exec.LookPath("opencode")
+	_, err := exec.LookPath(Binary())
 	return err == nil
 }
 

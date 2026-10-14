@@ -55,8 +55,10 @@ const (
 
 // sharedTUI reports whether Terminal sessions attach to af's serve: opencode 2 only (v1 has no
 // per-session environment to keep sessions apart with), unless switched back.
-func sharedTUI() bool {
-	return installedMajor() >= 2 && os.Getenv(standaloneEnv) != "1" && !Serve().Disabled()
+func sharedTUI() bool { return sharedTUIFor(CurrentLaunch()) }
+
+func sharedTUIFor(spec LaunchSpec) bool {
+	return spec.Major() >= 2 && os.Getenv(standaloneEnv) != "1" && !Serve().Disabled()
 }
 
 // slotModes records how each Terminal slot's pane was last launched. The workspace-wide switch
@@ -74,7 +76,7 @@ func markSlotMode(sid, mode string) { slotModes.Write(sid, mode) }
 // part of it: flipping it changes the NEXT launch, and a pane still attached to the serve keeps
 // being a dependent, restored, drained and interrupted.
 func sharedSlot(m session.Meta) bool {
-	return installedMajor() >= 2 && m.Kind == session.KindOpencode && m.DriverKind() == session.DriverTUI &&
+	return m.Kind == session.KindOpencode && m.DriverKind() == session.DriverTUI &&
 		slotModes.Read(session.UUID(m.Dir, m.Name)) == modeShared
 }
 
@@ -98,7 +100,7 @@ func sharedTerminals() int { return len(terminalSlots()) }
 
 // sharedDaemonWanted is whether the daemon has to be started the shared way (a stable password,
 // the plugins' shared mode): a launch that will attach to it, or a pane that already is.
-func sharedDaemonWanted() bool { return sharedTUI() || sharedTerminals() > 0 }
+func sharedDaemonWanted() bool { return sharedTUIFor(CurrentLaunch()) || sharedTerminals() > 0 }
 
 // --- API calls ---------------------------------------------------------------------
 
@@ -313,8 +315,13 @@ type sharedPlan struct {
 // before it starts the TUI. ok=false means "use the standalone launch" (the serve cannot be
 // had, e.g. opencode is not connected); an error means the launch must stop, because a
 // half-prepared session would attach to the wrong conversation.
-func buildSharedLaunch(m session.Meta, sid string) (plan sharedPlan, ok bool, err error) {
+func buildSharedLaunch(spec LaunchSpec, m session.Meta, sid string) (plan sharedPlan, ok bool, err error) {
 	addr, _, eerr := ensureServe()
+	// ensure follows the switch as it is now; a launch built for another reading must not attach
+	// to that daemon.
+	if CurrentLaunch().Key != spec.Key {
+		return sharedPlan{}, false, errors.New("opencode: the opencode 2 switch changed while the session was launching; launch it again")
+	}
 	if eerr != nil {
 		log.Printf("opencode: %s: shared serve unavailable, launching --standalone: %v", m.Name, eerr)
 		markSlotMode(sid, modeStandalone)
@@ -323,7 +330,7 @@ func buildSharedLaunch(m session.Meta, sid string) (plan sharedPlan, ok bool, er
 	// A TUI of one version against a server of another is the protocol skew nobody can debug from
 	// a pane, and a daemon outlives an in-place upgrade of the binary. Replace it before this
 	// TUI attaches; an adopted daemon (no process handle) cannot be, and is attached to as it is.
-	if want, have := installedVersion(), daemonVersion(addr); want != "" && have != "" && want != have {
+	if want, have := spec.version(), daemonVersion(addr); want != "" && have != "" && want != have {
 		log.Printf("opencode: %s: serve is %s, installed opencode is %s: restarting it", m.Name, have, want)
 		if restartServe("opencode " + have + " → " + want) {
 			if addr, _, eerr = ensureServe(); eerr != nil {

@@ -81,6 +81,10 @@ var Entries = []string{
 	// Archives being built for a folder download (fs_zip.go). Introduced directly under
 	// AgentStateDir, and empty between requests; listed only so the drift check stays honest.
 	"zip-export",
+	// The opencode 2 opt-in's switch and the record of how the serve was started
+	// (opencode/optin.go, optin_serve.go). Introduced directly under AgentStateDir.
+	"opencode-major",
+	"opencode-serve.json",
 	"plan-file",
 	"plan-review",
 	// Per-agent id ledgers and message rings (agents.NewSidStore / NewMsgLedger).
