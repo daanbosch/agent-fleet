@@ -7,7 +7,7 @@
 //
 //	PATH=<dir with opencode 2>:$PATH go test -tags contract -run SharedServe ./internal/agents/opencode/
 //
-// Like the other v2 contracts it is not run in CI (opencode-contract.yml pins opencode-ai only).
+// CI runs it in the opencode 2 job of opencode-contract.yml.
 // It needs tmux and node-free plugins only; go builds the workspace-agent it drives.
 package opencode
 
@@ -147,10 +147,10 @@ func descendants(root int) []int {
 func TestContractSharedServeTerminalSessions(t *testing.T) {
 	requireOpencode(t)
 	if !strings.HasPrefix(strings.TrimPrefix(opencodeVersion(t), "opencode v"), "2.") {
-		t.Skip("needs opencode 2")
+		skipUnlessV2Required(t, "needs opencode 2")
 	}
 	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("needs tmux")
+		skipUnlessV2Required(t, "needs tmux")
 	}
 	stub := &sharedStub{}
 	llm := httptest.NewServer(http.HandlerFunc(stub.handler))
