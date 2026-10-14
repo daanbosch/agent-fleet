@@ -5,6 +5,7 @@
 // `dir: ""` launches in the home directory (repo-less session) — worktree options
 // and repo-scoped bookkeeping (repoLast / prompt history) are skipped there.
 import { apiJSON, errDetail, errText, pasteImage } from "../../core/api/client.ts";
+import { AUTH_EXPIRED_CODE, toastSendFailure } from "../../lib/authExpiredToast.tsx";
 import { t } from "../../lib/i18n/index.ts";
 import { buildImagePrompt } from "../../lib/pastedImages.ts";
 import { useToast } from "../../ui/ToastProvider.tsx";
@@ -191,7 +192,10 @@ export function useStartWork(): (target: StartTarget, opts: LaunchOpts, take?: H
         prompt: seed,
         when_ready: true,
       }).catch(() => ({ error: { message: t("err.network") } }));
-      if (del?.error) toast(t("rp.first_prompt_failed", { err: errText(del.error) }));
+      if (del?.error) {
+        if (del.error.code === AUTH_EXPIRED_CODE) toastSendFailure(toast, { code: del.error.code }, "");
+        else toast(t("rp.first_prompt_failed", { err: errText(del.error) }));
+      }
     }
     if (seed) {
       // The send itself runs on the Agent side; the mirror only shows the submitted text as

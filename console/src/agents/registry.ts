@@ -223,6 +223,8 @@ export const AGENTS: Record<SessionKind, AgentDescriptor> = {
       runsInDir: true,
       launchableFromRepo: true,
     }),
+    // Expired still counts as available: the launch menus gate on this, and /login in the pane
+    // is a valid recovery. The setup card asks loginExpired() separately.
     available: (c) => !!c.conns?.claude?.connected,
   },
   codex: {
@@ -721,6 +723,12 @@ export const AGENTS: Record<SessionKind, AgentDescriptor> = {
 // kinds (mirrors the old ternary chains that fell back to claude).
 export function agentOf(kind: string | null | undefined): AgentDescriptor {
   return (kind && AGENTS[kind as SessionKind]) || AGENTS.claude;
+}
+
+// loginExpired: the kind is connected but its stored login can no longer run a turn. Only
+// claude reports this (conns.claude.expired); every other kind answers false.
+export function loginExpired(kind: string, conns: ConnectionsStatus | null | undefined): boolean {
+  return kind === "claude" && !!conns?.claude?.expired;
 }
 
 // nonPlanModeLabel is the mode label for the non-plan side (docs/log/76).

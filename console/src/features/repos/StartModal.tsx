@@ -13,6 +13,7 @@ import { t, useT } from "../../lib/i18n/index.ts";
 import { Trans } from "../../lib/i18n/Trans.tsx";
 import { useToast } from "../../ui/ToastProvider.tsx";
 import { agentOf, nonPlanModeLabel } from "../../agents/registry.ts";
+import { openAgentsSettings } from "../../lib/authExpiredToast.tsx";
 import { kindDisplayName } from "../../lib/sessionkind.ts";
 import { resolveEffort, resolveModel, resolveStartMode } from "../../lib/repoLast.ts";
 import { agentLaunchDefault, useSettings, setSetting } from "../../lib/settings.ts";
@@ -42,6 +43,8 @@ import { deriveRepoName } from "../../lib/reponame.ts";
 interface StartModalProps {
   /** Connection-gated coding-agent kinds (claude / codex / agy / opencode). */
   kinds: string[];
+  /** The workspace's Claude login has expired (see RepoRailContext.claudeExpired). */
+  claudeExpired?: boolean;
   onClose: () => void;
   /** A working copy was picked (existing or freshly cloned) — the host closes
    * this hub and opens the per-repo start-work dialog on it. */
@@ -68,7 +71,7 @@ interface SsmInstance {
   pingStatus: string;
 }
 
-export function StartModal({ kinds, onClose, onPickRepo }: StartModalProps) {
+export function StartModal({ kinds, claudeExpired = false, onClose, onPickRepo }: StartModalProps) {
   const toast = useToast();
   const tr = useT();
   const settings = useSettings();
@@ -557,6 +560,14 @@ export function StartModal({ kinds, onClose, onPickRepo }: StartModalProps) {
                 })}
               </div>
             </div>
+            {kind === "claude" && claudeExpired && (
+              <span className="ui-field-hint">
+                {tr("start.claude_expired")}
+                <button type="button" className="linklike" onClick={openAgentsSettings}>
+                  {tr("mirror.error_auth_action")}
+                </button>
+              </span>
+            )}
             {agentOf(kind).caps.model && (
               <div className="ui-field">
                 <span className="ui-field-label">{tr("launch.field.model")}</span>
