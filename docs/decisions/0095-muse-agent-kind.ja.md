@@ -2851,3 +2851,25 @@ optional なメンバー 7 つが明示的に nullable になった（`Session.s
 
 同じ代償がある。1.4.7 のバンドルは `MUSE_VERSION` を動かすまで 1.4.4 のバイナリに対して赤になる。
 実測: 1.4.7 緑・1.4.4 赤。ピンの更新は cli-pin-bump の仕事。
+
+### 注記 2026-10-15: 1.4.8-R6256.1 に合わせてバンドルを再エクスポート（#2164）
+
+1.4.8-R6256.1 で、クライアントが decode する閉じた enum に値が 1 つ増えた（`ItemKind` に
+`monitorFeed`。monitor タスクのイベントで、`monitorId` で紐づく）。互換検査はこれを非互換と判定する。
+ただし Go の振る舞いは変わらない。`monitorFeed` 項目は `webSearch` と同じく転写の汎用表示で描かれる。
+ほかは追加だけである。新しい optional メンバー（`Item.messagePhase`・`Item.monitorId`・
+`Session.generatedName`・`SessionResumeParams.permissionProfile` など）、computer-use のアプリ系の型、
+付与可能な能力 `sessionRename`（メンバーシップ enum）、通知 1 つ（`turn/modelRetryScheduled`）。
+この通知はハンドルが扱わない他の通知と同じく捨てられる。P2-24 により再エクスポートが答えなので、
+`internal/msp/schema` と `types_gen.go` を 1.4.8 のエクスポート（fingerprint `sha256:4e3200c3…`。
+リリース manifest の `msp_schema_fingerprint` と一致）に置き換えた。検査器は変えていない。
+`types_gen.go` の既存フィールドで型が変わったものは無い。
+
+上流へ報告したホスト側の 2 件（#1695）のうち、`reason` なしの `userInput/cancel` は 1.4.8 でも
+`-32602` で拒否される（`TestLiveUserInputCancelNeedsAReason` で実測。使い捨て HOME・ターンなし）。
+もう 1 件にはスキーマ上の答えが出た。`Item.messagePhase` が完了した `agentMessage` を `commentary` か
+`finalAnswer` と示す。ツール呼び出し前の commentary が実際にワイヤに載るようになったかは実ターンでしか
+確かめられないので、測るまでは session.jsonl の読み取り（#1696）を残す（#2168）。
+
+同じ代償がある。1.4.8 のバンドルは `MUSE_VERSION` を動かすまで 1.4.7 のバイナリに対して赤になる。
+実測: 1.4.8 緑・1.4.7 赤。ピンの更新は cli-pin-bump の仕事。
