@@ -269,6 +269,22 @@ type TranscriptData struct {
 	// Compacting reports the agent is compacting its conversation right now
 	// (opencode's in-flight compaction summary) — surfaced as the mirror's "compacting" badge.
 	Compacting bool
+	// Retry is set while the runtime retries a failing provider call (opencode's "retry"
+	// session status) and, with Failed, after the driver ended the turn because the message
+	// can never succeed. Nil otherwise. Managed drivers only.
+	Retry *RetryInfo
+}
+
+// RetryInfo is a provider error under retry. Without it the session reads as plain "working"
+// with an empty answer for as long as the runtime keeps trying.
+type RetryInfo struct {
+	Attempt int    `json:"attempt"`
+	Message string `json:"message"`
+	// NextMs is when the next attempt starts, in epoch milliseconds; 0 when the runtime
+	// does not say.
+	NextMs int64 `json:"nextMs,omitempty"`
+	// Failed means the driver stopped retrying and failed the turn with Message.
+	Failed bool `json:"failed,omitempty"`
 }
 
 // SettingsRecaller is an optional Agent capability for TUI sessions: what the conversation

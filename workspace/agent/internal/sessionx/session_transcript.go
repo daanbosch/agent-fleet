@@ -466,6 +466,11 @@ func handleGenericMessages(w http.ResponseWriter, r *http.Request, meta session.
 	if alive && td.Compacting {
 		resp["terminalState"] = "compacting"
 	}
+	// A provider error under retry, or the one that ended the last turn (agents/opencode
+	// retry.go): without it the session reads as plain working with an empty answer.
+	if alive && td.Retry != nil {
+		resp["retry"] = td.Retry
+	}
 	// Work an earlier turn left running, for the header's "background running" — the same
 	// answer the kind's WireLive gives the session list, and under claude's gate: only when
 	// not already working.

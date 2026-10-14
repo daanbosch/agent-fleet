@@ -412,7 +412,20 @@ type threadHandle struct {
 	// has to agree (sessionCompacting) — and cleared by every terminal turn state, a stop, the
 	// daemon going away and teardown, so a missed end event cannot keep it on.
 	compacting bool
-	events     chan agents.Event
+	// retry: the runtime is retrying a failing provider call (retry.go). Cleared by output, by
+	// every terminal turn state and by teardown. retryFailed is the retry that ended the last
+	// turn, kept for the mirror until the next input is committed; retryStop is its failure
+	// text, which runTurn consumes.
+	retry        *agents.RetryInfo
+	retryFailed  *agents.RetryInfo
+	retryStop    string
+	retryAbort   chan struct{} // closed when the abort noteRetry sent has been answered or given up on
+	retryAbortOK bool          // whether the daemon acknowledged it
+	// turnSent: this handle's own /message is out (set by runTurn, cleared when the pump
+	// finishes the input). running alone is also true while the pump waits behind another
+	// client's turn, which a retry status must never be attributed to.
+	turnSent bool
+	events   chan agents.Event
 }
 
 // tq returns the handle's queue, creating it on first use. Caller holds h.mu.
@@ -455,6 +468,7 @@ func (h *threadHandle) setState(st agents.TurnState) {
 	h.state = st
 	if st != agents.TurnRunning && st != agents.TurnWaitingInteraction {
 		h.compacting = false // the turn ended, or is being stopped
+		h.retry = nil
 	}
 	h.mu.Unlock()
 	h.emit(agents.Event{Kind: "turn_state", TurnState: st})
@@ -473,6 +487,7 @@ func (h *threadHandle) runtimeLost() {
 	h.mu.Lock()
 	h.alive = false
 	h.compacting = false
+	h.retry = nil
 	h.state = agents.TurnUnknown
 	h.mu.Unlock()
 	h.emit(agents.Event{Kind: "turn_state", TurnState: agents.TurnUnknown})
@@ -626,10 +641,18 @@ func (h *threadHandle) pump() {
 		} else {
 			h.setState(agents.TurnCancelled) // stopped before it was sent: it never becomes a turn
 		}
+		if !h.awaitRetryAbort() {
+			// The abort may still be executed later and would cut the next input's turn short:
+			// send nothing more until a resume re-reads the session (queued inputs stay queued).
+			log.Printf("opencode managed: retry abort not acknowledged name=%s: holding the queue", h.name)
+			h.runtimeLost()
+		}
 
 		h.mu.Lock()
 		h.tq().Settle(t)
 		h.running = false
+		h.turnSent = false
+		h.retry = nil
 		h.mu.Unlock()
 	}
 }
@@ -646,6 +669,7 @@ func (h *threadHandle) commit(t *agents.Taken) bool {
 		return false
 	}
 	h.abortAsked = false
+	h.retry, h.retryFailed, h.retryStop = nil, nil, ""
 	return true
 }
 
@@ -690,6 +714,7 @@ func (h *threadHandle) runTurn(t *agents.Taken) {
 	stopped := h.tq().Received(t)
 	if !stopped {
 		h.state = agents.TurnRunning
+		h.turnSent = true
 	}
 	h.mu.Unlock()
 	if stopped {
@@ -720,11 +745,18 @@ func (h *threadHandle) runTurn(t *agents.Taken) {
 	h.mu.Lock()
 	interrupted := h.state == agents.TurnInterrupting
 	asked := h.abortAsked
+	retryStop := h.retryStop
 	h.inter = nil // the turn ended, so no question is pending any more
 	h.mu.Unlock()
 	switch {
 	case interrupted:
 		h.setState(agents.TurnCancelled)
+	case retryStop != "":
+		// We cut a retry loop short because its message can never succeed (retry.go); the
+		// abort leaves no error on the message, so the reason is carried here.
+		failure = retryStop
+		log.Printf("opencode managed: turn failed name=%s model=%s %s", h.name, st.Model, retryStop)
+		h.setState(agents.TurnFailed)
 	case res.StatusCode >= 400:
 		failure = fmt.Sprintf("[error] HTTP %d", res.StatusCode)
 		log.Printf("opencode managed: turn failed name=%s status=%d", h.name, res.StatusCode)
@@ -810,6 +842,10 @@ func (h *threadHandle) interrupt(opts agents.InterruptOpts, teardown bool) (agen
 	out := h.tq().Interrupt(opts, running || foreign)
 	abort := running && out.Head != agents.HeadStopPending
 	h.compacting = false // a stop ends any compaction with the turn (measured: the abort completes it)
+	if running {
+		// The member's stop settles the turn as cancelled: no retry note, live or failed, may outlive it.
+		h.retry, h.retryFailed, h.retryStop = nil, nil, ""
+	}
 	switch {
 	case running:
 		h.state = agents.TurnInterrupting
@@ -950,6 +986,7 @@ func managedEnrich(m session.Meta, td *agents.TranscriptData) {
 	modeSet := h.settings.Mode
 	td.QueuedItems = h.tq().Items()
 	td.Discards = h.tq().Discards()
+	td.Retry = h.retryInfo()
 	h.mu.Unlock()
 	if inter != nil {
 		qs := make([]transcript.Question, len(inter.Questions))
@@ -1338,6 +1375,60 @@ func handleServeEvent(data []byte) {
 		}
 		if h := handleBySes(p.Info.SessionID); h != nil {
 			h.setCompacting(p.Info.inFlight())
+		}
+	case "session.status":
+		// v1: busy | retry | idle per session. The status goes busy between two attempts, so
+		// only output (message.part.updated below), idle and the turn's end clear a retry.
+		var p struct {
+			SessionID string `json:"sessionID"`
+			Status    struct {
+				Type    string `json:"type"`
+				Attempt int    `json:"attempt"`
+				Message string `json:"message"`
+				Next    int64  `json:"next"`
+			} `json:"status"`
+		}
+		if json.Unmarshal(ev.Properties, &p) != nil {
+			return
+		}
+		if h := handleBySes(p.SessionID); h != nil {
+			switch p.Status.Type {
+			case "retry":
+				h.noteRetry(p.Status.Attempt, p.Status.Message, p.Status.Next)
+			case "idle":
+				h.clearRetry()
+			}
+		}
+	case "session.retry.scheduled":
+		// v2: the next attempt of a failing step is due at "at".
+		var p struct {
+			SessionID string `json:"sessionID"`
+			Attempt   int    `json:"attempt"`
+			At        int64  `json:"at"`
+			Error     v2Err  `json:"error"`
+		}
+		if json.Unmarshal(ev.Properties, &p) != nil {
+			return
+		}
+		if h := handleBySes(p.SessionID); h != nil {
+			h.noteRetry(p.Attempt, p.Error.Message, p.At)
+		}
+	case "message.part.updated", "session.text.started", "session.step.ended":
+		// The retried call produced output (a failing attempt emits no part, measured).
+		var p struct {
+			SessionID string `json:"sessionID"`
+			Part      struct {
+				SessionID string `json:"sessionID"`
+			} `json:"part"`
+		}
+		if json.Unmarshal(ev.Properties, &p) != nil {
+			return
+		}
+		if p.SessionID == "" {
+			p.SessionID = p.Part.SessionID
+		}
+		if h := handleBySes(p.SessionID); h != nil {
+			h.clearRetry()
 		}
 	case "session.compaction.started":
 		// v2: the summary is being written. Cleared by .ended / .failed, and by every
