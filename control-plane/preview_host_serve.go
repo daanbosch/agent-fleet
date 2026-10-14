@@ -503,7 +503,7 @@ var previewProxyTransport = newAgentTransport()
 func relayPreview(w http.ResponseWriter, r *http.Request, rt runtime.Runtime, o previewRelayOptions) {
 	target, err := url.Parse(rt.Endpoint())
 	if err != nil || target.Host == "" {
-		http.Error(w, "workspace agent unreachable (is the workspace running?)", http.StatusBadGateway)
+		writePreviewRelayError(w, r, previewWorkspaceUnreachable, o.port)
 		return
 	}
 	path := o.path
@@ -541,6 +541,7 @@ func relayPreview(w http.ResponseWriter, r *http.Request, rt runtime.Runtime, o 
 			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
+			rewritePreviewAgentError(resp, r, o.port)
 			stripAppLoginCookies(resp)
 			if o.allowOrigin != "" {
 				// Drop whatever the app set before overwriting: with two of them
@@ -560,8 +561,9 @@ func relayPreview(w http.ResponseWriter, r *http.Request, rt runtime.Runtime, o 
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Printf("preview relay (port=%d): %v", o.port, err)
-			http.Error(w, "nothing is listening on 127.0.0.1:"+strconv.Itoa(o.port)+
-				" inside the workspace (or the workspace is not running)", http.StatusBadGateway)
+			// Reaching here means the CP's own dial toward the Agent failed (an Agent that
+			// answered, even with an error, comes through ModifyResponse above).
+			writePreviewRelayError(w, r, previewWorkspaceUnreachable, o.port)
 		},
 	}
 	rp.ServeHTTP(w, r)

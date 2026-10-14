@@ -238,3 +238,11 @@ slug は起動ごとに変わる（決定 3）ので、**生 URL を貼る運用
   **「軽量プレビューは WebSocket / SSE 非対応」という古い記述を訂正**した —— 決定 10 で
   ReverseProxy に載せ替えた結果、パス方式でも通るようになっている。
 - デプロイ手順: `deploy/aws/ecs/README.md` に `PreviewDomain` の節を追加。
+
+## 追記
+
+- 2026-10-14: リレーが失敗の種類を区別するようになった（#2139）。Agent の `/proxy/{port}` は `502` で
+  `preview_unreachable`（接続拒否・接続失敗のときだけ）/ `preview_not_http` / `preview_tls` / `preview_failed` を返し、
+  `X-AF-Preview-Error` を付ける。CP のリレー（パス方式・サブドメイン方式）はそのコードを言語に合わせたページ
+  （ナビゲーションは HTML、それ以外は JSON）にして返し、CP 自身の Agent への接続失敗は
+  `preview_workspace_unreachable` として別に扱う。
