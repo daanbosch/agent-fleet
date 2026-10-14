@@ -1,6 +1,7 @@
 package lcpp
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/harness"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/mcpc"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/mcpreg"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/transcript"
 )
@@ -267,3 +269,44 @@ func TestDescribedSetDetectsChangedDefinition(t *testing.T) {
 		t.Fatalf("new description = %q, want stale", got)
 	}
 }
+
+// A tool the Manager gained after the turn's snapshot was taken (tools/list_changed) was never
+// resolved by the approval/plan gate, so describe and call must refuse it this turn.
+func TestMCPBridgeRefusesToolOutsideTurnSnapshot(t *testing.T) {
+	mcpTestHome(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr := mcpc.NewManager(ctx)
+	defer mgr.Close()
+	if errs := mgr.Sync(ctx, []mcpreg.ServerDef{fakeMCPServerDef(t, "fx", "")}); len(errs) != 0 {
+		t.Fatalf("Sync: %v", errs)
+	}
+	var snapshot []harness.ToolDef
+	for _, d := range mgr.ToolDefs() {
+		if d.Name == mcpc.PrefixToolName("fx", "echo") {
+			snapshot = append(snapshot, d)
+		}
+	}
+	h := &threadHandle{mcpMgr: mgr}
+	byName := map[string]harness.Tool{}
+	for _, tl := range h.bridgeTools(snapshot) {
+		byName[tl.Def.Name] = tl
+	}
+	touch := mcpc.PrefixToolName("fx", "touch")
+	marker := filepath.Join(t.TempDir(), "marker")
+	callArgs := string(mustJSON(map[string]any{"name": touch, "arguments": map[string]any{"path": marker}}))
+	if _, err := byName["tool_describe"].Run(ctx, nil, string(mustJSON(map[string]any{"name": touch}))); err == nil {
+		t.Fatal("describe accepted a tool outside the turn snapshot")
+	}
+	if _, ok := byName["tool_call"].Target(callArgs); ok {
+		t.Fatal("Target resolved a tool outside the snapshot")
+	}
+	if _, err := byName["tool_call"].Run(ctx, nil, callArgs); err == nil || !strings.Contains(err.Error(), "unknown tool") {
+		t.Fatalf("call err = %v, want unknown tool", err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a tool outside the snapshot reached the server")
+	}
+}
+
+func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }

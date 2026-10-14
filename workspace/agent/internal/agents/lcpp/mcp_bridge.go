@@ -152,8 +152,17 @@ type bridgeCallArgs struct {
 
 // current is the tool's definition as the Manager holds it right now, which can be newer than
 // the turn-start snapshot in byName (tools/list_changed arrives mid-turn). ok=false when the
-// tool is gone.
+// tool is gone or was not in that snapshot.
 func (b *mcpBridge) current(name string) (harness.ToolDef, bool) {
+	// byName is the turn-start allowlist the approval gate resolved targets from (target): a
+	// name outside it was never judged, so it is not runnable this turn even if the Manager
+	// has it now. New tools become available next turn.
+	if _, ok := b.byName[name]; !ok {
+		return harness.ToolDef{}, false
+	}
+	// byName is the turn-start allowlist the approval gate resolved targets from (target): a
+	// name outside it was never judged, so it is not runnable this turn even if the Manager
+	// has it now. New tools become available next turn.
 	for _, d := range b.mgr.ToolDefs() {
 		if d.Name == name {
 			return d, true
