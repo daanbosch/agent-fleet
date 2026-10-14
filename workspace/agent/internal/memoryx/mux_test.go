@@ -62,6 +62,8 @@ var memoryTestRoutes = map[string]http.HandlerFunc{
 	"GET /agents/memory/entries/member-search":    HandleAgentMemoryMemberSearch,
 	"GET /agents/memory/entries/member-latest":    HandleAgentMemoryMemberLatest,
 	"GET /agents/memory/entries/member-forgotten": HandleAgentMemoryMemberForgotten,
+	"GET /agents/memory/entries/purge-preview":    HandleAgentMemoryPurgePreview,
+	"POST /agents/memory/entries/purge":           HandleAgentMemoryPurge,
 
 	"GET /agents/memory/entries/projects":             HandleAgentMemoryMemberProjects,
 	"GET /agents/memory/entries/project-move-preview": HandleAgentMemoryMemberMovePreview,
@@ -84,9 +86,10 @@ var memberOnlyTestRoutes = map[string]bool{
 	"POST /agents/memory/entries/pin":          true,
 	"POST /agents/memory/entries/revert":       true,
 	"POST /agents/memory/entries/member-save":  true,
-	"POST /agents/memory/entries/project-move": true,
+	"POST /agents/memory/entries/purge":        true,
 	"POST /agents/memory/snapshots":            true,
 	"POST /agents/memory/import/apply":         true,
+	"POST /agents/memory/entries/project-move": true,
 }
 
 func buildMux() *http.ServeMux {

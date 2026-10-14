@@ -20,6 +20,7 @@ import { useToast } from "../../../ui/ToastProvider.tsx";
 import { useConfirm } from "../../../ui/ConfirmProvider.tsx";
 import { useT } from "../../../lib/i18n/index.ts";
 import { fmtDateTime, DATETIME_FULL } from "../../../lib/intl.ts";
+import { PurgeHistoryDialog, type PurgeTarget } from "./memoryPurge.tsx";
 import type { MemoryBody, MemoryChange, MemoryListed, MemorySearchHit, SecretFinding } from "./memoryTypes.ts";
 
 const TYPES = ["user", "feedback", "project", "reference"] as const;
@@ -77,6 +78,7 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
   const [searchErr, setSearchErr] = useState(false);
   const [busy, setBusy] = useState(false);
   const [mine, setMine] = useState(0);
+  const [purging, setPurging] = useState<PurgeTarget | null>(null);
 
   const load = useCallback(async (signal: AbortSignal) => {
     const list = await api("api/agents/memory/entries/list");
@@ -396,6 +398,9 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
               <button type="button" disabled={busy} onClick={() => void forget(m)}>
                 {tr("mem.af_forget")}
               </button>
+              <button type="button" disabled={busy} onClick={() => setPurging({ ...m, where: whereOf(m) })}>
+                {tr("mem.pg_button")}
+              </button>
             </li>
           ))
         )}
@@ -492,6 +497,9 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
                   {" · "}
                   {who(c)}
                 </span>
+                <button type="button" disabled={busy} onClick={() => setPurging({ ...c, where: whereOf(c) })}>
+                  {tr("mem.pg_button")}
+                </button>
                 <button type="button" disabled={busy} onClick={() => void restore(c)}>
                   {tr("mem.br_restore")}
                 </button>
@@ -499,6 +507,9 @@ export function MemoryBrowserPanel({ reload, onChanged }: { reload: number; onCh
             ))}
           </ul>
         </>
+      )}
+      {purging && (
+        <PurgeHistoryDialog target={purging} onClose={() => setPurging(null)} onDone={() => { onChanged(); setMine((n) => n + 1); }} />
       )}
     </div>
   );

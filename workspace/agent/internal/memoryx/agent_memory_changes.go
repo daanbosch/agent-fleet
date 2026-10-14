@@ -59,6 +59,9 @@ type agentMemChangeView struct {
 	Latest     bool `json:"latest"`
 	Live       bool `json:"live"`
 	Revertible bool `json:"revertible"`
+	// PurgedBefore: the memory's earlier revisions were purged from the history (#1982), so
+	// this change cannot be undone; forgetting the memory still can.
+	PurgedBefore bool `json:"purgedBefore,omitempty"`
 }
 
 // agentMemChangesWire is the change list. Withheld counts rows left out because a value in
@@ -259,6 +262,7 @@ func agentMemChangeFrom(commit, at, body string) (v agentMemChangeView, rel, pid
 	v = agentMemChangeView{
 		Commit: commit, At: at, Op: tr["AF-Op"], Scope: scope, Name: name,
 		AuthorKind: tr["AF-Author-Kind"], AuthorSession: tr["AF-Author-Session"], RevertOf: tr["AF-Revert-Of"],
+		PurgedBefore: tr[agentMemPurgedTrailer] != "",
 	}
 	return v, rel, pid, true
 }
@@ -447,6 +451,18 @@ func agentMemRevert(req agentMemRevertReq, now time.Time) (agentMemWriteResult, 
 		return agentMemWriteResult{}, err
 	}
 	_, scope, _, name, _ := agentMemParseRepoPath(agentMemRepoPrefix + "/" + rel)
+	if !req.Forget {
+		body, err := memoryGitRun("log", "-1", "--format=%B", commit)
+		if err != nil {
+			return agentMemWriteResult{}, err
+		}
+		if agentMemTrailers(body)[agentMemPurgedTrailer] != "" {
+			// Without this the missing earlier side would read as "this change created the
+			// memory", and undoing it would delete the memory instead of restoring anything.
+			return agentMemWriteResult{}, memoryErrf(http.StatusConflict, errCodeMemoryConflict,
+				"the earlier revisions of this memory were purged from the history; there is nothing to go back to (forgetting it still works)")
+		}
+	}
 	// Compared by commit, not only by content: after create → forget → create → forget, the
 	// first forget and the live store agree that the memory is absent, yet reverting it would
 	// bring back the older text.

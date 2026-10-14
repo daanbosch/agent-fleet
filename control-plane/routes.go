@@ -936,6 +936,10 @@ func registerAgentEnvRoutes(mux *http.ServeMux, cfg config) {
 	mux.HandleFunc("GET /api/agents/memory/entries/member-search", rest)
 	mux.HandleFunc("GET /api/agents/memory/entries/member-latest", rest)
 	mux.HandleFunc("GET /api/agents/memory/entries/member-forgotten", rest)
+	// The member's purge of one memory's past revisions from the history (#1982). The CP signs
+	// the purge (member_origin.go) and audits it (proxy.go); the preview only reads.
+	mux.HandleFunc("GET /api/agents/memory/entries/purge-preview", rest)
+	mux.HandleFunc("POST /api/agents/memory/entries/purge", rest)
 	// Moving the memories of a project whose working copy is gone (#1984). The move is signed.
 	mux.HandleFunc("GET /api/agents/memory/entries/projects", rest)
 	mux.HandleFunc("GET /api/agents/memory/entries/project-move-preview", rest)
