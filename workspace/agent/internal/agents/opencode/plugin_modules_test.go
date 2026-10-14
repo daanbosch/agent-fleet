@@ -24,7 +24,7 @@ case "$2" in
   *) echo "$2"; exit 1 ;;
 esac
 `)
-	writeScript(t, filepath.Join(bin, "workspace-agent"), "#!/bin/sh\necho \"$*\" >> \""+agentLog+"\"\n")
+	writeScript(t, filepath.Join(bin, "workspace-agent"), "#!/bin/sh\necho \"$*\" >> \""+agentLog+"\"\nif [ \"$1\" = opencode-engine-token ]; then echo \"tok-$2\"; fi\n")
 
 	pluginDir := filepath.Join("..", "..", "..", "..", "opencode-plugin")
 	cmd := exec.Command(node, "--experimental-strip-types", "--no-warnings",
@@ -34,6 +34,12 @@ esac
 		"HOME="+home,
 		"AF_SESSION_SID=sid-test",
 		"AF_WORKSPACE_AGENT_BIN="+filepath.Join(bin, "workspace-agent"),
+		// The shared-server plugins read their timing and marker path once, at load.
+		"AF_OPENCODE_READY_FILE="+filepath.Join(t.TempDir(), "ready"),
+		"AF_OPENCODE_READY_WAIT_MS=700",
+		"AF_OPENCODE_TAG_WAIT_MS=700",
+		"AF_OPENCODE_TUI_POLL_MS=25",
+		"AF_OPENCODE_TUI_SERVER_POLL_MS=25",
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("plugin modules: %v\n%s", err, out)

@@ -66,12 +66,17 @@ type apiTarget struct {
 
 // v2TargetFor says where slot m's state is read from, or false when it is read from opencode.db.
 // A managed session is served by af's own supervised daemon (serveapi.go's client already adds
-// the Basic auth). The Terminal route answers false until it knows which daemon its TUI talks to.
+// the Basic auth), and so is a Terminal one whose TUI is attached to it (sharedTUI). A
+// --standalone Terminal session keeps its state in the shared database file only, which is
+// still the v1 reader's path.
 var v2TargetFor = func(m session.Meta) (apiTarget, bool) {
-	if !isV2() || m.DriverKind() != session.DriverManaged {
+	if !isV2() {
 		return apiTarget{}, false
 	}
-	return apiTarget{Addr: serveAddr(), Client: serveClient}, true
+	if m.DriverKind() == session.DriverManaged || (m.DriverKind() == session.DriverTUI && sharedTUI()) {
+		return apiTarget{Addr: serveAddr(), Client: serveClient}, true
+	}
+	return apiTarget{}, false
 }
 
 // statusError is a non-200 answer.

@@ -13,6 +13,15 @@
 // wireSession surfaces it (same store/path as claude). Absent AF_SESSION_SID (e.g. a
 // shell-launched opencode) the plugin is a no-op.
 //
+// Shared serve (opencode 2, issue #2120): af runs ONE `opencode serve` for every Terminal session, so
+// the server's environment has no AF_SESSION_SID and sessions are told apart by metadata instead:
+// af stamps {"af.sid"} on every opencode session it creates (and the TUI plugin does for the ones
+// made with /new), and the sid of an event's session comes from ctx.session.get. Each af sid has
+// its own debounced state machine. A subagent's session inherits the metadata but is left out by
+// its parentID, exactly as before. A session with no af.sid (Managed ones, a member's own `opencode
+// run`) is not ours to report. With AF_SESSION_SID in the environment (standalone, opencode 1) the
+// single env sid applies to every session, as it always did.
+//
 // One module for both opencode majors, with no dependency on @opencode/plugin: opencode 2
 // reads `id` and `setup` from a plain default-exported object and ignores `server`;
 // opencode 1 (object entrypoints, 1.18.29+) calls `server` and ignores the rest. The two
@@ -46,17 +55,28 @@ const GRACE_MS = 1500; // ignore message.* this long after session.idle (trailin
 const AGENT_BIN = process.env.AF_WORKSPACE_AGENT_BIN || "/usr/local/bin/workspace-agent";
 
 const bridge = () => {
-  const sid = process.env.AF_SESSION_SID;
-  const sidDir = process.env.HOME ? join(process.env.HOME, ".config/agent-fleet/opencode-sid") : null;
-  let cur = "";
-  let idleAt = 0;
+  const envSid = process.env.AF_SESSION_SID;
+  // Where the Agent reads slot -> session ids. A standalone/opencode 1 pane keeps writing the
+  // directory it always has; the shared server writes where the Agent reads today
+  // (paths.AgentStateDir), which is not that one since ADR 0087 moved the store.
+  const sidDir = process.env.HOME
+    ? join(process.env.HOME, envSid ? ".config/agent-fleet/opencode-sid" : ".local/state/agent-fleet/opencode-sid")
+    : null;
   let queue = Promise.resolve();
   // Set when the plugin unloads. Whatever is still in flight (a session lookup, a queued report)
   // must not write the slot or report a state after a reload's new bridge took over.
   let stopped = false;
-  const set = (state) => {
-    if (!sid || state === cur || stopped) return;
-    cur = state;
+  // One debounced state machine per af session: the shared serve hosts several at once.
+  const machines = new Map();
+  const machine = (sid) => {
+    if (!machines.has(sid)) machines.set(sid, { cur: "", idleAt: 0 });
+    return machines.get(sid);
+  };
+  const set = (sid, state) => {
+    if (!sid || stopped) return;
+    const m = machine(sid);
+    if (state === m.cur) return;
+    m.cur = state;
     // Fire-and-forget, but one at a time: separate processes finish in any order, and a
     // working that lands after its idle leaves the badge stuck. Absolute path so it resolves
     // regardless of the plugin's PATH.
@@ -72,7 +92,7 @@ const bridge = () => {
         }),
     );
   };
-  const recordOcid = (ocid) => {
+  const recordOcid = (sid, ocid) => {
     if (!sid || !ocid || !sidDir || stopped) return;
     try {
       mkdirSync(sidDir, { recursive: true });
@@ -81,9 +101,9 @@ const bridge = () => {
       /* ignore */
     }
   };
-  const idle = () => {
-    idleAt = Date.now();
-    set("idle");
+  const idle = (sid) => {
+    machine(sid).idleAt = Date.now();
+    set(sid, "idle");
   };
 
   // opencode 1. Extract the opencode session id from whichever event carries one, so the
@@ -102,12 +122,12 @@ const bridge = () => {
     const t = event && event.type;
     if (!t) return;
     const ocid = sidOf(event.properties);
-    if (ocid) recordOcid(ocid); // keep the slot pinned to the live session
+    if (ocid) recordOcid(envSid, ocid); // keep the slot pinned to the live session
     if (t === "session.idle") {
-      idle();
+      idle(envSid);
     } else if (t.startsWith("message.")) {
-      if (Date.now() - idleAt < GRACE_MS) return; // trailing finalize after idle
-      set("working");
+      if (Date.now() - machine(envSid).idleAt < GRACE_MS) return; // trailing finalize after idle
+      set(envSid, "working");
     }
   };
 
@@ -116,15 +136,27 @@ const bridge = () => {
   // child sessions are left out of both. The event stream is live-only: a subagent resumed after
   // a restart or reload never shows its session.created here, so an unseen id is looked up
   // (`lookup` = ctx.session.get). A failed lookup leaves the state and the id alone.
-  const childOf = new Map(); // session id -> is a subagent session
-  const isChild = async (id, lookup) => {
-    if (childOf.has(id)) return childOf.get(id);
+  //
+  // owner(id) is the af sid a session reports under: undefined = not known yet or not ours (a
+  // failed lookup, a session af has not tagged yet — the next event asks again), null = a
+  // subagent session. A tagged root session is remembered for good; a tag does not change.
+  const known = new Map(); // session id -> af sid | null (subagent)
+  const remember = (id, sid) => (known.set(id, sid), sid);
+  const owner = async (id, lookup, created) => {
+    if (known.has(id)) return known.get(id);
+    if (created) {
+      // session.created tells it is a subagent without a lookup; the metadata still needs one.
+      if (created.parentID) return remember(id, null);
+      if (envSid) return remember(id, envSid);
+    }
     try {
       const info = await lookup({ sessionID: id });
-      childOf.set(id, Boolean(info && info.parentID));
-      return childOf.get(id);
+      if (info && info.parentID) return remember(id, null);
+      const sid = envSid || (info && info.metadata && info.metadata["af.sid"]);
+      if (typeof sid !== "string" || !sid) return undefined;
+      return remember(id, sid);
     } catch {
-      return null;
+      return undefined;
     }
   };
   const onV2 = async (event, lookup) => {
@@ -132,8 +164,8 @@ const bridge = () => {
     const data = event && event.data;
     if (!t || !data || typeof data.sessionID !== "string") return;
     if (t === "session.created") {
-      childOf.set(data.sessionID, Boolean(data.parentID));
-      if (!data.parentID) recordOcid(data.sessionID);
+      const sid = await owner(data.sessionID, lookup, data);
+      if (!stopped && typeof sid === "string") recordOcid(sid, data.sessionID);
       return;
     }
     const working = t === "session.execution.started";
@@ -143,13 +175,13 @@ const bridge = () => {
       t === "session.execution.interrupted" ||
       t === "session.idle";
     if (!working && !done) return;
-    const child = await isChild(data.sessionID, lookup);
-    if (stopped || child !== false) return;
+    const sid = await owner(data.sessionID, lookup);
+    if (stopped || typeof sid !== "string") return;
     if (working) {
-      recordOcid(data.sessionID);
-      set("working");
+      recordOcid(sid, data.sessionID);
+      set(sid, "working");
     } else {
-      idle();
+      idle(sid);
     }
   };
   return { onV1, onV2, stop: () => void (stopped = true) };

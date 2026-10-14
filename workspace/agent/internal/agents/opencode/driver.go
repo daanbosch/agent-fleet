@@ -238,6 +238,11 @@ func DropHandle(name string) {
 	delete(handles, name)
 	handlesMu.Unlock()
 	if h == nil {
+		// A Terminal slot has no handle; its turn runs on the shared serve all the same, and
+		// closing the pane does not stop it.
+		if m, ok := session.ReadMeta(name); ok {
+			interruptTerminal(m)
+		}
 		return
 	}
 	h.mu.Lock()
@@ -314,6 +319,14 @@ func ReconcileManaged(reason string) {
 		}
 		if _, err := d.Resume(m); err != nil {
 			log.Printf("opencode managed: reconcile %s (%s): %v", m.Name, reason, err)
+		}
+	}
+	// Terminal panes that survived an Agent restart are attached to the daemon too: adopt it (or
+	// start a replacement and put their environments back) rather than wait for a Console poll,
+	// which never comes for a session that has no managed handle.
+	if sharedTerminals() > 0 {
+		if _, _, err := Serve().Ensure(); err != nil {
+			log.Printf("opencode: terminal sessions need the shared serve (%s): %v", reason, err)
 		}
 	}
 }

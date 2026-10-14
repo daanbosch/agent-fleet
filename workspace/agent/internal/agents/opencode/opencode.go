@@ -192,6 +192,17 @@ func (agentImpl) BuildLaunch(m session.Meta, _ agents.LaunchOpts) (agents.Launch
 	// which is what makes the usage row say who spent it. Merged rather than appended: two
 	// entries of the same name in `tmux new-session -e` is not something to leave to luck.
 	envs := mergeCommandEnv(append([]string{"AF_SESSION_SID=" + ocSid}, env()...), EngineEnv(m.Name))
+	// opencode 2: the TUI attaches to af's own serve. The session is created (or resumed, or
+	// forked) through its API here, so none of the v1 store reads below apply to it.
+	if sharedTUI() {
+		plan, ok, err := buildSharedLaunch(m, ocSid)
+		if err != nil {
+			return agents.LaunchPlan{}, err
+		}
+		if ok {
+			return agents.LaunchPlan{Program: plan.Program, Cwd: m.CWD(), Env: mergeCommandEnv(envs, plan.Env)}, nil
+		}
+	}
 	// Resume the slot's OWN opencode conversation (activeSession: the plugin-captured
 	// per-slot id, else a store-derived conversation this slot itself opened — never an
 	// older one from the same dir), UNLESS its last turn was interrupted (incomplete).

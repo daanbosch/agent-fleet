@@ -220,3 +220,64 @@ rule and held (`Blocked by configuration policy`) with the same agent allow in p
 name as the resource matched nothing. Chat and one-shot runs on v2 now carry `shell:*`, `edit:*`,
 `write:*` and `subagent:*` denies inline. Code Mode's `execute` did not reach the built-in shell
 even without a policy (control run), so it has no entry of its own.
+
+## 2026-10-14 — Terminal sessions on one shared serve (#2120)
+
+On opencode 2 a Terminal session now attaches to af's own supervised `opencode serve`
+(`opencode --server`) instead of a private `--standalone` server. The v1 launch and the
+standalone launch are untouched; `AF_OPENCODE_TUI_STANDALONE=1` puts the standalone one back
+without a release, and a launch that cannot get the serve (not connected, disabled) falls back
+to it by itself. Code: `workspace/agent/internal/agents/opencode/shared.go`, `attach.go`,
+`paneenv.go`; plugins `agent-fleet-shared.js`, `agent-fleet-tui/`, and the metadata path of
+`agent-fleet-status.js`.
+
+**How sessions stay apart** (all measured on 2.0.28, isolated `HOME`, loopback stub provider):
+
+- Identity is session metadata. The Agent creates (or forks) the opencode session itself with
+  `{"af.sid", "af.name"}`, records slot → session id at once, and the plugins resolve
+  `sessionID → ctx.session.get(...).metadata["af.sid"]`. `PATCH /api/session/{id}` **replaces**
+  the whole metadata object (not a merge), so every tag is read-merge-write. A fork copies
+  metadata (and permissions), so the copy is re-tagged.
+- The shell environment is `PUT /api/session/{id}/environment` (`{"variables": {…}}`, 204; 404 for
+  an unknown id). Without it the shell prints the **server's** environment, including the server
+  password and the provider keys. With it, it prints exactly the PUT variables.
+  `workspace-agent opencode-attach` is the pane program: it PUTs its own environment (toolchain
+  exports included, server credentials removed) and only then `exec`s the TUI.
+- The password rides the pane environment, never the command line.
+- The engine token per session is a server plugin `session.hook("http.request")`: the event
+  carries `request` (a `Request`), `sessionID`, `model`; setting `authorization` on it reaches the
+  provider (the stub saw `Bearer tok-<slot>` on every request). The token is minted by the Agent
+  (`workspace-agent opencode-engine-token <name>`), never stored in metadata.
+- Provider keys cannot leave the server environment: `POST /api/credential` stores the key in
+  `opencode.db` in plaintext (found with `strings` in the WAL), which af's no-plaintext-credential
+  rule excludes.
+
+**TUI plugin.** `~/.config/opencode/plugins/<dir>/` with a `package.json` whose `./tui` export
+is the entry loads on 2.0.28; its context has `client` (the generated client: `session.get`,
+`session.update({sessionID, metadata})`, `session.environment({sessionID, variables})`,
+`server.info()` with the server `pid`), `ui.router.current()` and `data.listen`. **Every TUI on
+the server receives every `session.created`**, so the first version, which claimed a new session
+on the event, tagged a `/new` made in one pane with another pane's sid (found by the end-to-end
+run). A pane now claims a session only while its own route shows it.
+
+**Restart gap.** The environment is in memory, so a new serve generation has none. On every new
+generation the Agent PUTs the environment of each live Terminal pane (read back from the pane's
+process tree, `/proc/<pid>/environ` — no copy on disk) before it counts the daemon as up, then
+writes the daemon pid to `~/.config/agent-fleet/opencode-env-ready`. The server plugin holds the
+shell tool until that marker names its own pid (bounded at 10 s, then runs). A session created by
+`/new` inside a TUI has the same hole between creation and the TUI plugin's PUT + tag; the shell
+tool waits for the tag of a new untagged session (5 s bound, never for Managed — tagged
+`af.managed` — subagent or old sessions). Measured on a restart with four panes: the new daemon
+answered, and the environments + marker were in place 170–350 ms later; the TUIs reconnected and
+their next command saw their own environment. **Residual window:** anything that runs a command
+without the shell tool, a server whose Agent is gone (the gate gives up after its bound), and a
+plugin that fails to load. The password is kept across generations (a `--server` TUI reconnects
+only with the password it started with).
+
+**Memory** (idle, bare TUIs, no plugins, RSS/PSS MB): 3 × `--standalone` 1230 / 842; one serve + 3 ×
+`--server` 732 / 543. Per extra pane about +160 / +112 (TUI) against +410 / +280 (standalone).
+
+**Left alone.** Provider, MCP and config settings stay per server. The stale slot directory:
+the status plugin of a standalone/opencode 1 pane still writes
+`~/.config/agent-fleet/opencode-sid`, which the Agent has not read since ADR 0087 moved the store
+to `~/.local/state` (#2122); the shared-server plugins write where the Agent reads.
