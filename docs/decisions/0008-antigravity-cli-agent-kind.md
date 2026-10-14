@@ -314,8 +314,14 @@ them is the requirement itself.
 - ~~Whether the image installs it as root or into home~~ → **settled on root install in Track B**
   (`--dir /usr/local/bin` plus `AGY_CLI_DISABLE_AUTO_UPDATE=true` to suppress self-update.
   ⚠️ Only the value `true` works — `1` is ignored. docs/32 §(self-update) / docs/70 §70.14.9).
-- Whether a Managed execution method is possible waits on `agy` shipping structured output (an
-  equivalent of `--output-format`).
+- ~~Whether a Managed execution method is possible waits on `agy` shipping structured output~~ →
+  `--output-format stream-json` exists now, but print mode cannot ask for a permission, so a
+  Managed method would run on preset permissions only. Reassessment: #2155.
+- Driving agy through its local connect-RPC (step status, answering approvals, real interrupt) is
+  **not possible from outside agy on 1.3.5**: every method needs a per-launch CSRF token that is
+  neither settable nor handed to any child af controls (MCP servers, hooks; sidecars are disabled in
+  the CLI). Measurements: docs/32 §(local RPC, #1079). Hooks do carry the conversation id and a
+  `Stop` signal: #2156.
 - L2 E2E including the CP and a browser (`e2e/`) has to happen separately on a host with docker
   (this container has none).
 

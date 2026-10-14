@@ -840,6 +840,41 @@ when already false なので追加コストなし）。なお TUI `/config` の
 ツールプロセス無しなら "" （idle ではない＝完了通知を出さず、Workspace を保持しない）。
 CP / Console 側の裏打ちは #1818 / #1819。
 
+### ローカル RPC で駆動できるかの実測（2026-10-15、#1079）
+
+Omnigent のように agy 内蔵の connect-RPC（trajectory のステップ状態・`requestedInteraction`・
+`HandleCascadeUserInteraction`・`CancelCascadeSteps`・`modelUsage`）で状態取得と承認回答を置き換えられるか、
+ピン版 1.3.5 で測った。**結論: AF の外から呼ぶ正規の手段は無い。DB/TUI 経路を続ける。**
+
+- **メソッドは存在する。** バイナリに `HandleCascadeUserInteraction` / `CancelCascadeSteps` /
+  `GetCascadeTrajectorySteps` / `SendUserCascadeMessage` / `RequestedInteraction` / `modelUsage` がある。
+- **TUI は起動直後から loopback で待ち受ける。** `127.0.0.1` に HTTPS(gRPC) と HTTP の 2 ポート。番号は
+  ログに `Language server listening on random port at N for HTTP` と出るので、`--log-file` を握れば発見はできる。
+- **全メソッドが CSRF トークン必須。** ヘッダ無しは `401 missing CSRF token`（HTTP・HTTPS 両ポート）。
+- **トークンは外から与えられない。** `ANTIGRAVITY_CSRF_TOKEN=<任意>` を付けて起動しても `401 invalid CSRF token`。
+  トークンは起動ごとにプロセス内で生成され、ファイルにも出ない。
+- **トークンを受け取る子プロセスに AF は入れない。**
+  - agy の MCP 子プロセス（AF の `workspace-agent mcp-stdio`）の環境に `ANTIGRAVITY_*` は無い。
+  - sidecar（`~/.gemini/config/sidecars/<id>/sidecar.json`）は文書上 `ANTIGRAVITY_LS_ADDRESS` と
+    `ANTIGRAVITY_CSRF_TOKEN` を受け取るが、CLI では起動しない。サーバ配信のフラグ `enable-sidecars` が CLI
+    サブクライアントで `null`、Unleash 上も devMode 限定で、置いても無反応だった。
+  - hooks（`~/.gemini/config/hooks.json`）の子に渡るのは `ANTIGRAVITY_CONVERSATION_ID` だけ。
+    `SessionStart` / `PreInvocation` / `Stop` を 1 ターン発火させて確認した。
+  - 文書上トークンを受け取るのはモデルが実行する `run_command` の子（`agy agentapi` 用）だけで、AF が使える経路ではない。
+- プロセスメモリからトークンを読む手は採らない。
+
+副産物として **hooks は使える構造化シグナル**だと分かった（プロンプト送信までは発火しない）。stdin の JSON
+（camelCase）は次のとおり。
+
+| イベント | stdin のキー |
+|---|---|
+| `SessionStart` | `conversationId`, `workspacePaths`, `transcriptPath`, `artifactDirectoryPath`, `modelName` |
+| `PreInvocation` | 上記 + `invocationNum`, `initialNumSteps` |
+| `Stop` | 上記 + `executionNum`, `fullyIdle`, `terminationReason`, `error` |
+
+会話 UUID の捕捉（いまは brain/ の差分）と working/idle の判定を置き換えられる見込みがある。
+stream-json による Managed 化の再検討は #2155、hooks による状態取得は #2156。
+
 ## ユーザーに依頼する事項（並行作業のブロッカー解消）
 
 1. **GCP プロジェクトの用意**（D1/M2 用）: 課金有効化済みプロジェクト ID を Connections 設定時に使える形で。
