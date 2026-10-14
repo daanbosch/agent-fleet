@@ -242,7 +242,7 @@ slug は起動ごとに変わる（決定 3）ので、**生 URL を貼る運用
 ## 追記
 
 - 2026-10-14: リレーが失敗の種類を区別するようになった（#2139）。Agent の `/proxy/{port}` は `502` で
-  `preview_unreachable`（接続拒否のときだけ）/ `preview_not_http` / `preview_tls` / `preview_failed` を返し、
+  `preview_unreachable`（接続拒否・接続失敗のときだけ）/ `preview_not_http` / `preview_tls` / `preview_failed` を返し、
   `X-AF-Preview-Error` を付ける。CP のリレー（パス方式・サブドメイン方式）はそのコードを言語に合わせたページ
   （ナビゲーションは HTML、それ以外は JSON）にして返し、CP 自身の Agent への接続失敗は
   `preview_workspace_unreachable` として別に扱う。

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"html"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -76,7 +77,7 @@ func writePreviewRelayError(w http.ResponseWriter, r *http.Request, kind string,
 func previewErrorBody(r *http.Request, kind string, port int) ([]byte, string) {
 	lang := auth.PreferredUILang(r)
 	msg := previewErrorText(lang, kind, port)
-	if strings.Contains(r.Header.Get("Accept"), "text/html") {
+	if acceptPrefersHTML(r.Header.Get("Accept")) {
 		page := "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\">" +
 			"<body style=\"font:16px system-ui;padding:2rem;background:#1e1e1e;color:#ddd\">" +
 			html.EscapeString(msg) + "</body>"
@@ -104,4 +105,38 @@ func rewritePreviewAgentError(resp *http.Response, in *http.Request, port int) {
 	resp.Header.Set("Content-Type", ctype)
 	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
 	resp.Header.Set("Cache-Control", "no-store")
+}
+
+// acceptPrefersHTML reports whether Accept prefers text/html over application/json: the higher q
+// wins, a tie goes to the one listed first, q=0 means refused. Anything else (including
+// "*/*" alone) gets JSON.
+func acceptPrefersHTML(accept string) bool {
+	htmlQ, jsonQ := 0.0, 0.0
+	htmlAt, jsonAt := -1, -1
+	for i, part := range strings.Split(accept, ",") {
+		mt, params, err := mime.ParseMediaType(strings.TrimSpace(part))
+		if err != nil {
+			continue
+		}
+		q := 1.0
+		if v, ok := params["q"]; ok {
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				q = f
+			}
+		}
+		switch mt {
+		case "text/html":
+			if htmlAt < 0 {
+				htmlQ, htmlAt = q, i
+			}
+		case "application/json":
+			if jsonAt < 0 {
+				jsonQ, jsonAt = q, i
+			}
+		}
+	}
+	if htmlQ <= 0 {
+		return false
+	}
+	return jsonQ <= 0 || htmlQ > jsonQ || (htmlQ == jsonQ && htmlAt < jsonAt)
 }

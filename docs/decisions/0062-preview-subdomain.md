@@ -271,6 +271,6 @@ it goes stale as a 404 — the least legible failure there is**.
 ## Notes
 
 - 2026-10-14: the relay now tells failures apart (#2139). The Agent's `/proxy/{port}` answers `502` with
-  `preview_unreachable` (connection refused only), `preview_not_http`, `preview_tls` or `preview_failed`, and marks
+  `preview_unreachable` (connection refused or dial failure), `preview_not_http`, `preview_tls` or `preview_failed`, and marks
   it with `X-AF-Preview-Error`; the CP relay (path and subdomain forms) renders that code as a localized page
   (HTML for navigations, JSON otherwise) and keeps its own dial failure as `preview_workspace_unreachable`.

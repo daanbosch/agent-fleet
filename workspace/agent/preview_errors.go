@@ -1,14 +1,15 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
 )
@@ -29,8 +30,9 @@ const (
 )
 
 // previewErrorHeader marks a response as the Agent's own relay error rather than the
-// previewed app's, so the Control Plane can tell the two apart. handlePreview deletes it
-// from every upstream response: an app must not be able to forge it.
+// previewed app's, so the Control Plane can tell the two apart. The contract covers the
+// FINAL response header only: handlePreview deletes it there, and the Control Plane reads
+// nothing else (not 1xx headers, not trailers), so an app cannot forge it by those routes.
 const previewErrorHeader = "X-AF-Preview-Error"
 
 // errPlainHTTPToTLS is returned by sniffPlainHTTPToTLS when a 400 says "you sent HTTP to
@@ -92,30 +94,82 @@ func writePreviewError(w http.ResponseWriter, kind string, port int) {
 	httpx.WriteErr(w, http.StatusBadGateway, kind, previewErrorMessage(kind, port))
 }
 
+// sniffWait bounds how long a 400 candidate may hold its headers back while the first
+// body bytes are read. The known notices arrive with the headers, so waiting longer only
+// ever delays a stream that happens to answer 400.
+const sniffWait = 200 * time.Millisecond
+
 // sniffPlainHTTPToTLS turns a 400 whose body says "plain HTTP sent to an HTTPS port"
 // into errPlainHTTPToTLS. Servers answer this on the TLS port itself (Go, nginx, Apache),
 // so it reaches the browser as a bare 400 that explains nothing. There is no typed signal,
-// so the body text is matched — only for a 400 with a small or close-delimited body,
-// never for chunked/streamed ones, so nothing that streams is held back.
+// so the body text is matched, narrowly: only a 400 whose Content-Type is absent, text/plain
+// or text/html (those servers' own pages; an app's JSON or event stream is never touched),
+// only the first read, and at most sniffWait. A body that has not shown up by then is
+// handed on untouched and arrives as soon as it does.
 func sniffPlainHTTPToTLS(resp *http.Response) error {
 	if resp.StatusCode != http.StatusBadRequest || len(resp.TransferEncoding) > 0 ||
-		resp.ContentLength > 512 {
+		resp.ContentLength > 512 || !plainNoticeContentType(resp.Header.Get("Content-Type")) {
 		return nil
 	}
-	buf := make([]byte, 256)
-	n, _ := io.ReadFull(resp.Body, buf)
-	buf = buf[:n]
-	if looksLikeHTTPToHTTPSNotice(buf) {
-		_ = resp.Body.Close()
-		return errPlainHTTPToTLS
+	pb := &peekBody{orig: resp.Body, res: make(chan sniffResult, 1)}
+	go func() {
+		buf := make([]byte, 256)
+		n, err := resp.Body.Read(buf)
+		pb.res <- sniffResult{buf[:n], err}
+	}()
+	select {
+	case r := <-pb.res:
+		if looksLikeHTTPToHTTPSNotice(r.data) {
+			_ = resp.Body.Close()
+			return errPlainHTTPToTLS
+		}
+		pb.res <- r // replay it to the reader
+	case <-time.After(sniffWait):
 	}
-	orig := resp.Body
-	resp.Body = struct {
-		io.Reader
-		io.Closer
-	}{io.MultiReader(bytes.NewReader(buf), orig), orig}
+	resp.Body = pb
 	return nil
 }
+
+func plainNoticeContentType(ct string) bool {
+	if ct == "" {
+		return true
+	}
+	mt, _, err := mime.ParseMediaType(ct)
+	return err == nil && (mt == "text/plain" || mt == "text/html")
+}
+
+type sniffResult struct {
+	data []byte
+	err  error
+}
+
+// peekBody replays the one read taken by sniffPlainHTTPToTLS, then continues with the
+// original body.
+type peekBody struct {
+	orig io.ReadCloser
+	res  chan sniffResult
+	buf  []byte
+	err  error
+	done bool
+}
+
+func (p *peekBody) Read(b []byte) (int, error) {
+	if !p.done {
+		r := <-p.res
+		p.buf, p.err, p.done = r.data, r.err, true
+	}
+	if len(p.buf) > 0 {
+		n := copy(b, p.buf)
+		p.buf = p.buf[n:]
+		return n, nil
+	}
+	if p.err != nil {
+		return 0, p.err
+	}
+	return p.orig.Read(b)
+}
+
+func (p *peekBody) Close() error { return p.orig.Close() }
 
 func looksLikeHTTPToHTTPSNotice(b []byte) bool {
 	s := strings.ToLower(string(b))

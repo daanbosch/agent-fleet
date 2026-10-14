@@ -162,3 +162,42 @@ func (e *previewHostEnv) setPublic(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestAcceptPrefersHTML(t *testing.T) {
+	for accept, want := range map[string]bool{
+		"":                                    false,
+		"*/*":                                 false,
+		"text/html":                           true,
+		"text/html,application/xhtml+xml,*/*": true,
+		"application/json":                    false,
+		"application/json,text/html;q=0":      false,
+		"application/json, text/html":         false, // tie: first listed wins
+		"text/html, application/json":         true,
+		"text/html;q=0.5, application/json":   false,
+		"application/json;q=0.2, text/html":   true,
+	} {
+		if got := acceptPrefersHTML(accept); got != want {
+			t.Errorf("acceptPrefersHTML(%q) = %v, want %v", accept, got, want)
+		}
+	}
+}
+
+// The marker is read from the final response header only: declaring it as a trailer on an
+// app's own 502 does not turn that response into a relay error page.
+func TestPreviewRelayIgnoresMarkerInTrailer(t *testing.T) {
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Trailer", previewErrorHeader)
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("app body"))
+		w.Header().Set(previewErrorHeader, "preview_tls")
+	}))
+	defer agent.Close()
+	for form, get := range relayForms() {
+		t.Run(form, func(t *testing.T) {
+			rec := get(t, agent.URL, nil)
+			if rec.Code != http.StatusBadGateway || rec.Body.String() != "app body" {
+				t.Fatalf("got %d %q, want the app's own 502", rec.Code, rec.Body)
+			}
+		})
+	}
+}

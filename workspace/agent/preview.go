@@ -68,7 +68,7 @@ func handlePreview(w http.ResponseWriter, r *http.Request) {
 		// ResponseHeaderTimeout would also cut a long-poll, which holds its headers until
 		// there is something to say. The caller going away cancels the request instead.
 		ModifyResponse: func(resp *http.Response) error {
-			resp.Header.Del(previewErrorHeader)
+			resp.Header.Del(previewErrorHeader) // final header only; see previewErrorHeader
 			return sniffPlainHTTPToTLS(resp)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {

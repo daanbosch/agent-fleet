@@ -238,3 +238,62 @@ func TestPreviewStreamingAndUpgradeStillWork(t *testing.T) {
 		t.Fatalf("echo through upgrade = %q, %v", got, err)
 	}
 }
+
+// getThroughFront sends GET /proxy/{port}/ through a live handlePreview server and
+// returns the response as soon as its headers arrive (or fails after 3 s).
+func getThroughFront(t *testing.T, port string) *http.Response {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/proxy/{port}/{rest...}", handlePreview)
+	front := httptest.NewServer(mux)
+	t.Cleanup(front.Close)
+	c := &http.Client{Timeout: 3 * time.Second}
+	resp, err := c.Get(front.URL + "/proxy/" + port + "/")
+	if err != nil {
+		t.Fatalf("headers did not arrive: %v", err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// A 400 that is really a live stream (close-delimited, never ends) must not be held back
+// by the TLS sniff: neither an event stream nor an unknown body that stalls.
+func TestPreviewStreaming400IsNotHeldBack(t *testing.T) {
+	hold := make(chan struct{})
+	t.Cleanup(func() { close(hold) })
+	for name, head := range map[string]string{
+		"sse":      "HTTP/1.0 400 Bad Request\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: one\n\n",
+		"no-type":  "HTTP/1.0 400 Bad Request\r\n\r\n", // headers only, body comes later
+		"no-type2": "HTTP/1.0 400 Bad Request\r\n\r\nstreaming...",
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := rawListener(t, func(c net.Conn) {
+				_, _ = c.Write([]byte(head))
+				<-hold
+			})
+			start := time.Now()
+			resp := getThroughFront(t, p)
+			if resp.StatusCode != 400 {
+				t.Fatalf("status = %d, want the app's 400", resp.StatusCode)
+			}
+			if d := time.Since(start); d > 2*time.Second {
+				t.Fatalf("headers took %v", d)
+			}
+		})
+	}
+}
+
+// An app's own JSON 400 that merely quotes the phrase is the app's, not a TLS signal.
+func TestPreviewAppJSON400QuotingNoticeIsKept(t *testing.T) {
+	const body = `{"error":"invalid input","rejected":"http request to an https server"}`
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, body)
+	}))
+	defer app.Close()
+	rr := previewGet(t, portOf(t, app.Listener.Addr().String()))
+	if rr.Code != 400 || rr.Body.String() != body {
+		t.Fatalf("got %d %q, want the app's 400 untouched", rr.Code, rr.Body)
+	}
+}
