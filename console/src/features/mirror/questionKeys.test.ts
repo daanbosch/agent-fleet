@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import {
+  answersByRespond,
   buildClaudeSeq,
   buildClaudeSubmit,
   buildMenuSeq,
@@ -348,5 +349,20 @@ describe("every named key these builders emit is one the Agent accepts", () => {
       for (const s of buildMenuSeq(qs, sel, ft, true))
         if (s.k !== undefined) expect([show([s]), allowed.has(s.k)]).toEqual([s.k, true]);
     }
+  });
+});
+
+describe("answersByRespond", () => {
+  it("is always structured for a Managed session", () => {
+    expect(answersByRespond(true, [{}])).toBe(true);
+    expect(answersByRespond(true, undefined)).toBe(true);
+  });
+  it("is structured for a Terminal question that carries an Interaction id", () => {
+    expect(answersByRespond(false, [{ id: "frm_1" }, { id: "frm_1" }])).toBe(true);
+  });
+  it("keeps the keys for a Terminal question without one", () => {
+    expect(answersByRespond(false, [{}])).toBe(false);
+    expect(answersByRespond(false, [{ id: "" }])).toBe(false);
+    expect(answersByRespond(false, null)).toBe(false);
   });
 });

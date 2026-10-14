@@ -223,20 +223,13 @@ func pendingFormsV2(t apiTarget, m session.Meta, ses string) []v2Form {
 }
 
 // questionsV2 is the card of the oldest pending form, one at a time like v1's newest running
-// question. withID stamps it with the form id (the address the Console's /respond takes) for a
-// Managed session; a Terminal slot leaves it empty, so its card keeps driving the TUI, which answers
-// forms itself.
-func questionsV2(forms []v2Form, withID bool) []transcript.Question {
+// question. It carries the form id, the address the Console's /respond takes: a Managed session
+// and a Terminal slot on the shared serve are both answered through the form API (RespondTerminal).
+func questionsV2(forms []v2Form) []transcript.Question {
 	if len(forms) == 0 {
 		return nil
 	}
-	qs := forms[0].questions()
-	if !withID {
-		for i := range qs {
-			qs[i].ID = ""
-		}
-	}
-	return qs
+	return forms[0].questions()
 }
 
 // respondForm answers or dismisses a pending form for the Managed driver. The form is read again

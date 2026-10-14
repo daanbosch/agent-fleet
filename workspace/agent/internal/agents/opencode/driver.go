@@ -201,6 +201,35 @@ func (managedDriver) LiveHandle(m session.Meta) (agents.ThreadHandle, bool) {
 
 var _ agents.LiveHandles = managedDriver{}
 
+var _ agents.TerminalResponder = managedDriver{}
+
+// RespondTerminal answers a form of a Terminal slot attached to af's serve through the form API;
+// the TUI follows (measured, docs/log/27). Terminal has no handle, so the daemon's own list is the
+// source: the form must be one it still holds for the running session, and respondForm reads it
+// again before answering. A settled, forgotten or unknown form is errFormSettled, so an answer made
+// in the TUI at the same moment is never doubled. Anything not on the serve keeps keys.
+func (managedDriver) RespondTerminal(m session.Meta, reply agents.InteractionReply) error {
+	t, ok := v2TargetFor(m)
+	if !ok || m.DriverKind() != session.DriverTUI {
+		return agents.ErrTerminalRespond
+	}
+	info, err := t.v2Session(m)
+	if err != nil {
+		return err
+	}
+	if info == nil {
+		return errFormSettled
+	}
+	var waiting bool
+	for _, f := range pendingFormsV2(t, m, info.ID) {
+		waiting = waiting || f.ID == reply.ID
+	}
+	if !waiting {
+		return fmt.Errorf("interaction %s は待機中ではありません: %w", reply.ID, errFormSettled)
+	}
+	return respondForm(t.Addr, info.ID, reply)
+}
+
 // --- handle registry ---------------------------------------------------------
 
 var handlesMu sync.Mutex

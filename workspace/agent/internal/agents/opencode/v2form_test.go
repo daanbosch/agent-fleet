@@ -257,13 +257,32 @@ func TestV2PendingFormReadsAsQuestion(t *testing.T) {
 }
 
 // A Terminal slot on the shared serve shows the pending form (so the question chip and the card
-// light up) but without the form id: its TUI answers the form itself, and the card keeps driving
-// that TUI with keys. af never posts a form reply for it, so there is nothing to double-answer.
-func TestV2TerminalShowsTheFormWithoutAnAddress(t *testing.T) {
+// light up) with the form id, the address /respond takes. A read never answers or cancels it.
+func TestV2TerminalShowsTheFormWithItsAddress(t *testing.T) {
+	fd, m := terminalForm(t)
+
+	if got := LiveState(m); got != "question" {
+		t.Fatalf("LiveState = %q, want question", got)
+	}
+	td, _ := readTranscript(m)
+	id := fixtureForms(t, "form-single.pending.json")[0].ID
+	if len(td.Pending) != 1 || td.Pending[0].Question != "Pick one" || td.Pending[0].ID != id {
+		t.Fatalf("pending = %+v", td.Pending)
+	}
+	fd.fmu.Lock()
+	defer fd.fmu.Unlock()
+	if len(fd.replies)+len(fd.deletes) != 0 {
+		t.Errorf("a read answered or cancelled a form: %v %v", fd.replies, fd.deletes)
+	}
+}
+
+// terminalForm is a Terminal slot on the shared serve whose session waits on the form-single form.
+func terminalForm(t *testing.T) (*formDaemon, session.Meta) {
 	fd := newFormDaemon(t)
 	fd.addSession(t, "ses_a", "", "1791931000000", "form-waiting.messages.json")
 	fd.active = []string{"ses_a"}
 	fd.list["ses_a"] = string(v2Fixture(t, "form-single.pending.json"))
+	fd.detail[fixtureForms(t, "form-single.pending.json")[0].ID] = string(v2Fixture(t, "form-detail.pending.json"))
 	prev := v2TargetFor
 	v2TargetFor = func(session.Meta) (apiTarget, bool) {
 		return apiTarget{Addr: fd.f.srv.URL, Client: serveClient}, true
@@ -272,18 +291,71 @@ func TestV2TerminalShowsTheFormWithoutAnAddress(t *testing.T) {
 	m := session.Meta{Name: "v2term", Dir: "/work", Kind: session.KindOpencode, Driver: session.DriverTUI}
 	sids.Write(session.UUID(m.Dir, m.Name), "ses_a")
 	t.Cleanup(func() { sids.Remove(session.UUID(m.Dir, m.Name)) })
+	return fd, m
+}
 
-	if got := LiveState(m); got != "question" {
-		t.Fatalf("LiveState = %q, want question", got)
+func TestV2RespondTerminalAnswersAndDismisses(t *testing.T) {
+	fd, m := terminalForm(t)
+	id := fixtureForms(t, "form-single.pending.json")[0].ID
+	d := managedDriver{}
+
+	if err := d.RespondTerminal(m, agents.InteractionReply{ID: "frm_stale", Decision: agents.DecisionAnswer}); !errors.Is(err, errFormSettled) {
+		t.Fatalf("a form the daemon does not hold: %v", err)
 	}
-	td, _ := readTranscript(m)
-	if len(td.Pending) != 1 || td.Pending[0].Question != "Pick one" || td.Pending[0].ID != "" {
-		t.Fatalf("pending = %+v", td.Pending)
+	if err := d.RespondTerminal(m, agents.InteractionReply{ID: id, Decision: agents.DecisionAnswer,
+		Answers: []agents.InteractionAnswer{{Options: []int{1}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RespondTerminal(m, agents.InteractionReply{ID: id, Decision: agents.DecisionCancel}); err != nil {
+		t.Fatal(err)
 	}
 	fd.fmu.Lock()
 	defer fd.fmu.Unlock()
-	if len(fd.replies)+len(fd.deletes) != 0 {
-		t.Errorf("a read answered or cancelled a form: %v %v", fd.replies, fd.deletes)
+	if len(fd.replies) != 1 || !strings.HasSuffix(fd.replies[0], "/form/"+id+"/reply "+`{"answer":{"q0":"B"}}`) {
+		t.Errorf("replies = %q", fd.replies)
+	}
+	if len(fd.deletes) != 1 || !strings.Contains(fd.deletes[0], "/form/"+id+"?message=") {
+		t.Errorf("deletes = %q", fd.deletes)
+	}
+}
+
+// The person answering in the TUI first: the daemon says the form is settled, or has already
+// dropped it from its list, and nothing is posted.
+func TestV2RespondTerminalNeverDoubleAnswers(t *testing.T) {
+	fd, m := terminalForm(t)
+	id := fixtureForms(t, "form-single.pending.json")[0].ID
+	reply := agents.InteractionReply{ID: id, Decision: agents.DecisionAnswer, Answers: []agents.InteractionAnswer{{Options: []int{0}}}}
+
+	fd.detail[id] = string(v2Fixture(t, "form-detail.answered.json")) // listed, but settled meanwhile
+	if err := (managedDriver{}).RespondTerminal(m, reply); !errors.Is(err, errFormSettled) {
+		t.Fatalf("settled form: %v", err)
+	}
+	fd.list["ses_a"] = `{"data":[]}` // gone from the list (the detail alone would still say pending)
+	fd.detail[id] = string(v2Fixture(t, "form-detail.pending.json"))
+	if err := (managedDriver{}).RespondTerminal(m, reply); !errors.Is(err, errFormSettled) {
+		t.Fatalf("form gone from the list: %v", err)
+	}
+	fd.replyStatus = http.StatusConflict // settled between the re-read and the post
+	fd.list["ses_a"] = string(v2Fixture(t, "form-single.pending.json"))
+	if err := (managedDriver{}).RespondTerminal(m, reply); !errors.Is(err, errFormSettled) {
+		t.Fatalf("409: %v", err)
+	}
+	fd.fmu.Lock()
+	defer fd.fmu.Unlock()
+	if len(fd.replies) != 1 { // only the 409 one was ever posted; the list check kept the other two back
+		t.Errorf("replies = %q", fd.replies)
+	}
+}
+
+// A slot that is not on the shared serve (v1, --standalone) has no API route: the Console keeps keys.
+func TestV2RespondTerminalRefusesWhatIsNotOnTheServe(t *testing.T) {
+	prev := v2TargetFor
+	v2TargetFor = func(session.Meta) (apiTarget, bool) { return apiTarget{}, false }
+	t.Cleanup(func() { v2TargetFor = prev })
+	m := session.Meta{Name: "v2standalone", Dir: "/work", Kind: session.KindOpencode, Driver: session.DriverTUI}
+	err := (managedDriver{}).RespondTerminal(m, agents.InteractionReply{ID: "frm", Decision: agents.DecisionAnswer})
+	if !errors.Is(err, agents.ErrTerminalRespond) {
+		t.Fatalf("err = %v", err)
 	}
 }
 
