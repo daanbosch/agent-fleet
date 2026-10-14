@@ -64,9 +64,15 @@ func handlePreview(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		},
+		// A server that accepts and then never answers is not timed out here, on purpose:
+		// ResponseHeaderTimeout would also cut a long-poll, which holds its headers until
+		// there is something to say. The caller going away cancels the request instead.
+		ModifyResponse: func(resp *http.Response) error {
+			resp.Header.Del(previewErrorHeader)
+			return sniffPlainHTTPToTLS(resp)
+		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			httpx.WriteErr(w, http.StatusBadGateway, "preview_unreachable",
-				"nothing is listening on 127.0.0.1:"+portStr+" inside the workspace")
+			writePreviewError(w, classifyPreviewError(err), port)
 		},
 	}
 	rp.ServeHTTP(w, r)

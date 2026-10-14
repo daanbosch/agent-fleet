@@ -132,6 +132,12 @@ from then on you can clone / push without entering tokens ([03](03-code.md) · [
 - **Listening on `127.0.0.1` (localhost) is enough for it to reach.** The browser connects directly to `127.0.0.1`
   from inside the same workspace, so a loopback-only listen opens without issues (`0.0.0.0` for external exposure is not needed).
   If it still can't reach, verify that the server really is up on that port and that you didn't mistype the port number.
+- **The lightweight preview or a preview subdomain shows a 502 page** that says which kind of failure it is:
+  *nothing is listening on the port* (start the app, reload); *the port is listening but does not speak HTTP*
+  (a database, SSH, gRPC over h2c: the preview carries HTTP and WebSocket only); *the port is serving HTTPS*
+  (turn off the dev server's HTTPS to preview it); or *the workspace is not running or cannot be reached*.
+  The page follows the browser's language (Japanese or English). The browser pane connects directly and shows
+  `target-unreachable` instead.
 - **A blank page / 404** tends to happen when you open an app that loads assets by absolute path in the **lightweight preview**.
   Its URL is a **sub-path** (`/preview/{port}/`), so the moment the app asks for `/static/...` it lands outside.
   **If preview subdomains are issued on your deployment, open it there first**: the app is served at the root, so
