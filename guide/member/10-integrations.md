@@ -79,8 +79,8 @@ https://k7f2q9x1w3ub5nzt0abc-8080.pv.example.com/   → port 8080 (e.g. Spring B
   any document you paste one into goes stale quickly.
 - **Signing in is required by default.** The first visit bounces through the Console login once and comes back.
 - **You choose which ports are exposed.** The default is `3000, 8080`; change it under Settings ›
-  **Preview subdomains**. A port that is not listed has no URL; the list is what keeps an admin console you
-  did not mean to expose off the internet.
+  **Preview subdomains**. A port that is not listed has no URL **for anyone but you** (see the next point); the list is
+  what keeps an admin console you did not mean to expose away from other people.
 - **Any other port opens for you alone.** A port the workspace is listening on but that is not listed (Vite on
   `5173`, a throwaway server on `4000`) opens on its subdomain from the port chip in the session row or from the
   Preview popover, with no setting to change. The click is a plain click on the chip when a preview URL is

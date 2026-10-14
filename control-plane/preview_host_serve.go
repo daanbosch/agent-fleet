@@ -113,10 +113,28 @@ func (a previewHostAPI) serve(w http.ResponseWriter, r *http.Request, ph preview
 	// for it (decision 6, narrowed: preview_grant.go). Anyone else cannot tell it from a
 	// port that is not there, so there is no handshake redirect either.
 	var grant store.PreviewTempPort
+	var viewer string
 	temp := !previewPortAllowed(st, ph.port)
 	if temp {
 		var ok bool
 		if grant, ok = a.liveGrant(ctx, ws, ph.port); !ok {
+			previewNotFound(w)
+			return
+		}
+		// The owner's credential is checked FIRST, before the network check, the callback
+		// or a CORS preflight can answer anything: those answer differently for a port with
+		// a grant than for one without, so an anonymous caller would learn that a grant
+		// exists. Owner only, whatever the public and tenant-share settings say. A missing,
+		// invalid, foreign or other-port credential is a plain 404, never a handshake.
+		// (A preflight carries no credential, so a temporary port cannot be called
+		// cross-origin; list the port to do that.)
+		if r.URL.Path == previewAuthCallbackPath {
+			cl, ok := a.verifyClaims(r.URL.Query().Get("t"))
+			if !ok || cl.Slug != ph.slug || cl.Port != ph.port || cl.MembershipID != ws.MembershipID {
+				previewNotFound(w)
+				return
+			}
+		} else if viewer, ok = a.authorized(ctx, r, ph, ws, st); !ok || viewer != ws.MembershipID {
 			previewNotFound(w)
 			return
 		}
@@ -147,16 +165,8 @@ func (a previewHostAPI) serve(w http.ResponseWriter, r *http.Request, ph preview
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	var viewer string
 	if temp {
-		// Owner only, whatever the public and tenant-share settings say: those govern the
-		// listed ports. No cookie, or somebody else's, is a plain 404 — never a handshake,
-		// which would confirm the port is open to the owner.
-		var ok bool
-		if viewer, ok = a.authorized(ctx, r, ph, ws, st); !ok || viewer != ws.MembershipID {
-			previewNotFound(w)
-			return
-		}
+		// Authenticated above.
 	} else if !st.PreviewPublic {
 		var ok bool
 		if viewer, ok = a.authorized(ctx, r, ph, ws, st); !ok {

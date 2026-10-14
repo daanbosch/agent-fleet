@@ -510,12 +510,8 @@ func (m *manager) rotatePreviewSlug(ctx context.Context, ws store.Workspace) (st
 	if err := m.store.SetWorkspacePreviewSlug(ctx, ws.ID, slug); err != nil {
 		return "", err
 	}
-	// Temporary grants (preview_grant.go) belong to one start. A fixed slug survives the
-	// restart, so the slug alone would not end them; the listener binding would, but
-	// dropping them here makes "start / restart / reissue clears them" literally true.
-	if err := m.store.ClearPreviewTempPorts(ctx, ws.ID); err != nil {
-		return "", err
-	}
+	// Temporary grants (preview_grant.go) are dropped by SetWorkspacePreviewSlug itself, in the
+	// same transaction, so a grant made under the previous slug cannot land after this point.
 	return slug, nil
 }
 

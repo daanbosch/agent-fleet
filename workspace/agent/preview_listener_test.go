@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -105,5 +107,71 @@ func TestPreviewProxyChecksGrantedListener(t *testing.T) {
 	app.Close()
 	if rr := get(strings.Join(inodes, ",")); rr.Code != http.StatusGone {
 		t.Fatalf("stopped listener: %d %s", rr.Code, rr.Body)
+	}
+}
+
+func proxyWith(t *testing.T, port string, inodes []string) *httptest.ResponseRecorder {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/proxy/{port}/{rest...}", handlePreview)
+	req := httptest.NewRequest("GET", "/proxy/"+port+"/", nil)
+	req.Header.Set(previewListenerHeader, strings.Join(inodes, ","))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	return rr
+}
+
+// A grant made for the IPv4 server and an IPv6-only [::] socket on the same port must not pass
+// to a different server that binds the IPv4 port after the first one stopped, even though the
+// IPv6 socket (one of the granted inodes) is still there.
+func TestPreviewGrantDoesNotMoveToANewSocketBesideASurvivor(t *testing.T) {
+	previewListeners.TTL = 0
+	t.Cleanup(func() { previewListeners.TTL = 2 * time.Second })
+	l4, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := portOf(t, l4.Addr().String())
+	l6, err := net.Listen("tcp6", "[::]:"+port)
+	if err != nil {
+		l4.Close()
+		t.Skipf("no IPv6 listener here: %v", err)
+	}
+	defer l6.Close()
+	srv4 := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "old") })}
+	go srv4.Serve(l4)
+	granted := listenports.Inodes("/proc", atoi(t, port))
+	if len(granted) != 2 {
+		t.Fatalf("granted inodes = %v, want the tcp and tcp6 sockets", granted)
+	}
+	if rr := proxyWith(t, port, granted); rr.Code != 200 || rr.Body.String() != "old" {
+		t.Fatalf("live grant: %d %q", rr.Code, rr.Body)
+	}
+	srv4.Close() // the IPv4 server stops; the IPv6 socket stays
+	l4n, err := net.Listen("tcp4", "127.0.0.1:"+port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "NEW") })}
+	go srv.Serve(l4n)
+	defer srv.Close()
+	rr := proxyWith(t, port, granted)
+	if rr.Code != http.StatusGone || strings.Contains(rr.Body.String(), "NEW") {
+		t.Fatalf("the new server inherited the grant: %d %q", rr.Code, rr.Body)
+	}
+}
+
+// With the real 2 s cache, a grant made from a fresh read passes its first request even when
+// the cache was taken before the listener existed.
+func TestPreviewFirstRelayAfterGrantPassesWithWarmCache(t *testing.T) {
+	previewListeners.TTL = 2 * time.Second
+	// Warm the cache before the listener exists.
+	previewListeners.Matches(time.Now(), 1, []string{"x"})
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer app.Close()
+	port := portOf(t, app.Listener.Addr().String())
+	granted := listenports.Inodes("/proc", atoi(t, port))
+	if rr := proxyWith(t, port, granted); rr.Code != 200 {
+		t.Fatalf("first request after the grant: %d %s", rr.Code, rr.Body)
 	}
 }

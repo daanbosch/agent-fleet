@@ -20,16 +20,18 @@ import { useDismiss } from "../../lib/useDismiss.ts";
 import { useBrowserUnavailable } from "../browser/availability.ts";
 import { browserTarget } from "../browser/target.ts";
 import { useSettingsUI } from "../settings/store.ts";
-import { copyableURL, portTargets, subdomainOpenURL, type PortTarget } from "./portTargets.ts";
-import { usePreviewStore } from "./previewState.ts";
+import { copyableURL, portTargets, subdomainHost, subdomainOpenURL, type PortTarget } from "./portTargets.ts";
+import { useCurrentPreviewInfo, usePreviewStore } from "./previewState.ts";
 
 /** What the shared state says about this port, kept fresh while a control is on screen. */
 function usePortState(port: number, running: boolean) {
-  const info = usePreviewStore((s) => s.info);
+  const info = useCurrentPreviewInfo();
   const browserUnavailable = useBrowserUnavailable();
+  // Read when nothing valid for this tenant is held (first control on screen, tenant switch);
+  // restarts are handled once, by the workspace-state subscription in previewState.ts.
   useEffect(() => {
-    if (running) void usePreviewStore.getState().refresh();
-  }, [running]);
+    if (running && !info) void usePreviewStore.getState().refresh();
+  }, [running, info]);
   return { info, browserUnavailable, targets: portTargets({ port, running, browserUnavailable, info }) };
 }
 
@@ -37,7 +39,7 @@ function usePortState(port: number, running: boolean) {
 function useOpenPort(port: number, path: string) {
   const openTarget = useLayoutStore((st) => st.openTarget);
   const openTargetInNew = useLayoutStore((st) => st.openTargetInNew);
-  const info = usePreviewStore((s) => s.info);
+  const info = useCurrentPreviewInfo();
   return (target: PortTarget, inNew = false) => {
     if (target === "subdomain" && info) {
       window.open(subdomainOpenURL(info, port, path), "_blank", "noopener");
@@ -115,8 +117,10 @@ interface Inner {
 
 function targetTitle(tr: ReturnType<typeof useT>, t: PortTarget, port: number, info: Info): string {
   if (t === "subdomain") {
-    const url = info ? subdomainOpenURL(info, port) : "";
-    return tr("portopen.title_subdomain", { port, url: url.replace(/^https?:\/\//, "").replace(/\?.*$/, "") });
+    // The host the click really lands on: the issued URL for a listed port, the same slug
+    // and domain with this port for an unlisted one (which the owner-only entry opens).
+    const host = info ? subdomainHost(info, port) : "";
+    return tr("portopen.title_subdomain", { port, url: host });
   }
   return tr(t === "pane" ? "portopen.title_pane" : "portopen.title_light", { port });
 }
@@ -126,10 +130,18 @@ function PortChip({ port, info, targets, go }: Inner) {
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const wrap = useRef<HTMLSpanElement>(null);
   const press = useRef<number | undefined>(undefined);
+  // A long-press that opened the menu must not also "click" when the finger lifts.
+  const longPressed = useRef(false);
+  useEffect(() => () => window.clearTimeout(press.current), []);
   // The pane stays one gesture away: Ctrl/⌘/middle-click. Where it is unavailable the same
   // gesture opens the default, as the chip always opened something where it could.
   const inNewTarget: PortTarget = targets.state.pane === "" ? "pane" : (targets.def ?? "light");
   const click = (e: React.MouseEvent) => {
+    if (longPressed.current) {
+      longPressed.current = false;
+      e.preventDefault();
+      return;
+    }
     if (!targets.def) return;
     if (e.ctrlKey || e.metaKey) go(inNewTarget, true);
     else go(targets.def);
@@ -157,10 +169,18 @@ function PortChip({ port, info, targets, go }: Inner) {
         }}
         onTouchStart={() => {
           window.clearTimeout(press.current);
-          press.current = window.setTimeout(() => openMenu(wrap.current), 500);
+          longPressed.current = false;
+          press.current = window.setTimeout(() => {
+            longPressed.current = true;
+            openMenu(wrap.current);
+          }, 500);
         }}
         onTouchEnd={() => window.clearTimeout(press.current)}
         onTouchMove={() => window.clearTimeout(press.current)}
+        onTouchCancel={() => {
+          window.clearTimeout(press.current);
+          longPressed.current = false;
+        }}
       >
         :{port}
       </button>

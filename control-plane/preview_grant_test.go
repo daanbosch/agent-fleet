@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/k-k1/agent-fleet/control-plane/internal/store"
 )
 
 // grantAgent is a fake Agent for the temporary-grant paths: it reports each port's listening
@@ -51,13 +53,8 @@ func newGrantAgent(t *testing.T) *grantAgent {
 			g.seen = r.Header.Clone()
 			port, _ := strconv.Atoi(strings.Split(strings.TrimPrefix(r.URL.Path, "/proxy/"), "/")[0])
 			if want := r.Header.Get(previewListenerHeader); want != "" {
-				alive := false
-				for _, in := range strings.Split(want, ",") {
-					for _, have := range g.listen[port].Inodes {
-						alive = alive || in == have
-					}
-				}
-				if !alive {
+				// The Agent's rule: something listens and every socket on the port is granted.
+				if !grantStillMatches(want, g.listen[port].Inodes) {
 					w.Header().Set(previewErrorHeader, previewListenerChanged)
 					w.WriteHeader(http.StatusGone)
 					return
@@ -392,4 +389,140 @@ func TestPreviewPathFormDropsClientListenerHeader(t *testing.T) {
 	if got := ag.seenHeader(previewListenerHeader); got != "" {
 		t.Errorf("client listener header reached the Agent: %q", got)
 	}
+}
+
+// Everything an unlisted port answers is owner-gated BEFORE the network check, the callback
+// and CORS preflights: with a grant present, an anonymous caller must see exactly what it sees
+// without one.
+func TestPreviewUnlistedPortAnswersAnonymousCallersLikeNoGrant(t *testing.T) {
+	ag := newGrantAgent(t)
+	ag.set(5173, "http", "111")
+	e := newPreviewHostEnv(t, ag.srv.URL)
+	v := e.addViewer(t, "colleague")
+	slug := e.mintSlug(t)
+	e.setPreviewSettings(t, func(st *wsSettings) {
+		st.PreviewPublic = true
+		st.PreviewCrossOrigin = true
+		st.PreviewTenantShare = true
+	})
+	sibling := "https://" + previewHostname(slug, 3000, e.domain)
+
+	probe := func(host int, withCookie *http.Cookie, opts string) (int, string) {
+		hostname := previewHostname(slug, host, e.domain)
+		var req *http.Request
+		switch opts {
+		case "preflight":
+			req = httptest.NewRequest(http.MethodOptions, "https://"+hostname+"/api", nil)
+			req.Header.Set("Origin", sibling)
+			req.Header.Set("Access-Control-Request-Method", "GET")
+		case "callback":
+			req = httptest.NewRequest(http.MethodGet, "https://"+hostname+previewAuthCallbackPath+"?t=invalid&next=/", nil)
+		default:
+			req = httptest.NewRequest(http.MethodGet, "https://"+hostname+"/", nil)
+		}
+		req.Host = hostname
+		req.Header.Set("X-Forwarded-Proto", "https")
+		if withCookie != nil {
+			req.AddCookie(withCookie)
+		}
+		rec := httptest.NewRecorder()
+		e.host.ServeHTTP(rec, req)
+		return rec.Code, rec.Header().Get("Access-Control-Allow-Origin")
+	}
+	colleagueListed := e.viewerCookie(t, v, slug, 3000)
+	ownerListed := e.viewerCookie(t, previewViewer{userKey: "preview-user"}, slug, 3000)
+	for _, withGrant := range []bool{false, true} {
+		if withGrant {
+			ownerOpens(t, e, slug, 5173)
+		}
+		for _, kind := range []string{"preflight", "callback", "page"} {
+			for name, ck := range map[string]*http.Cookie{"anonymous": nil, "colleague listed-port cookie": colleagueListed, "owner listed-port cookie": ownerListed} {
+				code, acao := probe(5173, ck, kind)
+				if code != http.StatusNotFound || acao != "" {
+					t.Errorf("grant=%v %s %s: %d acao=%q, want a bare 404", withGrant, kind, name, code, acao)
+				}
+			}
+		}
+	}
+}
+
+// Concurrent opens settle in one transaction: the cap holds, a renewed listener audits once.
+func TestPreviewGrantConcurrentOpensRespectCapAndAuditOnce(t *testing.T) {
+	ag := newGrantAgent(t)
+	e := newPreviewHostEnv(t, ag.srv.URL)
+	e.mintSlug(t)
+	for i := 0; i < maxPreviewTempPorts+1; i++ {
+		ag.set(20000+i, "http", strconv.Itoa(i+1))
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < maxPreviewTempPorts+1; i++ {
+		wg.Add(1)
+		go func(port int) {
+			defer wg.Done()
+			e.openOwnDirect(port)
+		}(20000 + i)
+	}
+	wg.Wait()
+	if got := len(e.tempPorts(t)); got != maxPreviewTempPorts {
+		t.Fatalf("grants = %d, want exactly the cap %d", got, maxPreviewTempPorts)
+	}
+	before := auditCount(t, e, "workspace.preview_temp_port")
+	ag.set(21000, "http", "9")
+	var wg2 sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg2.Add(1)
+		go func() { defer wg2.Done(); e.openOwnDirect(20000) }()
+	}
+	wg2.Wait()
+	if after := auditCount(t, e, "workspace.preview_temp_port"); after != before {
+		t.Errorf("renewing the same listener added %d audit rows", after-before)
+	}
+}
+
+// A grant whose slug was rotated while its probe ran must not be saved over the new start.
+func TestPreviewGrantSaveRefusedAfterSlugRotation(t *testing.T) {
+	ag := newGrantAgent(t)
+	e := newPreviewHostEnv(t, ag.srv.URL)
+	old := e.mintSlug(t)
+	e.mintSlug(t) // reissue while the old open is still probing
+	res, err := e.mgr.store.SavePreviewTempPort(context.Background(), store.PreviewTempPort{
+		WorkspaceID: e.ws.ID, Port: 5173, Slug: old, Inodes: "1", CreatedAt: store.NowTS()}, maxPreviewTempPorts, store.AuditLog{ID: store.NewID(), TenantID: e.ws.TenantID, Action: "x"})
+	if err != nil || res != store.PreviewTempStale {
+		t.Fatalf("save under the old slug: %v %v, want stale", res, err)
+	}
+	if got := e.tempPorts(t); len(got) != 0 {
+		t.Errorf("stale grant saved: %v", got)
+	}
+}
+
+// Servers that have stopped do not hold the cap: a full table of dead grants makes room.
+func TestPreviewGrantCapPrunesStoppedListeners(t *testing.T) {
+	ag := newGrantAgent(t)
+	e := newPreviewHostEnv(t, ag.srv.URL)
+	e.mintSlug(t)
+	for i := 0; i < maxPreviewTempPorts; i++ {
+		ag.set(20000+i, "http", strconv.Itoa(i+1))
+		if rec := e.openOwnAs(t, "preview-user", 20000+i); rec.Code != http.StatusFound {
+			t.Fatalf("grant %d: %d", i, rec.Code)
+		}
+	}
+	for i := 0; i < maxPreviewTempPorts; i++ { // every server stops
+		ag.mu.Lock()
+		delete(ag.listen, 20000+i)
+		ag.mu.Unlock()
+	}
+	ag.set(21000, "http", "777")
+	if rec := e.openOwnAs(t, "preview-user", 21000); rec.Code != http.StatusFound {
+		t.Fatalf("a new port after 16 stopped servers: %d %s", rec.Code, rec.Body)
+	}
+	if got := e.tempPorts(t); len(got) != 1 || got[0] != 21000 {
+		t.Errorf("grants = %v, want only the new one", got)
+	}
+}
+
+// openOwnDirect is openOwnAs without switching the dev identity (the default one is the owner),
+// which is a shared field and cannot be flipped from several goroutines.
+func (e *previewHostEnv) openOwnDirect(port int) {
+	rec := httptest.NewRecorder()
+	e.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "https://af.example.com"+previewOwnOpenPath+"?port="+strconv.Itoa(port), nil))
 }

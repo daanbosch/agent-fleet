@@ -37,8 +37,8 @@ const (
 // previewListenerHeader carries a grant's listener inodes, comma separated, from the CP.
 const previewListenerHeader = "X-AF-Preview-Listener"
 
-// previewListeners answers "is that listener still there" with a 2 s cache: the bound on
-// how long a stopped listener keeps passing.
+// previewListeners answers "does the grant still describe this port's listeners" with a 2 s
+// cache: the bound on how long a stopped listener keeps passing.
 var previewListeners = &listenports.InodeCache{Root: "/proc", TTL: 2 * time.Second}
 
 func splitInodes(v string) []string {

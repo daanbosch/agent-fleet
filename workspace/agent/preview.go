@@ -37,7 +37,7 @@ func handlePreview(w http.ResponseWriter, r *http.Request) {
 	// sent along is dropped by the CP before it gets here.
 	granted := splitInodes(r.Header.Get(previewListenerHeader))
 	r.Header.Del(previewListenerHeader)
-	if len(granted) > 0 && !previewListeners.Alive(time.Now(), port, granted) {
+	if len(granted) > 0 && !previewListeners.Matches(time.Now(), port, granted) {
 		writePreviewError(w, previewListenerChanged, port)
 		return
 	}

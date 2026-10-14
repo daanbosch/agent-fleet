@@ -11,6 +11,7 @@ const { useLayoutStore } = await import("../../layout/store.ts");
 const { useWorkspaceStore } = await import("../../core/store/workspace.ts");
 const { useSettingsUI } = await import("../settings/store.ts");
 const { t } = await import("../../lib/i18n/index.ts");
+const { setTenant } = await import("../../core/api/client.ts");
 type Info = import("./previewState.ts").PreviewInfo;
 
 let root: Root | null = null;
@@ -47,7 +48,7 @@ beforeEach(() => {
   openTargetInNew.mockReset();
   useLayoutStore.setState({ openTarget, openTargetInNew });
   // The state is injected; a refresh must not overwrite it from the network.
-  usePreviewStore.setState({ info: info(), refresh: async () => {} });
+  usePreviewStore.setState({ info: info(), tenant: "", refresh: async () => {} });
   open = vi.spyOn(window, "open").mockReturnValue(null);
   host = document.createElement("div");
   document.body.appendChild(host);
@@ -61,12 +62,14 @@ afterEach(() => {
   useLayoutStore.setState(original);
   useWorkspaceStore.setState({ browserUnavailable: "" });
   useSettingsUI.setState({ settingsOpen: false, previewAddPort: null });
+  setTenant("");
+  vi.useRealTimers();
 });
 
 describe("PortOpen chip", () => {
   it("opens a listed port at its subdomain URL, noopener, and names it in the tooltip", async () => {
     await render(3000);
-    expect(chip().title).toBe(t("portopen.title_subdomain", { port: 3000, url: "abc-3000.pv.example.com/" }));
+    expect(chip().title).toBe(t("portopen.title_subdomain", { port: 3000, url: "abc-3000.pv.example.com" }));
     await act(async () => chip().click());
     expect(open).toHaveBeenCalledWith("https://abc-3000.pv.example.com/", "_blank", "noopener");
     expect(openTarget).not.toHaveBeenCalled();
@@ -224,5 +227,87 @@ describe("PortOpen buttons (workspace bar)", () => {
   it("offers Expose this port… with a domain", async () => {
     await renderButtons(5173);
     expect(btns().some((b) => b.textContent === t("portopen.expose"))).toBe(true);
+  });
+});
+
+describe("PortOpen state follows tenant and start", () => {
+  it("names the real subdomain host in the tooltip, for an unlisted port too", async () => {
+    await render(5173);
+    expect(chip().title).toBe(t("portopen.title_subdomain", { port: 5173, url: "abc-5173.pv.example.com" }));
+  });
+
+  it("does not open another tenant's slug after a tenant switch", async () => {
+    setTenant("acme");
+    usePreviewStore.setState({ info: info(), tenant: "acme" });
+    await render(3000);
+    await act(async () => chip().click());
+    expect(String(open.mock.calls[0][0])).toContain("abc-3000");
+    open.mockClear();
+    setTenant("globex"); // both workspaces still running, only the tenant changed
+    await render(3000);
+    await act(async () => chip().click());
+    expect(open).not.toHaveBeenCalledWith(expect.stringContaining("abc-3000"), expect.anything(), expect.anything());
+    expect(openTarget).toHaveBeenCalled(); // pane until the new tenant's state arrives
+  });
+
+  it("drops the state when the workspace stops and ignores a slow answer from before", async () => {
+    let resolveOld!: (v: unknown) => void;
+    const api = vi.fn().mockReturnValueOnce(new Promise((r) => (resolveOld = r)));
+    vi.resetModules();
+    vi.doMock("../../core/api/client.ts", async (orig) => ({ ...(await orig<Record<string, unknown>>()), api }));
+    const fresh = await import("./previewState.ts");
+    const ws = await import("../../core/store/workspace.ts");
+    ws.useWorkspaceStore.setState({ state: "stopped" });
+    fresh.usePreviewStore.setState({ info: info(), tenant: "" });
+    ws.useWorkspaceStore.setState({ state: "running" }); // → forced refresh (the slow one)
+    expect(api).toHaveBeenCalledTimes(1);
+    ws.useWorkspaceStore.setState({ state: "stopped" }); // → reset: the old answer is void
+    expect(fresh.usePreviewStore.getState().info).toBeNull();
+    resolveOld({ previewDomain: "pv.example.com", previewUrls: { "3000": "https://OLD-3000.pv.example.com" } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fresh.usePreviewStore.getState().info).toBeNull();
+    vi.doUnmock("../../core/api/client.ts");
+  });
+});
+
+describe("PortOpen long-press", () => {
+  const touch = (type: string) => chip().dispatchEvent(new Event(type, { bubbles: true, cancelable: true }));
+
+  it("opens the menu and swallows the click that follows the release", async () => {
+    vi.useFakeTimers();
+    await render(5173);
+    await act(async () => touch("touchstart"));
+    await act(async () => vi.advanceTimersByTime(600));
+    expect(menu()).not.toBeNull();
+    await act(async () => touch("touchend"));
+    await act(async () => chip().click());
+    expect(open).not.toHaveBeenCalled();
+    expect(openTarget).not.toHaveBeenCalled();
+    // The next ordinary tap works again.
+    await act(async () => touch("touchstart"));
+    await act(async () => touch("touchend"));
+    await act(async () => chip().click());
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
+  it("a short tap and a cancelled press open nothing extra", async () => {
+    vi.useFakeTimers();
+    await render(5173);
+    await act(async () => touch("touchstart"));
+    await act(async () => touch("touchcancel"));
+    await act(async () => vi.advanceTimersByTime(600));
+    expect(menu()).toBeNull();
+    await act(async () => chip().click());
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
+  it("a press still pending at unmount does not open a menu afterwards", async () => {
+    vi.useFakeTimers();
+    await render(5173);
+    await act(async () => touch("touchstart"));
+    await act(async () => root!.render(<div />));
+    await act(async () => vi.advanceTimersByTime(600));
+    expect(menu()).toBeNull();
   });
 });

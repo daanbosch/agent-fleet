@@ -69,12 +69,16 @@ type agentListener struct {
 // agentPreviewListener asks the Agent for the port's listening sockets and an HTTP probe. A
 // non-200 (404 from an older Agent, 400 for a refused port) comes back as status with a nil
 // listener, so the caller fails closed.
-func agentPreviewListener(ctx context.Context, rt runtime.Runtime, port int) (*agentListener, int, error) {
+func agentPreviewListener(ctx context.Context, rt runtime.Runtime, port int, probe bool) (*agentListener, int, error) {
 	if rt.Endpoint() == "" {
 		return nil, 0, http.ErrServerClosed
 	}
+	q := ""
+	if probe {
+		q = "?probe=1"
+	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet,
-		rt.Endpoint()+"/preview-listener/"+strconv.Itoa(port)+"?probe=1", nil)
+		rt.Endpoint()+"/preview-listener/"+strconv.Itoa(port)+q, nil)
 	if tok := rt.Token(); tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
@@ -151,24 +155,13 @@ type grantRefusal struct {
 }
 
 // grant checks the port with the Agent and records the grant. nil = granted.
+//
+// The count, the write and the audit row are decided in one store transaction under the
+// workspace lock (SavePreviewTempPort), which also refuses a grant whose slug was rotated
+// while the probe ran.
 func (a previewHostAPI) grant(ctx context.Context, ws store.Workspace, actorID string, port int) *grantRefusal {
-	existing, _ := a.mgr.store.ListPreviewTempPorts(ctx, ws.ID)
-	var prev *store.PreviewTempPort
-	live := 0
-	for i, g := range existing {
-		if g.Slug != ws.PreviewSlug {
-			continue
-		}
-		live++
-		if g.Port == port {
-			prev = &existing[i]
-		}
-	}
-	if prev == nil && live >= maxPreviewTempPorts {
-		return &grantRefusal{http.StatusConflict, previewGrantCap}
-	}
 	rt := a.mgr.runtimeFor(ws, noSecretKeys)
-	got, status, err := agentPreviewListener(ctx, rt, port)
+	got, status, err := agentPreviewListener(ctx, rt, port, true)
 	switch {
 	case err != nil:
 		return &grantRefusal{http.StatusBadGateway, previewWorkspaceUnreachable}
@@ -187,19 +180,67 @@ func (a previewHostAPI) grant(ctx context.Context, ws store.Workspace, actorID s
 		}
 		return &grantRefusal{http.StatusConflict, kind}
 	}
-	inodes := strings.Join(got.Inodes, ",")
-	if err := a.mgr.store.UpsertPreviewTempPort(ctx, store.PreviewTempPort{
-		WorkspaceID: ws.ID, Port: port, Slug: ws.PreviewSlug, Inodes: inodes, CreatedAt: store.NowTS(),
-	}); err != nil {
-		return &grantRefusal{http.StatusInternalServerError, "preview_failed"}
+	g := store.PreviewTempPort{
+		WorkspaceID: ws.ID, Port: port, Slug: ws.PreviewSlug,
+		Inodes: strings.Join(got.Inodes, ","), CreatedAt: store.NowTS(),
 	}
-	// One row per grant made — a renewal for the same listener is not a new exposure.
-	if prev == nil || prev.Inodes != inodes {
-		_ = a.mgr.store.InsertAudit(ctx, store.AuditLog{
-			ID: store.NewID(), TenantID: ws.TenantID, ActorKind: "user", ActorID: actorID,
-			Action: "workspace.preview_temp_port", Target: ws.ID,
-			Detail: "port=" + strconv.Itoa(port), At: store.NowTS(),
-		})
+	audit := store.AuditLog{
+		ID: store.NewID(), TenantID: ws.TenantID, ActorKind: "user", ActorID: actorID,
+		Action: "workspace.preview_temp_port", Target: ws.ID,
+		Detail: "port=" + strconv.Itoa(port), At: store.NowTS(),
+	}
+	res, err := a.mgr.store.SavePreviewTempPort(ctx, g, maxPreviewTempPorts, audit)
+	if err == nil && res == store.PreviewTempCap {
+		// Rows outlive their servers (nothing probes in the background), so a full table may
+		// be all stale. Drop the ones whose listener is gone, then try once more.
+		a.pruneDeadGrants(ctx, ws, rt)
+		audit.ID = store.NewID()
+		res, err = a.mgr.store.SavePreviewTempPort(ctx, g, maxPreviewTempPorts, audit)
+	}
+	switch {
+	case err != nil:
+		return &grantRefusal{http.StatusInternalServerError, "preview_failed"}
+	case res == store.PreviewTempCap:
+		return &grantRefusal{http.StatusConflict, previewGrantCap}
+	case res == store.PreviewTempStale:
+		// The workspace restarted or stopped while the port was being checked.
+		return &grantRefusal{http.StatusConflict, "preview_failed"}
 	}
 	return nil
+}
+
+// pruneDeadGrants deletes the workspace's grants whose listener no longer matches, using the
+// Agent's cheap listing (no HTTP probe). Only run when the cap is hit.
+func (a previewHostAPI) pruneDeadGrants(ctx context.Context, ws store.Workspace, rt runtime.Runtime) {
+	grants, err := a.mgr.store.ListPreviewTempPorts(ctx, ws.ID)
+	if err != nil {
+		return
+	}
+	for _, g := range grants {
+		cur, status, err := agentPreviewListener(ctx, rt, g.Port, false)
+		if err != nil || status != http.StatusOK || cur == nil {
+			continue // cannot tell: keep it
+		}
+		if !grantStillMatches(g.Inodes, cur.Inodes) {
+			_ = a.mgr.store.DeletePreviewTempPortIf(ctx, ws.ID, g.Port, g.Inodes)
+		}
+	}
+}
+
+// grantStillMatches mirrors the Agent's rule: something listens, and every listening socket
+// on the port is one the grant was made for.
+func grantStillMatches(granted string, current []string) bool {
+	if len(current) == 0 {
+		return false
+	}
+	ok := map[string]bool{}
+	for _, in := range strings.Split(granted, ",") {
+		ok[in] = true
+	}
+	for _, in := range current {
+		if !ok[in] {
+			return false
+		}
+	}
+	return true
 }

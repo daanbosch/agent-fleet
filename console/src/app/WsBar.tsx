@@ -41,7 +41,7 @@ import { AUTO_INLINE, noteSessionKinds, planUsageChips, readKindStamps, type Kin
 import { setSettings, useSettings } from "../lib/settings.ts";
 import { useSettingsUI } from "../features/settings/store.ts";
 import { PortOpen, useDefaultPortOpen } from "../features/preview/PortOpen.tsx";
-import { usePreviewStore } from "../features/preview/previewState.ts";
+import { useCurrentPreviewInfo, usePreviewStore } from "../features/preview/previewState.ts";
 import { useBrowserUnavailable } from "../features/browser/availability.ts";
 import { AwsProfilesChip } from "../features/awslogin/AwsProfilesChip.tsx";
 import { GcpProfilesChip } from "../features/gcplogin/GcpProfilesChip.tsx";
@@ -1199,7 +1199,7 @@ export function WsBar() {
   const { foldUsage, foldMore, noteUsageLayout } = useWsBarFold(barRef, !isMobile);
   const phoneFold = useWsBarPhoneFold(barRef, isMobile);
   // Unlisted ports the owner has open right now (control-plane/preview_grant.go).
-  const tempPorts = usePreviewStore((s) => s.info?.tempPorts ?? NO_PORTS);
+  const tempPorts = useCurrentPreviewInfo()?.tempPorts ?? NO_PORTS;
   const [port, setPort] = useState("");
   const [previewPath, setPreviewPath] = useState("/");
   const [pvOpen, setPvOpen] = useState(false); // desktop port-preview popover

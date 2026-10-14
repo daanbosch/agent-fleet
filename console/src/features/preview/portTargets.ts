@@ -84,3 +84,17 @@ export function copyableURL(info: PreviewInfo | null, port: number): string {
   if (info && info.ports.includes(port) && info.urls[String(port)]) return info.urls[String(port)];
   return previewURL(port, "/");
 }
+
+/** The hostname (and path) a subdomain open of `port` ends up on, for tooltips. A listed port
+ *  has its issued URL; for an unlisted one the same slug and domain are used, since the
+ *  host is `{slug}-{port}.{domain}` and any issued URL shows slug and domain. */
+export function subdomainHost(info: PreviewInfo, port: number): string {
+  const own = info.urls[String(port)];
+  const strip = (u: string) => u.replace(/^https?:\/\//, "");
+  if (own) return strip(own);
+  for (const u of Object.values(info.urls)) {
+    const m = /^https?:\/\/([^.]+)-\d+\.(.+)$/.exec(u);
+    if (m) return `${m[1]}-${port}.${m[2]}`;
+  }
+  return info.domain;
+}

@@ -234,8 +234,8 @@ func inodesOf(m map[string]int, port int) []string {
 }
 
 // InodeCache holds the listener table for a moment, so a relay checking a grant on every
-// request reads /proc/net/tcp* at most once per TTL. The TTL is how long a stopped
-// listener can still pass.
+// request reads /proc/net/tcp* at most once per TTL while grants keep passing. The TTL is how
+// long a stopped listener can still pass.
 type InodeCache struct {
 	Root string
 	TTL  time.Duration
@@ -245,19 +245,47 @@ type InodeCache struct {
 	val map[string]int
 }
 
-// Alive reports whether any of inodes is still a listening socket on port.
-func (c *InodeCache) Alive(now time.Time, port int, inodes []string) bool {
+// Matches reports whether a grant made for `granted` still describes what listens on port:
+// something listens, and EVERY listening socket on the port is one the grant was made for.
+//
+// "Some granted inode is still alive" is not enough: a server that stops while another of
+// its sockets stays (an IPv6-only [::] listener beside the IPv4 one) would let a different
+// process that binds the port afterwards inherit the grant. Any socket the grant did not see
+// is a different listener, so it is refused.
+//
+// A miss on the cached table is re-checked against a fresh read before it is believed: the
+// grant was made from a fresh read, so a listener that appeared after the cache was taken
+// must not fail its first request.
+func (c *InodeCache) Matches(now time.Time, port int, granted []string) bool {
+	if matches(c.table(now, false), port, granted) {
+		return true
+	}
+	return matches(c.table(now, true), port, granted)
+}
+
+func (c *InodeCache) table(now time.Time, fresh bool) map[string]int {
 	c.mu.Lock()
-	if c.val == nil || now.Sub(c.at) >= c.TTL {
+	defer c.mu.Unlock()
+	if fresh || c.val == nil || now.Sub(c.at) >= c.TTL {
 		c.val = listeners(c.Root)
 		c.at = now
 	}
-	m := c.val
-	c.mu.Unlock()
-	for _, in := range inodes {
-		if p, ok := m[in]; ok && p == port {
-			return true
+	return c.val
+}
+
+func matches(table map[string]int, port int, granted []string) bool {
+	cur := inodesOf(table, port)
+	if len(cur) == 0 {
+		return false
+	}
+	ok := map[string]bool{}
+	for _, g := range granted {
+		ok[g] = true
+	}
+	for _, in := range cur {
+		if !ok[in] {
+			return false
 		}
 	}
-	return false
+	return true
 }
