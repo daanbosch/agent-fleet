@@ -297,19 +297,22 @@ func kubeObjectName(name string) string {
 
 // kubeRuntime is one workspace on the kubernetes profile.
 type kubeRuntime struct {
-	cfg        *kubeConfig
-	c          *kubeClient
-	pins       imageResolver
-	wsName     string // the CP's name for the workspace (Workspace.ContainerName)
-	base       string // the Kubernetes name of the StatefulSet and the Service
-	token      string
-	keys       SecretKeys
-	extraEnv   []string
-	memBytes   int64
-	cpuMilli   int64
-	homeGiB    int
-	poll       time.Duration
-	stopMargin time.Duration
+	// homeDestroyed is set by Destroy when it deleted the StatefulSet, which it does only once
+	// every recorded claim and volume is confirmed gone (home_gone.go).
+	homeDestroyed bool
+	cfg           *kubeConfig
+	c             *kubeClient
+	pins          imageResolver
+	wsName        string // the CP's name for the workspace (Workspace.ContainerName)
+	base          string // the Kubernetes name of the StatefulSet and the Service
+	token         string
+	keys          SecretKeys
+	extraEnv      []string
+	memBytes      int64
+	cpuMilli      int64
+	homeGiB       int
+	poll          time.Duration
+	stopMargin    time.Duration
 	// editTemplate changes the pod template before Start writes it (tests only: a
 	// template the namespace's Pod Security level refuses, for the boot phase).
 	editTemplate func(*kPodTemplateSpec)

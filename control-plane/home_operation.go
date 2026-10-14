@@ -280,7 +280,9 @@ func (m *manager) resumeHomeOperation(ctx context.Context, op store.HomeOperatio
 		m.finishMemberWipe(lease, op, err)
 		return
 	}
-	m.finishHomeOperation(op, err, leftovers)
+	if m.finishHomeOperation(op, err, leftovers) && err == nil && op.Kind == store.HomeOpDestroy {
+		m.releaseHomeDEKAfterDestroy(op.MembershipID, rt)
+	}
 }
 
 // finishMemberWipe applies what follows a member's wipe task, for its starter and for the

@@ -239,3 +239,39 @@ has moved. Migration 0091 / pg 0076 adds `home_dek.confirm_epoch` (below).
 
 Verified by unit tests with fakes (an httptest Agent and an in-memory KMS) only. Real ECS/EFS
 starts, a draining task's report, a snapshot restore and a real KMS key have not been run.
+
+## Addendum (2026-10-14) — dropping a home's key once its home is proven gone (#1956)
+
+The parts above say nothing deletes a `home_dek` row. This changes that for one case and
+leaves the rest as it was; the format, the confirm step and the custodian are untouched. No
+migration.
+
+- **The shred.** Destroying a home was meant to end its data for good, but its random key lived
+  on, so a surviving copy of the store stayed openable. A `home_dek` row is now deleted when
+  Destroy has finished, the workspace row is gone, and the runtime **proves** the home gone.
+  The proof is a separate port (`runtime.ProveHomeGone`: gone / present / unknown, unknown
+  being the zero value), asked after the destroy under the membership's lifecycle lease. It is
+  never derived from "Destroy returned no leftovers", which PR #1955 showed to be empty on
+  `ecs` without the home task. `docker` and `native` observe the home directory under a
+  present data root; `kubernetes` and `ecs`/`ecs-ec2` answer only from the Destroy of the same
+  runtime value (the StatefulSet deleted after the inventory showed every claim and volume
+  gone; the EFS home task exiting 0), because the Control Plane cannot list volumes back or
+  mount EFS. A fresh runtime value, such as an orphan sweep would build, answers unknown.
+- **The delete is one conditional statement**: it names the row read (sealed key, confirm
+  epoch), requires scheme `random`, and requires that no workspace row names the membership.
+  A re-created home, a remigrate and a re-mint therefore cannot be undone by a stale decision.
+  A row still `migrating` is never deleted automatically, since its confirm may only have been
+  lost while the store is already re-sealed; that leaves the `migrating` probe rows of a golden
+  bake, for the operator.
+- **The operator.** `af-cp home-dek-status --orphans` lists keys no workspace row names
+  (a candidate only: a home can outlive its workspace row), and
+  `--remove-orphan <membership-id> --force` removes one. The command has no runtime, so
+  `--force` is the operator's statement that the home is gone; it still refuses a key a
+  workspace names.
+- **Residual race.** Under Postgres' read committed isolation the "no workspace row" check
+  cannot see a row committed after the statement began. Starts of the membership hold the same
+  lifecycle lease that the delete runs under, which closes it.
+
+Verified by unit tests (SQLite and Postgres for the store; fakes for the runtimes). No real ECS,
+EFS, EBS, EKS or KMS run: `ecs`, `ecs-ec2` and `kubernetes` proofs are unverified on a real
+deployment.

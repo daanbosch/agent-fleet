@@ -19,6 +19,17 @@ type destroyingRuntime struct {
 	destroyed *int
 	leftovers []string
 	err       error
+	// verdict is what the runtime proves about the home afterwards; between runs before it
+	// answers, so a test can change the world while the proof is in flight.
+	verdict runtime.HomeVerdict
+	between func()
+}
+
+func (d destroyingRuntime) ProveHomeGone(context.Context) (runtime.HomeVerdict, string) {
+	if d.between != nil {
+		d.between()
+	}
+	return d.verdict, "test"
 }
 
 func (d destroyingRuntime) Destroy(context.Context) ([]string, error) {
@@ -33,10 +44,12 @@ type destroyingFactory struct {
 	destroyed int
 	leftovers []string
 	err       error
+	verdict   runtime.HomeVerdict
+	between   func()
 }
 
 func (f *destroyingFactory) New(runtime.Workspace, runtime.SecretKeys, []string) runtime.Runtime {
-	return destroyingRuntime{destroyed: &f.destroyed, leftovers: f.leftovers, err: f.err}
+	return destroyingRuntime{destroyed: &f.destroyed, leftovers: f.leftovers, err: f.err, verdict: f.verdict, between: f.between}
 }
 
 // setup for the destroy tests: a tenant with an admin and a member who already has a

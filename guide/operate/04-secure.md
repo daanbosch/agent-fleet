@@ -195,12 +195,31 @@ together with `CustodianKmsKeyArn`; only the Control Plane task definition chang
   know the home's key, or losing the `home_dek` table, is a different case and can need
   credentials reconnected (see "Turning it off does not undo it" below).
 - Homes that have not started since, and old snapshots or backups, are **not** shredded
-  by disabling the KMS key (#1956 tracks the rest).
+  by disabling the KMS key. A key whose home is destroyed is removed only when the runtime
+  proves the home gone (next item).
 
 - **The key belongs to the home, not the workspace.** Deleting and re-creating a workspace over
-  a kept home keeps the key. Nothing removes it yet, Destroy included: not every runtime can
-  prove the whole home is gone, and a key dropped while part of it survives makes that part
-  unreadable.
+  a kept home keeps the key. A key is removed in one case: Destroy finished, a workspace row no
+  longer names the home, and the runtime **proves** the whole home is gone. A key dropped while
+  part of the home survives makes that part unreadable, so any other answer keeps it.
+  What each runtime can prove: `docker` and `native` see the home directory on the Control Plane's
+  host (absent under a present data root); `kubernetes` and `ecs`/`ecs-ec2` can only say so
+  from the Destroy they just ran (the StatefulSet deleted after every claim and volume was
+  confirmed gone; the EFS home task exiting 0), never afterwards, and never from "no leftovers"
+  (`ecs` without the home task removes only the access points, and a retry then reports none).
+  A key still `migrating` is never removed this way, and a runtime that cannot prove it keeps
+  the key. Once that crypto-shredding happens, the key's ciphertext is gone with the row, so
+  copies of the store that survive elsewhere (snapshots, backups) are unreadable too.
+- **Orphaned keys.** Keys that were kept (a `migrating` probe of a golden bake, a runtime that
+  could not prove it, a destroy by an older Control Plane) are listed by
+  `af-cp home-dek-status --orphans` (read-only; keys no workspace row names). A listed key is a
+  candidate, not a proof, because a home can outlive its workspace row. After you have checked
+  that the home is gone (the EFS directories, the EBS volume and snapshots, the cluster
+  claims, or the data directory), remove it with
+  `af-cp home-dek-status --remove-orphan <membership-id> --force`. `--force` is your statement
+  that the home is gone, because that command has no runtime to check with; it still refuses
+  a key a workspace row names. A key removed while the home exists makes its `secrets.enc`
+  unreadable for good.
 - **Moving a store to it.** The first start after you turn it on mints the home's key, and the
   Control Plane passes it to the workspace beside the derived key. At boot the workspace opens
   `secrets.enc` with either one and re-seals it under the home's key. A store that neither key

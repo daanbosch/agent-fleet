@@ -102,3 +102,89 @@ func TestConfirmAndRemigrateHomeDEK(t *testing.T) {
 		}
 	}
 }
+
+func TestDeleteHomeDEKIsConditional(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range homeOpStores(t) {
+		seed := func(confirm bool) (Workspace, HomeDEK) {
+			ws := homeOpWorkspace(t, st)
+			d, err := st.InsertHomeDEK(ctx, HomeDEK{MembershipID: ws.MembershipID, Ciphertext: "sealed", KeyRef: ws.TenantID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if confirm {
+				if ok, err := st.ConfirmHomeDEK(ctx, d); err != nil || !ok {
+					t.Fatalf("%s: confirm = %v, %v", name, ok, err)
+				}
+				d, _, _ = st.GetHomeDEK(ctx, ws.MembershipID)
+			}
+			return ws, d
+		}
+		del := func(label string, d HomeDEK, want bool) {
+			t.Helper()
+			if got, err := st.DeleteHomeDEK(ctx, d); err != nil || got != want {
+				t.Fatalf("%s: %s: DeleteHomeDEK = %v, %v; want %v", name, label, got, err, want)
+			}
+			_, ok, _ := st.GetHomeDEK(ctx, d.MembershipID)
+			if want && ok {
+				t.Fatalf("%s: %s: row still present after a delete that reported success", name, label)
+			}
+			if !want && !ok && label != "already gone" {
+				t.Fatalf("%s: %s: a refused delete removed the row", name, label)
+			}
+		}
+
+		// A workspace row names the membership: the home is alive as far as the store knows.
+		ws, d := seed(true)
+		del("workspace exists", d, false)
+		if err := st.DeleteWorkspace(ctx, ws.ID); err != nil {
+			t.Fatal(err)
+		}
+		// A key read before a remigrate is stale afterwards: the epoch moved.
+		if ok, err := st.RemigrateHomeDEK(ctx, ws.MembershipID); err != nil || !ok {
+			t.Fatalf("%s: remigrate = %v, %v", name, ok, err)
+		}
+		del("migrating again", d, false)
+		cur, _, _ := st.GetHomeDEK(ctx, ws.MembershipID)
+		del("migrating", cur, false)
+		if ok, err := st.ConfirmHomeDEK(ctx, cur); err != nil || !ok {
+			t.Fatalf("%s: re-confirm = %v, %v", name, ok, err)
+		}
+		del("read before the remigrate", d, false)
+		cur, _, _ = st.GetHomeDEK(ctx, ws.MembershipID)
+		stale := cur
+		stale.Ciphertext = "another"
+		del("another key", stale, false)
+		del("current, no workspace, confirmed", cur, true)
+		del("already gone", cur, false)
+	}
+}
+
+func TestOrphanHomeDEKs(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range homeOpStores(t) {
+		live := homeOpWorkspace(t, st)
+		orphan := homeOpWorkspace(t, st)
+		for _, ws := range []Workspace{live, orphan} {
+			if _, err := st.InsertHomeDEK(ctx, HomeDEK{MembershipID: ws.MembershipID, Ciphertext: "sealed", KeyRef: ws.TenantID}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := st.DeleteWorkspace(ctx, orphan.ID); err != nil {
+			t.Fatal(err)
+		}
+		got, err := st.ListOrphanHomeDEKs(ctx)
+		if err != nil || len(got) != 1 || got[0].MembershipID != orphan.MembershipID || got[0].Scheme != HomeDEKMigrating || !got[0].MembershipExists {
+			t.Fatalf("%s: orphans = %+v, %v", name, got, err)
+		}
+		if ok, err := st.DeleteOrphanHomeDEK(ctx, live.MembershipID); err != nil || ok {
+			t.Fatalf("%s: removed the key a workspace names: %v, %v", name, ok, err)
+		}
+		if ok, err := st.DeleteOrphanHomeDEK(ctx, orphan.MembershipID); err != nil || !ok {
+			t.Fatalf("%s: orphan removal = %v, %v", name, ok, err)
+		}
+		if got, _ := st.ListOrphanHomeDEKs(ctx); len(got) != 0 {
+			t.Fatalf("%s: orphans after removal = %+v", name, got)
+		}
+	}
+}

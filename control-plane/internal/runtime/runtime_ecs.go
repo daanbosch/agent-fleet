@@ -79,10 +79,13 @@ type ssmAPI interface {
 // NO CP-side state: every resource is addressed by a deterministic name/tag and
 // created-or-got on Start, so there is no schema change vs the docker adapter.
 type ecsRuntime struct {
-	cfg ecsConfig
-	ecs ecsAPI
-	efs efsAPI
-	ssm ssmAPI
+	// homeDestroyed is set by Destroy once the home task has removed the EFS home
+	// (home_gone.go).
+	homeDestroyed bool
+	cfg           ecsConfig
+	ecs           ecsAPI
+	efs           efsAPI
+	ssm           ssmAPI
 	// ecr resolves the workspace image tag to its content identity, for the
 	// backend-drift ("restart required") badge only (runtime_ecs_stale.go). nil = the
 	// feature is simply off, never an error.
@@ -473,6 +476,7 @@ func (e *ecsRuntime) Destroy(ctx context.Context) ([]string, error) {
 		if err := e.runHomeTask(ctx, homeWipeDestroy); err != nil {
 			return nil, fmt.Errorf("remove the EFS home: %w", err)
 		}
+		e.homeDestroyed = true
 		return e.notRemovedByHomeTask(leftovers), nil
 	}
 	return leftovers, nil
