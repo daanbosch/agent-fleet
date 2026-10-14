@@ -16,6 +16,7 @@ package agy
 //   - hooks.json is shared with the user: only the entry named hookName is ours.
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -50,6 +51,21 @@ type hookRecord struct {
 	// State is "working" or "idle"; "" for SessionStart, which only names the conversation.
 	State string `json:"state,omitempty"`
 	At    string `json:"at"` // RFC3339
+	// Gen is the launch generation the writer carried. A record whose Gen is not the slot's
+	// current one belongs to an earlier launch and is never read, whenever it was written.
+	Gen string `json:"gen,omitempty"`
+	// StepIdx is the conversation's last step at a Stop (nil when the DB could not be read): a
+	// later step is the evidence of a new turn whose PreInvocation went missing.
+	StepIdx *int `json:"stepIdx,omitempty"`
+}
+
+// currentRecord reads the slot's record, only when it was written under the current launch.
+func currentRecord(slotSid string) (hookRecord, bool) {
+	rec, ok := hookRecords.Read(slotSid)
+	if !ok || rec.Gen == "" || rec.Gen != launchGens.Read(slotSid) {
+		return hookRecord{}, false
+	}
+	return rec, true
 }
 
 // launchEnvVar names the launch generation in the pane's environment. agy passes it on to its
@@ -127,11 +143,16 @@ func recordHook(name, gen, event string, in hookInput, now time.Time) {
 	if state == "" && event != "SessionStart" {
 		return
 	}
-	prev, hadPrev := hookRecords.Read(slotSid)
+	prev, hadPrev := currentRecord(slotSid)
 	if hadPrev && prev.ConvID != "" && prev.ConvID != in.ConversationID {
 		return
 	}
-	rec := hookRecord{ConvID: in.ConversationID, State: state, At: now.Format(time.RFC3339)}
+	rec := hookRecord{ConvID: in.ConversationID, State: state, At: now.Format(time.RFC3339), Gen: gen}
+	if event == "Stop" {
+		if idx, ok := lastStepIdx(in.ConversationID); ok {
+			rec.StepIdx = &idx
+		}
+	}
 	if state == "" && hadPrev {
 		// SessionStart names the conversation but says nothing about the turn.
 		rec.State = prev.State
@@ -139,13 +160,13 @@ func recordHook(name, gen, event string, in hookInput, now time.Time) {
 	_ = hookRecords.Write(slotSid, rec)
 }
 
-// idleGrace is how far past a Stop the conversation DB may still be written (the turn's last
-// steps land around it) before that write counts as a new turn.
+// idleGrace is how long after a Stop the conversation DB may still be landing the turn's own
+// last steps; a Stop is not contradicted by the DB before it has passed.
 const idleGrace = 10 * time.Second
 
 // hookConversation is the conversation UUID the slot's hook reported, "" when none did.
 func hookConversation(slotSid string) string {
-	rec, ok := hookRecords.Read(slotSid)
+	rec, ok := currentRecord(slotSid)
 	if !ok {
 		return ""
 	}
@@ -158,7 +179,7 @@ func hookConversation(slotSid string) string {
 // a cancelled turn leaves it behind, so an idle composer footer overrides it.
 func hookLiveState(m session.Meta, p liveProbes, r lastStepRow, haveStep bool) string {
 	slotSid := session.UUID(m.Dir, m.Name)
-	rec, ok := hookRecords.Read(slotSid)
+	rec, ok := currentRecord(slotSid)
 	if !ok || rec.State == "" {
 		return ""
 	}
@@ -171,9 +192,17 @@ func hookLiveState(m session.Meta, p liveProbes, r lastStepRow, haveStep bool) s
 	}
 	if rec.State == "idle" {
 		// A Stop is only as current as the next PreInvocation. When that hook went missing
-		// (timeout, edited hooks.json), conversation activity newer than the Stop withdraws it.
-		if haveStep && dbState(r) == "working" {
-			if mt, ok := p.dbModTime(r.conv); ok && mt.After(at.Add(idleGrace)) {
+		// (timeout, edited hooks.json), a working step past the one the Stop saw is a new turn.
+		// Until idleGrace has passed the DB may still be landing the turn's own last steps, so
+		// it is not consulted; after it, a step beyond the Stop's that is still working wins.
+		if haveStep && dbState(r) == "working" && p.now().Sub(at) > idleGrace {
+			newer := false
+			if rec.StepIdx != nil {
+				newer = r.idx > *rec.StepIdx
+			} else if mt, ok := p.dbModTime(r.conv); ok {
+				newer = mt.After(at.Add(idleGrace))
+			}
+			if newer {
 				return ""
 			}
 		}
@@ -214,7 +243,7 @@ func hookEntry(exe string) map[string]any {
 }
 
 // EnsureHooks installs af's named entry into the global hooks.json, leaving every other name
-// byte-for-byte as the user wrote it. Idempotent: nothing is written when the entry is already
+// as the user wrote it (values preserved; whitespace is normalised). Idempotent: nothing is written when the entry is already
 // current. Run at every launch because the command embeds this binary's path, which a rebuilt
 // or relocated agent invalidates. A file that is not plain JSON, or a symlink that resolves to
 // nothing, is left alone (the error says why) and the slot runs on the DB path. The caller logs.
@@ -343,4 +372,18 @@ func lockHooks(string) (func(), error) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	return func() { _ = f.Close(); hooksMu.Unlock() }, nil
+}
+
+// lastStepIdx is the conversation DB's newest step index, read-only; ok=false when unreadable.
+func lastStepIdx(conv string) (int, bool) {
+	db, err := sql.Open("sqlite", "file:"+conversationDBPath(conv)+"?mode=ro&_pragma=busy_timeout(1000)")
+	if err != nil {
+		return 0, false
+	}
+	defer db.Close()
+	var idx int
+	if db.QueryRow(`SELECT idx FROM steps ORDER BY idx DESC LIMIT 1`).Scan(&idx) != nil {
+		return 0, false
+	}
+	return idx, true
 }

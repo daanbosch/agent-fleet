@@ -804,8 +804,9 @@ agy 1.3.5 の `~/.gemini/config/hooks.json`（#1079 の実測で判明）を、T
 - 会話 ID の所有: 起動ごとに世代（`AF_AGY_LAUNCH`、pane の env 経由で hook に届く）を発行し、一致しない hook は無視する。
   最初の SessionStart で会話を固定し、別の会話 ID（pane 内の `run_command` が起動した子 agy 等）や採用済み/resume の
   UUID と異なるものは記録を上書きさせない。不正な stdin・会話 ID 無しは記録しない。
-- Stop の idle にも鮮度を付ける: Stop より新しい DB 更新で DB が working なら idle を撤回して DB 判定に戻す
-  （次の PreInvocation が欠落した場合）。
+- Stop の idle にも鮮度を付ける: Stop 時点の DB の最終 step idx を記録に持ち、猶予（10 秒）を過ぎた後に、それより後ろの
+  step が working なら idle を撤回して DB 判定に戻す（次の PreInvocation が欠落した場合）。猶予内や、Stop 直後に
+  落ち着く最終 step では撤回しない。世代は起動の先頭で更新し、記録にも世代を持たせて、現世代と違う記録は読まない。
 - hooks.json の書き込みはプロセス間 flock（agent の state 側のロック）＋専用 tmp ＋ rename 直前の内容再確認。
   他名の entry は `json.RawMessage` のまま残す（数値が丸められない）。既存ファイルの mode を引き継ぎ、
   実体の無い symlink は触らない。AF entry は af セッションの外では何もしない（`AF_SESSION_NAME` 無し）ので、

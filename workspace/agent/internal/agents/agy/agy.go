@@ -78,6 +78,9 @@ func (agentImpl) BuildLaunch(m session.Meta, _ agents.LaunchOpts) (agents.Launch
 	// A hook record of an earlier launch says nothing about this one, and the hook command
 	// embeds this binary's path, so re-assert the entry before agy reads it. A failure only
 	// costs the hook signal: the DB / brain paths below carry the slot.
+	// Rotate the generation first: from here on a straggler of the previous process carries a
+	// generation that no longer matches, so it cannot recreate a record in the gap below.
+	launchEnv := newLaunchGen(slotSid)
 	clearHook(slotSid)
 	if err := EnsureHooks(); err != nil {
 		log.Printf("agy: lifecycle hooks not installed, falling back to the conversation DB: %v", err)
@@ -96,7 +99,7 @@ func (agentImpl) BuildLaunch(m session.Meta, _ agents.LaunchOpts) (agents.Launch
 	return agents.LaunchPlan{
 		Program: buildProgram(m.Model, m.Mode, resumeID, agents.BypassPermissions(m)),
 		Cwd:     m.CWD(),
-		Env:     append(append([]string(nil), MaskEnv()...), newLaunchGen(slotSid)),
+		Env:     append(append([]string(nil), MaskEnv()...), launchEnv),
 	}, nil
 }
 

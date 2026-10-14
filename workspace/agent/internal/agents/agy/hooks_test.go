@@ -306,14 +306,60 @@ func TestRunHookMalformedStdinRecordsNothing(t *testing.T) {
 	}
 }
 
-func TestStaleIdleWithdrawnByNewerDBActivity(t *testing.T) {
-	m, sid := hookFixture(t, "slot-stale-idle")
-	conv := "conv-si"
+func TestStaleIdleWithdrawnByNewerStep(t *testing.T) {
+	const conv = "conv-si"
+	for _, tc := range []struct {
+		name    string
+		stopIdx int
+		status  int
+		ago     time.Duration
+		want    string
+	}{
+		{"next turn started 2 s after the Stop, hook missing, well past the grace", -1, stepStatusRunning, 30 * time.Second, "working"},
+		{"the turn's own last step landing just after the Stop", 0, stepStatusRunning, 2 * time.Second, "idle"},
+		{"a newer step inside the grace is not yet trusted", -1, stepStatusRunning, 2 * time.Second, "idle"},
+		{"same step as the Stop stays idle", 0, stepStatusRunning, 30 * time.Second, "idle"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, sid := hookFixture(t, "slot-si")
+			sids.Write(sid, conv)
+			mkConvDB(t, conv, [][3]any{{14, tc.status, []byte("x")}})
+			launchGens.Write(sid, "g1")
+			idx := tc.stopIdx
+			hookRecords.Write(sid, hookRecord{ConvID: conv, State: "idle", Gen: "g1", StepIdx: &idx, At: time.Now().Add(-tc.ago).Format(time.RFC3339)})
+			if got := liveState(m, probesAt(time.Now())); got != tc.want {
+				t.Fatalf("state = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	// A turn's last step that settled to done right after the Stop (negative control).
+	m, sid := hookFixture(t, "slot-si2")
 	sids.Write(sid, conv)
-	mkConvDB(t, conv, [][3]any{{14, stepStatusRunning, []byte("x")}})
-	recordGen(m.Name, "Stop", hookInput{ConversationID: conv, FullyIdle: ptr(true)}, time.Now().Add(-time.Minute))
-	if got := liveState(m, probesAt(time.Now())); got != "working" {
-		t.Fatalf("state = %q, want working (DB is newer than the Stop)", got)
+	mkConvDBWithTurns(t, conv, [][3]any{{14, stepStatusDone, []byte("x")}, {15, stepStatusDone, []byte("x")}}, [][]byte{executorRow(4, 1)})
+	launchGens.Write(sid, "g1")
+	idx := 0
+	hookRecords.Write(sid, hookRecord{ConvID: conv, State: "idle", Gen: "g1", StepIdx: &idx, At: time.Now().Add(-time.Minute).Format(time.RFC3339)})
+	if got := liveState(m, probesAt(time.Now())); got != "idle" {
+		t.Fatalf("settled final step withdrew the Stop: %q", got)
+	}
+}
+
+// A hook of the previous process that lands between the generation rotation and the clear must
+// not leave a record the new launch reads.
+func TestOldGenerationRecordIsNeverRead(t *testing.T) {
+	m, sid := hookFixture(t, "slot-gap")
+	launchGens.Write(sid, "old")
+	recordHook(m.Name, "old", "SessionStart", hookInput{ConversationID: "old-conv"}, time.Now())
+	launchGens.Write(sid, "new") // newLaunchGen, before clearHook
+	recordHook(m.Name, "old", "PreInvocation", hookInput{ConversationID: "old-conv"}, time.Now())
+	// Whatever it managed to write before the clear, the record is not the new launch's.
+	hookRecords.Write(sid, hookRecord{ConvID: "old-conv", State: "working", Gen: "old", At: time.Now().Format(time.RFC3339)})
+	if got := hookConversation(sid); got != "" {
+		t.Fatalf("read an earlier launch's conversation %q", got)
+	}
+	recordHook(m.Name, "new", "SessionStart", hookInput{ConversationID: "new-conv"}, time.Now())
+	if got := hookConversation(sid); got != "new-conv" {
+		t.Fatalf("conversation = %q, want new-conv", got)
 	}
 }
 
