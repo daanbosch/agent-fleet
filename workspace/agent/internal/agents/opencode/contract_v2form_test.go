@@ -102,7 +102,7 @@ func TestContractV2FormQuestionRoundTrip(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(raw.String(), `"Pick one"="my own answer"`) || !strings.Contains(raw.String(), `"Which toppings?"="Ham, Pineapple"`) {
+	if !strings.Contains(raw.String(), `"Pick one"="DEMO-BREAK"`) || !strings.Contains(raw.String(), `"Which toppings?"="Ham, Pineapple"`) {
 		t.Errorf("the answer did not reach the model: %q", raw.String())
 	}
 
