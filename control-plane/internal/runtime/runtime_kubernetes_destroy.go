@@ -232,6 +232,7 @@ func (k *kubeRuntime) Destroy(ctx context.Context) ([]string, error) {
 		return []string{"statefulset:" + ns + "/" + k.base}, nil
 	}
 	k.setPhase("")
+	k.homeDestroyed = true
 	return nil, nil
 }
 

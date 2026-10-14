@@ -24,6 +24,12 @@ type recordedHomeRuntime struct {
 	// startErr fails Start; onStart sees the world at the moment of the start.
 	startErr error
 	onStart  func()
+	// verdict is the runtime's proof about the home once its Destroy has run.
+	verdict runtime.HomeVerdict
+}
+
+func (r *recordedHomeRuntime) ProveHomeGone(context.Context) (runtime.HomeVerdict, string) {
+	return r.verdict, "test"
 }
 
 func (r *recordedHomeRuntime) Start(ctx context.Context) error {

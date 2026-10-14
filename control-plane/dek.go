@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/k-k1/agent-fleet/control-plane/internal/runtime"
@@ -149,4 +150,58 @@ func homeDEKModeRandom(mode, custodianKind string) (bool, error) {
 	default:
 		return false, fmt.Errorf("AF_WORKSPACE_DEK=%q: want derived or random", mode)
 	}
+}
+
+// releaseHomeDEK drops the credential-store key of a home that has just been destroyed, and
+// only when the runtime proves that nothing of the home is left (runtime.ProveHomeGone). Any
+// other answer keeps the key: a key dropped while a byte of the home survives makes that
+// byte unreadable for good, and a key kept costs one row. Callers hold the membership's
+// lifecycle lease, so no start of the same membership is reading the key meanwhile; the
+// delete itself re-checks that the lease is still this destroy's, unexpired, under a database
+// lock that workspace inserts and lease takeovers also take, and is conditional on the row read
+// here and on no workspace row for the membership (store.DeleteHomeDEK). A lease lost since
+// the destroy keeps the key: the proof then may describe a home an earlier generation had. Never an error: the destroy it follows has succeeded.
+//
+// Only a 'random' key goes. A 'migrating' one may already seal a store whose confirm was
+// lost, so it stays for the operator (af-cp home-dek-status).
+func (m *manager) releaseHomeDEK(ctx context.Context, membershipID string, rt runtime.Runtime, lease *workspaceLifecycleLeaseGuard) {
+	if membershipID == "" || m.store == nil {
+		return
+	}
+	if lease == nil || lease.lost.Load() {
+		log.Printf("home key of membership %s: kept, the lifecycle lease is gone, so this destroy's proof may describe an earlier home", membershipID)
+		return
+	}
+	d, ok, err := m.store.GetHomeDEK(ctx, membershipID)
+	if err != nil {
+		log.Printf("home key of membership %s: read before its removal: %v; kept", membershipID, err)
+		return
+	}
+	if !ok {
+		return
+	}
+	if d.Scheme != store.HomeDEKRandom {
+		log.Printf("home key of membership %s: kept, it is %s (af-cp home-dek-status lists it once no workspace names it)", membershipID, d.Scheme)
+		return
+	}
+	if v, why := runtime.ProveHomeGone(ctx, rt); v != runtime.HomeGone {
+		log.Printf("home key of membership %s: kept, the home is not proven gone (%s: %s)", membershipID, v, why)
+		return
+	}
+	switch gone, err := m.store.DeleteHomeDEK(ctx, d, lease.token); {
+	case err != nil:
+		log.Printf("home key of membership %s: remove: %v; kept", membershipID, err)
+	case gone:
+		log.Printf("home key of membership %s: removed with its destroyed home", membershipID)
+	default:
+		log.Printf("home key of membership %s: kept, the row changed or a workspace names it again", membershipID)
+	}
+}
+
+// releaseHomeDEKAfterDestroy is releaseHomeDEK on a context of its own: the lease's may be
+// the very thing that ended.
+func (m *manager) releaseHomeDEKAfterDestroy(membershipID string, rt runtime.Runtime, lease *workspaceLifecycleLeaseGuard) {
+	ctx, cancel := context.WithTimeout(context.Background(), homeOpFinishTimeout)
+	defer cancel()
+	m.releaseHomeDEK(ctx, membershipID, rt, lease)
 }

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestHomeDEKInsertNeverReplaces(t *testing.T) {
@@ -101,4 +102,197 @@ func TestConfirmAndRemigrateHomeDEK(t *testing.T) {
 			t.Fatalf("%s: remigrate of a migrating home claimed the row", name)
 		}
 	}
+}
+
+func TestDeleteHomeDEKIsConditional(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range homeOpStores(t) {
+		seed := func(confirm bool) (Workspace, HomeDEK) {
+			ws := homeOpWorkspace(t, st)
+			d, err := st.InsertHomeDEK(ctx, HomeDEK{MembershipID: ws.MembershipID, Ciphertext: "sealed", KeyRef: ws.TenantID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if confirm {
+				if ok, err := st.ConfirmHomeDEK(ctx, d); err != nil || !ok {
+					t.Fatalf("%s: confirm = %v, %v", name, ok, err)
+				}
+				d, _, _ = st.GetHomeDEK(ctx, ws.MembershipID)
+			}
+			return ws, d
+		}
+		del := func(label string, d HomeDEK, want bool) {
+			t.Helper()
+			token := leaseOf(t, st, d.MembershipID)
+			defer st.ReleaseSessionShareOwnerLease(ctx, d.MembershipID, token)
+			if got, err := st.DeleteHomeDEK(ctx, d, token); err != nil || got != want {
+				t.Fatalf("%s: %s: DeleteHomeDEK = %v, %v; want %v", name, label, got, err, want)
+			}
+			_, ok, _ := st.GetHomeDEK(ctx, d.MembershipID)
+			if want && ok {
+				t.Fatalf("%s: %s: row still present after a delete that reported success", name, label)
+			}
+			if !want && !ok && label != "already gone" {
+				t.Fatalf("%s: %s: a refused delete removed the row", name, label)
+			}
+		}
+
+		// A workspace row names the membership: the home is alive as far as the store knows.
+		ws, d := seed(true)
+		del("workspace exists", d, false)
+		if err := st.DeleteWorkspace(ctx, ws.ID); err != nil {
+			t.Fatal(err)
+		}
+		// A key read before a remigrate is stale afterwards: the epoch moved.
+		if ok, err := st.RemigrateHomeDEK(ctx, ws.MembershipID); err != nil || !ok {
+			t.Fatalf("%s: remigrate = %v, %v", name, ok, err)
+		}
+		del("migrating again", d, false)
+		cur, _, _ := st.GetHomeDEK(ctx, ws.MembershipID)
+		del("migrating", cur, false)
+		if ok, err := st.ConfirmHomeDEK(ctx, cur); err != nil || !ok {
+			t.Fatalf("%s: re-confirm = %v, %v", name, ok, err)
+		}
+		del("read before the remigrate", d, false)
+		cur, _, _ = st.GetHomeDEK(ctx, ws.MembershipID)
+		stale := cur
+		stale.Ciphertext = "another"
+		del("another key", stale, false)
+		del("current, no workspace, confirmed", cur, true)
+		del("already gone", cur, false)
+	}
+}
+
+func TestOrphanHomeDEKs(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range homeOpStores(t) {
+		live := homeOpWorkspace(t, st)
+		orphan := homeOpWorkspace(t, st)
+		for _, ws := range []Workspace{live, orphan} {
+			if _, err := st.InsertHomeDEK(ctx, HomeDEK{MembershipID: ws.MembershipID, Ciphertext: "sealed", KeyRef: ws.TenantID}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := st.DeleteWorkspace(ctx, orphan.ID); err != nil {
+			t.Fatal(err)
+		}
+		got, err := st.ListOrphanHomeDEKs(ctx)
+		if err != nil || len(got) != 1 || got[0].MembershipID != orphan.MembershipID || got[0].Scheme != HomeDEKMigrating || !got[0].MembershipExists {
+			t.Fatalf("%s: orphans = %+v, %v", name, got, err)
+		}
+		if ok, err := st.DeleteOrphanHomeDEK(ctx, live.MembershipID); err != nil || ok {
+			t.Fatalf("%s: removed the key a workspace names: %v, %v", name, ok, err)
+		}
+		if ok, err := st.DeleteOrphanHomeDEK(ctx, orphan.MembershipID); err != nil || !ok {
+			t.Fatalf("%s: orphan removal = %v, %v", name, ok, err)
+		}
+		if got, _ := st.ListOrphanHomeDEKs(ctx); len(got) != 0 {
+			t.Fatalf("%s: orphans after removal = %+v", name, got)
+		}
+	}
+}
+
+// leaseOf takes the membership's lifecycle lease the way a destroy does and returns its token.
+func leaseOf(t *testing.T, st *SQL, membershipID string) string {
+	t.Helper()
+	token := NewID()
+	now := time.Now().UTC()
+	ts := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000000000Z07:00") }
+	ok, err := st.AcquireSessionShareOwnerLease(context.Background(), membershipID, token, ts(now), ts(now.Add(time.Minute)))
+	if err != nil || !ok {
+		t.Fatalf("lease = %v, %v", ok, err)
+	}
+	return token
+}
+
+// The delete is the lease holder's: a token that is not the current one, a lease another CP
+// took over, an expired one, and no token at all keep the key.
+func TestDeleteHomeDEKNeedsTheLease(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range homeOpStores(t) {
+		ws := homeOpWorkspace(t, st)
+		d, _ := st.InsertHomeDEK(ctx, HomeDEK{MembershipID: ws.MembershipID, Ciphertext: "sealed", KeyRef: ws.TenantID})
+		if ok, err := st.ConfirmHomeDEK(ctx, d); err != nil || !ok {
+			t.Fatal(ok, err)
+		}
+		d, _, _ = st.GetHomeDEK(ctx, ws.MembershipID)
+		if err := st.DeleteWorkspace(ctx, ws.ID); err != nil {
+			t.Fatal(err)
+		}
+		old := leaseOf(t, st, ws.MembershipID)
+		if err := st.ReleaseSessionShareOwnerLease(ctx, ws.MembershipID, old); err != nil {
+			t.Fatal(err)
+		}
+		fresh := leaseOf(t, st, ws.MembershipID) // another CP took the membership over
+		for label, token := range map[string]string{"released lease": old, "no lease": "", "unknown token": "x"} {
+			if ok, err := st.DeleteHomeDEK(ctx, d, token); err != nil || ok {
+				t.Fatalf("%s: %s: deleted = %v, %v", name, label, ok, err)
+			}
+		}
+		// The operator path refuses while an operation holds the membership.
+		if ok, err := st.DeleteOrphanHomeDEK(ctx, ws.MembershipID); err != nil || ok {
+			t.Fatalf("%s: orphan removal under a live lease = %v, %v", name, ok, err)
+		}
+		if err := st.ReleaseSessionShareOwnerLease(ctx, ws.MembershipID, fresh); err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := st.DeleteOrphanHomeDEK(ctx, ws.MembershipID); err != nil || !ok {
+			t.Fatalf("%s: orphan removal after the lease ended = %v, %v", name, ok, err)
+		}
+	}
+}
+
+// Postgres only (READ COMMITTED): a workspace insert for the membership may not commit while a
+// delete is waiting on the key row, or the delete would go on to drop the key the new workspace
+// points at. The delete holds the membership row, which the insert's foreign key needs.
+func TestDeleteHomeDEKBlocksAWorkspaceInsert(t *testing.T) {
+	ctx := context.Background()
+	st, ok := homeOpStores(t)["postgres"]
+	if !ok {
+		t.Skip("needs AF_TEST_DATABASE_URL")
+	}
+	ws := homeOpWorkspace(t, st)
+	d, _ := st.InsertHomeDEK(ctx, HomeDEK{MembershipID: ws.MembershipID, Ciphertext: "sealed", KeyRef: ws.TenantID})
+	if ok, err := st.ConfirmHomeDEK(ctx, d); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	d, _, _ = st.GetHomeDEK(ctx, ws.MembershipID)
+	if err := st.DeleteWorkspace(ctx, ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	token := leaseOf(t, st, ws.MembershipID)
+
+	// Hold the key row, as a concurrent reader of the key would.
+	hold, err := st.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hold.Rollback()
+	if _, err := hold.ExecContext(ctx, `SELECT 1 FROM home_dek WHERE membership_id=? FOR UPDATE`, ws.MembershipID); err != nil {
+		t.Fatal(err)
+	}
+	deleted := make(chan bool, 1)
+	go func() {
+		ok, _ := st.DeleteHomeDEK(ctx, d, token)
+		deleted <- ok
+	}()
+	time.Sleep(500 * time.Millisecond) // the delete is now waiting on the key row
+	created := make(chan struct{})
+	go func() {
+		w := ws
+		w.ID = NewID()
+		w.ContainerName += "-2"
+		_ = st.CreateWorkspace(ctx, w)
+		close(created)
+	}()
+	select {
+	case <-created:
+		t.Fatal("a workspace for the membership committed while the delete waited: it would then lose its key")
+	case <-time.After(700 * time.Millisecond):
+	}
+	hold.Rollback()
+	if !<-deleted {
+		t.Fatal("the delete should win once the key row is free")
+	}
+	<-created
 }

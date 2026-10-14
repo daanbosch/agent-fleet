@@ -881,13 +881,16 @@ func (m *manager) beginDestroyWorkspace(ctx context.Context, membershipID string
 		defer release()
 		leftovers, err := runtime.DestroyRuntime(lease.Context(), rt)
 		if record != nil {
-			m.finishHomeOperation(*record, err, leftovers)
+			if m.finishHomeOperation(*record, err, leftovers) && err == nil {
+				m.releaseHomeDEKAfterDestroy(membershipID, rt, lease)
+			}
 			return leftovers, err
 		}
 		if err == nil {
 			if err = lease.checkpoint(ctx); err == nil {
 				if err = m.store.DeleteWorkspace(ctx, ws.ID); err == nil {
 					m.evictMembershipCache(membershipID)
+					m.releaseHomeDEKAfterDestroy(membershipID, rt, lease)
 				}
 			}
 		}

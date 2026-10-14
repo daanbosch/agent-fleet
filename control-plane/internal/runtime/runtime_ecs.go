@@ -79,10 +79,15 @@ type ssmAPI interface {
 // NO CP-side state: every resource is addressed by a deterministic name/tag and
 // created-or-got on Start, so there is no schema change vs the docker adapter.
 type ecsRuntime struct {
-	cfg ecsConfig
-	ecs ecsAPI
-	efs efsAPI
-	ssm ssmAPI
+	// homeDestroyed is set by Destroy once the home task has removed the EFS home
+	// (home_gone.go).
+	homeDestroyed bool
+	// homeUnproven is set when Destroy met an access point it cannot account for.
+	homeUnproven bool
+	cfg          ecsConfig
+	ecs          ecsAPI
+	efs          efsAPI
+	ssm          ssmAPI
 	// ecr resolves the workspace image tag to its content identity, for the
 	// backend-drift ("restart required") badge only (runtime_ecs_stale.go). nil = the
 	// feature is simply off, never an error.
@@ -473,7 +478,9 @@ func (e *ecsRuntime) Destroy(ctx context.Context) ([]string, error) {
 		if err := e.runHomeTask(ctx, homeWipeDestroy); err != nil {
 			return nil, fmt.Errorf("remove the EFS home: %w", err)
 		}
-		return e.notRemovedByHomeTask(leftovers), nil
+		left := e.notRemovedByHomeTask(leftovers)
+		e.homeDestroyed = len(left) == 0 && !e.homeUnproven
+		return left, nil
 	}
 	return leftovers, nil
 }
@@ -481,6 +488,16 @@ func (e *ecsRuntime) Destroy(ctx context.Context) ([]string, error) {
 // notRemovedByHomeTask drops from leftovers the directories the destroy task has just
 // removed (homeTaskDirs). An access point rooted anywhere else stays reported: nothing
 // removed it, and a leftover silently dropped is one nobody looks for again.
+// isHomeTaskPath reports whether path is one of the member's directories the destroy task removes.
+func (e *ecsRuntime) isHomeTaskPath(path string) bool {
+	for _, dir := range homeTaskDirs {
+		if path == "/"+dir+"/"+e.membershipID {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *ecsRuntime) notRemovedByHomeTask(leftovers []string) []string {
 	var out []string
 	for _, l := range leftovers {
@@ -529,6 +546,7 @@ func (e *ecsRuntime) accessPoints(ctx context.Context) ([]efstypes.AccessPointDe
 // the part of the teardown that is identical on both launch types. Split out so the EC2
 // adapter can run it in its own order (slot and volume first, then this).
 func (e *ecsRuntime) destroySharedResources(ctx context.Context) ([]string, error) {
+	e.homeUnproven = false
 	aps, err := e.accessPoints(ctx)
 	if err != nil {
 		return nil, err
@@ -538,8 +556,22 @@ func (e *ecsRuntime) destroySharedResources(ctx context.Context) ([]string, erro
 		if tagValue(ap.Tags, "af-membership") != e.membershipID {
 			continue
 		}
-		if rd := ap.RootDirectory; rd != nil && aws.ToString(rd.Path) != "" {
-			leftovers = append(leftovers, "efs:"+e.cfg.efsFileSystem+aws.ToString(rd.Path))
+		rd := ap.RootDirectory
+		if rd != nil && aws.ToString(rd.Path) != "" {
+			path := aws.ToString(rd.Path)
+			leftovers = append(leftovers, "efs:"+e.cfg.efsFileSystem+path)
+			if !e.isHomeTaskPath(path) {
+				// The home task never removes what this access point roots, and deleting the
+				// access point would forget it: a retry would find nothing odd and prove the
+				// home gone. It stays, reported on every Destroy, until an operator has dealt
+				// with the directory.
+				continue
+			}
+		} else {
+			// Rooted at the file system's root: unknowable, kept for the same reason.
+			leftovers = append(leftovers, "efs-access-point:"+e.cfg.efsFileSystem+"/"+aws.ToString(ap.AccessPointId))
+			e.homeUnproven = true
+			continue
 		}
 		if _, err := e.efs.DeleteAccessPoint(ctx, &efs.DeleteAccessPointInput{
 			AccessPointId: ap.AccessPointId,
