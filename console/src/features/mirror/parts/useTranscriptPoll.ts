@@ -82,6 +82,7 @@ export function useTranscriptPoll({
     rejectedPlansRef.current = new Set(); // optimistic reject marks belong to the old session
     setLoaded(false);
     setTermState("");
+    setRetry(null); // the band belongs to the session being left
     setStatus("");
     setBgBusy(false);
     setFinalizing(false); // the idle→reply bridge belongs to the old session

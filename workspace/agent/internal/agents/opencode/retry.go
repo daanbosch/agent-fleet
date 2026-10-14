@@ -70,9 +70,12 @@ func retryFailure(msg string) string {
 // message once /message comes back.
 func (h *threadHandle) noteRetry(attempt int, msg string, nextMs int64) {
 	h.mu.Lock()
-	if !h.running {
+	// Only a turn whose /message this handle has sent is ours: while the pump waits behind
+	// another client's turn (an attached TUI's) a retry belongs to that client. A stop in flight
+	// has already settled the turn as cancelled.
+	if !h.running || !h.turnSent || h.state == agents.TurnInterrupting {
 		h.mu.Unlock()
-		return // another client's turn (an attached TUI's) is not ours to fail
+		return
 	}
 	info := &agents.RetryInfo{Attempt: attempt, Message: msg, NextMs: nextMs}
 	if h.retryStop != "" {

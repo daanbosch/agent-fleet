@@ -186,7 +186,6 @@ func TestV2RetryScheduled(t *testing.T) {
 		t.Fatal("a finished step must clear the retry")
 	}
 	handleServeEvent([]byte(`{"type":"session.retry.scheduled","data":{"sessionID":"ses_test","attempt":2,"at":1,"error":{"type":"provider.internal","message":"` + regionMsg + `","status":500}}}`))
-	waitState(t, h, agents.TurnRunning)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		m.mu.Lock()
@@ -212,4 +211,81 @@ func TestRetryFromTheMeasuredGlobalEvent(t *testing.T) {
 		t.Fatalf("Retry = %+v, want the measured retry", got)
 	}
 	endTurn(m)
+}
+
+// While the pump waits behind another client's turn (an attached TUI's), h.running is true but
+// no /message of ours is out: that client's retry is not ours to show or to abort.
+func TestRetryBehindAnotherClientsTurnIsNotOurs(t *testing.T) {
+	m, srv := newMockServe(t)
+	h := newTestHandle(t, srv)
+	registerTestHandle(t, h)
+	m.mu.Lock()
+	m.busy = true // the foreign turn
+	m.mu.Unlock()
+	if err := h.Send(memberInput("queued", "msg_q")); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		m.mu.Lock()
+		polls := m.statusPolls
+		m.mu.Unlock()
+		if polls > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	handleServeEvent(retryStatus(2, regionMsg))
+	m.mu.Lock()
+	aborts, turns := m.aborts, len(m.turns)
+	m.mu.Unlock()
+	if aborts != 0 || turns != 0 {
+		t.Fatalf("aborts=%d own messages=%d, want neither: the retry is the other client's", aborts, turns)
+	}
+	if got := enriched(h); got != nil {
+		t.Fatalf("Retry = %+v, want none for another client's turn", got)
+	}
+	m.mu.Lock()
+	m.busy = false
+	m.mu.Unlock()
+	waitState(t, h, agents.TurnCompleted)
+}
+
+// A stop leaves no retry note behind, whichever came first.
+func TestStopLeavesNoRetryNoteStopFirst(t *testing.T)  { stopLeavesNoRetryNote(t, true) }
+func TestStopLeavesNoRetryNoteRetryFirst(t *testing.T) { stopLeavesNoRetryNote(t, false) }
+
+// (not a subtest: the handle's sid is built from t.Name(), which must not contain a slash)
+func stopLeavesNoRetryNote(t *testing.T, stopFirst bool) {
+	{
+		{
+			m, srv := newMockServe(t)
+			h := newTestHandle(t, srv)
+			registerTestHandle(t, h)
+			m.holdAbort = true
+			startBlocking(t, m, h)
+			if stopFirst {
+				if _, err := h.Interrupt(agents.InterruptOpts{}); err != nil {
+					t.Fatal(err)
+				}
+				handleServeEvent(retryStatus(2, regionMsg))
+			} else {
+				handleServeEvent(retryStatus(2, regionMsg))
+				if _, err := h.Interrupt(agents.InterruptOpts{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := enriched(h); got != nil {
+				t.Fatalf("Retry = %+v right after the stop, want none", got)
+			}
+			m.mu.Lock()
+			m.holdAbort = false
+			m.mu.Unlock()
+			endTurn(m)
+			waitState(t, h, agents.TurnCancelled)
+			if got := enriched(h); got != nil {
+				t.Fatalf("Retry = %+v after the cancelled turn, want none", got)
+			}
+		}
+	}
 }

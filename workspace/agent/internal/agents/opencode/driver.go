@@ -380,7 +380,11 @@ type threadHandle struct {
 	retry       *agents.RetryInfo
 	retryFailed *agents.RetryInfo
 	retryStop   string
-	events      chan agents.Event
+	// turnSent: this handle's own /message is out (set by runTurn, cleared when the pump
+	// finishes the input). running alone is also true while the pump waits behind another
+	// client's turn, which a retry status must never be attributed to.
+	turnSent bool
+	events   chan agents.Event
 }
 
 // tq returns the handle's queue, creating it on first use. Caller holds h.mu.
@@ -600,6 +604,8 @@ func (h *threadHandle) pump() {
 		h.mu.Lock()
 		h.tq().Settle(t)
 		h.running = false
+		h.turnSent = false
+		h.retry = nil
 		h.mu.Unlock()
 	}
 }
@@ -661,6 +667,7 @@ func (h *threadHandle) runTurn(t *agents.Taken) {
 	stopped := h.tq().Received(t)
 	if !stopped {
 		h.state = agents.TurnRunning
+		h.turnSent = true
 	}
 	h.mu.Unlock()
 	if stopped {
@@ -788,6 +795,10 @@ func (h *threadHandle) interrupt(opts agents.InterruptOpts, teardown bool) (agen
 	out := h.tq().Interrupt(opts, running || foreign)
 	abort := running && out.Head != agents.HeadStopPending
 	h.compacting = false // a stop ends any compaction with the turn (measured: the abort completes it)
+	if running {
+		// The member's stop settles the turn as cancelled: no retry note, live or failed, may outlive it.
+		h.retry, h.retryFailed, h.retryStop = nil, nil, ""
+	}
 	switch {
 	case running:
 		h.state = agents.TurnInterrupting
