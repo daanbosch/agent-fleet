@@ -6,7 +6,7 @@
 //   openNewSession               → features/sessions/store (tick signal)
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactElement } from "react";
 import { createPortal } from "react-dom";
-import { api, previewURL } from "../core/api/client.ts";
+import { api } from "../core/api/client.ts";
 import { onPush, pushHealthy } from "../core/push/events.ts";
 import { useTenantStore } from "../core/store/tenant.ts";
 import { useWorkspaceStore, wsBusy, wsPowerStops, wsStartBusy } from "../core/store/workspace.ts";
@@ -40,7 +40,8 @@ import { useUsageResetNotify } from "./usageResetNotify.ts";
 import { AUTO_INLINE, noteSessionKinds, planUsageChips, readKindStamps, type KindStamps } from "./usageChipPlan.ts";
 import { setSettings, useSettings } from "../lib/settings.ts";
 import { useSettingsUI } from "../features/settings/store.ts";
-import { browserTarget } from "../features/browser/target.ts";
+import { PortOpen, useDefaultPortOpen } from "../features/preview/PortOpen.tsx";
+import { useCurrentPreviewInfo, usePreviewStore } from "../features/preview/previewState.ts";
 import { useBrowserUnavailable } from "../features/browser/availability.ts";
 import { AwsProfilesChip } from "../features/awslogin/AwsProfilesChip.tsx";
 import { GcpProfilesChip } from "../features/gcplogin/GcpProfilesChip.tsx";
@@ -582,6 +583,9 @@ function UsageChipPlace({ kind }: { kind: string }) {
 // UsageChip: a compact per-agent limit chip (glyph + the two window percentages) that
 // opens a dropdown with each window's bar + reset + a reload. Renders null until the
 // agent's endpoint answers with data, so it self-hides for agents the user doesn't use.
+// A stable empty list: a selector returning a fresh [] each time re-renders forever.
+const NO_PORTS: number[] = [];
+
 export function UsageChip({ src, tenant }: { src: UsageSource; tenant: string | null }) {
   const tr = useT();
   const fiveLabel = tr(src.fiveLabelKey);
@@ -1185,7 +1189,6 @@ export function WsBar() {
   const splitRight = useLayoutStore((s) => s.splitRight);
   const splitDown = useLayoutStore((s) => s.splitDown);
   const resetToTerminal = useLayoutStore((s) => s.resetToTerminal);
-  const openPaneTarget = useLayoutStore((s) => s.openTarget);
   const activePaneId = layout.activeCellId;
   const openStart = useSessionsStore((s) => s.openStart);
   const askConfirm = useConfirm();
@@ -1195,6 +1198,8 @@ export function WsBar() {
   const barRef = useRef<HTMLDivElement>(null);
   const { foldUsage, foldMore, noteUsageLayout } = useWsBarFold(barRef, !isMobile);
   const phoneFold = useWsBarPhoneFold(barRef, isMobile);
+  // Unlisted ports the owner has open right now (control-plane/preview_grant.go).
+  const tempPorts = useCurrentPreviewInfo()?.tempPorts ?? NO_PORTS;
   const [port, setPort] = useState("");
   const [previewPath, setPreviewPath] = useState("/");
   const [pvOpen, setPvOpen] = useState(false); // desktop port-preview popover
@@ -1344,23 +1349,10 @@ export function WsBar() {
     if (ok) void restartWs();
   };
 
-  // Open a service the user started inside the container (e.g. a Spring Boot app
-  // on :8080) in a new tab, proxied through the CP /preview/{port}.
-  const openPreview = () => {
-    const p = port.trim();
-    if (!running || !browserTarget(Number(p), "/")) return;
-    window.open(previewURL(p, previewPath.trim()), "_blank", "noopener");
-    setPvOpen(false);
-    setMoreOpen(false);
-  };
-
-  const openBrowserPane = () => {
-    // Enter in the port field still opens something useful where the pane cannot.
-    if (browserUnavailable) return openPreview();
-    if (!running) return;
-    const target = browserTarget(Number(port.trim()), previewPath.trim());
-    if (!target) return;
-    openPaneTarget({ content: { kind: "browser", ...target } });
+  // Enter in the port field does what a plain click on the primary button does: the default
+  // target (subdomain, else browser pane, else lightweight preview — features/preview).
+  const openDefaultPort = useDefaultPortOpen(Number(port.trim()), running, previewPath.trim() || "/");
+  const closePortPops = () => {
     setPvOpen(false);
     setMoreOpen(false);
   };
@@ -1383,6 +1375,7 @@ export function WsBar() {
         (list) => !cancelled && setAttachments(list),
         () => !cancelled && setAttachments((prev) => (prev.length ? [] : prev)),
       );
+    void usePreviewStore.getState().refresh({ force: true });
     void api("api/env/ws-settings").then(
       (res: any) => {
         if (cancelled) return;
@@ -1578,35 +1571,33 @@ export function WsBar() {
             placeholder={tr("wsbar.preview.port_ph")}
             value={port}
             onChange={(e) => setPort(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && openBrowserPane()}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              openDefaultPort();
+              closePortPops();
+            }}
             title={tr("wsbar.preview.port_hint")}
           />
           <input
             className="preview-path"
             value={previewPath}
             onChange={(e) => setPreviewPath(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && openBrowserPane()}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              openDefaultPort();
+              closePortPops();
+            }}
             aria-label={tr("browser.path")}
             title={tr("wsbar.preview.path_hint")}
           />
         </div>
-        <div className="pv-row pv-actions">
-          {/* Disabled rather than hidden where the runtime has no browser features, so the
-              tooltip and the hint below can say why the button everyone else has is off. */}
-          <Button
-            onClick={openBrowserPane}
-            disabled={!!browserUnavailable || !running || !browserTarget(Number(port.trim()), previewPath.trim())}
-            title={browserUnavailable ? tr("browser.unavailable.short", { runtime: browserUnavailable }) : undefined}
-          >
-            {tr("wsbar.preview.open_pane")}
-          </Button>
-          {/* Disabled by the same browserTarget check openPreview uses, so an out-of-range
-              or 7700 port cannot leave a clickable button that does nothing (same shape as
-              the open-in-pane button). */}
-          <Button onClick={openPreview} disabled={!running || !browserTarget(Number(port.trim()), "/")}>
-            {tr("wsbar.preview.open_light")}
-          </Button>
-        </div>
+        <PortOpen
+          variant="buttons"
+          port={Number(port.trim())}
+          path={previewPath.trim() || "/"}
+          running={!!running}
+          onOpened={closePortPops}
+        />
         <div className="pv-hint">
           {browserUnavailable
             ? tr("wsbar.preview.hint_unavailable", { runtime: browserUnavailable })
@@ -1661,6 +1652,19 @@ export function WsBar() {
               </div>
             ))}
           <div className="pv-hint">{tr("wsbar.preview.hosts_hint")}</div>
+        </div>
+      )}
+      {/* Unlisted ports the owner has opened for this start. They are the owner's alone and
+          end with the listener, so they are listed apart from the issued URLs above. */}
+      {tempPorts.length > 0 && (
+        <div className="pv-section">
+          <label className="pv-label">{tr("portopen.temp_badge")}</label>
+          <div className="pv-row pv-actions">
+            {tempPorts.map((p) => (
+              <PortOpen key={p} variant="pill" port={p} running={!!running} />
+            ))}
+          </div>
+          <div className="pv-hint">{tr("portopen.temp_hint")}</div>
         </div>
       )}
       {/* Previews shared by other people in the same tenant (docs/log/81 §14.6). What opens

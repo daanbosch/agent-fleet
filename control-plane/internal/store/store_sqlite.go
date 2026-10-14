@@ -1624,6 +1624,10 @@ func setWorkspaceStateTx(ctx context.Context, tx *sqlTx, workspaceID, state stri
 		if _, err = tx.ExecContext(ctx, `UPDATE workspace SET preview_slug='' WHERE id=?`, workspaceID); err != nil {
 			return err
 		}
+		// Temporary preview grants die with the start they were made in.
+		if err = clearPreviewGrantsTx(ctx, tx, workspaceID); err != nil {
+			return err
+		}
 	}
 	if state == "running" {
 		if _, err = tx.ExecContext(ctx, `DELETE FROM workspace_auto_stop WHERE workspace_id=?`, workspaceID); err != nil {
@@ -1776,6 +1780,8 @@ func deleteWorkspaceTx(ctx context.Context, tx *sqlTx, workspaceID string) error
 		`DELETE FROM workspace_stop_intent WHERE workspace_id=?`,
 		`DELETE FROM workspace_auto_stop WHERE workspace_id=?`,
 		`DELETE FROM workspace_activity WHERE workspace_id=?`,
+		`DELETE FROM preview_temp_port WHERE workspace_id=?`,
+		`DELETE FROM preview_epoch WHERE workspace_id=?`,
 		`DELETE FROM shared_session_catalog WHERE workspace_id=?`,
 		`DELETE FROM session WHERE workspace_id=?`,
 		`DELETE FROM wrapped_dek WHERE workspace_id=?`,
@@ -1881,9 +1887,25 @@ func (s *SQL) SetWorkspaceSettings(ctx context.Context, workspaceID, settingsJSO
 // SetWorkspacePreviewSlug records the slug this container start is reachable under
 // (docs/log/81 §4); "" clears it, which is what a stop does. The unique index is partial
 // (non-empty only), so every stopped workspace can hold "" at once.
+//
+// The temporary preview grants (preview_temp_port) belong to one slug, so they go in the same
+// transaction: a grant saved under the old slug can no longer land after the rotation.
 func (s *SQL) SetWorkspacePreviewSlug(ctx context.Context, workspaceID, slug string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE workspace SET preview_slug=? WHERE id=?`, slug, workspaceID)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = lockWorkspace(ctx, tx, workspaceID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE workspace SET preview_slug=? WHERE id=?`, slug, workspaceID); err != nil {
+		return err
+	}
+	if err = clearPreviewGrantsTx(ctx, tx, workspaceID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // SetWorkspaceAutoStop records why the Control Plane stopped the workspace, replacing the

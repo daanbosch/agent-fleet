@@ -510,6 +510,8 @@ func (m *manager) rotatePreviewSlug(ctx context.Context, ws store.Workspace) (st
 	if err := m.store.SetWorkspacePreviewSlug(ctx, ws.ID, slug); err != nil {
 		return "", err
 	}
+	// Temporary grants (preview_grant.go) are dropped by SetWorkspacePreviewSlug itself, in the
+	// same transaction, so a grant made under the previous slug cannot land after this point.
 	return slug, nil
 }
 

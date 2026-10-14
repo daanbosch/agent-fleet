@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -344,6 +345,28 @@ func TestPreviewFirstBodyChunkOf400StreamIsNotParked(t *testing.T) {
 	if _, err := io.ReadFull(resp.Body, got); err != nil || string(got) != "streaming..." {
 		t.Fatalf("first chunk = %q, err %v (upstream still open)", got, err)
 	}
+}
+
+type netConn = net.Conn
+
+func rawListenerClosed(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := portOf(t, l.Addr().String())
+	l.Close()
+	return p
+}
+
+func atoi(t *testing.T, s string) int {
+	t.Helper()
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 type headEOFBody struct{ data []byte }

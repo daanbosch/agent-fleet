@@ -30,7 +30,19 @@ var previewErrorCodes = map[string]bool{
 	"preview_not_http":    true,
 	"preview_tls":         true,
 	"preview_failed":      true,
+	// The listener a temporary grant was bound to is gone (preview_grant.go).
+	previewListenerChanged: true,
 }
+
+// previewListenerChanged is the Agent's code for a granted listener that no longer exists.
+const previewListenerChanged = "preview_listener_changed"
+
+// Refusals made by the owner-open endpoint (preview_grant.go), rendered with the same pages.
+const (
+	previewGrantUnavailable = "preview_grant_unavailable"
+	previewGrantCap         = "preview_grant_cap"
+	previewBadPort          = "preview_bad_port"
+)
 
 // previewErrorText returns the localized sentence for a kind. It names the port and
 // nothing the relay saw — a public preview's anonymous visitors read it, so no address,
@@ -47,6 +59,14 @@ func previewErrorText(lang, kind string, port int) string {
 			return "Port " + p + " is serving HTTPS — turn off the dev server's HTTPS to preview it."
 		case previewWorkspaceUnreachable:
 			return "The workspace is not running or cannot be reached."
+		case previewListenerChanged:
+			return "The listener on port " + p + " changed or stopped. Reopen the port from the Console."
+		case previewGrantUnavailable:
+			return "Opening port " + p + " is not available until the workspace is restarted (its agent is older than this feature)."
+		case previewGrantCap:
+			return "Too many temporarily opened ports. Close a server or add the port to the preview ports in Settings."
+		case previewBadPort:
+			return "Port " + p + " cannot be previewed."
 		}
 		return "The preview could not complete the request to port " + p + "."
 	}
@@ -59,6 +79,14 @@ func previewErrorText(lang, kind string, port int) string {
 		return "ポート " + p + " は HTTPS で動いています。プレビューするには開発サーバーの HTTPS を無効にしてください。"
 	case previewWorkspaceUnreachable:
 		return "ワークスペースが起動していないか、到達できません。"
+	case previewListenerChanged:
+		return "ポート " + p + " の待ち受けが変わったか停止しました。Console からもう一度開いてください。"
+	case previewGrantUnavailable:
+		return "ポート " + p + " を開くには、ワークスペースの再起動が必要です（Agent がこの機能より古い版です）。"
+	case previewGrantCap:
+		return "一時的に開いているポートが多すぎます。サーバーを止めるか、設定のプレビューポートに追加してください。"
+	case previewBadPort:
+		return "ポート " + p + " はプレビューできません。"
 	}
 	return "ポート " + p + " へのプレビュー要求を完了できませんでした。"
 }
@@ -67,11 +95,16 @@ func previewErrorText(lang, kind string, port int) string {
 // browser navigation (the lightweight preview opens in a new tab, so the browser shows
 // this body as the page), JSON for everything else (fetch / XHR callers read the code).
 func writePreviewRelayError(w http.ResponseWriter, r *http.Request, kind string, port int) {
+	writePreviewPage(w, r, http.StatusBadGateway, kind, port)
+}
+
+// writePreviewPage is writePreviewRelayError with the status chosen by the caller.
+func writePreviewPage(w http.ResponseWriter, r *http.Request, status int, kind string, port int) {
 	body, ctype := previewErrorBody(r, kind, port)
 	w.Header().Set("Content-Type", ctype)
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusBadGateway)
+	w.WriteHeader(status)
 	_, _ = w.Write(body)
 }
 
@@ -92,9 +125,23 @@ func previewErrorBody(r *http.Request, kind string, port int) ([]byte, string) {
 // previewErrorHeader) with the localized form, keeping the Agent's specific code. It is a
 // ModifyResponse step; a response without a known marker is left alone, so an app's own
 // 502 is never touched.
-func rewritePreviewAgentError(resp *http.Response, in *http.Request, port int) {
+//
+// A vanished granted listener (previewListenerChanged) arrives as 410 and leaves as 404 —
+// the same answer an unlisted port gives — after onGone drops the grant.
+func rewritePreviewAgentError(resp *http.Response, in *http.Request, port int, onGone func()) {
 	kind := resp.Header.Get(previewErrorHeader)
-	if !previewErrorCodes[kind] || resp.StatusCode != http.StatusBadGateway {
+	if !previewErrorCodes[kind] {
+		return
+	}
+	if kind == previewListenerChanged {
+		if resp.StatusCode != http.StatusGone {
+			return
+		}
+		if onGone != nil {
+			onGone()
+		}
+		resp.StatusCode, resp.Status = http.StatusNotFound, "404 Not Found"
+	} else if resp.StatusCode != http.StatusBadGateway {
 		return
 	}
 	_ = resp.Body.Close()

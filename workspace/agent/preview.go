@@ -5,6 +5,7 @@ import (
 	"net/http/httputil"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/browserx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
@@ -28,6 +29,16 @@ func handlePreview(w http.ResponseWriter, r *http.Request) {
 	// (they differ when the agent listens elsewhere) — forwarding here would loop.
 	if browserx.ReservedBrowserAgentPort(port) {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_port", "this port is the workspace agent")
+		return
+	}
+
+	// The CP sets this for a port the owner opened without registering it: the listener
+	// the grant was made for. It is never forwarded to the app, and whatever a client
+	// sent along is dropped by the CP before it gets here.
+	granted := splitInodes(r.Header.Get(previewListenerHeader))
+	r.Header.Del(previewListenerHeader)
+	if len(granted) > 0 && !previewListeners.Matches(time.Now(), port, granted) {
+		writePreviewError(w, previewListenerChanged, port)
 		return
 	}
 

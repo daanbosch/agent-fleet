@@ -315,6 +315,9 @@ func buildMux() *http.ServeMux {
 	// Preview — reverse-proxy to a service the user started inside the container
 	// (Spring Boot, dev server, ...). Reached only via the CP's /preview/{port}.
 	mux.HandleFunc("/proxy/{port}/{rest...}", handlePreview)
+	// The listener a temporary preview grant is bound to, and the HTTP probe before one is
+	// made (control-plane/preview_grant.go).
+	mux.HandleFunc("GET /preview-listener/{port}", handlePreviewListener)
 
 	// Repository management — git ops on working copies under ~/repos.
 	mux.HandleFunc("GET /repos", gitx.HandleListRepos)

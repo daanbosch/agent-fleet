@@ -11,10 +11,11 @@ import { createRoot, type Root } from "react-dom/client";
 
 const api = vi.fn();
 const apiJSON = vi.fn();
+const tenantNow = { v: "default" };
 vi.mock("../../../core/api/client.ts", () => ({
   api: (...args: unknown[]) => api(...args),
   apiJSON: (...args: unknown[]) => apiJSON(...args),
-  getTenant: () => "default",
+  getTenant: () => tenantNow.v,
   errText: (e: { message?: string }) => e?.message || "",
   isTransientErr: () => false,
   raw: () => Promise.resolve(new Response("")),
@@ -141,5 +142,123 @@ describe("PreviewTab", () => {
       input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
     });
     expect(apiJSON).toHaveBeenCalledWith("api/env/ws-settings", "PUT", { previewPorts: [3000, 5173] });
+  });
+});
+
+
+describe("writes queued across a scope change", () => {
+  const queueSecondWrite = async () => {
+    api.mockResolvedValue(wsSettings());
+    const { PreviewTab } = await freshModule();
+    const { t } = await import("../../../lib/i18n/index.ts");
+    const { useTenantStore } = await import("../../../core/store/tenant.ts");
+    const pending: Array<(v: unknown) => void> = [];
+    apiJSON.mockImplementation(() => new Promise((r) => pending.push(r)));
+    await mount(<PreviewTab />);
+    const input = document.querySelector<HTMLInputElement>(".ds-select")!;
+    await act(async () => input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }))); // write 1 is out
+    const label = [...document.querySelectorAll("*")].find((e) => e.children.length === 0 && e.textContent === t("env.preview_public_label"))!;
+    const on = [...label.parentElement!.querySelectorAll("button")].find((b) => b.textContent === t("common.on"))!;
+    await act(async () => on.click()); // write 2 waits behind it
+    expect(apiJSON).toHaveBeenCalledTimes(1);
+    return { pending, useTenantStore };
+  };
+
+  it("does not send a queued write to another tenant", async () => {
+    const { pending } = await queueSecondWrite();
+    tenantNow.v = "other"; // the tenant switched before the queue reached the second write
+    await act(async () => pending[0](wsSettings()));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(apiJSON).toHaveBeenCalledTimes(1); // the public toggle was cancelled, not sent to "other"
+    tenantNow.v = "default";
+  });
+
+  it("does not send a queued write after the identity changed within the tenant", async () => {
+    const { pending, useTenantStore } = await queueSecondWrite();
+    useTenantStore.setState({ identityRev: useTenantStore.getState().identityRev + 1 });
+    await act(async () => pending[0](wsSettings()));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(apiJSON).toHaveBeenCalledTimes(1);
+    useTenantStore.setState({ identityRev: 0 });
+  });
+});
+
+describe("overlapping saves", () => {
+  it("a field blur and a toggle click in flight together end on the last save", async () => {
+    api.mockResolvedValue(wsSettings());
+    const { PreviewTab } = await freshModule();
+    const { usePreviewStore } = await import("../../preview/previewState.ts");
+    const { t } = await import("../../../lib/i18n/index.ts");
+    const pending: Array<(v: unknown) => void> = [];
+    apiJSON.mockImplementation(() => new Promise((r) => pending.push(r)));
+    await mount(<PreviewTab />);
+    const input = document.querySelector<HTMLInputElement>(".ds-select")!;
+    await act(async () => input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }))); // ports save
+    const label = [...document.querySelectorAll("*")].find((e) => e.children.length === 0 && e.textContent === t("env.preview_public_label"))!;
+    const on = [...label.parentElement!.querySelectorAll("button")].find((b) => b.textContent === t("common.on"))!;
+    await act(async () => on.click()); // public save, while the ports save is still out
+    await act(async () => pending[0](wsSettings({ previewPublic: false }))); // ports answers first
+    expect(usePreviewStore.getState().info?.public).toBe(false);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(apiJSON).toHaveBeenCalledTimes(2); // sent in order, one after the other
+    await act(async () => pending[1](wsSettings({ previewPublic: true })));
+    expect(usePreviewStore.getState().info?.public).toBe(true); // the last save wins
+  });
+});
+
+describe("Expose this port… strip", () => {
+  const addStrip = () => host!.querySelector(".pv-add-strip");
+  const click = async (label: string) => {
+    const b = [...host!.querySelectorAll("button")].find((x) => x.textContent === label)!;
+    await act(async () => b.click());
+  };
+  const tabWith = async (extra: Record<string, unknown> = {}) => {
+    api.mockResolvedValue(wsSettings(extra));
+    const { PreviewTab } = await freshModule();
+    const { useSettingsUI } = await import("../store.ts"); // after the reset: the tab's own copy
+    return { useSettingsUI, PreviewTab };
+  };
+
+  it("asks first and saves nothing until Add; Cancel saves nothing", async () => {
+    const { PreviewTab, useSettingsUI } = await tabWith();
+    useSettingsUI.setState({ previewAddPort: 5173 });
+    await mount(<PreviewTab />);
+    expect(addStrip()?.textContent).toContain("5173");
+    expect(apiJSON).not.toHaveBeenCalled();
+    await click("キャンセル");
+    expect(addStrip()).toBeNull();
+    expect(apiJSON).not.toHaveBeenCalled();
+    expect(useSettingsUI.getState().previewAddPort).toBeNull();
+  });
+
+  it("Add saves the list with the port appended", async () => {
+    const { PreviewTab, useSettingsUI } = await tabWith();
+    apiJSON.mockResolvedValue(wsSettings({ previewPorts: [3000, 8080, 5173] }));
+    useSettingsUI.setState({ previewAddPort: 5173 });
+    await mount(<PreviewTab />);
+    await click("追加");
+    expect(apiJSON).toHaveBeenCalledWith("api/env/ws-settings", "PUT", { previewPorts: [3000, 8080, 5173] });
+    expect(addStrip()).toBeNull();
+  });
+
+  it("shows no strip for an already listed port, and the cap message at the cap", async () => {
+    const { PreviewTab, useSettingsUI } = await tabWith();
+    useSettingsUI.setState({ previewAddPort: 3000 });
+    await mount(<PreviewTab />);
+    expect(addStrip()).toBeNull();
+    act(() => root?.unmount());
+    host?.remove();
+
+    const full = await tabWith({ previewMaxPorts: 2 });
+    full.useSettingsUI.setState({ previewAddPort: 5173 });
+    await mount(<full.PreviewTab />);
+    expect(addStrip()?.textContent).toContain("2");
+    expect([...host!.querySelectorAll("button")].some((b) => b.textContent === "追加")).toBe(false);
   });
 });

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/listenports"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/portprobe"
 )
 
@@ -22,6 +23,28 @@ const (
 	previewTLS         = portprobe.TLS
 	previewFailed      = portprobe.Failed
 )
+
+// previewListenerChanged: the listener a temporary grant was bound to is gone (the server
+// stopped, or another process took the port). Answered with 410, not 502. Specific to the
+// relay, so it is not part of portprobe's vocabulary.
+const previewListenerChanged = "preview_listener_changed"
+
+// previewListenerHeader carries a grant's listener inodes, comma separated, from the CP.
+const previewListenerHeader = "X-AF-Preview-Listener"
+
+// previewListeners answers "does the grant still describe this port's listeners" with a 2 s
+// cache: the bound on how long a stopped listener keeps passing.
+var previewListeners = &listenports.InodeCache{Root: "/proc", TTL: 2 * time.Second}
+
+func splitInodes(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 // previewErrorHeader marks a response as the Agent's own relay error rather than the
 // previewed app's, so the Control Plane can tell the two apart. The contract covers the
@@ -47,13 +70,19 @@ func previewErrorMessage(kind string, port int) string {
 		return "127.0.0.1:" + p + " is listening but does not speak HTTP; the preview carries HTTP and WebSocket only"
 	case previewTLS:
 		return "127.0.0.1:" + p + " is serving HTTPS; turn off the dev server's HTTPS to preview it"
+	case previewListenerChanged:
+		return "the listener on port " + p + " has changed; reopen it from the Console"
 	}
 	return "the preview could not complete the request to 127.0.0.1:" + p
 }
 
 func writePreviewError(w http.ResponseWriter, kind string, port int) {
 	w.Header().Set(previewErrorHeader, kind)
-	httpx.WriteErr(w, http.StatusBadGateway, kind, previewErrorMessage(kind, port))
+	status := http.StatusBadGateway
+	if kind == previewListenerChanged {
+		status = http.StatusGone
+	}
+	httpx.WriteErr(w, status, kind, previewErrorMessage(kind, port))
 }
 
 // sniffWait bounds how long a 400 candidate may hold its headers back while its first

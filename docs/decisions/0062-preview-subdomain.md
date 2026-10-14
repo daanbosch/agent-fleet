@@ -274,6 +274,17 @@ it goes stale as a 404 — the least legible failure there is**.
   `preview_unreachable` (connection refused or dial failure), `preview_not_http`, `preview_tls` or `preview_failed`, and marks
   it with `X-AF-Preview-Error`; the CP relay (path and subdomain forms) renders that code as a localized page
   (HTML for navigations, JSON otherwise) and keeps its own dial failure as `preview_workspace_unreachable`.
+
+- 2026-10-14: decision 6 is narrowed for the owner (#2138). The preview list still governs what *other people*
+  can reach (public-mode visitors, tenant-share colleagues); the owner's own access to an unlisted port is per
+  live listener. The owner opens it with `GET /preview-open-own?port=N` on the Console origin: the CP asks the
+  Agent for the port's listening-socket inodes (and one HTTP probe, on that click only) and stores a grant
+  `{workspace, port, slug, inodes}`. `serve`, `handshake` and `siblingOrigin` honour it only with an owner
+  cookie, public mode included, and answer everyone else with the same bare 404 as an unknown port. Every relayed
+  request carries the granted inodes (`X-AF-Preview-Listener`, set by the CP, client copies dropped) and the
+  Agent answers 410 when none is still listening (cache of 2 s: that is how long a stopped listener can still
+  pass), after which the CP deletes the grant. Slug rotation and stop clear grants; at most 16 per workspace;
+  one audit row (`workspace.preview_temp_port`) per grant. An Agent without `/preview-listener` fails closed.
 - 2026-10-15: the browser pane now shares that classification (#2151). Its Chromium dials `127.0.0.1:{port}` directly, so
   the relay is not in the path; when a pane navigation to a loopback URL fails, the Agent probes the port once
   (`internal/portprobe`, one bounded `HEAD /`) and, for `preview_not_http` / `preview_tls`, adds `reason` next to the
