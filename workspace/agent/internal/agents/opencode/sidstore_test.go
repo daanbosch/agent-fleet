@@ -42,7 +42,8 @@ func TestSlotSidsLegacyFallback(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
-			lp := legacySidPath("slot1")
+			sids.lastScan = time.Time{}
+			lp := filepath.Join(legacySidDir(), "slot1")
 			putSid(t, lp, c.legacy, c.legacyTime)
 			if c.state != "" {
 				putSid(t, sids.Path("slot1"), c.state, c.stateTime)
@@ -62,9 +63,75 @@ func TestSlotSidsLegacyFallback(t *testing.T) {
 
 func TestSlotSidsRemoveDropsLegacyToo(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	putSid(t, legacySidPath("slot1"), "ses_x", time.Now())
+	sids.lastScan = time.Time{}
+	putSid(t, filepath.Join(legacySidDir(), "slot1"), "ses_x", time.Now())
 	sids.Remove("slot1")
 	if got := sids.Read("slot1"); got != "" {
 		t.Fatalf("Read after Remove = %q, want none", got)
+	}
+}
+
+// A legacy file that cannot be deleted must not bring a cleared conversation back.
+func TestSlotSidsRemoveSurvivesUndeletableLegacy(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permissions do not bind root")
+	}
+	t.Setenv("HOME", t.TempDir())
+	sids.lastScan = time.Time{}
+	lp := filepath.Join(legacySidDir(), "slot1")
+	putSid(t, lp, "ses_cleared", time.Now().Add(-time.Minute))
+	sids.Write("slot1", "ses_cleared")
+	if err := os.Chmod(filepath.Dir(lp), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Dir(lp), 0o700) })
+	sids.Remove("slot1")
+	sids.lastScan = time.Time{}
+	if got := sids.Read("slot1"); got != "" {
+		t.Fatalf("Read after Remove = %q, want none", got)
+	}
+	// A later write by an old plugin is newer than the tombstone and counts again.
+	_ = os.Chmod(filepath.Dir(lp), 0o700)
+	putSid(t, lp, "ses_again", time.Now().Add(time.Minute))
+	sids.lastScan = time.Time{}
+	if got := sids.Read("slot1"); got != "ses_again" {
+		t.Fatalf("Read after a fresh legacy write = %q, want ses_again", got)
+	}
+}
+
+// The old record is the only copy until the state write lands.
+func TestSlotSidsKeepsLegacyWhenStateWriteFails(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sids.lastScan = time.Time{}
+	lp := filepath.Join(legacySidDir(), "slot1")
+	putSid(t, lp, "ses_only", time.Now())
+	staging := filepath.Join(sids.SidStore.Path("x"), "..", ".staging")
+	if err := os.MkdirAll(filepath.Dir(staging), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(staging, nil, 0o600); err != nil { // a file where the staging dir goes
+		t.Fatal(err)
+	}
+	if got := sids.Read("slot1"); got != "" {
+		t.Fatalf("Read = %q with an unwritable state dir", got)
+	}
+	if _, err := os.Stat(lp); err != nil {
+		t.Fatalf("legacy record lost: %v", err)
+	}
+	os.Remove(staging)
+	sids.lastScan = time.Time{}
+	if got := sids.Read("slot1"); got != "ses_only" {
+		t.Fatalf("Read after recovery = %q", got)
+	}
+}
+
+// Polled readers must not re-list the old directory every call.
+func TestSlotSidsScanIsThrottled(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sids.lastScan = time.Time{}
+	_ = sids.Read("slot1")
+	putSid(t, filepath.Join(legacySidDir(), "slot1"), "ses_late", time.Now())
+	if got := sids.Read("slot1"); got != "" {
+		t.Fatalf("second Read inside the interval looked at the old directory: %q", got)
 	}
 }

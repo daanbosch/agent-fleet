@@ -46,7 +46,7 @@
 // reads it to resume THIS slot's own session (opencode --session <id>) on relaunch,
 // so each slot keeps a distinct conversation instead of sharing via --continue.
 import { execFile } from "node:child_process";
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
 const GRACE_MS = 1500; // ignore message.* this long after session.idle (trailing finalize)
@@ -91,11 +91,20 @@ const bridge = () => {
   };
   const recordOcid = (sid, ocid) => {
     if (!sid || !ocid || !sidDir || stopped) return;
+    // Staged and renamed (as the Agent's own stores do): the Agent reads this file from another
+    // process, and a truncate-then-write would let it see an empty or partial id.
+    const staging = join(sidDir, ".staging");
+    const tmp = join(staging, `${sid}.${process.pid}.${Date.now()}`);
     try {
-      mkdirSync(sidDir, { recursive: true });
-      writeFileSync(join(sidDir, sid), ocid);
+      mkdirSync(staging, { recursive: true });
+      writeFileSync(tmp, ocid, { mode: 0o600 });
+      renameSync(tmp, join(sidDir, sid));
     } catch {
-      /* ignore */
+      try {
+        unlinkSync(tmp);
+      } catch {
+        /* nothing staged */
+      }
     }
   };
   const idle = (sid) => {

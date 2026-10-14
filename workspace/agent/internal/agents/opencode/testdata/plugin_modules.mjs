@@ -3,7 +3,7 @@
 //
 //   node --experimental-strip-types plugin_modules.mjs <plugin dir> <fake rtk dir> <fake agent log>
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, existsSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, writeFileSync, rmSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -124,6 +124,7 @@ assert.equal(ids.size, 3, "plugin ids must be distinct");
 {
   const states = () => (existsSync(agentLog) ? readFileSync(agentLog, "utf8").trim().split("\n").filter(Boolean) : []);
   const ocid = () => readFileSync(join(process.env.HOME, ".local/state/agent-fleet/opencode-sid", process.env.AF_SESSION_SID), "utf8");
+  const stagedLeft = () => readdirSync(join(process.env.HOME, ".local/state/agent-fleet/opencode-sid/.staging"));
   const ev = (type, data) => ({ type, data });
   const h = v2Host();
   const cleanup = mods.status.setup(h.ctx);
@@ -208,6 +209,8 @@ assert.equal(ids.size, 3, "plugin ids must be distinct");
   await sleep(200);
   assert.deepEqual(states().slice(before), ["session-status working sid-test", "session-status idle sid-test"]);
   assert.equal(ocid(), "ses_v1");
+  assert.deepEqual(stagedLeft(), [], "no staged file may be left behind");
+  assert.equal(statSync(join(process.env.HOME, ".local/state/agent-fleet/opencode-sid", process.env.AF_SESSION_SID)).mode & 0o777, 0o600);
 }
 // --- the shared opencode 2 server (issue #2120) -------------------------------------------------
 
