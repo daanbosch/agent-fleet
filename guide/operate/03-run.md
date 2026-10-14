@@ -230,6 +230,23 @@ body on demand) is a second way to the same text; the other kinds have only the 
   time, so before adding to it, check that it is genuinely needed by everyone, every time; a
   topic file costs nothing until it is read. This layer cannot be delivered to cursor.
 
+## opencode 2: Terminal sessions and the shared server
+
+With opencode 2, Terminal (CLI) sessions attach to the one opencode server the Workspace Agent
+runs ([member/06](../member/06-agents.md#with-opencode-2)). To force a private server per
+Terminal session instead (the opencode 1 memory profile, about 150-250 MB more per session),
+set this in the environment of the Workspace Agent process:
+
+```
+AF_OPENCODE_TUI_STANDALONE=1
+```
+
+- The Agent reads it on every launch, so no restart is needed. It affects sessions launched
+  afterwards; a running session keeps the mode it started in.
+- `AF_OPENCODE_SERVE_DISABLE=1` (managed opencode off) also gives private servers, because
+  there is no shared server to attach to.
+- With opencode 1 neither variable has an effect on Terminal sessions.
+
 ## Once it is on the public internet
 
 Put the Control Plane on a public hostname and **vulnerability scanners find it within

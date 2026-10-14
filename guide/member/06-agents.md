@@ -238,18 +238,15 @@ the workspace runs **opencode 2**; with opencode 1 nothing in this subsection ha
   **⚙Settings → "Agent instructions"** shows that this is where they went and whether they are
   in effect. Leave that block alone; it is rewritten when you save.
 - **Terminal (CLI) sessions share one server.** Each Terminal (CLI) session attaches to the
-  opencode server Agent Fleet already runs for Managed sessions, instead of starting a private
-  one, which saves roughly 250 MB of memory per additional Terminal session (measured with idle sessions).
-  Every session stays separate: its own conversation, its own environment and its own status.
-  If that server is not available (for example it is not connected), the session starts with a
-  private server instead, on its own. To always use a private server per Terminal session, set
-  this in the Workspace's environment:
-
-  ```
-  AF_OPENCODE_TUI_STANDALONE=1
-  ```
-
-  A session keeps the mode it was launched in.
+  opencode server Agent Fleet runs (it starts it when needed), instead of starting a private
+  one, which saves about 150-250 MB of memory per additional Terminal session (measured with
+  idle sessions). Every session stays separate: its own conversation, its own environment and
+  its own status. If that server cannot be had (it fails to start, or opencode is switched off
+  for the Workspace), the session starts with a private server instead, on its own. An
+  administrator can also force a private server per session. A session keeps the mode it was
+  launched in.
+<!-- TODO(#2133): if it adds a member-facing switch for the private server, describe it here and
+     in the administrator note in operate/03-run. -->
 - **Questions are forms.** When opencode asks you something, the chat view shows it as a
   question card, one field per question, and you answer it there: pick an option or type your
   own. **Cancel — back to chat** dismisses the form and the agent carries on. This works in
@@ -262,10 +259,6 @@ the workspace runs **opencode 2**; with opencode 1 nothing in this subsection ha
      answering in the terminal. Replace the Terminal sentence above accordingly. -->
 - **No ToDo list.** opencode 2 has no todo tool, so the session never shows a ToDo list.
   This is how opencode 2 works, not a lost connection.
-<!-- TODO(#2129 / PR #2130, merge with it): add the retry band: while opencode retries a provider
-     error the chat view shows "The provider returned an error and the agent is retrying
-     (attempt N): …"; an error no retry can fix (region or privacy, quota or billing, bad key)
-     ends the turn as failed with that message. This applies to opencode 1 as well. -->
 
 ## GitHub Copilot
 

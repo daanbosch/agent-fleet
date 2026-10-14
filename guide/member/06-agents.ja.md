@@ -237,18 +237,14 @@ Claude の挙動は同じ画面で切り替えられます。
   目印付きブロックに書き込み、**⚙設定 →「エージェントへの指示」** の行に、書き込み先と、実際に効いて
   いるかが表示されます。このブロックは保存のたびに書き直されるので、手で触らないでください。
 - **ターミナル（CLI）セッションは 1 つのサーバーを共有します。** ターミナル（CLI）セッション
-  は、セッションごとに専用のサーバーを起動する代わりに、Agent Fleet がマネージドセッション用に
-  すでに動かしている opencode サーバーにつながります。ターミナルセッションを 1 つ増やすたびに
-  メモリがおよそ 250 MB 少なくて済みます（アイドル状態のセッションで計測）。会話・環境・状態は
-  セッションごとに別々のままです。そのサーバーが使えないとき（たとえば未接続のとき）は、自動的に
-  専用サーバーで起動します。常にターミナルセッションごとの専用サーバーにしたいときは、
-  ワークスペースの環境に次を設定します。
-
-  ```
-  AF_OPENCODE_TUI_STANDALONE=1
-  ```
-
-  セッションは、起動したときのモードのまま動き続けます。
+  は、セッションごとに専用のサーバーを起動する代わりに、Agent Fleet が動かしている opencode
+  サーバー（必要なときに起動します）につながります。ターミナルセッションを 1 つ増やすたびに
+  メモリがおよそ 150〜250 MB 少なくて済みます（アイドル状態のセッションで計測）。会話・環境・状態は
+  セッションごとに別々のままです。そのサーバーが用意できないとき（起動に失敗した、またはワークスペースで
+  opencode が無効にされている）は、自動的に専用サーバーで起動します。管理者がセッションごとの専用
+  サーバーに固定することもできます。セッションは、起動したときのモードのまま動き続けます。
+<!-- TODO(#2133): if it adds a member-facing switch for the private server, describe it here and
+     in the administrator note in operate/03-run (en + ja). -->
 - **質問はフォームです。** opencode が質問してくると、チャット画面に質問カードが出ます。
   質問ごとに 1 つの入力欄があり、選択肢を選ぶか、自分で入力して答えます。**キャンセルして会話に戻る**
   を押すとフォームは取り下げられ、エージェントは続きを進めます。これが使えるのはマネージド
@@ -261,10 +257,6 @@ Claude の挙動は同じ画面で切り替えられます。
      answering in the terminal. Replace the Terminal sentence above accordingly (en + ja). -->
 - **ToDo リストはありません。** opencode 2 には todo ツールが無いので、セッションに ToDo
   リストは表示されません。接続が切れたのではなく、opencode 2 の仕様です。
-<!-- TODO(#2129 / PR #2130, merge with it): add the retry band (en + ja): while opencode retries a
-     provider error the chat view shows that the provider returned an error and the agent is
-     retrying (attempt N); an error no retry can fix (region or privacy, quota or billing, bad
-     key) ends the turn as failed with that message. This applies to opencode 1 as well. -->
 
 ## GitHub Copilot
 
