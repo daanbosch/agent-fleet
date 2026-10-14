@@ -11,6 +11,7 @@ package agy
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,8 +23,8 @@ import (
 )
 
 // sids maps our deterministic slot sid to agy's conversation UUID, read back as
-// `--conversation <UUID>` on resume. agy has no hooks to report its own id, so
-// the UUID is adopted from its cwd→last-conversation map once it changes from
+// `--conversation <UUID>` on resume. The id comes from agy's own lifecycle hook when
+// it fired (hooks.go), else from its cwd→last-conversation map once that changes from
 // the pre-launch snapshot — see captureConversation.
 var sids = agents.NewSidStore("agy-sid")
 
@@ -74,6 +75,16 @@ func (agentImpl) BuildLaunch(m session.Meta, _ agents.LaunchOpts) (agents.Launch
 	// on the condition that it stays off at all times.
 	enforceTelemetryOff()
 	slotSid := session.UUID(m.Dir, m.Name)
+	// A hook record of an earlier launch says nothing about this one, and the hook command
+	// embeds this binary's path, so re-assert the entry before agy reads it. A failure only
+	// costs the hook signal: the DB / brain paths below carry the slot.
+	// Rotate the generation first: from here on a straggler of the previous process carries a
+	// generation that no longer matches, so it cannot recreate a record in the gap below.
+	launchEnv := newLaunchGen(slotSid)
+	clearHook(slotSid)
+	if err := EnsureHooks(); err != nil {
+		log.Printf("agy: lifecycle hooks not installed, falling back to the conversation DB: %v", err)
+	}
 	resumeID := sids.Read(slotSid)
 	if resumeID == "" {
 		// Fresh conversation: snapshot the dir's current map entry AND the brain
@@ -88,14 +99,15 @@ func (agentImpl) BuildLaunch(m session.Meta, _ agents.LaunchOpts) (agents.Launch
 	return agents.LaunchPlan{
 		Program: buildProgram(m.Model, m.Mode, resumeID, agents.BypassPermissions(m)),
 		Cwd:     m.CWD(),
-		Env:     MaskEnv(),
+		Env:     append(append([]string(nil), MaskEnv()...), launchEnv),
 	}, nil
 }
 
 func (agentImpl) WireLive(m session.Meta, alive bool) agents.LiveInfo {
-	// agy has no status hooks; working / idle / question / permission all come from the
-	// conversation DB's last step (LiveState — pending.go). Surfacing only the pending prompt
-	// here left State empty mid-turn, which the Console draws as waiting for input.
+	// working / idle come from agy's lifecycle hooks when they have spoken, and question /
+	// permission always from the conversation DB's last step (LiveState — pending.go).
+	// Surfacing only the pending prompt here left State empty mid-turn, which the Console
+	// draws as waiting for input.
 	li := agents.LiveInfo{Resumable: true}
 	if alive {
 		// Before the conversation is adopted the DB has no opinion; only a fresh stored
@@ -120,9 +132,12 @@ func (agentImpl) WireLive(m session.Meta, alive bool) agents.LiveInfo {
 	return li
 }
 
-// captureConversation adopts the slot's conversation UUID as soon as either
-// source can attribute one to THIS launch:
+// captureConversation adopts the slot's conversation UUID as soon as a source can
+// attribute one to THIS launch:
 //
+//  0. the slot's own lifecycle hook (hooks.go) — named by the launch env, so it needs no
+//     disambiguation; present from the first prompt on. Checked first; the two below are the
+//     fallback for agy builds or setups where the hook never ran.
 //  1. cwd→last-conversation map differing from the pre-launch snapshot — agy
 //     only flushes it on graceful exit (v1.1.4), so this lands via GracefulStop
 //     (halt) or the first poll after the user's own /exit. Checked first: it is
@@ -145,6 +160,10 @@ func captureConversation(m session.Meta) {
 		sids.Write(slotSid, uuid)
 		prelaunch.Remove(slotSid)
 		brainPrelaunch.Remove(slotSid)
+	}
+	if conv := hookConversation(slotSid); conv != "" {
+		adopt(conv)
+		return
 	}
 	if cur := LastConversationFor(m.Dir); cur != "" && cur != prelaunch.Read(slotSid) {
 		adopt(cur)
@@ -232,6 +251,8 @@ func diffStrings(cur []string, prev map[string]bool) []string {
 
 func (agentImpl) ClearResume(sid string) {
 	sids.Remove(sid)
+	clearHook(sid)
+	launchGens.Remove(sid)
 	prelaunch.Remove(sid)
 	brainPrelaunch.Remove(sid)
 }

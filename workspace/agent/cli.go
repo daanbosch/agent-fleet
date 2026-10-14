@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/afmemory"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/agy"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/claude"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/opencode"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/browserx"
@@ -215,6 +216,12 @@ var subcommands = []subcommand{
 		summary: "claude hook: record working/idle/question state",
 		hidden:  true,
 		run:     sessionx.RunSessionStatusHook,
+	},
+	{
+		name:    agy.HookSubcommand,
+		summary: "agy hook: record the conversation id and working/idle state",
+		hidden:  true,
+		run:     agy.RunHook,
 	},
 	{
 		name:    claude.PushHookSubcommand,

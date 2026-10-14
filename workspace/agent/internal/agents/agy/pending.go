@@ -172,15 +172,26 @@ func protoVarintField(b []byte, num uint64) (v uint64, found, ok bool) {
 // LiveState is agy's session state derived from the conversation DB, mirroring
 // opencode.LiveState: "question"/"permission" while blocked on the user,
 // "working" mid-turn, "idle" once the turn has ended (turnEnd), "" when the DB has
-// no opinion yet. agy ships no status hooks, so this is the ONLY turn-end
-// signal — /input persists an optimistic "working" that nothing else clears,
-// which left the operator's completion-report arm unconsumed forever (docs/log/30 item 2).
+// no opinion yet. working / idle prefer agy's lifecycle hook (hookLiveState) and fall back to
+// the DB where no usable hook record exists; question / permission are DB-only, and win over the
+// hook because a PreToolUse may fire while the tool still waits for approval (unmeasured). Without the hook
+// the DB is the only turn-end signal — /input persists an optimistic "working" that nothing
+// else clears, which left the operator's completion-report arm unconsumed forever
+// (docs/log/30 item 2).
 // Callers gate on liveness themselves: a killed session's DB keeps its last
 // status, which must not surface as live state on a stopped session.
 func LiveState(m session.Meta) string { return liveState(m, realProbes) }
 
 func liveState(m session.Meta, p liveProbes) string {
 	r, ok := lastStep(m)
+	if ok {
+		if st := dbState(r); st == "question" || st == "permission" {
+			return st
+		}
+	}
+	if st := hookLiveState(m, p, r, ok); st != "" {
+		return st
+	}
 	if !ok {
 		return ""
 	}
