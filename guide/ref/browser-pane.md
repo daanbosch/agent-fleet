@@ -56,7 +56,7 @@ current port and path. Cookies, storage and half-typed input are not restored.
 
 | State | Means | What to do |
 |---|---|---|
-| `target-unreachable` | Chromium started, but nothing answers HTTP at that port and path. Waiting for a dev server to boot looks like this too. | Check the port, the path and that the server is listening; **Reload** once it is up. **Reconnect** if it persists. |
+| `target-unreachable` | Chromium started, but nothing answers HTTP at that port and path. Waiting for a dev server to boot looks like this too. When the port is listening but does not speak HTTP, or serves HTTPS, the pane says so (the Agent probes the port once per failed navigation); with nothing listening the message stays generic. | Check the port, the path and that the server is listening; **Reload** once it is up. **Reconnect** if it persists. |
 | `disconnected` | The browser WebSocket between Console, Control Plane and Agent dropped. This does not necessarily mean Chromium died. | Check the Workspace is running and connectivity is back, then **Reconnect**. |
 | `crashed` | Chromium inside the Workspace died and the existing Page cannot continue. | **Reconnect** to get a new Page. If it repeats, look at the Workspace's memory use and at the app itself. |
 

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -16,6 +17,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/portprobe"
 )
 
 var (
@@ -87,7 +90,12 @@ type browserPage struct {
 	castGen       atomic.Uint64 // active screencast generation; 0 while stopped
 	castEpoch     atomic.Uint64 // monotonic source for castGen values
 	unreachable   bool
-	topRequestID  string
+	// reason is why the unreachable page failed when a probe could name it (a
+	// portprobe kind), valid only for reasonURL. probedKey is the failed
+	// navigation the probe ran for: one probe per failed navigation, and a result
+	// for any other navigation is dropped.
+	reason, reasonURL, probedKey string
+	topRequestID                 string
 	// topRequestURL is topRequestID's URL. A failed request commits its error
 	// page only ~30-40 ms after Network.loadingFailed; until then p.url must
 	// already name the failed URL, or a pane navigate resolves against the
@@ -707,8 +715,10 @@ func (m *browserManager) handleEvent(cdp browserCDP, ev browserCDPEvent) {
 				if p.topRequestURL != "" {
 					p.url = p.topRequestURL
 				}
+				addr, key := p.beginProbeLocked(v.RequestID)
 				p.mu.Unlock()
 				p.setState("target-unreachable")
+				p.probeReason(addr, key)
 				return
 			}
 			// Canceled (net::ERR_ABORTED) is a navigation that ended without
@@ -823,6 +833,7 @@ func (m *browserManager) handleRequestPaused(cdp browserCDP, p *browserPage, raw
 		if !blocked {
 			p.mu.Lock()
 			p.unreachable = false
+			p.reason = ""
 			p.topRequestID = v.NetworkID
 			p.topRequestURL = normalizeLoopbackURL(u).String()
 			p.mu.Unlock()
@@ -914,16 +925,20 @@ func (p *browserPage) settleNavigateError(loaderID, errorText string) {
 		return
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.loaderID != loaderID {
+		p.mu.Unlock()
 		return
 	}
+	var addr, key string
+	defer func() { p.probeReason(addr, key) }() // runs after the unlock below
+	defer p.mu.Unlock()
 	if errorText == "net::ERR_ABORTED" {
 		p.topRequestID = ""
 		p.loaderID = p.committedLoaderID
 		p.unreachable = p.committedUnreachable
 	} else {
 		p.unreachable = true
+		addr, key = p.beginProbeLocked(loaderID)
 	}
 	state := "ready"
 	if p.unreachable {
@@ -952,8 +967,74 @@ func (p *browserPage) markLoaded() {
 func (p *browserPage) response() browserPageResponse {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return browserPageResponse{ID: p.id, Port: p.port, URL: p.url, Title: p.title, State: p.state}
+	return browserPageResponse{ID: p.id, Port: p.port, URL: p.url, Title: p.title, State: p.state, Reason: p.reasonLocked()}
 }
+
+// reasonLocked is the probed reason for the page as it stands: only while it is still
+// the unreachable page the probe ran for.
+func (p *browserPage) reasonLocked() string {
+	if p.unreachable && p.reason != "" && p.reasonURL == p.url {
+		return p.reason
+	}
+	return ""
+}
+
+// beginProbeLocked decides whether the navigation that just failed gets a probe and
+// returns the address to probe and the navigation's key; ("", "") means no probe.
+// Callers hold p.mu. The failed document request's own ID is the key: Page.navigate's
+// error and Network.loadingFailed both report the same navigation and so share it, and
+// only a different navigation (a reload, a new address) probes again.
+func (p *browserPage) beginProbeLocked(key string) (addr, probeKey string) {
+	if key == "" || p.probedKey == key {
+		return "", ""
+	}
+	raw := p.topRequestURL
+	if raw == "" {
+		raw = p.url
+	}
+	u, err := url.Parse(raw)
+	if err != nil || !allowedTopLevelBrowserURL(u) {
+		return "", ""
+	}
+	p.probedKey = key
+	p.reason = ""
+	n := normalizeLoopbackURL(u)
+	port := n.Port()
+	if port == "" {
+		port = "80"
+		if n.Scheme == "https" {
+			port = "443"
+		}
+	}
+	p.reasonURL = n.String()
+	return net.JoinHostPort(n.Hostname(), port), key
+}
+
+// probeReason probes addr off the caller's goroutine and, when it can name why the
+// port does not serve HTTP, carries the reason to the Console next to the unchanged
+// target-unreachable state. No lock is held while probing.
+func (p *browserPage) probeReason(addr, key string) {
+	if addr == "" {
+		return
+	}
+	go func() {
+		kind := reasonProbe(context.Background(), addr)
+		if kind != portprobe.NotHTTP && kind != portprobe.TLS {
+			return // nothing listening / HTTP / unknown: the generic text stays
+		}
+		p.mu.Lock()
+		if p.probedKey != key || !p.unreachable || p.state != "target-unreachable" {
+			p.mu.Unlock()
+			return
+		}
+		p.reason = kind
+		p.mu.Unlock()
+		p.notifyJSON(map[string]any{"type": "state", "state": "target-unreachable", "reason": kind})
+	}()
+}
+
+// reasonProbe is portprobe.Probe; a test replaces it.
+var reasonProbe = portprobe.Probe
 
 func (p *browserPage) setState(state string) {
 	p.mu.Lock()

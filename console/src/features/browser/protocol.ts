@@ -1,4 +1,13 @@
 export type BrowserPageState = "loading" | "ready" | "disconnected" | "crashed" | "target-unreachable";
+/**
+ * Why a target-unreachable page failed, when the Agent probed the port and could
+ * tell. A field next to the state, not a state of its own, so an older Console
+ * (or Agent) simply shows the generic text. "" is nothing listening or unknown.
+ */
+export type BrowserUnreachableReason = "" | "preview_not_http" | "preview_tls";
+export function knownUnreachableReason(v: unknown): BrowserUnreachableReason {
+  return v === "preview_not_http" || v === "preview_tls" ? v : "";
+}
 export type BrowserMouseButton = "none" | "left" | "middle" | "right";
 
 export interface BrowserConsoleEntry {
@@ -24,6 +33,7 @@ export type BrowserOutbound =
 
 export interface BrowserSnapshot {
   state: BrowserPageState;
+  reason?: BrowserUnreachableReason;
   url: string;
   title: string;
   width: number;

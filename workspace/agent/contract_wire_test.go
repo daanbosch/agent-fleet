@@ -207,7 +207,7 @@ func agentContractFamilies() []contractFamily {
 			binding: browserPageBinding,
 			tsPath:  "../../console/src/features/browser/controller.ts",
 			tsName:  "BrowserPageResult",
-			tsKeys:  keySet("id", "port", "url", "state"),
+			tsKeys:  keySet("id", "port", "url", "state", "reason"),
 			tsOnly:  map[string]string{},
 			goOnly: map[string]string{
 				"title": "[gap] the page title is returned but the Console's BrowserPageResult does not declare it.",
@@ -308,7 +308,7 @@ var memoryImportPreviewBinding = map[string]string{
 }
 
 var browserPageBinding = map[string]string{
-	"ID": "id", "Port": "port", "URL": "url", "Title": "title", "State": "state",
+	"ID": "id", "Port": "port", "URL": "url", "Title": "title", "State": "state", "Reason": "reason",
 }
 
 var chatMessageBinding = map[string]string{

@@ -246,3 +246,7 @@ slug は起動ごとに変わる（決定 3）ので、**生 URL を貼る運用
   `X-AF-Preview-Error` を付ける。CP のリレー（パス方式・サブドメイン方式）はそのコードを言語に合わせたページ
   （ナビゲーションは HTML、それ以外は JSON）にして返し、CP 自身の Agent への接続失敗は
   `preview_workspace_unreachable` として別に扱う。
+- 2026-10-15: ブラウザペインも同じ分類を使うようにした（#2151）。ペインの Chromium は `127.0.0.1:{port}` へ直接つなぐのでリレーを
+  通らない。ループバック URL への遷移が失敗したら Agent がそのポートを 1 回だけ調べ（`internal/portprobe`、時間制限付きの
+  `HEAD /` 1 本）、`preview_not_http` / `preview_tls` のときは状態 `target-unreachable` はそのままに `reason` を添える。
+  分類器は `internal/portprobe` に移し、`/proxy/{port}` の挙動は変えていない。
