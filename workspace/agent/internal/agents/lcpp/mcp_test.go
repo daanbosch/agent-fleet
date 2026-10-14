@@ -97,6 +97,7 @@ func runFakeMCPServer() {
 	tools := []map[string]any{
 		{"name": "echo", "description": "echoes msg back", "inputSchema": map[string]any{
 			"type": "object", "properties": map[string]any{"msg": map[string]any{"type": "string"}},
+			"required": []string{"msg"},
 		}},
 		{"name": "touch", "description": "creates an empty file at path", "inputSchema": map[string]any{
 			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},

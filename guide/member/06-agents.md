@@ -342,6 +342,7 @@ What to expect before your first session:
   families trigger compaction loops the harness deliberately breaks out of.
 - **Stick to a verified model family.** Qwen3, GPT-OSS, and Gemma are confirmed to work;
   `llama-3.1-8b-instruct` does not (no Llama-specific tool-call parser in this build).
+- **External (MCP) tools are loaded on demand.** Once the tools from your enabled MCP servers add up to more than a few thousand characters of schema, the model is not sent them all on every turn. It gets three small tools instead (`tool_search`, `tool_describe`, `tool_call`) and looks up the tool it needs. This keeps a small context window free. Approvals work as for any other tool, and the transcript shows the tool that was actually called. lcpp's own tools (read, edit, bash and so on) are always sent. An administrator can change this with `AF_LCPP_MCP_TOOLS` on the Agent: `direct` always sends every schema, `deferred` always uses the three tools.
 
 For full details (measured turn counts by model family, cold-start timings, and the
 reasoning behind the window guidance), see [Agents reference](../ref/agents.md#lcpp-what-hardware-measurement-found).
