@@ -292,3 +292,10 @@ with a restart after flipping it. Two panes showing the same untagged session us
 (PATCH has no compare-and-set): taking a session is now `workspace-agent opencode-claim`, an
 exclusive file create keyed by the session id taken before anything is read or written (one winner,
 the loser changes nothing, a claim that fails before the tag is released).
+
+Review round 3 (#2123): the Go fork/resume re-tag was an unconditional PATCH, outside the claim
+exclusivity: a fork carries the source's tag from the moment it exists, so the source's pane could
+claim it first and then have its tag overwritten. The Go launch now uses the same exclusive claim
+(`claimSessionFor`); a copy somebody else got first is left to them and a new one is forked, and the
+tag inherited from the source is accepted only for the claimant that won the file. The TUI plugin
+re-sends environments through `opencode-put-env`, which checks the tag.

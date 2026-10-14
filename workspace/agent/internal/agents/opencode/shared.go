@@ -223,6 +223,9 @@ func forkSharedSession(addr, src, before string) (string, error) {
 	return w.Data.ID, nil
 }
 
+// afterFork is a test seam: it runs between a fork existing and its claim.
+var afterFork = func(addr, ses string) {}
+
 // switchSharedSession applies the slot's model and agent to an existing session: a session that
 // exists ignores the config a fresh one reads (measured, #2118).
 func switchSharedSession(addr, ses string, m session.Meta) error {
@@ -315,18 +318,32 @@ func buildSharedLaunch(m session.Meta, sid string) (plan sharedPlan, ok bool, er
 		if err := switchSharedSession(addr, ses, m); err != nil {
 			return sharedPlan{}, false, err
 		}
-		if err := tagSharedSession(addr, ses, sid, m.Name); err != nil {
-			return sharedPlan{}, false, fmt.Errorf("opencode: tag the session: %w", err)
+		// The slot's own record names it, but a pane of another slot may hold it: refuse, never
+		// overwrite what another pane owns.
+		if err := claimSessionFor(addr, m, ses, claimOpts{}); err != nil {
+			return sharedPlan{}, false, fmt.Errorf("opencode: take the session: %w", err)
 		}
 	case m.ForkFrom != "":
-		ses, err = forkSharedSession(addr, m.ForkFrom, m.ForkAt)
-		if err != nil {
-			return sharedPlan{}, false, err
+		// A fork carries its source's tag the moment it exists, so the source's pane can claim it
+		// before this slot does. The claim is exclusive and the tag is never overwritten: a copy
+		// somebody else got first is left to them and a new one is made.
+		srcSID := ""
+		if src, gerr := getSharedSession(addr, m.ForkFrom); gerr == nil {
+			srcSID = src.Metadata[metaSID]
 		}
-		// Recorded first: a failure below must not strand the copy un-owned.
-		sids.Write(sid, ses)
-		if err := tagSharedSession(addr, ses, sid, m.Name); err != nil {
-			return sharedPlan{}, false, fmt.Errorf("opencode: tag the fork: %w", err)
+		for attempt := 0; ; attempt++ {
+			ses, err = forkSharedSession(addr, m.ForkFrom, m.ForkAt)
+			if err != nil {
+				return sharedPlan{}, false, err
+			}
+			afterFork(addr, ses)
+			err = claimSessionFor(addr, m, ses, claimOpts{inheritedFrom: srcSID})
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, errClaimTaken) || attempt >= 2 {
+				return sharedPlan{}, false, fmt.Errorf("opencode: claim the fork: %w", err)
+			}
 		}
 		if err := switchSharedSession(addr, ses, m); err != nil {
 			return sharedPlan{}, false, err
@@ -443,7 +460,7 @@ func RunClaim(args []string) {
 	if len(args) != 2 {
 		os.Exit(2)
 	}
-	switch err := claimSession(serveAddr(), args[0], args[1]); {
+	switch err := claimSession(serveAddr(), args[0], args[1], claimOpts{putEnv: true}); {
 	case err == nil:
 	case errors.Is(err, errClaimTaken):
 		os.Exit(claimTaken)
@@ -455,16 +472,29 @@ func RunClaim(args []string) {
 
 var errClaimTaken = errors.New("the session belongs to another slot")
 
+// claimOpts: putEnv puts the slot's pane environment (the TUI plugin's claim; the launch has no
+// pane yet, its wrapper does it). inheritedFrom is the af.sid a fork carries over from its source:
+// that tag alone does not make the session someone else's, only the claim file does.
+type claimOpts struct {
+	putEnv        bool
+	inheritedFrom string
+}
+
 // claimSession makes ses the slot's: one winner per session, however many panes show it. The
 // decision is an exclusive file create keyed by the session id, taken BEFORE anything is read or
 // written, so two panes that both saw the session untagged cannot both put an environment and a
 // tag (the tag has no compare-and-set upstream: PATCH replaces the metadata). The losing pane
 // changes nothing. A claim that fails before the tag is set is released for the next try.
-func claimSession(addr, name, ses string) error {
+func claimSession(addr, name, ses string, o claimOpts) error {
 	m, ok := session.ReadMeta(name)
 	if !ok || m.Kind != session.KindOpencode || m.DriverKind() != session.DriverTUI {
 		return fmt.Errorf("%q is not an opencode Terminal slot", name)
 	}
+	return claimSessionFor(addr, m, ses, o)
+}
+
+func claimSessionFor(addr string, m session.Meta, ses string, o claimOpts) error {
+	name := m.Name
 	sid := session.UUID(m.Dir, m.Name)
 	dir := filepath.Join(paths.AgentStateDir(), "opencode-claim")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -488,20 +518,22 @@ func claimSession(addr, name, ses string) error {
 		_ = os.Remove(path)
 		return gerr
 	}
-	if other := info.Metadata[metaSID]; other != "" && other != sid {
+	if other := info.Metadata[metaSID]; other != "" && other != sid && (o.inheritedFrom == "" || other != o.inheritedFrom) {
 		return errClaimTaken // the tag is the authority; the file is left as it is
 	}
 	if info.Metadata[metaManaged] != "" {
 		return errClaimTaken
 	}
-	vars, found := paneEnv(name)
-	if !found {
-		_ = os.Remove(path)
-		return fmt.Errorf("no pane environment for %s", name)
-	}
-	if perr := putEnvironment(addr, ses, vars); perr != nil {
-		_ = os.Remove(path)
-		return perr
+	if o.putEnv {
+		vars, found := paneEnv(name)
+		if !found {
+			_ = os.Remove(path)
+			return fmt.Errorf("no pane environment for %s", name)
+		}
+		if perr := putEnvironment(addr, ses, vars); perr != nil {
+			_ = os.Remove(path)
+			return perr
+		}
 	}
 	if terr := tagSharedSession(addr, ses, sid, name); terr != nil {
 		_ = os.Remove(path)

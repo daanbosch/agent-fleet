@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 )
 
@@ -35,6 +36,10 @@ type sharedDaemon struct {
 func newSharedDaemon(t *testing.T) *sharedDaemon {
 	t.Helper()
 	useMajor(t, 2)
+	// The fake hands out the same ids in every test; real ids are unique, claim files are not cleaned.
+	claims := filepath.Join(paths.AgentStateDir(), "opencode-claim")
+	_ = os.RemoveAll(claims)
+	t.Cleanup(func() { _ = os.RemoveAll(claims) })
 	d := &sharedDaemon{sessions: map[string]map[string]string{}, envs: map[string]map[string]string{}, pid: 4242, version: "2.0.28"}
 	d.srv = httptest.NewServer(http.HandlerFunc(d.handle))
 	t.Cleanup(d.srv.Close)
@@ -703,7 +708,7 @@ func TestClaimSessionHasOneWinnerWhenPanesRace(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				<-start
-				results[i] = claimSession(d.srv.URL, name, ses)
+				results[i] = claimSession(d.srv.URL, name, ses, claimOpts{putEnv: true})
 			}()
 		}
 		close(start)
@@ -732,10 +737,10 @@ func TestClaimSessionHasOneWinnerWhenPanesRace(t *testing.T) {
 		}
 		d.mu.Unlock()
 		loser := map[string]string{"paneA": "paneB", "paneB": "paneA"}[winner]
-		if err := claimSession(d.srv.URL, winner, ses); err != nil {
+		if err := claimSession(d.srv.URL, winner, ses, claimOpts{putEnv: true}); err != nil {
 			t.Errorf("the winner's retry must be idempotent: %v", err)
 		}
-		if err := claimSession(d.srv.URL, loser, ses); !errors.Is(err, errClaimTaken) {
+		if err := claimSession(d.srv.URL, loser, ses, claimOpts{putEnv: true}); !errors.Is(err, errClaimTaken) {
 			t.Errorf("the loser later: %v", err)
 		}
 	}
@@ -757,20 +762,97 @@ func TestClaimSessionReleasesAFailedClaimAndRefusesOthers(t *testing.T) {
 	t.Cleanup(func() { paneEnv = oldEnv })
 	d.sessions["ses_f"] = map[string]string{}
 	d.failEnv = 1
-	if err := claimSession(d.srv.URL, "ca", "ses_f"); err == nil || errors.Is(err, errClaimTaken) {
+	if err := claimSession(d.srv.URL, "ca", "ses_f", claimOpts{putEnv: true}); err == nil || errors.Is(err, errClaimTaken) {
 		t.Fatalf("a refused PUT is a failure, not a loss: %v", err)
 	}
-	if err := claimSession(d.srv.URL, "cb", "ses_f"); err != nil {
+	if err := claimSession(d.srv.URL, "cb", "ses_f", claimOpts{putEnv: true}); err != nil {
 		t.Errorf("the failed claim must have been released: %v", err)
 	}
 	d.sessions["ses_m"] = map[string]string{metaManaged: "1"}
 	d.sessions["ses_o"] = map[string]string{metaSID: "someone-else"}
 	for _, ses := range []string{"ses_m", "ses_o"} {
-		if err := claimSession(d.srv.URL, "ca", ses); !errors.Is(err, errClaimTaken) {
+		if err := claimSession(d.srv.URL, "ca", ses, claimOpts{putEnv: true}); !errors.Is(err, errClaimTaken) {
 			t.Errorf("%s: %v", ses, err)
 		}
 		if _, has := d.envs[ses]; has {
 			t.Errorf("%s got an environment", ses)
 		}
+	}
+}
+
+// The Go side's fork goes through the same exclusive claim as every other: the copy carries the
+// source's tag from the moment it exists, so the source's pane can claim it first — and then the
+// fork's slot must NOT overwrite that. It gets a new copy instead, and the first stays with the pane
+// that claimed it (metadata, claim file and environment all agree).
+func TestForkNeverOverwritesACopyTheSourcePaneAlreadyClaimed(t *testing.T) {
+	d := newSharedDaemon(t)
+	src := terminalMeta(t, "paneA")
+	session.WriteMeta(src)
+	sidA := session.UUID(src.Dir, src.Name)
+	d.sessions["ses_src"] = sharedMetadata(sidA, "paneA")
+	oldEnv := paneEnv
+	paneEnv = func(name string) (map[string]string, bool) { return map[string]string{"AF_SESSION_NAME": name}, true }
+	t.Cleanup(func() { paneEnv = oldEnv })
+
+	var raced []string
+	afterFork = func(addr, ses string) {
+		if len(raced) > 0 {
+			return // only the first copy is claimed by the source's pane
+		}
+		raced = append(raced, ses)
+		// Pane A shows the new copy (it still carries A's tag) and claims it before B's launch does.
+		if err := claimSession(addr, "paneA", ses, claimOpts{putEnv: true}); err != nil {
+			t.Errorf("the source pane's claim: %v", err)
+		}
+	}
+	t.Cleanup(func() { afterFork = func(string, string) {} })
+
+	b := terminalMeta(t, "paneB")
+	b.ForkFrom = "ses_src"
+	sidB := session.UUID(b.Dir, b.Name)
+	t.Cleanup(func() { sids.Remove(sidB); slotModes.Remove(sidB) })
+	if _, err := (agentImpl{}).BuildLaunch(b, agents.LaunchOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	first, second := raced[0], sids.Read(sidB)
+	if second == "" || second == first {
+		t.Fatalf("B must end up on a copy of its own, got %q (first copy %q)", second, first)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.sessions[first][metaSID] != sidA || d.envs[first]["AF_SESSION_NAME"] != "paneA" {
+		t.Errorf("the copy A claimed was overwritten: %v %v", d.sessions[first], d.envs[first])
+	}
+	if d.sessions[second][metaSID] != sidB || d.sessions[second][metaName] != "paneB" {
+		t.Errorf("B's copy is not tagged for B: %v", d.sessions[second])
+	}
+	// A's later claims of B's copy are refused, and so is B's of A's.
+	d.mu.Unlock()
+	if err := claimSession(d.srv.URL, "paneA", second, claimOpts{putEnv: true}); !errors.Is(err, errClaimTaken) {
+		t.Errorf("A claiming B's copy: %v", err)
+	}
+	d.mu.Lock()
+}
+
+// The other order: B's claim wins; the source pane's later claim of that copy is refused although
+// the copy still carried A's tag when A looked.
+func TestForkClaimedFirstKeepsTheSourcePaneOut(t *testing.T) {
+	d := newSharedDaemon(t)
+	src := terminalMeta(t, "pA")
+	session.WriteMeta(src)
+	sidA := session.UUID(src.Dir, src.Name)
+	d.sessions["ses_src"] = sharedMetadata(sidA, "pA")
+	b := terminalMeta(t, "pB")
+	b.ForkFrom = "ses_src"
+	sidB := session.UUID(b.Dir, b.Name)
+	t.Cleanup(func() { sids.Remove(sidB); slotModes.Remove(sidB) })
+	if _, err := (agentImpl{}).BuildLaunch(b, agents.LaunchOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	oldEnv := paneEnv
+	paneEnv = func(string) (map[string]string, bool) { return map[string]string{"X": "1"}, true }
+	t.Cleanup(func() { paneEnv = oldEnv })
+	if err := claimSession(d.srv.URL, "pA", sids.Read(sidB), claimOpts{putEnv: true}); !errors.Is(err, errClaimTaken) {
+		t.Errorf("the source pane claimed B's copy: %v", err)
 	}
 }

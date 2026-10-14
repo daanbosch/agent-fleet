@@ -460,9 +460,10 @@ const now = Date.now();
     assert.deepEqual(w.calls, []);
 
     // a new server process lost every environment: this pane's sessions get theirs again.
+    const putEnvs = () => readFileSync(agentLog, "utf8").split("\n").filter((l) => l.startsWith("opencode-put-env paneP"));
     w.pid = 200;
-    await until(() => w.calls.filter((c) => c[0] === "environment").length >= 2, "environments re-sent after a pid change");
-    assert.deepEqual(new Set(w.calls.filter((c) => c[0] === "environment").map((c) => c[1])), new Set(["ses_free", "ses_mine"]), "only sessions this pane won are re-sent");
+    await until(() => putEnvs().length >= 2, "environments re-sent after a pid change");
+    assert.deepEqual(new Set(putEnvs()), new Set(["opencode-put-env paneP ses_free", "opencode-put-env paneP ses_mine"]), "only sessions this pane won are re-sent, through the Agent that checks they are still its own");
     stop();
   } finally {
     for (const [k, v] of [["AF_OPENCODE_SHARED", saved.shared], ["AF_SESSION_SID", saved.sid], ["AF_SESSION_NAME", saved.name], ["OPENCODE_SERVER_PASSWORD", saved.pw]]) {

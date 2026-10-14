@@ -67,8 +67,6 @@ export default {
     let lastSlot = "";
     let stopped = false;
 
-    const putEnvironment = (sessionID) => ctx.client.session.environment({ sessionID, variables: shellEnvironment() });
-
     const recordSlot = (sessionID) => {
       if (!sidDir) return;
       try {
@@ -135,12 +133,11 @@ export default {
         if (info && info.pid) {
           if (pid && info.pid !== pid) {
             // A new server process lost every environment: send this pane's again.
+            // Through the Agent, which checks the session is still this slot's: a fork the Go side
+            // took over from this pane's session carries another tag now.
             for (const sessionID of mine) {
-              try {
-                await putEnvironment(sessionID);
-              } catch {
-                /* the Agent restores the slot's own session too */
-              }
+              if ((await run(["opencode-put-env", name, sessionID])) === 0) continue;
+              mine.delete(sessionID);
             }
           }
           pid = info.pid;
