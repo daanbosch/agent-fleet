@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -94,37 +95,51 @@ func writePreviewError(w http.ResponseWriter, kind string, port int) {
 	httpx.WriteErr(w, http.StatusBadGateway, kind, previewErrorMessage(kind, port))
 }
 
-// sniffWait bounds how long a 400 candidate may hold its headers back while the first
-// body bytes are read. The known notices arrive with the headers, so waiting longer only
-// ever delays a stream that happens to answer 400.
-const sniffWait = 200 * time.Millisecond
+// sniffWait bounds how long a 400 candidate may hold its headers back while its first
+// body bytes are collected. The known notices arrive with the headers, so waiting longer
+// only ever delays a stream that happens to answer 400.
+const (
+	sniffWait  = 200 * time.Millisecond
+	sniffLimit = 256 // bytes examined
+)
 
 // sniffPlainHTTPToTLS turns a 400 whose body says "plain HTTP sent to an HTTPS port"
 // into errPlainHTTPToTLS. Servers answer this on the TLS port itself (Go, nginx, Apache),
 // so it reaches the browser as a bare 400 that explains nothing. There is no typed signal,
 // so the body text is matched, narrowly: only a 400 whose Content-Type is absent, text/plain
 // or text/html (those servers' own pages; an app's JSON or event stream is never touched),
-// only the first read, and at most sniffWait. A body that has not shown up by then is
-// handed on untouched and arrives as soon as it does.
+// only the first sniffLimit bytes, and at most sniffWait. A body still unfinished by then is
+// handed on, whatever was read so far first, and the rest follows as it arrives.
 func sniffPlainHTTPToTLS(resp *http.Response) error {
 	if resp.StatusCode != http.StatusBadRequest || len(resp.TransferEncoding) > 0 ||
 		resp.ContentLength > 512 || !plainNoticeContentType(resp.Header.Get("Content-Type")) {
 		return nil
 	}
-	pb := &peekBody{orig: resp.Body, res: make(chan sniffResult, 1)}
+	orig := resp.Body // captured: the goroutine must never see the field we replace below
+	res := make(chan sniffResult, 1)
+	var abandoned atomic.Bool
 	go func() {
-		buf := make([]byte, 256)
-		n, err := resp.Body.Read(buf)
-		pb.res <- sniffResult{buf[:n], err}
+		var got []byte
+		tmp := make([]byte, sniffLimit)
+		for {
+			n, err := orig.Read(tmp[:sniffLimit-len(got)])
+			got = append(got, tmp[:n]...)
+			if err != nil || len(got) >= sniffLimit || abandoned.Load() || looksLikeHTTPToHTTPSNotice(got) {
+				res <- sniffResult{got, err}
+				return
+			}
+		}
 	}()
+	pb := &peekBody{orig: orig, res: res}
 	select {
-	case r := <-pb.res:
+	case r := <-res:
 		if looksLikeHTTPToHTTPSNotice(r.data) {
-			_ = resp.Body.Close()
+			_ = orig.Close()
 			return errPlainHTTPToTLS
 		}
-		pb.res <- r // replay it to the reader
+		res <- r // replay it to the reader
 	case <-time.After(sniffWait):
+		abandoned.Store(true)
 	}
 	resp.Body = pb
 	return nil

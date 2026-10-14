@@ -133,7 +133,15 @@ func rawListener(t *testing.T, fn func(net.Conn)) string {
 			if err != nil {
 				return
 			}
-			go func() { defer c.Close(); fn(c) }()
+			go func() {
+				defer c.Close()
+				// Read the request first, as a real server does; answering unasked
+				// makes the client reject the reply as unsolicited.
+				if _, err := http.ReadRequest(bufio.NewReader(c)); err != nil {
+					return
+				}
+				fn(c)
+			}()
 		}
 	}()
 	return portOf(t, l.Addr().String())
@@ -295,5 +303,28 @@ func TestPreviewAppJSON400QuotingNoticeIsKept(t *testing.T) {
 	rr := previewGet(t, portOf(t, app.Listener.Addr().String()))
 	if rr.Code != 400 || rr.Body.String() != body {
 		t.Fatalf("got %d %q, want the app's 400 untouched", rr.Code, rr.Body)
+	}
+}
+
+// The notice may arrive split across reads; it is still recognised.
+func TestPreviewTLSNoticeSplitAcrossWrites(t *testing.T) {
+	p := rawListener(t, func(c net.Conn) {
+		_, _ = c.Write([]byte("HTTP/1.0 400 Bad Request\r\n\r\nClient sent an HTTP "))
+		time.Sleep(50 * time.Millisecond)
+		_, _ = c.Write([]byte("request to an HTTPS server.\n"))
+	})
+	wantPreviewError(t, previewGet(t, p), "preview_tls", p)
+}
+
+// An ordinary 400 whose body is late, or split, comes through whole with its length.
+func TestPreviewLate400BodyIsDeliveredWhole(t *testing.T) {
+	p := rawListener(t, func(c net.Conn) {
+		_, _ = c.Write([]byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 12\r\nConnection: close\r\n\r\nhello "))
+		time.Sleep(400 * time.Millisecond) // longer than sniffWait
+		_, _ = c.Write([]byte("world\n"))
+	})
+	rr := previewGet(t, p)
+	if rr.Code != 400 || rr.Body.String() != "hello world\n" || rr.Header().Get("Content-Length") != "12" {
+		t.Fatalf("got %d %q CL=%q", rr.Code, rr.Body, rr.Header().Get("Content-Length"))
 	}
 }

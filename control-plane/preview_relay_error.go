@@ -14,8 +14,9 @@ import (
 )
 
 // previewErrorHeader is what the Agent sets on its own relay-error responses
-// (workspace/agent/preview_errors.go). The Agent deletes it from every upstream response,
-// so its presence means the Agent, not the previewed app, produced the failure.
+// (workspace/agent/preview_errors.go). The Agent deletes it from the final upstream response
+// header, and only that header is read here (never 1xx headers or trailers), so its presence
+// means the Agent, not the previewed app, produced the failure.
 const previewErrorHeader = "X-AF-Preview-Error"
 
 // previewWorkspaceUnreachable is the CP's own failure: the dial toward the Agent failed.
