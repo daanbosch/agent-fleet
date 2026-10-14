@@ -2,6 +2,7 @@ import type { Session } from "../../../types/session.ts";
 import type { useToast } from "../../../ui/ToastProvider.tsx";
 import { CarriedBlock } from "../CarriedBlock.tsx";
 import { PLAN_APPROVE_KEYS } from "../planDecision.ts";
+import { answersByRespond } from "../questionKeys.ts";
 import { stopRowVisible } from "../stopQueue.ts";
 import type { useTranslate } from "../useTranslate.ts";
 import { ApprovalCard, LiveReplyCard, PlanPendingCard, PermissionCard, QuestionCard, TypingRow } from "./pendingCards.tsx";
@@ -41,6 +42,7 @@ export function MirrorPendingCards({
   } = st;
   const { sendKeys, sendSeq, sendInterrupt, cancelQuestion, sendApproval, sendRespond } = actions;
   const { openPlan, openFile, planSendBlocked, sendPlanComments, reviewPlanElsewhere } = plan;
+  const byId = answersByRespond(managed, pending);
   return (
     <>
       {carried && (
@@ -132,13 +134,15 @@ export function MirrorPendingCards({
             // present: falling back to keys/seq would drive a tmux pane that does not
             // exist. A question missing its id (a transitional or resyncing case up to P2)
             // is rejected server-side with bad_interaction, and sendRespond toasts that.
-            managed ? (answers) => sendRespond(pending[0]?.id || "", answers) : undefined
+            // A Terminal (CLI) question with an id (opencode 2 on the shared serve) takes the
+            // same route; the Agent answers through the form API and the TUI follows.
+            byId ? (answers) => sendRespond(pending[0]?.id || "", answers) : undefined
           }
-          // Managed: decline the question through /respond, which every driver answers with the
+          // By id: decline the question through /respond, which every driver answers with the
           // runtime's own rejection (codex alone turns it into a stop, ADR 0105 decision 7). A
           // stop here would be a second stop inside an episode and discard the queue. Terminal
-          // (CLI): the card's Cancel is the Esc, as before.
-          onCancel={() => void (managed ? cancelQuestion(pending[0]?.id || "") : sendInterrupt())}
+          // (CLI) without an id: the card's Cancel is the Esc, as before.
+          onCancel={() => void (byId ? cancelQuestion(pending[0]?.id || "") : sendInterrupt())}
           translate={translate}
         />
       )}
