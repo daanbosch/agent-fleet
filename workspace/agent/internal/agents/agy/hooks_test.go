@@ -453,3 +453,45 @@ func TestNewInputAfterStopBeatsIdle(t *testing.T) {
 }
 
 func ptrInt(i int) *int { return &i }
+
+// Second-precision timestamps cannot order an input typed in the Stop's own second; the status
+// record's Rev can.
+func TestNewInputInStopsOwnSecondBeatsIdle(t *testing.T) {
+	const conv = "conv-ss"
+	m, sid := hookFixture(t, "slot-ss")
+	sids.Write(sid, conv)
+	mkConvDB(t, conv, [][3]any{{14, stepStatusRunning, []byte("x")}, {14, stepStatusRunning, []byte("x")}})
+	launchGens.Write(sid, "g1")
+	status.Persist(sid, "idle")
+	now := time.Now()
+	recordHook(m.Name, "g1", "Stop", hookInput{ConversationID: conv, FullyIdle: ptr(true)}, now.Truncate(time.Second))
+	status.Persist(sid, "working") // the input route, same second, new Rev
+	// Persist's TS is second-precision too: it is not After the Stop's time.
+	if got := liveState(m, probesAt(now)); got != "working" {
+		t.Fatalf("state = %q, want working", got)
+	}
+}
+
+// No Console working record (typed in the terminal), the Stop's step idx unreadable and the DB
+// quiet since Stop+2 s: the hook idle must not be the answer 30 s later.
+func TestUnreadableStopIdxDoesNotPinIdle(t *testing.T) {
+	const conv = "conv-ui"
+	m, sid := hookFixture(t, "slot-ui")
+	sids.Write(sid, conv)
+	mkConvDB(t, conv, [][3]any{{14, stepStatusRunning, []byte("x")}, {14, stepStatusRunning, []byte("x")}})
+	launchGens.Write(sid, "g1")
+	stop := time.Now().Add(-30 * time.Second)
+	hookRecords.Write(sid, hookRecord{ConvID: conv, State: "idle", Gen: "g1", At: stop.Format(time.RFC3339)})
+	wrote := stop.Add(2 * time.Second)
+	if err := os.Chtimes(conversationDBPath(conv), wrote, wrote); err != nil {
+		t.Fatal(err)
+	}
+	if got := liveState(m, probesAt(time.Now())); got != "working" {
+		t.Fatalf("state = %q, want working", got)
+	}
+	// Inside the grace the same record is still the turn's own tail.
+	hookRecords.Write(sid, hookRecord{ConvID: conv, State: "idle", Gen: "g1", At: time.Now().Add(-2 * time.Second).Format(time.RFC3339)})
+	if got := liveState(m, probesAt(time.Now())); got != "idle" {
+		t.Fatalf("inside the grace: state = %q, want idle", got)
+	}
+}

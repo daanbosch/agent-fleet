@@ -807,8 +807,10 @@ agy 1.3.5 の `~/.gemini/config/hooks.json`（#1079 の実測で判明）を、T
 - Stop の idle にも鮮度を付ける: Stop 時点の DB の最終 step idx を記録に持ち、猶予（10 秒）を過ぎた後に、それより後ろの
   step が working なら idle を撤回して DB 判定に戻す（次の PreInvocation が欠落した場合）。猶予内や、Stop 直後に
   落ち着く最終 step では撤回しない。世代は起動の先頭で更新し、記録にも世代を持たせて、現世代と違う記録は読まない。
-- Stop 後に status の working（入力経路が書く）が新しく書かれていれば、猶予・DB 書込みに関係なく idle を撤回する
-  （turn_end_poll が新しいターンを完了として消費しないため）。
+- Stop 後の新入力は status record の Rev で判定する（Stop が見た Rev と違う working なら新入力。秒精度の時刻では
+  同じ秒の入力を区別できない）。撤回すると DB 判定に戻り、turn_end_poll が新ターンを完了として消費しない。
+  Stop 時点の step idx が読めなかった場合は、猶予後に DB が working なら hook の idle を採らず DB 判定に任せる
+  （端末直入力は status record を残さない）。
 - hooks.json の書き込みはプロセス間 flock（agent の state 側のロック）＋専用 tmp ＋ rename 直前の内容再確認。
   他名の entry は `json.RawMessage` のまま残す（数値が丸められない）。既存ファイルの mode を引き継ぎ、
   実体の無い symlink は触らない。AF entry は af セッションの外では何もしない（`AF_SESSION_NAME` 無し）ので、

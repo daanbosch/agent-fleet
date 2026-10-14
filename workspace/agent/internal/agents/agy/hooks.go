@@ -58,6 +58,10 @@ type hookRecord struct {
 	// StepIdx is the conversation's last step at a Stop (nil when the DB could not be read): a
 	// later step is the evidence of a new turn whose PreInvocation went missing.
 	StepIdx *int `json:"stepIdx,omitempty"`
+	// StatusRev is the Rev of the slot's status record as the Stop saw it ("" when there was
+	// none), nil on a record that is not a Stop. Every write of that record mints a new Rev, so
+	// "working with another Rev" is an input written after the Stop at any sub-second distance.
+	StatusRev *string `json:"statusRev,omitempty"`
 }
 
 // currentRecord reads the slot's record, only when it was written under the current launch.
@@ -150,6 +154,8 @@ func recordHook(name, gen, event string, in hookInput, now time.Time) {
 	}
 	rec := hookRecord{ConvID: in.ConversationID, State: state, At: now.Format(time.RFC3339), Gen: gen}
 	if event == "Stop" {
+		st, _ := status.Read(slotSid)
+		rec.StatusRev = &st.Rev
 		if idx, ok := lastStepIdx(in.ConversationID); ok {
 			rec.StepIdx = &idx
 		}
@@ -195,7 +201,7 @@ func hookLiveState(m session.Meta, p liveProbes, r lastStepRow, haveStep bool) s
 		// A new input recorded after the Stop is evidence of a new turn that needs no DB write
 		// and no grace: the status record holds the "working" the input route stamped, and
 		// reading idle here would let the turn-end poll consume that turn as completed.
-		if newInputSince(slotSid, at) {
+		if newInputSince(slotSid, rec, at) {
 			return ""
 		}
 		// A Stop is only as current as the next PreInvocation. When that hook went missing
@@ -203,13 +209,10 @@ func hookLiveState(m session.Meta, p liveProbes, r lastStepRow, haveStep bool) s
 		// Until idleGrace has passed the DB may still be landing the turn's own last steps, so
 		// it is not consulted; after it, a step beyond the Stop's that is still working wins.
 		if haveStep && dbState(r) == "working" && p.now().Sub(at) > idleGrace {
-			newer := false
-			if rec.StepIdx != nil {
-				newer = r.idx > *rec.StepIdx
-			} else if mt, ok := p.dbModTime(r.conv); ok {
-				newer = mt.After(at.Add(idleGrace))
-			}
-			if newer {
+			// Without the Stop's step idx nothing separates the turn's own tail from a new turn
+			// (input typed in the terminal leaves no status record), and a step still working
+			// past the grace is no tail: the DB decides.
+			if rec.StepIdx == nil || r.idx > *rec.StepIdx {
 				return ""
 			}
 		}
@@ -224,12 +227,17 @@ func hookLiveState(m session.Meta, p liveProbes, r lastStepRow, haveStep bool) s
 	return "working"
 }
 
-// newInputSince reports whether the slot's status record says "working" from a write after t.
-// Strictly after: a turn that started in the same second as its Stop cannot be told apart.
-func newInputSince(slotSid string, t time.Time) bool {
+// newInputSince reports whether the slot's status record says "working" from a write after the
+// Stop. A Stop that captured the record's Rev is compared by Rev (second-precision timestamps
+// cannot order an input in the Stop's own second); a record without one falls back to the
+// timestamp, strictly after.
+func newInputSince(slotSid string, rec hookRecord, t time.Time) bool {
 	st, ok := status.Read(slotSid)
 	if !ok || st.State != "working" {
 		return false
+	}
+	if rec.StatusRev != nil {
+		return st.Rev != *rec.StatusRev
 	}
 	ts, err := time.Parse(time.RFC3339, st.TS)
 	return err == nil && ts.After(t)
