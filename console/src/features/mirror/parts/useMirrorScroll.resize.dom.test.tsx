@@ -38,6 +38,12 @@ function Body({ s }: { s: ReturnType<typeof useMirrorScroll> }) {
           configurable: true,
         });
         el.getBoundingClientRect = () => new DOMRect(0, top, 200, height);
+        for (const [idx, at] of [[3, 1008], [7, 1538]]) { // reply heads, this far into the content
+          const reply = document.createElement("div");
+          reply.setAttribute("data-turn-idx", String(idx));
+          reply.getBoundingClientRect = () => new DOMRect(0, top + at - scroll, 200, 100);
+          el.appendChild(reply);
+        }
         s.bodyRef.current = el;
       }}
     />
@@ -112,6 +118,29 @@ describe("useMirrorScroll body resize", () => {
     resize(500, true); // the browser clamps to 1500 (and scrolls) before the observer runs
     expect(el.scrollTop).toBe(1410);
     expect(api!.atBottomRef.current).toBe(false); // the clamp is not the reader coming back down
+  });
+
+  it("measures from our own last write when its scroll event has not arrived yet", () => {
+    const el = api!.bodyRef.current!;
+    resize(380, true); // following: pinned to the end, 1620
+    expect(el.scrollTop).toBe(1620);
+    api!.lastReplyIdxRef.current = 7;
+    act(() => api!.jumpToReplyTop()); // our write to 1530, follow off, its scroll event still pending
+    resize(500, true); // the band goes in the same task: the browser clamps to 1500
+    expect(el.scrollTop).toBe(1410);
+    expect(api!.atBottomRef.current).toBe(false);
+  });
+
+  it("does not shift a write that already chose its place after the band went", () => {
+    const el = api!.bodyRef.current!;
+    api!.atBottomRef.current = false;
+    resize(380, true);
+    top -= 120; // the band goes, the observer has not run yet
+    height = 500;
+    api!.lastReplyIdxRef.current = 3;
+    act(() => api!.jumpToReplyTop()); // measured in the new layout: 1000
+    act(() => observers.forEach((cb) => cb()));
+    expect(el.scrollTop).toBe(1000);
   });
 
   it("keeps the top in place when the body shrinks from below (the composer growing)", () => {

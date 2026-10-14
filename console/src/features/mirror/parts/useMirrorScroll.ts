@@ -137,7 +137,7 @@ export function useMirrorScroll() {
     if (!didInitRef.current) return true; // the first settle restores it
     const el = bodyRef.current;
     if (el && applyMark(el, mark)) {
-      selfTopRef.current = el.scrollTop;
+      noteSelfScroll(el);
       atBottomRef.current = false;
       restoringRef.current = true;
       prependAnchorRef.current = null;
@@ -213,7 +213,7 @@ export function useMirrorScroll() {
     if (restoringRef.current) {
       const mark = restoreMarkRef.current;
       if (mark && !atBottomRef.current && applyMark(el, mark)) {
-        selfTopRef.current = el.scrollTop;
+        noteSelfScroll(el);
         return;
       }
       endRestore();
@@ -225,14 +225,28 @@ export function useMirrorScroll() {
         // to that would overshoot upward, so start from the offset before this resize.
         const clamped = topMoved < 0 && el.scrollTop >= el.scrollHeight - el.clientHeight - 1;
         el.scrollTop = (clamped ? Math.max(el.scrollTop, last.scrollTop) : el.scrollTop) + topMoved;
-        selfTopRef.current = el.scrollTop;
+        noteSelfScroll(el);
       }
       return;
     }
     if (Date.now() < interactUntilRef.current) return; // the reader's own click grew it
     if (el.scrollHeight - el.scrollTop - el.clientHeight < 1) return;
     el.scrollTop = el.scrollHeight;
+    noteSelfScroll(el);
+  };
+  // Every offset we write goes through here. The scroll event for it may not have been delivered
+  // when a band above goes in the same task, and the clamp that follows must be undone from THIS
+  // offset, not an older one (measured: a completion anchor at 1530 then the band going landed at
+  // 1500 and re-armed follow, instead of 1410). A write made against a resize the observer has
+  // not handled yet already chose its place in the new layout, so it absorbs that resize.
+  const noteSelfScroll = (el: HTMLDivElement) => {
     selfTopRef.current = el.scrollTop;
+    const box = bodyBoxRef.current;
+    box.scrollTop = el.scrollTop;
+    if (el.clientHeight !== box.height) {
+      box.height = el.clientHeight;
+      box.top = el.getBoundingClientRect().top;
+    }
   };
   // Arm the "the reader caused this reflow" window. A pointer or keyboard interaction inside
   // the transcript can toggle a disclosure (work progress / thinking / tool run), switch code
@@ -331,7 +345,7 @@ export function useMirrorScroll() {
     endRestore(); // the end was chosen explicitly — drop the restore anchor
     prependAnchorRef.current = null; // …and the paging anchor with it
     el.scrollTop = el.scrollHeight;
-    selfTopRef.current = el.scrollTop;
+    noteSelfScroll(el);
     atBottomRef.current = true;
     setShowJump(false);
     syncReplyTop();
@@ -353,7 +367,7 @@ export function useMirrorScroll() {
     endRestore();
     prependAnchorRef.current = null; // an explicit destination replaces the paging anchor
     el.scrollTop = top;
-    selfTopRef.current = el.scrollTop;
+    noteSelfScroll(el);
     // We left the end, so follow goes off — otherwise the next poll drags us back down.
     atBottomRef.current = false;
     setShowJump(true);
@@ -433,7 +447,7 @@ export function useMirrorScroll() {
     if (!el) return;
     const toBottom = () => {
       el.scrollTop = el.scrollHeight;
-      selfTopRef.current = el.scrollTop;
+      noteSelfScroll(el);
       atBottomRef.current = true; // authoritative now (don't wait for the async scroll event)
     };
 
@@ -472,7 +486,7 @@ export function useMirrorScroll() {
         // end, which is readable from anyway.
         const mark = restoreMarkRef.current;
         if (mark && !mark.atBottom && applyMark(el, mark)) {
-          selfTopRef.current = el.scrollTop;
+          noteSelfScroll(el);
           atBottomRef.current = false; // not at the end: follow is off and jump-to-latest appears
           restoringRef.current = true; // from now on, re-apply this anchor on every late height
           setShowJump(true);
@@ -527,7 +541,7 @@ export function useMirrorScroll() {
           answerAnchoredRef.current = replyIdx;
           const top = el.scrollTop + (answer.getBoundingClientRect().top - el.getBoundingClientRect().top) - 12;
           el.scrollTop = Math.max(0, top);
-          selfTopRef.current = el.scrollTop;
+          noteSelfScroll(el);
           atBottomRef.current = false; // parked at the answer top — leave the user here (and stop the RO re-pin)
         } else if (body && !work) {
           answerAnchoredRef.current = replyIdx; // nothing folded — top already is the answer
@@ -554,7 +568,7 @@ export function useMirrorScroll() {
     // The old scroller can be reused for another session (pane D&D / opening a row
     // in the current mirror). Clear its physical offset in the same pre-paint phase;
     // the first transcript layout effect then pins the new content to its end.
-    if (bodyRef.current) { bodyRef.current.scrollTop = 0; selfTopRef.current = 0; }
+    if (bodyRef.current) { bodyRef.current.scrollTop = 0; noteSelfScroll(bodyRef.current); }
     // The "the reader grew this" window belongs to the PREVIOUS session and must not carry over.
     // Switching sessions with a horizontal swipe on a phone drops that finger's pointerdown on
     // the transcript and arms noteInteraction for 600ms (the capture handler on .mirror-scroll);
@@ -609,7 +623,7 @@ export function useMirrorScroll() {
     }
     if (Math.abs(top - el.scrollTop) >= 1) {
       el.scrollTop = top;
-      selfTopRef.current = el.scrollTop;
+      noteSelfScroll(el);
     }
     return true;
   };
