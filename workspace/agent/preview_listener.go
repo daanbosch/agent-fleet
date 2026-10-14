@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/browserx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/listenports"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/portprobe"
 )
 
 // previewProbeTimeout bounds the one HTTP request a grant probe sends.
@@ -50,16 +52,23 @@ func handlePreviewListener(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
-// probePreviewPort sends one GET / to 127.0.0.1:port and classifies the outcome with the
-// same rules as the relay, so a grant is refused for exactly what the relay would fail on.
+// probePreviewPort says whether 127.0.0.1:port can be previewed: "http", or the failure kind the
+// relay would report. portprobe.Probe does the classification shared with the browser pane (a
+// hand-driven HEAD, so a server that speaks first reads as not-HTTP, not as a transport quirk).
+// A port that answered HTTP gets one more look for the "plain HTTP sent to an HTTPS port" 400
+// notice a TLS dev server answers with, which the HEAD cannot show (it has no body).
 func probePreviewPort(port int) string {
+	addr := "127.0.0.1:" + strconv.Itoa(port)
+	if kind := portprobe.Probe(context.Background(), addr); kind != "" {
+		return kind
+	}
 	tr := &http.Transport{DisableKeepAlives: true, Proxy: nil, ResponseHeaderTimeout: previewProbeTimeout,
 		DialContext: (&net.Dialer{Timeout: previewProbeTimeout}).DialContext}
 	defer tr.CloseIdleConnections()
-	req, _ := http.NewRequest(http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(port)+"/", nil)
+	req, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/", nil)
 	resp, err := tr.RoundTrip(req)
 	if err != nil {
-		return classifyPreviewError(err)
+		return "http" // it answered HTTP a moment ago: a later hiccup is not a protocol verdict
 	}
 	defer resp.Body.Close()
 	if err := sniffPlainHTTPToTLS(resp); errors.Is(err, errPlainHTTPToTLS) {

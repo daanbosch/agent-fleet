@@ -35,6 +35,14 @@ type Tool struct {
 	// context.Canceled/DeadlineExceeded error, which the loop propagates instead
 	// (cancelling the whole turn, not just this call).
 	Run func(ctx context.Context, rt *Runtime, argsJSON string) (string, error)
+	// Target, when set, marks a tool that only forwards to another registered tool (a
+	// dispatch bridge). Given the call's raw arguments it returns the tool the call will
+	// actually reach, and the loop judges THAT tool at every gate that depends on what runs:
+	// plan mode, the Mutates approval (and the name in its summary), and the same-name
+	// streak. ok=false (the target does not resolve) leaves the bridge itself as the judged
+	// tool, so Run must then refuse without side effects — it must not fall through to
+	// running anything.
+	Target func(argsJSON string) (target Tool, ok bool)
 }
 
 // ApproveFunc gates a Mutates tool call before Run executes. It is asked once per
@@ -240,6 +248,17 @@ func (r *Registry) Defs(plan bool) []ToolDef {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// judged is the tool the loop's gates should evaluate for call: the tool a bridge forwards
+// to (Tool.Target), else the tool itself.
+func (r *Registry) judged(tool Tool, call ToolCall) Tool {
+	if tool.Target != nil {
+		if target, ok := tool.Target(call.Arguments); ok {
+			return target
+		}
+	}
+	return tool
 }
 
 func (r *Registry) lookup(name string) (Tool, bool) {

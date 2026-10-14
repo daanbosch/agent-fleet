@@ -1441,6 +1441,14 @@ type DEKStore interface {
 	RemigrateHomeDEK(ctx context.Context, membershipID string) (bool, error)
 	// CountHomeDEKs is the home_dek tally an operator checks the migration against.
 	CountHomeDEKs(ctx context.Context) (HomeDEKCounts, error)
+	// DeleteHomeDEK drops the key of a home proven gone for the holder of the membership's
+	// lifecycle lease; conditional on the lease, the row read, the 'random' scheme and no
+	// workspace row for the membership (store_home_dek.go).
+	DeleteHomeDEK(ctx context.Context, read HomeDEK, leaseToken string) (bool, error)
+	// ListOrphanHomeDEKs lists the keys no workspace row names, DeleteOrphanHomeDEK is the
+	// operator's removal of one (any scheme, still only while no workspace names it).
+	ListOrphanHomeDEKs(ctx context.Context) ([]OrphanHomeDEK, error)
+	DeleteOrphanHomeDEK(ctx context.Context, membershipID string) (bool, error)
 }
 
 // SessionIndexStore mirrors the Agent's session list: ReplaceSessions swaps the

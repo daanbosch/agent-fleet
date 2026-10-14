@@ -136,8 +136,9 @@ from then on you can clone / push without entering tokens ([03](03-code.md) · [
   *nothing is listening on the port* (start the app, reload); *the port is listening but does not speak HTTP*
   (a database, SSH, gRPC over h2c: the preview carries HTTP and WebSocket only); *the port is serving HTTPS*
   (turn off the dev server's HTTPS to preview it); or *the workspace is not running or cannot be reached*.
-  The page follows the browser's language (Japanese or English). The browser pane connects directly and shows
-  `target-unreachable` instead.
+  The page follows the browser's language (Japanese or English). The browser pane connects directly, so its
+  failure stays `target-unreachable`, but when the Agent finds the port is listening without speaking HTTP, or serving
+  HTTPS, the pane's message says so instead of the generic one (nothing listening keeps the generic message).
 - **A blank page / 404** tends to happen when you open an app that loads assets by absolute path in the **lightweight preview**.
   Its URL is a **sub-path** (`/preview/{port}/`), so the moment the app asks for `/static/...` it lands outside.
   **If preview subdomains are issued on your deployment, open it there first**: the app is served at the root, so

@@ -275,7 +275,12 @@ CSPRNG から来るので、定数を掴まされるより質は上がる。
 - ~~イメージ同梱は root 設置か home 設置か~~ → **Track B で root 設置に確定**
   （`--dir /usr/local/bin`＋`AGY_CLI_DISABLE_AUTO_UPDATE=true` で自己更新封殺。
   ⚠️ 値は `true` のみ有効 — `1` は無視される。docs/32 §（自己更新）／docs/70 §70.14.9）。
-- Managed 実行方式の可否は `agy` 側の構造化出力（`--output-format` 相当）の将来提供待ち。
+- ~~Managed 実行方式の可否は `agy` 側の構造化出力の将来提供待ち~~ → `--output-format stream-json` は
+  入ったが、print モードは権限を尋ねられないため、Managed にしても権限は決め打ちになる。再検討は #2155。
+- agy 内蔵の connect-RPC（ステップ状態・承認への回答・本当の中断）での駆動は **1.3.5 では agy の外から不可**。
+  全メソッドが起動ごとの CSRF トークンを要し、それは外から与えられず、AF が握る子（MCP サーバ・hooks）にも
+  渡らない（sidecar は CLI では無効）。実測は docs/32 §（ローカル RPC・#1079）。hooks は会話 ID と `Stop`
+  を運ぶ: #2156。
 - CP・ブラウザ込みの L2 E2E（`e2e/`）は docker のあるホストで別途（本コンテナは docker 無し）。
 
 ## 決定（提案）

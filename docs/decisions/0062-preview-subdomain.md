@@ -285,3 +285,7 @@ it goes stale as a 404 — the least legible failure there is**.
   Agent answers 410 when none is still listening (cache of 2 s: that is how long a stopped listener can still
   pass), after which the CP deletes the grant. Slug rotation and stop clear grants; at most 16 per workspace;
   one audit row (`workspace.preview_temp_port`) per grant. An Agent without `/preview-listener` fails closed.
+- 2026-10-15: the browser pane now shares that classification (#2151). Its Chromium dials `127.0.0.1:{port}` directly, so
+  the relay is not in the path; when a pane navigation to a loopback URL fails, the Agent probes the port once
+  (`internal/portprobe`, one bounded `HEAD /`) and, for `preview_not_http` / `preview_tls`, adds `reason` next to the
+  unchanged `target-unreachable` state. The classifier moved to `internal/portprobe`; `/proxy/{port}` behaviour is unchanged.

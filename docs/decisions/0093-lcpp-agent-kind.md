@@ -817,3 +817,34 @@ cannot disagree without a red build. Along the way it recorded something worth k
 of them: `caps.contextBar` has no reader anywhere in the Console — the gauge draws from the
 session's context payload whatever the kind — so that flag is documentation, and this test is
 now what makes it mean anything.
+
+## Note (2026-10-14): MCP tool schemas are deferred behind a bridge (#1565)
+
+Decision 6 sends every MCP tool's schema in each request. The builtin `af` server alone is 70-odd
+tools, which on a small self-hosted window is a fixed cost before the model has done anything.
+This note adds a bridge; it changes no decision above.
+
+- **Three built-in tools, `tool_search` / `tool_describe` / `tool_call`.** Search returns names with
+  a one-line description, describe returns one tool's description and full input schema, call
+  dispatches through `mcpc`. `tool_call` refuses a tool that was not described in this session and
+  an unknown name, with an error the model can act on, and validates the arguments against the
+  tool's own advertised schema before the server sees them. (A restarted session forgets which
+  tools were described; the model is told to describe again.)
+- **Threshold, not always-on.** In `auto` mode the bridge replaces the schemas only when their
+  summed size (name + description + schema) passes 6000 bytes, about 1.5k tokens. A couple of small
+  tools stay direct: the bridge's own three schemas and the extra round trip would cost more.
+  Measured with 70 tools shaped like af's: 32.4 KB direct against 1.0 KB behind the bridge.
+- **lcpp's own tools never defer.** read / write / edit / bash / glob / grep / ls / ask_user /
+  todo_write are always in the request; only MCP tools are hidden.
+- **Opt-out knob.** `AF_LCPP_MCP_TOOLS` in the Agent's environment: `auto` (default), `direct`
+  (the previous behaviour), `deferred` (always bridge). Read every turn, like the MCP server set.
+- **Gates are unchanged.** `harness.Tool.Target` lets a bridge name the tool a call reaches; the
+  loop judges that tool for plan mode and for the Mutates approval (the prompt names the real tool,
+  `run mcp__srv__x`, not `tool_call`), and `mcpToolMutates` stays the one place that decides. A
+  `tool_call` whose target does not resolve is not gated, and refuses without side effects. The
+  same-name repeat streak counts the target, so different tools reached through the bridge do not
+  trip it.
+- **Transcript.** The record keeps the model's real `tool_call`; the mirror and Console render it as
+  the tool it reached, with that tool's arguments.
+- **Not verified:** a live run against a real llama.cpp model. Whether small models drive the
+  search/describe/call sequence reliably is open; `AF_LCPP_MCP_TOOLS=direct` is the way back.

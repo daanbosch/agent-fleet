@@ -157,28 +157,210 @@ func TestResolveDEKMintFailsClosed(t *testing.T) {
 	}
 }
 
-// Destroy does not drop the home key. An adapter's Destroy does not prove the whole home is
-// gone (ecs without the home task removes the access points and leaves the EFS directories,
-// and a retry after a partial failure reports no leftovers), so a dropped key could make a
-// surviving secrets.enc unreadable.
-func TestDestroyKeepsHomeDEK(t *testing.T) {
+// Destroy drops the home key only on the runtime's proof that the home is gone. "Destroy
+// returned no leftovers" is not one (ecs without the home task removes the access points,
+// leaves the EFS directories, and a retry then reports nothing), so a runtime that cannot
+// prove it keeps the key: a dropped key makes a surviving secrets.enc unreadable for good.
+func TestDestroyKeepsHomeDEKUnlessProvenGone(t *testing.T) {
 	ctx := context.Background()
-	for _, leftovers := range [][]string{nil, {"efs:fs-1/home/M-1"}} {
-		f := &destroyingFactory{leftovers: leftovers}
+	for _, tc := range []struct {
+		name      string
+		verdict   runtime.HomeVerdict
+		scheme    string
+		leftovers []string
+		destroyOK bool
+		wantKept  bool
+	}{
+		{"unknown, no leftovers", runtime.HomeUnknown, store.HomeDEKRandom, nil, true, true},
+		{"unknown, leftovers", runtime.HomeUnknown, store.HomeDEKRandom, []string{"efs:fs-1/home/M-1"}, true, true},
+		{"present", runtime.HomePresent, store.HomeDEKRandom, nil, true, true},
+		{"proven gone", runtime.HomeGone, store.HomeDEKRandom, nil, true, false},
+		{"proven gone, migrating", runtime.HomeGone, store.HomeDEKMigrating, nil, true, true},
+		{"proven gone but destroy failed", runtime.HomeGone, store.HomeDEKRandom, nil, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &destroyingFactory{leftovers: tc.leftovers, verdict: tc.verdict}
+			if !tc.destroyOK {
+				f.err = errors.New("boom")
+			}
+			st, mgr, victim, tn := destroyFixture(t, f)
+			memID := membershipIDOf(t, st, victim, tn)
+			seedHomeDEK(t, st, memID, tn.ID, tc.scheme)
+			_, err := mgr.destroyWorkspaceByMembership(ctx, memID)
+			if (err == nil) != tc.destroyOK {
+				t.Fatalf("destroy err = %v", err)
+			}
+			_, ok, gerr := st.GetHomeDEK(ctx, memID)
+			if gerr != nil || ok != tc.wantKept {
+				t.Fatalf("home key kept = %v (err %v), want %v", ok, gerr, tc.wantKept)
+			}
+		})
+	}
+}
+
+// seedHomeDEK stores a key row in the given scheme.
+func seedHomeDEK(t *testing.T, st *store.SQL, memID, tenantID, scheme string) store.HomeDEK {
+	t.Helper()
+	ctx := context.Background()
+	d, err := st.InsertHomeDEK(ctx, store.HomeDEK{MembershipID: memID, Ciphertext: "sealed", KeyRef: tenantID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scheme == store.HomeDEKRandom {
+		if ok, err := st.ConfirmHomeDEK(ctx, d); err != nil || !ok {
+			t.Fatalf("confirm = %v, %v", ok, err)
+		}
+	}
+	return d
+}
+
+// A stale decision never deletes a key that changed under it: the proof is taken, then a
+// workspace row is made for the membership again, or the key is put back to migrating.
+func TestDestroyedHomeDEKSurvivesAChangeDuringTheProof(t *testing.T) {
+	ctx := context.Background()
+	t.Run("home re-created", func(t *testing.T) {
+		f := &destroyingFactory{verdict: runtime.HomeGone}
 		st, mgr, victim, tn := destroyFixture(t, f)
 		memID := membershipIDOf(t, st, victim, tn)
-		if _, err := st.InsertHomeDEK(ctx, store.HomeDEK{MembershipID: memID, Ciphertext: "sealed", KeyRef: tn.ID}); err != nil {
-			t.Fatal(err)
+		seedHomeDEK(t, st, memID, tn.ID, store.HomeDEKRandom)
+		f.between = func() {
+			recreateWorkspace(t, st, store.Workspace{TenantID: tn.ID, MembershipID: memID}, "W-NEW")
 		}
 		if _, err := mgr.destroyWorkspaceByMembership(ctx, memID); err != nil {
-			t.Fatalf("destroy (leftovers %v): %v", leftovers, err)
+			t.Fatal(err)
 		}
-		if f.destroyed != 1 {
-			t.Fatalf("precondition: Destroy ran %d times", f.destroyed)
+		if _, ok, _ := st.GetHomeDEK(ctx, memID); !ok {
+			t.Fatal("the key of a home that has a workspace again was deleted")
 		}
-		if _, ok, err := st.GetHomeDEK(ctx, memID); err != nil || !ok {
-			t.Fatalf("destroy (leftovers %v) dropped the home key (ok=%v, err=%v)", leftovers, ok, err)
+	})
+	t.Run("remigrated", func(t *testing.T) {
+		f := &destroyingFactory{verdict: runtime.HomeGone}
+		st, mgr, victim, tn := destroyFixture(t, f)
+		memID := membershipIDOf(t, st, victim, tn)
+		seedHomeDEK(t, st, memID, tn.ID, store.HomeDEKRandom)
+		f.between = func() {
+			if ok, err := st.RemigrateHomeDEK(ctx, memID); err != nil || !ok {
+				t.Fatalf("remigrate = %v, %v", ok, err)
+			}
 		}
+		if _, err := mgr.destroyWorkspaceByMembership(ctx, memID); err != nil {
+			t.Fatal(err)
+		}
+		if d, ok, _ := st.GetHomeDEK(ctx, memID); !ok || d.Scheme != store.HomeDEKMigrating {
+			t.Fatalf("a key put back to migrating during the proof was deleted (ok=%v)", ok)
+		}
+	})
+}
+
+// The destroys that run as a recorded home operation (the home task adapters) drop a proven
+// key too: by the starter that finishes the record, and by the reconciler of a replaced CP.
+func TestRecordedDestroyDropsProvenHomeDEK(t *testing.T) {
+	ctx := context.Background()
+	for _, via := range []string{"starter", "reconciler"} {
+		for _, verdict := range []runtime.HomeVerdict{runtime.HomeGone, runtime.HomeUnknown} {
+			t.Run(via+"/"+verdict.String(), func(t *testing.T) {
+				rt := newRecordedHomeRuntime("stopped")
+				rt.verdict = verdict
+				close(rt.gate)
+				st, mgr, victim, tn := destroyFixture(t, fixedRuntimeFactory{rt})
+				memID := membershipIDOf(t, st, victim, tn)
+				seedHomeDEK(t, st, memID, tn.ID, store.HomeDEKRandom)
+				if via == "starter" {
+					if _, err := mgr.destroyWorkspaceByMembership(ctx, memID); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					ws, _, _ := st.GetWorkspaceByMembership(ctx, memID)
+					openRecord(t, st, ws, store.HomeOpDestroy, "destroy", nil, "")
+					reconcileNow(mgr)
+					reconcileNow(mgr)
+				}
+				if _, ok, _ := st.GetWorkspaceByMembership(ctx, memID); ok {
+					t.Fatal("precondition: the destroy did not finish")
+				}
+				_, kept, _ := st.GetHomeDEK(ctx, memID)
+				if kept != (verdict != runtime.HomeGone) {
+					t.Fatalf("home key kept = %v with verdict %s", kept, verdict)
+				}
+			})
+		}
+	}
+}
+
+// A destroy whose lifecycle lease is gone (lost to a takeover, or expired) keeps the key: its
+// proof may describe a home an earlier generation had, and another CP may have re-created it.
+func TestReleaseHomeDEKNeedsTheLiveLease(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name     string
+		mutate   func(*workspaceLifecycleLeaseGuard)
+		wantKept bool
+	}{
+		{"held", func(*workspaceLifecycleLeaseGuard) {}, false},
+		{"marked lost", func(g *workspaceLifecycleLeaseGuard) { g.lost.Store(true) }, true},
+		{"taken over", func(g *workspaceLifecycleLeaseGuard) {
+			g.token = "someone-elses-token" // what the guard holds is no longer the stored lease
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &destroyingFactory{verdict: runtime.HomeGone}
+			st, mgr, victim, tn := destroyFixture(t, f)
+			memID := membershipIDOf(t, st, victim, tn)
+			ws, _, _ := st.GetWorkspaceByMembership(ctx, memID)
+			seedHomeDEK(t, st, memID, tn.ID, store.HomeDEKRandom)
+			if err := st.DeleteWorkspace(ctx, ws.ID); err != nil {
+				t.Fatal(err)
+			}
+			lease, err := acquireWorkspaceLifecycleLease(ctx, st, memID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lease.Close()
+			tc.mutate(lease)
+			mgr.releaseHomeDEK(ctx, memID, f.New(runtime.Workspace(ws), runtime.SecretKeys{}, nil), lease)
+			if _, ok, _ := st.GetHomeDEK(ctx, memID); ok != tc.wantKept {
+				t.Fatalf("key kept = %v, want %v", ok, tc.wantKept)
+			}
+		})
+	}
+}
+
+func TestHomeDEKOrphanCLI(t *testing.T) {
+	ctx := context.Background()
+	st := ssmAPIStores(t)["sqlite"]
+	live := homeDEKWorkspace(t, st, "W7")
+	gone := homeDEKWorkspace(t, st, "W8")
+	seedHomeDEK(t, st, live.MembershipID, live.TenantID, store.HomeDEKRandom)
+	seedHomeDEK(t, st, gone.MembershipID, gone.TenantID, store.HomeDEKMigrating)
+	if err := st.DeleteWorkspace(ctx, gone.ID); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	if err := printOrphanHomeDEKs(ctx, st, &b); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), gone.MembershipID) || strings.Contains(b.String(), live.MembershipID) ||
+		strings.Contains(b.String(), "sealed") {
+		t.Fatalf("orphan listing:\n%s", b.String())
+	}
+	b.Reset()
+	if code := removeOrphanHomeDEK(ctx, st, gone.MembershipID, false, &b); code != 1 {
+		t.Fatalf("without --force: exit %d", code)
+	}
+	if _, ok, _ := st.GetHomeDEK(ctx, gone.MembershipID); !ok {
+		t.Fatal("removed without --force")
+	}
+	if code := removeOrphanHomeDEK(ctx, st, live.MembershipID, true, &b); code != 1 {
+		t.Fatalf("a key a workspace names: exit %d", code)
+	}
+	if _, ok, _ := st.GetHomeDEK(ctx, live.MembershipID); !ok {
+		t.Fatal("--force removed the key of a live workspace")
+	}
+	if code := removeOrphanHomeDEK(ctx, st, gone.MembershipID, true, &b); code != 0 {
+		t.Fatalf("orphan with --force: exit %d", code)
+	}
+	if _, ok, _ := st.GetHomeDEK(ctx, gone.MembershipID); ok {
+		t.Fatal("the orphan survived --force")
 	}
 }
 

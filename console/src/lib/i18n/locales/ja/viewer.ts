@@ -18,6 +18,8 @@ export const viewer = {
   "browser.keyboard_toggle": "キーボードの表示/非表示",
   "browser.loading": "ページを読み込み中…",
   "browser.target_unreachable": "対象ポートへ接続できません。サービスの起動後に再接続してください。",
+  "browser.target_not_http": "対象ポートは待ち受けていますが HTTP を話しません。ブラウザペインは HTTP のみ表示できます。",
+  "browser.target_tls": "対象ポートは HTTPS で動いています。開発サーバーの HTTPS を無効にしてから再接続してください。",
   "browser.crashed": "コンテナ内ブラウザがクラッシュしました。",
   "browser.installing": "ブラウザを準備中です（初回のみ約200MBを取得）…",
   "browser.disconnected": "ブラウザペインの接続が切れました。",

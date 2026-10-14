@@ -223,9 +223,13 @@ func (h *threadHandle) syncMCPServers(ctx context.Context, defs []mcpreg.ServerD
 
 // mcpTools wraps h.mcpMgr's current tool set (whatever the syncMCPServers call just before it
 // in runTurn left connected) as []harness.Tool, ready to fold into the same Registry as
-// harness.BuiltinTools().
+// harness.BuiltinTools(). Past mcp_bridge.go's threshold it returns the three bridge tools
+// instead, so the schemas stay out of the request.
 func (h *threadHandle) mcpTools() []harness.Tool {
 	defs := h.mcpMgr.ToolDefs()
+	if mcpDeferred(defs) {
+		return h.bridgeTools(defs)
+	}
 	out := make([]harness.Tool, 0, len(defs))
 	for _, def := range defs {
 		def := def // capture per iteration — each Run closure must call its OWN tool

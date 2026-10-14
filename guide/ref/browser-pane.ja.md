@@ -56,7 +56,7 @@ Workspace の中で動いている Web アプリを見せる手段は 2 つあ�
 
 | 状態 | 意味 | 利用者の操作 |
 |---|---|---|
-| `target-unreachable` | Chromium は起動したが、その port/path で HTTP に応答が無い。**開発サーバーの起動待ちもこの状態**。| port・path・listen 状態を確認し、サーバーが上がってから**再読み込み**。残るなら**再接続**。|
+| `target-unreachable` | Chromium は起動したが、その port/path で HTTP に応答が無い。**開発サーバーの起動待ちもこの状態**。ポートが待ち受けているのに HTTP を話さない／HTTPS で動いている場合は、その旨をペインに表示（失敗した遷移ごとに Agent がポートを 1 回調べます）。何も待ち受けていないときは汎用の文言のまま。| port・path・listen 状態を確認し、サーバーが上がってから**再読み込み**。残るなら**再接続**。|
 | `disconnected` | Console―CP―Agent の browser WebSocket が切れた。**Chromium の crash とは限らない**。| Workspace が稼働中か、通信が戻ったかを確認して**再接続**。|
 | `crashed` | Workspace 内 Chromium が異常終了し、既存 Page を継続できない。| **再接続**で新しい Page を作る。繰り返すなら Workspace のメモリ使用量と対象アプリを見る。|
 

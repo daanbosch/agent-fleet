@@ -256,3 +256,8 @@ slug は起動ごとに変わる（決定 3）ので、**生 URL を貼る運用
   Agent が 410 を返す（キャッシュ 2 秒＝止まった listener がなお通りうる上限）。その後 CP が grant を消す。slug の再発行と停止で
   grant は全消去、Workspace あたり最大 16 件、grant 1 件ごとに監査 1 行（`workspace.preview_temp_port`）。`/preview-listener` を
   持たない Agent では fail closed。
+
+- 2026-10-15: ブラウザペインも同じ分類を使うようにした（#2151）。ペインの Chromium は `127.0.0.1:{port}` へ直接つなぐのでリレーを
+  通らない。ループバック URL への遷移が失敗したら Agent がそのポートを 1 回だけ調べ（`internal/portprobe`、時間制限付きの
+  `HEAD /` 1 本）、`preview_not_http` / `preview_tls` のときは状態 `target-unreachable` はそのままに `reason` を添える。
+  分類器は `internal/portprobe` に移し、`/proxy/{port}` の挙動は変えていない。
