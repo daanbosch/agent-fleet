@@ -306,9 +306,11 @@ func TestAgentMemoryBackfillScansTheDecodedRecord(t *testing.T) {
 	path := filepath.Join(agentMemDir(), "projects", c.Project.ID, "project.json")
 	const tok = `\u0067hp_0123456789abcdefghijklmnopqrstuvwxyzAB`
 	for name, rec := range map[string]string{
-		"root":   `{"id": "` + c.Project.ID + `", "root": "/r/` + tok + `", "display": "esc"}`,
-		"nested": `{"id": "` + c.Project.ID + `", "display": "esc", "future": {"a": ["` + tok + `"]}}`,
-		"key":    `{"id": "` + c.Project.ID + `", "display": "esc", "` + tok + `": 1}`,
+		"root":      `{"id": "` + c.Project.ID + `", "root": "/r/` + tok + `", "display": "esc"}`,
+		"nested":    `{"id": "` + c.Project.ID + `", "display": "esc", "future": {"a": ["` + tok + `"]}}`,
+		"dup":       `{"id": "` + c.Project.ID + `", "display": "` + tok + `", "display": "dup"}`,
+		"dupnested": `{"id": "` + c.Project.ID + `", "f": {"x": "` + tok + `", "x": 1}}`,
+		"key":       `{"id": "` + c.Project.ID + `", "display": "esc", "` + tok + `": 1}`,
 	} {
 		if err := os.WriteFile(path, []byte(rec), 0o600); err != nil {
 			t.Fatal(err)
