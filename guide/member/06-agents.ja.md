@@ -225,6 +225,47 @@ Claude の挙動は同じ画面で切り替えられます。
 
 - **思考を展開して表示**：セッション画面の「思考」ブロックを最初から開いた状態で出します。既定はオフ（畳んだ状態で、見出しをクリックすると読めます）。表示だけの設定で、エージェントの動き方は変わりません（claude / codex 側の同じ設定とは独立です）。
 
+### opencode 2 の場合
+
+ここまでの内容は、opencode の 1 系・2 系どちらにも当てはまります。以下は、ワークスペースが
+**opencode 2** で動いているときだけの話です。opencode 1 では、この節のことは起きません。
+
+- **読まれるのは `AGENTS.md` だけです。** opencode 2 は `CLAUDE.md` に切り替えて読むことは
+  せず、`CLAUDE.md` しかないリポジトリでは opencode に何も渡りません。opencode に守らせたい
+  ことは、リポジトリの `AGENTS.md` に書いてください。あなた自身の **「エージェントへの指示」** は
+  これまでどおり opencode に届きます。Agent Fleet が opencode のグローバルな `AGENTS.md` の
+  目印付きブロックに書き込み、**⚙設定 →「エージェントへの指示」** の行に、書き込み先と、実際に効いて
+  いるかが表示されます。このブロックは保存のたびに書き直されるので、手で触らないでください。
+- **ターミナル（CLI）セッションは 1 つのサーバーを共有します。** ターミナル（CLI）セッション
+  は、セッションごとに専用のサーバーを起動する代わりに、Agent Fleet がマネージドセッション用に
+  すでに動かしている opencode サーバーにつながります。ターミナルセッションを 1 つ増やすたびに
+  メモリがおよそ 250 MB 少なくて済みます（アイドル状態のセッションで計測）。会話・環境・状態は
+  セッションごとに別々のままです。そのサーバーが使えないとき（たとえば未接続のとき）は、自動的に
+  専用サーバーで起動します。常にターミナルセッションごとの専用サーバーにしたいときは、
+  ワークスペースの環境に次を設定します。
+
+  ```
+  AF_OPENCODE_TUI_STANDALONE=1
+  ```
+
+  セッションは、起動したときのモードのまま動き続けます。
+- **質問はフォームです。** opencode が質問してくると、チャット画面に質問カードが出ます。
+  質問ごとに 1 つの入力欄があり、選択肢を選ぶか、自分で入力して答えます。**キャンセルして会話に戻る**
+  を押すとフォームは取り下げられ、エージェントは続きを進めます。これが使えるのはマネージド
+  セッションです。ターミナル（CLI）セッションでもカードは表示されますが、答えるのはターミナル
+  画面です（質問が 1 つなら、カードのボタンがキーを押してくれます。質問が複数のフォームや複数選択の
+  項目があるフォームは、ターミナル画面で答えます）。待機中のフォームは、opencode サーバーが
+  再起動すると失われます。
+<!-- TODO(#2131, merge with it): once merged, a Terminal (CLI) session on the shared server
+     answers a form from the card like a Managed one; a session on a private server keeps
+     answering in the terminal. Replace the Terminal sentence above accordingly (en + ja). -->
+- **ToDo リストはありません。** opencode 2 には todo ツールが無いので、セッションに ToDo
+  リストは表示されません。接続が切れたのではなく、opencode 2 の仕様です。
+<!-- TODO(#2129 / PR #2130, merge with it): add the retry band (en + ja): while opencode retries a
+     provider error the chat view shows that the provider returned an error and the agent is
+     retrying (attempt N); an error no retry can fix (region or privacy, quota or billing, bad
+     key) ends the turn as failed with that message. This applies to opencode 1 as well. -->
+
 ## GitHub Copilot
 
 **copilot**（GitHub Copilot CLI）に個別のログインはありません。**git プロバイダの
@@ -367,7 +408,7 @@ claude / codex / opencode / GitHub Copilot / agy の 5 エージェントに **�
 - **新しく起動するセッションから**効きます。実行中のセッションは、起動時に読んだ内容のままです。
   例外は lcpp です。書き込むファイルが無く、行には「毎ターン システムプロンプトへ追加」と出て、
   実行中の lcpp セッションにも次のターンから反映されます。
-- 配れる先は claude / codex / opencode / GitHub Copilot / agy / Kiro / lcpp / muse です。
+- 配れる先は claude / codex / opencode / GitHub Copilot / agy / Kiro / lcpp / muse です（opencode 2 では `AGENTS.md` のブロック経由で届きます。[opencode 2 の場合](#opencode-2-の場合)を参照）。
   **対応していないのは Cursor だけ**で、設定画面にも行として出て理由が書かれます（Cursor は
   指示の置き場がユーザー単位ではローカルに無く、User Rules は Cursor アカウント側にあるため）。
 - 行ごとに**どこへ届くか**（書かれたファイル。lcpp はシステムプロンプト）と**いま効いているか**が出ます。「保存できたが効いていない」

@@ -226,6 +226,47 @@ finish answering and cuts short any that do not, so press it when nothing is mid
 
 - **Show thinking expanded**: the session view's "Thinking" block starts expanded. Off by default (collapsed; click the heading to read it). Display only: it doesn't change how the agent works (independent of the same setting on claude / codex).
 
+### With opencode 2
+
+Everything above holds for both generations of opencode. The points below apply only once
+the workspace runs **opencode 2**; with opencode 1 nothing in this subsection happens.
+
+- **Only `AGENTS.md` is read.** opencode 2 does not fall back to `CLAUDE.md`, so a repository
+  that has only a `CLAUDE.md` gives opencode nothing. Put what opencode should follow in the
+  repository's `AGENTS.md`. Your own **Agent instructions** still reach opencode: Agent Fleet
+  writes them into a marked block of opencode's global `AGENTS.md`, and the row in
+  **⚙Settings → "Agent instructions"** shows that this is where they went and whether they are
+  in effect. Leave that block alone; it is rewritten when you save.
+- **Terminal (CLI) sessions share one server.** Each Terminal (CLI) session attaches to the
+  opencode server Agent Fleet already runs for Managed sessions, instead of starting a private
+  one, which saves roughly 250 MB of memory per additional Terminal session (measured with idle sessions).
+  Every session stays separate: its own conversation, its own environment and its own status.
+  If that server is not available (for example it is not connected), the session starts with a
+  private server instead, on its own. To always use a private server per Terminal session, set
+  this in the Workspace's environment:
+
+  ```
+  AF_OPENCODE_TUI_STANDALONE=1
+  ```
+
+  A session keeps the mode it was launched in.
+- **Questions are forms.** When opencode asks you something, the chat view shows it as a
+  question card, one field per question, and you answer it there: pick an option or type your
+  own. **Cancel — back to chat** dismisses the form and the agent carries on. This works in
+  Managed sessions. In a Terminal (CLI) session the card is shown too, but you answer through
+  the terminal (the card's buttons press the keys for a single question; a form with several
+  questions or multiple-choice fields is answered in the terminal view). A form that is
+  waiting is lost if the opencode server restarts.
+<!-- TODO(#2131, merge with it): once merged, a Terminal (CLI) session on the shared server
+     answers a form from the card like a Managed one; a session on a private server keeps
+     answering in the terminal. Replace the Terminal sentence above accordingly. -->
+- **No ToDo list.** opencode 2 has no todo tool, so the session never shows a ToDo list.
+  This is how opencode 2 works, not a lost connection.
+<!-- TODO(#2129 / PR #2130, merge with it): add the retry band: while opencode retries a provider
+     error the chat view shows "The provider returned an error and the agent is retrying
+     (attempt N): …"; an error no retry can fix (region or privacy, quota or billing, bad key)
+     ends the turn as failed with that message. This applies to opencode 1 as well. -->
+
 ## GitHub Copilot
 
 **copilot** (GitHub Copilot CLI) has no separate sign-in. **Connecting GitHub as a git
@@ -373,7 +414,7 @@ Instructions come in three layers, and this setting is the **middle** one.
 - It applies to **sessions started from now on**. Running sessions keep what they read at start.
   lcpp is the exception: it has no file to write, so its row says it is added to the system
   prompt every turn, and a running lcpp session picks up a change on its next turn.
-- It can be delivered to claude / codex / opencode / GitHub Copilot / agy / Kiro / lcpp / muse.
+- It can be delivered to claude / codex / opencode / GitHub Copilot / agy / Kiro / lcpp / muse (opencode 2 takes it through an `AGENTS.md` block; see [OpenCode](#with-opencode-2)).
   **Cursor is the only one that can't take it**, and it still appears in the list with the reason
   (Cursor keeps User Rules in your Cursor account, with no local per-user place for instructions).
 - Each row shows **where it goes** (the file it was written to, or for lcpp the system prompt) and **whether it is actually in effect**. When
