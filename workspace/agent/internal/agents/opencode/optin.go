@@ -89,6 +89,7 @@ func UseV2() bool { return WantsV2() && V2Binary() != "" }
 // that flips in between cannot give the v2 binary the 1.x database (or the reverse).
 type LaunchSpec struct {
 	V2  bool
+	Maj int    // the major this reading launches
 	Bin string // "opencode" (resolved through PATH) or the opt-in binary's path
 	Key string // launchKey as of the reading
 }
@@ -96,9 +97,9 @@ type LaunchSpec struct {
 // CurrentLaunch reads the switch once.
 func CurrentLaunch() LaunchSpec {
 	if bin := V2Binary(); bin != "" && WantsV2() {
-		return LaunchSpec{V2: true, Bin: bin, Key: "v2:" + bin}
+		return LaunchSpec{V2: true, Maj: 2, Bin: bin, Key: "v2:" + bin}
 	}
-	return LaunchSpec{Bin: "opencode"}
+	return LaunchSpec{Maj: installedMajor(), Bin: "opencode"}
 }
 
 // Env is the provider keys plus, for the opt-in, its own database: the whole environment an
@@ -115,11 +116,14 @@ func (l LaunchSpec) processEnv() []string {
 }
 
 // Major is the opencode major this reading launches: 2 for the opt-in, else what the PATH one is.
-func (l LaunchSpec) Major() int {
+func (l LaunchSpec) Major() int { return l.Maj }
+
+// version is the full version of the binary this reading launches.
+func (l LaunchSpec) version() string {
 	if l.V2 {
-		return 2
+		return readPackageVersion(filepath.Join(filepath.Dir(l.Bin), "..", "package.json"))
 	}
-	return installedMajor()
+	return installedVersion()
 }
 
 func (l LaunchSpec) shellBin() string {

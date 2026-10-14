@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -141,15 +142,19 @@ func TestOptInEnvironmentVariableWinsOverTheFile(t *testing.T) {
 }
 
 // The shell of a session must not inherit the v2 database: a 1.x `opencode` run there would
-// write 1.x tables into it.
+// write 1.x tables into it. The value decides, not the switch as it is now: a pane built while
+// the opt-in was on keeps it after the switch went back.
 func TestOptInKeepsTheDatabasePathOutOfSessionShells(t *testing.T) {
 	optInHome(t)
 	installFakeV2(t)
-	if serverOnlyEnv("OPENCODE_DB") {
-		t.Fatal("OPENCODE_DB is stripped while the opt-in is off (a member's own setting must pass)")
+	got := shellEnvironment([]string{"OPENCODE_DB=/members/own.db", "FOO=1"})
+	if got["OPENCODE_DB"] != "/members/own.db" {
+		t.Fatal("a member's own OPENCODE_DB must pass")
 	}
 	_ = SetWantsV2(true)
-	got := shellEnvironment([]string{"OPENCODE_DB=/x", "FOO=1"})
+	paneEnv := CurrentLaunch().Env() // built while on
+	_ = SetWantsV2(false)            // the switch went back before the PUT
+	got = shellEnvironment(append(paneEnv, "FOO=1"))
 	if _, ok := got["OPENCODE_DB"]; ok || got["FOO"] != "1" {
 		t.Fatalf("shell environment = %v", got)
 	}
@@ -497,5 +502,89 @@ func TestDrainSeesABusyV2PaneAfterTheSwitchWentToV1(t *testing.T) {
 	_ = SetWantsV2(false)
 	if got := busyTerminals(srv.URL); len(got) != 1 || got[0] != "ses_busy" {
 		t.Fatalf("busy terminals after 2 → 1 = %v, want the running 2.x pane", got)
+	}
+}
+
+// An off reading stays off: the switch going on while BuildLaunch is in flight (between its
+// first reading and the engine environment) must not turn the 1.x launch into an attach to a
+// 2.x serve.
+func TestBuildLaunchOffReadingSurvivesAFlipOn(t *testing.T) {
+	optInHome(t)
+	useMajor(t, 1)
+	installFakeV2(t)
+	stubUsagePref(t, UsageOwn)
+	old := EngineEnv
+	EngineEnv = func(string) []string { _ = SetWantsV2(true); return nil }
+	t.Cleanup(func() { EngineEnv = old })
+	m := session.Meta{Name: "oc-flip", Dir: t.TempDir(), Kind: session.KindOpencode}
+	plan, err := (agentImpl{}).BuildLaunch(m, agents.LaunchOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Program != "opencode --auto" || strings.Contains(strings.Join(plan.Env, " "), "OPENCODE_SERVER") {
+		t.Fatalf("a launch read while off became %q (env %v)", plan.Program, plan.Env)
+	}
+	if got := buildProgramFor(CurrentLaunch(), "", "", "", false); !strings.Contains(got, "--standalone") {
+		t.Fatalf("precondition: the switch is on now: %q", got)
+	}
+}
+
+// An adopted daemon (Agent restarted: not supervised, still healthy) is drained like a supervised
+// one before it is signalled: its Terminal panes are still running turns on it.
+func TestRetiringAnAdoptedDaemonDrainsItsBusyTerminals(t *testing.T) {
+	optInHome(t)
+	t.Setenv("AF_OPENCODE_DRAIN_TIMEOUT_SEC", "1")
+	installFakeV2(t)
+	var cmd *exec.Cmd
+	dead := make(chan struct{})
+	var mu sync.Mutex
+	aborted := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-dead:
+			http.Error(w, "gone", http.StatusServiceUnavailable)
+			return
+		default:
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/info":
+			_, _ = w.Write([]byte(`{"version":"2.0.28"}`))
+		case r.URL.Path == "/api/session/active":
+			_, _ = w.Write([]byte(`{"data":{"ses_busy":{"type":"running"}}}`))
+		case strings.HasSuffix(r.URL.Path, "/interrupt"):
+			mu.Lock()
+			aborted = r.URL.Path
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			_, _ = w.Write([]byte(`{"healthy":true}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv(serveAddrEnv, srv.URL)
+	detectedMajor.Store(int32(apiV2))
+	t.Cleanup(func() { detectedMajor.Store(int32(apiV1)) })
+	cmd = sleepArgs(t, "serve", "--hostname", "127.0.0.1", "--port", servePort(srv.URL))
+	go func() { _ = cmd.Wait(); close(dead) }()
+	noteServeStart(cmd.Process.Pid, "v2:x")
+
+	m := session.Meta{Name: "oc-adopted", Dir: t.TempDir(), Kind: session.KindOpencode, Driver: session.DriverTUI}
+	sid := session.UUID(m.Dir, m.Name)
+	markSlotMode(sid, modeShared)
+	sids.Write(sid, "ses_busy")
+	t.Cleanup(func() { slotModes.Remove(sid); sids.Remove(sid) })
+	oldSlots := terminalSlots
+	terminalSlots = func() []session.Meta { return []session.Meta{m} }
+	t.Cleanup(func() { terminalSlots = oldSlots })
+
+	s := &Supervisor{} // not up: the Agent just restarted
+	if err := s.retireAdopted(srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(aborted, "ses_busy") {
+		t.Fatalf("the busy Terminal turn was neither waited for nor aborted before the daemon was stopped (abort %q)", aborted)
 	}
 }

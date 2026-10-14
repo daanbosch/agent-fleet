@@ -193,7 +193,7 @@ func (s *Supervisor) retireStaleFor(want string) error {
 		s.Restart("opencode major switched")
 		return nil
 	}
-	return s.retireAdopted(serveAddr(), up)
+	return s.retireAdopted(serveAddr())
 }
 
 // readRecordKey reads the record's key without the identity check, for the cheap "is there
@@ -206,7 +206,7 @@ func readRecordKey() (serveRecord, string) {
 // retireAdopted ends a daemon this Agent did not start itself, by the pid it recorded. Without a
 // record the daemon cannot be signalled, and the caller says so rather than attach to the wrong
 // opencode.
-func (s *Supervisor) retireAdopted(addr string, supervised bool) error {
+func (s *Supervisor) retireAdopted(addr string) error {
 	r, ok := recordedServe()
 	if !ok {
 		return fmt.Errorf("opencode serve が %s で別のメジャー版のまま動いています。止めてからやり直してください", addr)
@@ -214,9 +214,9 @@ func (s *Supervisor) retireAdopted(addr string, supervised bool) error {
 	s.mu.Lock()
 	s.stopping, s.up = true, false
 	s.mu.Unlock()
-	if supervised {
-		s.drain(addr)
-	}
+	// Drained whether or not this Agent supervised the daemon: after an Agent restart the daemon
+	// is healthy and its Terminal panes still run turns on it.
+	s.drain(addr)
 	signalRecorded(r, syscall.SIGTERM)
 	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) && healthy(addr) {

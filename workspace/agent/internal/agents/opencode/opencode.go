@@ -192,7 +192,7 @@ func (agentImpl) BuildLaunch(m session.Meta, _ agents.LaunchOpts) (agents.Launch
 	// opencode 2: the TUI attaches to af's own serve. The session is created (or resumed, or
 	// forked) through its API here, so none of the v1 store reads below apply to it.
 	if sharedTUIFor(spec) {
-		plan, ok, err := buildSharedLaunch(m, ocSid)
+		plan, ok, err := buildSharedLaunch(spec, m, ocSid)
 		if err != nil {
 			return agents.LaunchPlan{}, err
 		}
