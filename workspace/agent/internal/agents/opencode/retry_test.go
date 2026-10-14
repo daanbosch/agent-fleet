@@ -402,3 +402,22 @@ func TestRetryAfterTheTurnSettledIsIgnored(t *testing.T) {
 		h.mu.Unlock()
 	}
 }
+
+// A request that timed out may still be executed later, so a second one being acknowledged does
+// not make the abort confirmed.
+func TestTimedOutRetryAbortIsNotConfirmedByARetry(t *testing.T) {
+	old := serveClient.Timeout
+	serveClient.Timeout = 200 * time.Millisecond
+	t.Cleanup(func() { serveClient.Timeout = old })
+	retryAbortBackoff = 10 * time.Millisecond
+	t.Cleanup(func() { retryAbortBackoff = 500 * time.Millisecond })
+	m, srv := newMockServe(t)
+	release := make(chan struct{})
+	m.mu.Lock()
+	m.holdFirstAbort = release // the first POST times out inside the handler
+	m.mu.Unlock()
+	if confirmedAbort(srv.URL, "ses_test", "/tmp") {
+		t.Fatal("an abort whose first request timed out must not count as confirmed")
+	}
+	close(release)
+}

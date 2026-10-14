@@ -112,20 +112,23 @@ func (h *threadHandle) noteRetry(attempt int, msg string, nextMs int64) {
 var retryAbortBackoff = 500 * time.Millisecond
 
 // confirmedAbort sends the abort until the daemon answers 2xx, at most three times. A transport
-// error or a timeout proves nothing: the daemon may still execute a request it received, which
-// is why the caller treats "not confirmed" as unknown rather than as done.
+// error or a timeout proves nothing: the daemon may still execute a request it received, and a
+// later request being acknowledged does not say the earlier one is gone. So one such failure makes
+// the whole abort unconfirmed, whatever follows, and the caller treats that as unknown.
 func confirmedAbort(addr, ses, dir string) bool {
+	lost := false
 	for i := 0; i < 3; i++ {
 		if i > 0 {
 			time.Sleep(retryAbortBackoff)
 		}
 		res, err := serveClient.Post(abortURL(addr, ses, dir), "application/json", strings.NewReader("{}"))
 		if err != nil {
+			lost = true
 			continue
 		}
 		res.Body.Close()
 		if res.StatusCode/100 == 2 {
-			return true
+			return !lost
 		}
 	}
 	return false
