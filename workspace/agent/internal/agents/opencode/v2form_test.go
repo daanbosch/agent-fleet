@@ -73,13 +73,14 @@ func eventOfType(t *testing.T, lines []string, typ string) string {
 // formDaemon is a v2 daemon that also answers the form routes from fixtures.
 type formDaemon struct {
 	*v2Daemon
-	fmu         sync.Mutex
-	list        map[string]string // session → GET …/form body
-	detail      map[string]string // form id → GET …/form/{id} body
-	replyHook   func()            // runs inside a reply, before it is answered
-	replyStatus int               // answered instead of 204 when set
-	replies     []string          // "POST path body"
-	deletes     []string          // "DELETE uri"
+	fmu          sync.Mutex
+	list         map[string]string // session → GET …/form body
+	detail       map[string]string // form id → GET …/form/{id} body
+	replyHook    func()            // runs inside a reply, before it is answered
+	replyStatus  int               // answered instead of 204 when set
+	deleteStatus int               // same for a cancel
+	replies      []string          // "POST path body"
+	deletes      []string          // "DELETE uri"
 }
 
 func newFormDaemon(t *testing.T) *formDaemon {
@@ -124,6 +125,10 @@ func newFormDaemon(t *testing.T) *formDaemon {
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == "DELETE":
 			fd.deletes = append(fd.deletes, r.URL.RequestURI())
+			if fd.deleteStatus != 0 {
+				w.WriteHeader(fd.deleteStatus)
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.Error(w, "unexpected", http.StatusTeapot)
@@ -524,10 +529,6 @@ func TestV2SettledFormWhoseEventWasMissed(t *testing.T) {
 			fd.detail[f.ID] = string(v2Fixture(t, "form-detail.answered.json"))
 		},
 		"daemon forgot it": func(fd *formDaemon, f v2Form) {},
-		"reply races to 409": func(fd *formDaemon, f v2Form) {
-			fd.detail[f.ID] = string(v2Fixture(t, "form-detail.pending.json"))
-			fd.replyStatus = http.StatusConflict
-		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			fd := newFormDaemon(t)
@@ -561,5 +562,62 @@ func TestV2SettledFormWhoseEventWasMissed(t *testing.T) {
 	}
 	if snap, _ := h.Snapshot(); snap.Interaction != nil || snap.TurnState != agents.TurnRunning {
 		t.Fatalf("Respond left the handle waiting: %+v", snap)
+	}
+}
+
+// Respond itself recovers from a refusal that says "settled", with no mirror read to do it for it:
+// the request really went out (or, for a 404 on the detail, stopped before it), the error is
+// errFormSettled, and the handle has already let go of that form and kept the one behind it.
+func TestV2RespondRecoversFromARefusalThatSaysSettled(t *testing.T) {
+	answer := []agents.InteractionAnswer{{Options: []int{0}}}
+	pending := func(fd *formDaemon, f v2Form) { fd.detail[f.ID] = string(v2Fixture(t, "form-detail.pending.json")) }
+	cases := map[string]struct {
+		setup   func(fd *formDaemon, f v2Form)
+		reply   agents.InteractionReply
+		posts   int // replies that must have gone out
+		cancels int // cancels that must have gone out
+	}{
+		"POST 409 after a pending detail": {
+			setup: func(fd *formDaemon, f v2Form) { pending(fd, f); fd.replyStatus = http.StatusConflict },
+			reply: agents.InteractionReply{Decision: agents.DecisionAnswer, Answers: answer}, posts: 1,
+		},
+		"POST 404 after a pending detail": {
+			setup: func(fd *formDaemon, f v2Form) { pending(fd, f); fd.replyStatus = http.StatusNotFound },
+			reply: agents.InteractionReply{Decision: agents.DecisionAnswer, Answers: answer}, posts: 1,
+		},
+		"GET 404 on the detail": {
+			setup: func(fd *formDaemon, f v2Form) {},
+			reply: agents.InteractionReply{Decision: agents.DecisionAnswer, Answers: answer},
+		},
+		"DELETE 409": {
+			setup: func(fd *formDaemon, f v2Form) { fd.deleteStatus = http.StatusConflict },
+			reply: agents.InteractionReply{Decision: agents.DecisionCancel}, cancels: 1,
+		},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			fd := newFormDaemon(t)
+			h := formHandle(t, fd)
+			a, b := secondForm(t, h)
+			c.setup(fd, a)
+			waitOn(h, a, b)
+			c.reply.ID = a.ID
+			err := h.Respond(c.reply)
+			if !errors.Is(err, errFormSettled) {
+				t.Fatalf("Respond = %v, want errFormSettled", err)
+			}
+			fd.fmu.Lock()
+			posts, cancels := len(fd.replies), len(fd.deletes)
+			fd.fmu.Unlock()
+			if posts != c.posts || cancels != c.cancels {
+				t.Fatalf("requests sent: %d replies, %d cancels; want %d, %d", posts, cancels, c.posts, c.cancels)
+			}
+			h.mu.Lock()
+			forms, inter, state := len(h.forms), h.inter, h.state
+			h.mu.Unlock()
+			if forms != 1 || inter == nil || inter.ID != b.ID || state != agents.TurnWaitingInteraction {
+				t.Fatalf("after the refusal: %d forms, inter %+v, state %s; want only %s left", forms, inter, state, b.ID)
+			}
+		})
 	}
 }
