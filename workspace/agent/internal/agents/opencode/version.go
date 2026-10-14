@@ -19,6 +19,9 @@ var buildPinsPath = "/usr/local/share/agent-fleet/versions.json"
 
 // opencodeBinary resolves the opencode on PATH; a var so tests can point it at a fake tree.
 var opencodeBinary = func() string {
+	if UseV2() {
+		return V2Binary()
+	}
 	p, err := exec.LookPath("opencode")
 	if err != nil {
 		return ""

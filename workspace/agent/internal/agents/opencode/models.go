@@ -51,7 +51,7 @@ func Models() []string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "opencode", "models")
+	cmd := exec.CommandContext(ctx, Binary(), "models")
 	cmd.Env = withoutAWSCredentialChain(mergeCommandEnv(os.Environ(), providerEnv))
 	// Keep stderr. `cmd.Output()` throws it away, and this call fails silently in every other
 	// respect too — the error path returns a nil list, which the picker renders exactly like

@@ -31,7 +31,7 @@ func buildProgram(model, mode string, ocid string, fork bool) string {
 	// Env (AF_SESSION_SID + provider API keys) is carried on LaunchPlan.Env and
 	// injected by tmux `new-session -e`: prefixing NAME='value' onto the command
 	// put the keys into /proc/*/cmdline and pane_start_command in plaintext.
-	parts := []string{"opencode"}
+	parts := []string{shellBinary()}
 	// Run unattended like claude (--dangerously-skip-permissions) and codex
 	// (--dangerously-bypass-…): the container IS the sandbox, so auto-approve every
 	// permission prompt (external-dir access, edits, bash) instead of stalling the TUI on
@@ -96,7 +96,7 @@ func buildProgramV2(model, mode, ocid string, fork bool) string {
 	case "normal":
 		agent = "build"
 	}
-	tui := []string{"opencode", "--standalone", envOr("AGENT_OPENCODE_FLAGS", "--auto")}
+	tui := []string{shellBinary(), "--standalone", envOr("AGENT_OPENCODE_FLAGS", "--auto")}
 	if ocid == "" {
 		if cfg := freshSessionConfig(model, agent); cfg != "" {
 			tui = append([]string{"OPENCODE_CONFIG_CONTENT=" + session.ShellQuote(cfg)}, tui...)
@@ -110,7 +110,7 @@ func buildProgramV2(model, mode, ocid string, fork bool) string {
 	// shown only when it fails: a plan agent that silently stayed on build would let the
 	// session edit when the member chose plan.
 	api := func(sub, body string) string {
-		return `AF_OC_OUT=$(opencode api --standalone POST /api/session/` + target + "/" + sub + " -d " + session.ShellQuote(body) + " 2>&1)"
+		return `AF_OC_OUT=$(` + shellBinary() + ` api --standalone POST /api/session/` + target + "/" + sub + " -d " + session.ShellQuote(body) + " 2>&1)"
 	}
 	var switches []string
 	if prov, id, ok := splitModel(model); ok {
@@ -139,7 +139,7 @@ func buildProgramV2(model, mode, ocid string, fork bool) string {
 	if !fork {
 		return "AF_OC_SES=" + ses + "; if " + cond + "; then " + run + "; else " + fail("could not apply the model or agent") + "; fi"
 	}
-	return `AF_OC_OUT=$(opencode api --standalone POST /api/session/` + ses + `/fork -d '{}' 2>&1); ` +
+	return `AF_OC_OUT=$(` + shellBinary() + ` api --standalone POST /api/session/` + ses + `/fork -d '{}' 2>&1); ` +
 		`AF_OC_SES=$(printf '%s' "$AF_OC_OUT" | grep -o '"id":"ses_[A-Za-z0-9]*"' | head -n 1 | cut -d'"' -f4); ` +
 		`if [ -z "$AF_OC_SES" ]; then ` + fail("fork failed") + `; elif ` + cond + `; then ` + run +
 		`; else ` + fail("could not apply the model or agent") + `; fi`

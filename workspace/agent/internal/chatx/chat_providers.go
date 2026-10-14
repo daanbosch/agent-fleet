@@ -823,7 +823,7 @@ func (opencodeChat) Send(ctx context.Context, c *ChatConversation, prompt string
 		args = append(args, "--model", pinned)
 	}
 	args = append(args, headlessPrompt(c.personaOf(), c.knowledgeDirs(), prompt))
-	cmd := exec.CommandContext(ctx, "opencode", args...)
+	cmd := exec.CommandContext(ctx, opencode.Binary(), args...)
 	cmd.Dir = dir
 	env := opencode.Env()
 	env = append(env, opencodeConfigEnv(opencodeChatConfig(c))...)
@@ -2132,7 +2132,7 @@ func OneShotHeadlessRun(ctx context.Context, feature string, tier OneShotTier, p
 			call.ModelReq = m
 		}
 		args = append(args, headlessPrompt(persona, nil, prompt))
-		cmd := exec.CommandContext(ctx, "opencode", args...)
+		cmd := exec.CommandContext(ctx, opencode.Binary(), args...)
 		cmd.Dir = chatWorkdir()
 		cmd.Env = envWith(env...)
 		out, err := cmd.Output()
@@ -2152,7 +2152,7 @@ func OneShotHeadlessRun(ctx context.Context, feature string, tier OneShotTier, p
 		// from ctx (the reply is already in hand; cleanup shouldn't be cancelled).
 		if sesID != "" {
 			go func() {
-				cl := exec.Command("opencode", "session", "delete", sesID)
+				cl := exec.Command(opencode.Binary(), "session", "delete", sesID)
 				cl.Dir = chatWorkdir()
 				cl.Env = envWith(opencode.Env()...)
 				_ = cl.Run()

@@ -87,6 +87,8 @@ type Supervisor struct {
 	askedStop *exec.Cmd
 	// watching: one zero-demand watcher (agents.WatchIdle, idlestop.go) is running.
 	watching bool
+	// key is launchKey() as of the daemon's start (or adoption): which opencode it is.
+	key string
 }
 
 var supervisor = &Supervisor{}
@@ -282,6 +284,9 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 	if s.Disabled() {
 		return "", 0, errors.New("opencode serve is disabled (AF_OPENCODE_SERVE_DISABLE=1)")
 	}
+	if err := s.retireStale(); err != nil {
+		return "", 0, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	addr := serveAddr()
@@ -296,6 +301,7 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 		s.cmd = nil
 		s.up = true
 		s.stopping = false
+		s.key = adoptedKey()
 		s.armIdleWatchLocked()
 		go s.monitorEvents(addr, s.gen)
 		log.Printf("opencode serve: adopted running daemon at %s (gen %d)", addr, s.gen)
@@ -331,7 +337,7 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 			useServePassword(prevPassword)
 		}
 	}()
-	cmd := exec.Command("opencode", "serve", "--hostname", host, "--port", port)
+	cmd := exec.Command(Binary(), "serve", "--hostname", host, "--port", port)
 	// Provider keys are env-injected (auth.go) — the same set a TUI launch gets, so
 	// managed turns authenticate identically. Re-keying requires a Restart (§7). The
 	// auth variables come last: a duplicate key keeps its final value.
@@ -363,6 +369,8 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 			s.cmd = cmd
 			s.up = true
 			s.stopping = false
+			s.key = launchKey()
+			noteServeStart(cmd.Process.Pid, s.key)
 			gen := s.gen
 			s.armIdleWatchLocked()
 			go s.waitDaemon(cmd, tail, gen)

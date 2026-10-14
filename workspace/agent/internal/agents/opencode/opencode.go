@@ -199,6 +199,11 @@ func (agentImpl) BuildLaunch(m session.Meta, _ agents.LaunchOpts) (agents.Launch
 		}
 	} else if installedMajor() >= 2 {
 		markSlotMode(ocSid, modeStandalone)
+	} else {
+		// A pane launched on 1.x is never attached to the serve. Without this a record left by an
+		// earlier opencode 2 launch of the slot (the opt-in was on then) would make a later switch
+		// back to 2 count this 1.x pane as a dependent of the 2.x serve.
+		slotModes.Remove(ocSid)
 	}
 	// Resume the slot's OWN opencode conversation (activeSession: the plugin-captured
 	// per-slot id, else a store-derived conversation this slot itself opened — never an

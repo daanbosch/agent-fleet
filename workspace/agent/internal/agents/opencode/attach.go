@@ -30,7 +30,7 @@ func RunAttach(args []string) {
 
 // execTUI replaces the process with opencode; a var so a test can observe the argv.
 var execTUI = func(argv, environ []string) error {
-	bin, err := exec.LookPath("opencode")
+	bin, err := exec.LookPath(Binary())
 	if err != nil {
 		return err
 	}

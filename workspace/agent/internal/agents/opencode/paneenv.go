@@ -17,9 +17,11 @@ import (
 )
 
 // serverOnlyEnv are the variables that belong to the TUI's connection to the server and must not
-// reach a shell.
+// reach a shell. Under the opt-in the opencode 2 database path is one of them: a 1.x `opencode`
+// run from a session's shell would otherwise open the 2.x database and write 1.x tables into it.
 func serverOnlyEnv(name string) bool {
-	return name == "OPENCODE_SERVER_PASSWORD" || name == "OPENCODE_SERVER_USERNAME"
+	return name == "OPENCODE_SERVER_PASSWORD" || name == "OPENCODE_SERVER_USERNAME" ||
+		(name == "OPENCODE_DB" && UseV2())
 }
 
 // shellEnvironment turns KEY=VALUE entries into the map PUT /environment takes, minus the
