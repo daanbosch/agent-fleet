@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/portprobe"
 )
@@ -190,8 +194,14 @@ func TestBrowserStaleProbeResultIsDropped(t *testing.T) {
 		t.Fatal("the page's lock is held while probing")
 	}
 	h.navigate("L2", "http://127.0.0.1:3000/other") // the page moves on
+	h.stateMessages()                               // drop what was sent so far
 	once.Do(func() { close(release) })
 	time.Sleep(100 * time.Millisecond)
+	for _, m := range h.stateMessages() {
+		if m["state"] == "target-unreachable" {
+			t.Fatalf("a stale failure was sent after the newer navigation: %v", m)
+		}
+	}
 	if got := h.p.response(); got.Reason != "" {
 		t.Fatalf("a stale probe result reached the page: %+v", got)
 	}
@@ -278,5 +288,59 @@ func TestBrowserLiveUnreachableReason(t *testing.T) {
 				t.Fatalf("%+v, want no reason", got)
 			}
 		})
+	}
+}
+
+// A probe that finishes before any viewer attaches has nobody to tell; the viewer that
+// attaches later must still learn the reason, after the "ready" the Console takes as a
+// state of its own.
+func TestBrowserReasonReachesAViewerAttachedAfterTheProbe(t *testing.T) {
+	port := listenBanner(t)
+	h := newReasonHarness(t, port, portprobe.Probe)
+	h.p.mu.Lock()
+	h.p.viewer = nil
+	h.p.mu.Unlock()
+	previous := WorkspaceBrowserManager
+	WorkspaceBrowserManager = h.m
+	server := httptest.NewServer(buildMux())
+	t.Cleanup(func() {
+		server.Close()
+		WorkspaceBrowserManager = previous
+	})
+
+	h.navigate("L1", "http://127.0.0.1:"+strconv.Itoa(port)+"/")
+	h.fail("L1")
+	if !waitFor(5*time.Second, func() bool { return h.reason() == portprobe.NotHTTP }) {
+		t.Fatalf("no reason: %+v", h.p.response())
+	}
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/ws/browser?id="+h.p.id, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var types []string
+	var last map[string]any
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for last == nil || last["type"] != "state" {
+		mt, payload, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read after %v: %v", types, err)
+		}
+		if mt != websocket.TextMessage {
+			continue
+		}
+		var m map[string]any
+		if json.Unmarshal(payload, &m) != nil {
+			continue
+		}
+		types = append(types, m["type"].(string))
+		last = m
+	}
+	if last["state"] != "target-unreachable" || last["reason"] != portprobe.NotHTTP {
+		t.Fatalf("late viewer got %v, want target-unreachable with %s", last, portprobe.NotHTTP)
+	}
+	if types[0] != "ready" {
+		t.Fatalf("message order %v: ready must come first", types)
 	}
 }

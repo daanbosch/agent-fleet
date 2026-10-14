@@ -166,6 +166,11 @@ func HandleBrowserWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	ready := p.readyMessage()
 	v.enqueueText(ready)
+	// The Console takes "ready" as state ready. A probe that finished before this viewer
+	// attached had nobody to tell, so say the reason again right after it.
+	if m := p.reasonMessage(); m != nil {
+		v.enqueueText(m)
+	}
 	writerDone := make(chan struct{})
 	go func() {
 		v.writeLoop()
@@ -201,6 +206,18 @@ func (p *browserPage) readyMessage() []byte {
 		"type": "ready", "version": 1, "url": p.url, "title": p.title,
 		"width": p.viewport.Width, "height": p.viewport.Height,
 	})
+}
+
+// reasonMessage is the state message carrying the probed reason, or nil when the page
+// has none to give.
+func (p *browserPage) reasonMessage() []byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r := p.reasonLocked()
+	if r == "" || p.state != "target-unreachable" {
+		return nil
+	}
+	return mustBrowserJSON(map[string]any{"type": "state", "state": "target-unreachable", "reason": r})
 }
 
 func (v *browserViewer) enqueueText(data []byte) {

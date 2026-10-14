@@ -1017,8 +1017,9 @@ func (p *browserPage) probeReason(addr, key string) {
 	if addr == "" {
 		return
 	}
+	probe := reasonProbe // read here, not in the goroutine: tests swap the variable
 	go func() {
-		kind := reasonProbe(context.Background(), addr)
+		kind := probe(context.Background(), addr)
 		if kind != portprobe.NotHTTP && kind != portprobe.TLS {
 			return // nothing listening / HTTP / unknown: the generic text stays
 		}
@@ -1028,8 +1029,13 @@ func (p *browserPage) probeReason(addr, key string) {
 			return
 		}
 		p.reason = kind
+		// Notified under the same lock as the check: released in between, a newer
+		// navigation's loading/ready could be sent first and this stale failure
+		// would then arrive after it. enqueueText never blocks.
+		if p.viewer != nil {
+			p.viewer.enqueueText(mustBrowserJSON(map[string]any{"type": "state", "state": "target-unreachable", "reason": kind}))
+		}
 		p.mu.Unlock()
-		p.notifyJSON(map[string]any{"type": "state", "state": "target-unreachable", "reason": kind})
 	}()
 }
 

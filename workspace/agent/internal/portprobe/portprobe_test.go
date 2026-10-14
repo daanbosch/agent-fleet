@@ -113,3 +113,18 @@ func TestProbeSendsOneHeadRequest(t *testing.T) {
 		t.Fatalf("requests=%d offPath=%d method=%v, want one HEAD /", methods.Load(), paths.Load(), gotMethod.Load())
 	}
 }
+
+// A server that speaks first (an SSH banner) must read as not-HTTP every time, not only
+// when the banner loses the race against the request (measured: with http.Transport about
+// 1 in 50 probes failed with "readLoopPeekFailLocked").
+func TestProbeBannerFirstIsStable(t *testing.T) {
+	addr, _ := rawListener(t, func(c net.Conn) {
+		defer c.Close()
+		_, _ = c.Write([]byte("SSH-2.0-OpenSSH_9.6\r\n"))
+	})
+	for i := 0; i < 300; i++ {
+		if got := Probe(context.Background(), addr); got != NotHTTP {
+			t.Fatalf("probe %d: %q, want %q", i, got, NotHTTP)
+		}
+	}
+}

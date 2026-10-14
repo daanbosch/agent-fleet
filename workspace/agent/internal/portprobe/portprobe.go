@@ -5,6 +5,7 @@
 package portprobe
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -80,28 +81,37 @@ const (
 // the outcome, or "" when the port answered with HTTP. The caller guarantees addr is a
 // loopback address of this workspace.
 //
-// HEAD, once, no redirects followed, no keep-alive: the browser's own navigation has
-// already sent a GET to this port, so this adds no request a handler could not have seen,
-// and it carries no body. A port that answers HTTP at all (even a 400) returns "": the
-// pane would have loaded that page, so a navigation that failed against it did not fail
-// for a protocol reason this probe can name.
+// HEAD, once, no redirects followed, one connection used once: the browser's own
+// navigation has already sent a GET to this port, so this adds no request a handler could
+// not have seen, and it carries no body. A port that answers HTTP at all (even a 400)
+// returns "": the pane would have loaded that page, so a navigation that failed against
+// it did not fail for a protocol reason this probe can name.
+//
+// The connection is driven by hand rather than through http.Transport: a server that
+// speaks first (an SSH banner) makes the transport's idle read loop fail the request with
+// an error that carries no usable type ("readLoopPeekFailLocked: %!w(<nil>)", measured),
+// so such a port would read as "failed" depending on timing. Reading the reply ourselves
+// gives the same parser errors Classify already knows.
 func Probe(ctx context.Context, addr string) string {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
+	conn, err := (&net.Dialer{Timeout: dialTimeout}).DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return Classify(err)
+	}
+	defer conn.Close()
+	deadline, _ := ctx.Deadline()
+	_ = conn.SetDeadline(deadline)
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, "http://"+addr+"/", nil)
 	if err != nil {
 		return Failed
 	}
-	client := &http.Client{
-		Transport: &http.Transport{
-			Proxy:             nil, // never route a loopback probe through an environment proxy
-			DialContext:       (&net.Dialer{Timeout: dialTimeout}).DialContext,
-			DisableKeepAlives: true,
-		},
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	req.Header.Set("User-Agent", "agent-fleet-portprobe")
+	req.Close = true
+	if err := req.Write(conn); err != nil {
+		return Classify(err)
 	}
-	defer client.CloseIdleConnections()
-	resp, err := client.Do(req)
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
 	if err != nil {
 		return Classify(err)
 	}
