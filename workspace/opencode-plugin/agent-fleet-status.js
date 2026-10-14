@@ -42,7 +42,7 @@
 // lifecycle edges and need no such window.
 //
 // It also records the opencode session id (ses_…) of the live session, keyed by
-// AF_SESSION_SID, into ~/.config/agent-fleet/opencode-sid/<AF_SESSION_SID>. The Agent
+// AF_SESSION_SID, into ~/.local/state/agent-fleet/opencode-sid/<AF_SESSION_SID>. The Agent
 // reads it to resume THIS slot's own session (opencode --session <id>) on relaunch,
 // so each slot keeps a distinct conversation instead of sharing via --continue.
 import { execFile } from "node:child_process";
@@ -56,12 +56,9 @@ const AGENT_BIN = process.env.AF_WORKSPACE_AGENT_BIN || "/usr/local/bin/workspac
 
 const bridge = () => {
   const envSid = process.env.AF_SESSION_SID;
-  // Where the Agent reads slot -> session ids. A standalone/opencode 1 pane keeps writing the
-  // directory it always has; the shared server writes where the Agent reads today
-  // (paths.AgentStateDir), which is not that one since ADR 0087 moved the store.
-  const sidDir = process.env.HOME
-    ? join(process.env.HOME, envSid ? ".config/agent-fleet/opencode-sid" : ".local/state/agent-fleet/opencode-sid")
-    : null;
+  // Where the Agent reads slot -> session ids (paths.AgentStateDir/opencode-sid). It does not
+  // follow XDG_STATE_HOME, so neither does this.
+  const sidDir = process.env.HOME ? join(process.env.HOME, ".local/state/agent-fleet/opencode-sid") : null;
   let queue = Promise.resolve();
   // Set when the plugin unloads. Whatever is still in flight (a session lookup, a queued report)
   // must not write the slot or report a state after a reload's new bridge took over.

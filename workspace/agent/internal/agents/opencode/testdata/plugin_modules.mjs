@@ -123,7 +123,7 @@ assert.equal(ids.size, 3, "plugin ids must be distinct");
 // status: states reported in order, ids recorded, subagent sessions left out.
 {
   const states = () => (existsSync(agentLog) ? readFileSync(agentLog, "utf8").trim().split("\n").filter(Boolean) : []);
-  const ocid = () => readFileSync(join(process.env.HOME, ".config/agent-fleet/opencode-sid", process.env.AF_SESSION_SID), "utf8");
+  const ocid = () => readFileSync(join(process.env.HOME, ".local/state/agent-fleet/opencode-sid", process.env.AF_SESSION_SID), "utf8");
   const ev = (type, data) => ({ type, data });
   const h = v2Host();
   const cleanup = mods.status.setup(h.ctx);
