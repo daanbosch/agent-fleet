@@ -320,7 +320,8 @@ export interface MoveResultItem {
 }
 
 /** Where the Agent memory switch's reconciler is (`auto-sync`, #1972). */
-export type AutoSyncPhase = "off" | "importing" | "on" | "writing_back";
+/** "unreadable": the Agent's state file cannot be read, so the phase is unknown and native memory stays off. */
+export type AutoSyncPhase = "off" | "importing" | "on" | "writing_back" | "unreadable";
 
 export interface AutoSyncProject {
   id: string;
@@ -364,6 +365,8 @@ export interface AutoSyncStatus {
   catchUpPending?: number;
   nativeMemoryOff: boolean;
   nativeBackOn?: boolean;
+  /** What the Agent could not do by itself: state_unreadable, state_not_saved, codex_flag. */
+  problems?: string[];
   run?: AutoSyncRun;
 }
 

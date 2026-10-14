@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/claude"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memoryx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 )
 
@@ -37,9 +38,9 @@ func TestUIPrefsPutKeepsNativeMemoryOffUntilTheWriteBack(t *testing.T) {
 	}
 }
 
-// Stage A of codex: AF memory going on switches features.memories off in config.toml and leaves
-// the rest of the file alone. (Putting the member's value back is the reconciler's, tested in
-// memoryx.)
+// Stage A of codex through the real PUT and config.toml: AF memory going on switches
+// features.memories off and leaves the rest of the file alone, and going off puts the member's
+// own value back.
 func TestAutoSyncWiresTheCodexFlagToConfigToml(t *testing.T) {
 	instrEnv(t)
 	cfg := filepath.Join(paths.CodexHome(), "config.toml")
@@ -56,9 +57,14 @@ func TestAutoSyncWiresTheCodexFlagToConfigToml(t *testing.T) {
 		if rec.Code != 200 {
 			t.Fatalf("PUT %s: %d", body, rec.Code)
 		}
+		memoryx.AutoSyncRunUntilIdle()
 	}
 	put(`{"agentMemory":true}`)
 	if b, _ := os.ReadFile(cfg); !strings.Contains(string(b), "memories = false") || !strings.Contains(string(b), "# mine") {
 		t.Fatalf("config.toml after switching on:\n%s", b)
+	}
+	put(`{"agentMemory":false}`)
+	if b, _ := os.ReadFile(cfg); !strings.Contains(string(b), "memories = true") || !strings.Contains(string(b), "# mine") {
+		t.Fatalf("config.toml after switching off:\n%s", b)
 	}
 }

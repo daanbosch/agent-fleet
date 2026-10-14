@@ -2,6 +2,7 @@ package memoryx
 
 import (
 	"bytes"
+	"encoding/json"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -671,5 +672,187 @@ func TestAutoSyncHandlers(t *testing.T) {
 	}
 	if rec := do(HandleAutoSyncAction, "POST", "/agents/memory/auto-sync", `{"action":"wake"}`); rec.Code != 200 {
 		t.Errorf("wake = %d", rec.Code)
+	}
+}
+
+// blockStateSave makes the state file's temp name a directory, so every save fails.
+func blockStateSave(t *testing.T, on bool) {
+	t.Helper()
+	tmp := autoStatePath() + ".tmp"
+	if on {
+		if err := os.MkdirAll(tmp, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	_ = os.RemoveAll(tmp)
+}
+
+func diskPhase(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile(autoStatePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := map[string]any{}
+	if json.Unmarshal(b, &m) != nil {
+		t.Fatalf("state file is not JSON: %s", b)
+	}
+	p, _ := m["phase"].(string)
+	return p
+}
+
+// A state that cannot be saved starts nothing: no import runs against a phase that is not on
+// disk, and native memory stays off, in both directions.
+func TestAutoSyncStateSaveFailureStartsNothing(t *testing.T) {
+	e := newAutoEnv(t)
+	e.file("one", "one", "project", "body")
+	blockStateSave(t, true)
+	e.want = true
+	AutoSyncWake()
+	e.drain()
+	if len(afNames(t, e.pid)) != 0 {
+		t.Fatal("an import ran although the phase could not be saved")
+	}
+	if diskPhase(t) != autoPhaseOff || !AutoSyncNativeMemoryOff() || !strings.Contains(strings.Join(autoStatus().Problems, ","), autoProblemNotSaved) {
+		t.Fatalf("status = %+v", autoStatus())
+	}
+	blockStateSave(t, false)
+	e.drain()
+	if got := afNames(t, e.pid); !eq(got, []string{"one"}) || autoStatus().Phase != autoPhaseOn {
+		t.Fatalf("after the save works again: %v %+v", got, autoStatus())
+	}
+
+	// Switching off while saves fail: the durable phase is still `on`, so the write-back is not
+	// skipped and native memory does not resume.
+	e.save("only-af", "af", "project", "af body")
+	blockStateSave(t, true)
+	e.want = false
+	AutoSyncWake()
+	e.drain()
+	if diskPhase(t) != autoPhaseOn || !AutoSyncNativeMemoryOff() {
+		t.Fatalf("phase %s, native off %v", diskPhase(t), AutoSyncNativeMemoryOff())
+	}
+	blockStateSave(t, false)
+	e.drain()
+	if st := autoStatus(); st.Phase != autoPhaseOff || !eq(e.nativeNames(e.slug), []string{"one", "only-af"}) {
+		t.Fatalf("status %+v, claude holds %v", st, e.nativeNames(e.slug))
+	}
+}
+
+// A state file that exists but cannot be read is not a first start: nothing is adopted over it,
+// native memory stays off, and only the member's choice replaces it.
+func TestAutoSyncUnreadableStateIsNotAdopted(t *testing.T) {
+	e := newAutoEnv(t)
+	e.file("one", "one", "project", "body")
+	e.flip(true)
+	e.save("only-af", "af", "project", "af body")
+	e.want = false
+	AutoSyncWake() // writing_back is on disk, the write-back has not run
+	if diskPhase(t) != autoPhaseWritingBack {
+		t.Fatal(diskPhase(t))
+	}
+	if err := os.WriteFile(autoStatePath(), []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	autoAdopt() // the restart
+	if b, _ := os.ReadFile(autoStatePath()); string(b) != "{broken" {
+		t.Fatalf("the unreadable state was overwritten: %s", b)
+	}
+	e.drain()
+	st := autoStatus()
+	if st.Phase != "unreadable" || !st.Failing || !st.NativeMemoryOff || !AutoSyncNativeMemoryOff() {
+		t.Fatalf("status = %+v", st)
+	}
+	if len(e.nativeNames(e.slug)) != 1 {
+		t.Fatal("something was written while the phase was unknown")
+	}
+	if err := autoAbandon(); err != nil {
+		t.Fatal(err)
+	}
+	if st := autoStatus(); st.Phase != autoPhaseOff || st.NativeMemoryOff || !st.NativeBackOn {
+		t.Fatalf("after giving up: %+v", st)
+	}
+}
+
+// off → on → off (write-back not run yet) → on: the sessions that launched with native memory on
+// are still owed their catch-up.
+func TestAutoSyncCatchUpSurvivesAFlipBackBeforeTheWriteBack(t *testing.T) {
+	e := newAutoEnv(t)
+	e.file("early", "early", "project", "early body")
+	e.live = []string{"claude-main"}
+	e.flip(true)
+	e.want = false
+	AutoSyncWake() // writing_back, not run
+	e.flip(true)
+	if st := autoStatus(); st.Phase != autoPhaseOn || st.CatchUpPending != 1 {
+		t.Fatalf("status = %+v", st)
+	}
+	e.file("late", "written by the early session", "project", "late body")
+	e.live = nil
+	e.drain()
+	if got := afNames(t, e.pid); !eq(got, []string{"early", "late"}) {
+		t.Fatalf("the catch-up was lost: %v", got)
+	}
+}
+
+// The codex flag is retried until it takes, in a stable phase too, and an Agent that adopts a
+// switch that was already on switches it off.
+func TestAutoSyncCodexFlagIsRetriedAndAdopted(t *testing.T) {
+	e := newAutoEnv(t)
+	e.codexVal, e.codexFound = true, true
+	failing := true
+	AutoSyncCodexSet = func(on bool) error {
+		if failing {
+			return os.ErrPermission
+		}
+		e.codexVal, e.codexFound = on, true
+		return nil
+	}
+	e.flip(true)
+	if !e.codexVal || !strings.Contains(strings.Join(autoStatus().Problems, ","), autoProblemCodex) {
+		t.Fatalf("the failed write was not reported: %+v", autoStatus())
+	}
+	failing = false
+	e.drain()
+	if e.codexVal || len(autoStatus().Problems) != 0 {
+		t.Fatalf("switch-on write never retried: flag %v, %+v", e.codexVal, autoStatus())
+	}
+	failing = true
+	e.flip(false)
+	if e.codexVal || autoStatus().Phase != autoPhaseOff {
+		t.Fatalf("flag %v phase %s", e.codexVal, autoStatus().Phase)
+	}
+	failing = false
+	e.drain()
+	if !e.codexVal {
+		t.Fatal("the restore never retried in the stable `off` phase")
+	}
+
+	// Adoption of a switch that was already on.
+	e.codexVal, e.codexFound = true, true
+	_ = os.Remove(autoStatePath())
+	e.want = true
+	autoAdopt()
+	e.drain()
+	if e.codexVal {
+		t.Error("an adopted switch left codex's memories on")
+	}
+}
+
+// The member turns the flag on, then off again, and AF memory goes off before the next poll: the
+// last edit wins over the recorded value.
+func TestAutoSyncCodexMemberEditJustBeforeOff(t *testing.T) {
+	e := newAutoEnv(t)
+	e.codexVal, e.codexFound = true, true
+	e.flip(true)
+	e.codexVal = true
+	e.drain() // a poll sees it
+	e.codexVal = false
+	e.want = false
+	AutoSyncWake() // straight into the write-back, no poll in between
+	e.drain()
+	if e.codexVal {
+		t.Error("the restore overwrote the member's last edit")
 	}
 }

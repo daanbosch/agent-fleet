@@ -119,6 +119,9 @@ type autoSyncCodex struct {
 	Restore bool `json:"restore"`
 	// Last is the value AF last saw or wrote; a different value later is the member's edit.
 	Last bool `json:"last"`
+	// Forcing: the flag was `true` when AF memory went on and is still to be switched off. Set
+	// before the flag is touched, so a failed write is retried and a kill loses nothing.
+	Forcing bool `json:"forcing,omitempty"`
 }
 
 // AutoSyncRun is the result of one run, shown on Settings > Agent memory.
@@ -174,100 +177,166 @@ func (r *AutoSyncRun) addRow(row AutoSyncRow) {
 	r.Rows = append(r.Rows, row)
 }
 
-func autoLoadLocked() (autoSyncState, bool) {
+// autoLoadState says what the state file holds.
+type autoLoadState int
+
+const (
+	autoStateMissing autoLoadState = iota // no file: a first start
+	autoStateLoaded
+	autoStateUnreadable // a file that cannot be read or parsed: what it said is not known
+)
+
+func autoLoadLocked() (autoSyncState, autoLoadState) {
 	var st autoSyncState
 	b, err := os.ReadFile(autoStatePath())
+	if errors.Is(err, os.ErrNotExist) {
+		return autoSyncState{}, autoStateMissing
+	}
 	if err != nil || json.Unmarshal(b, &st) != nil {
-		return autoSyncState{}, false
+		return autoSyncState{}, autoStateUnreadable
 	}
 	switch st.Phase {
 	case autoPhaseOff, autoPhaseImporting, autoPhaseOn, autoPhaseWritingBack:
-		return st, true
+		return st, autoStateLoaded
 	}
-	return autoSyncState{}, false
+	return autoSyncState{}, autoStateUnreadable
 }
 
-func autoSaveLocked(st autoSyncState) {
+func autoSaveLocked(st autoSyncState) error {
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
-		return
+		return err
 	}
 	tmp := autoStatePath() + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		log.Printf("agent memory: auto sync: state not saved (%s)", agentMemErrKind(err))
-		return
+		return err
 	}
 	if err := os.Rename(tmp, autoStatePath()); err != nil {
 		_ = os.Remove(tmp)
-		log.Printf("agent memory: auto sync: state not saved (%s)", agentMemErrKind(err))
+		return err
+	}
+	return nil
+}
+
+// Problems the Agent could not resolve by itself, shown in the status. Each is cleared by the
+// pass that succeeds.
+const (
+	autoProblemUnreadable = "state_unreadable"
+	autoProblemNotSaved   = "state_not_saved"
+	autoProblemCodex      = "codex_flag"
+)
+
+var (
+	autoProblemMu sync.Mutex
+	autoProblems  = map[string]bool{}
+)
+
+func autoProblem(code string, on bool) {
+	autoProblemMu.Lock()
+	defer autoProblemMu.Unlock()
+	if on {
+		autoProblems[code] = true
+	} else {
+		delete(autoProblems, code)
 	}
 }
 
-// autoUpdate loads the state (`off` when nothing is recorded), lets f change it and saves it.
-func autoUpdate(f func(st *autoSyncState)) autoSyncState {
+func autoProblemList() []string {
+	autoProblemMu.Lock()
+	defer autoProblemMu.Unlock()
+	var out []string
+	for k := range autoProblems {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// errAutoState: the phase could not be read or saved, so nothing that depends on it was started.
+var errAutoState = errors.New("agent memory auto sync: state unavailable")
+
+// autoUpdate loads the state (`off` when there is no file), lets f change it and saves it. The
+// state it returns is the durable one: when the save fails, or the file cannot be read, it
+// returns errAutoState and the unchanged state, so a caller never acts on a phase that is not on
+// disk. Nothing is overwritten when the file exists but cannot be read.
+func autoUpdate(f func(st *autoSyncState)) (autoSyncState, error) {
 	autoMu.Lock()
 	defer autoMu.Unlock()
-	st, ok := autoLoadLocked()
-	if !ok {
+	st, ls := autoLoadLocked()
+	if ls == autoStateUnreadable {
+		autoProblem(autoProblemUnreadable, true)
+		return autoSyncState{Phase: autoPhaseOff}, errAutoState
+	}
+	autoProblem(autoProblemUnreadable, false)
+	if ls == autoStateMissing {
 		st = autoSyncState{Phase: autoPhaseOff, Since: autoNow().UTC().Format(time.RFC3339)}
 	}
 	// Compared as written: st holds pointers, so a struct copy would change with it.
 	before, _ := json.Marshal(st)
-	f(&st)
-	if after, _ := json.Marshal(st); !ok || string(before) != string(after) {
-		autoSaveLocked(st)
+	durable := st
+	if durable.Codex != nil {
+		c := *durable.Codex
+		durable.Codex = &c
 	}
-	return st
+	f(&st)
+	if after, _ := json.Marshal(st); ls == autoStateMissing || string(before) != string(after) {
+		if err := autoSaveLocked(st); err != nil {
+			log.Printf("agent memory: auto sync: state not saved (%s)", agentMemErrKind(err))
+			autoProblem(autoProblemNotSaved, true)
+			return durable, errAutoState
+		}
+	}
+	autoProblem(autoProblemNotSaved, false)
+	return st, nil
 }
 
 // autoAdopt records the phase an Agent with no state file is in: one that already had the switch
 // on (it predates this reconciler) has nothing owed, so it starts at `on` and no import runs
-// unasked. It is done once, at start, and never by a flip: a flip on an Agent with no state
-// must import.
+// unasked. It is done once, at start, only when there is no file at all, and never by a flip: a
+// flip on an Agent with no state must import. A file that exists but cannot be read is not
+// "first start": its phase is unknown, so nothing is adopted over it.
 func autoAdopt() {
 	autoMu.Lock()
 	defer autoMu.Unlock()
-	if _, ok := autoLoadLocked(); ok {
+	switch _, ls := autoLoadLocked(); ls {
+	case autoStateLoaded:
+		return
+	case autoStateUnreadable:
+		autoProblem(autoProblemUnreadable, true)
 		return
 	}
 	st := autoSyncState{Phase: autoPhaseOff, Since: autoNow().UTC().Format(time.RFC3339)}
 	if autoWant() {
 		st.Phase = autoPhaseOn
 	}
-	autoSaveLocked(st)
+	if err := autoSaveLocked(st); err != nil {
+		log.Printf("agent memory: auto sync: state not saved (%s)", agentMemErrKind(err))
+		autoProblem(autoProblemNotSaved, true)
+	}
 }
 
 // AutoSyncNativeMemoryOff says whether a claude launch must switch its native memory off: in
-// every phase but `off`, and whenever the switch itself is on. Before the first state is written
-// (an Agent that has never reconciled) the switch alone decides.
+// every phase but `off`, whenever the switch itself is on, and whenever the phase is not known
+// (an unreadable state file). Before the first state is written (an Agent that has never
+// reconciled) the switch alone decides.
 func AutoSyncNativeMemoryOff() bool {
 	if autoWant() {
 		return true
 	}
 	autoMu.Lock()
 	defer autoMu.Unlock()
-	st, ok := autoLoadLocked()
-	return ok && st.Phase != autoPhaseOff
+	st, ls := autoLoadLocked()
+	return ls == autoStateUnreadable || ls == autoStateLoaded && st.Phase != autoPhaseOff
 }
 
-func autoCodexRecord(st *autoSyncState) {
-	if st.Codex != nil || AutoSyncCodexFlag == nil || AutoSyncCodexSet == nil {
-		return
-	}
-	// Absent and false are both "off" for codex; neither is restored.
-	if val, found := AutoSyncCodexFlag(); found && val {
-		if err := AutoSyncCodexSet(false); err != nil {
-			log.Printf("agent memory: auto sync: codex memories flag not switched off (%s)", agentMemErrKind(err))
-			return
-		}
-		st.Codex = &autoSyncCodex{Restore: true}
-	}
-}
+// The codex flag (stage A) is reconciled from the persisted record on every pass, in every
+// phase, so a failed write is retried and a crash cannot lose the value to restore. The order is
+// always: record durably, then touch the flag, then record that it is done.
 
-// autoCodexWatch notices an edit of the flag the member made while AF memory is on: their value
-// replaces the recorded one.
+// autoCodexWatch notices an edit of the flag the member made: their value replaces the recorded
+// one. It only reads, so it can run inside an update.
 func autoCodexWatch(st *autoSyncState) {
-	if st.Codex == nil || AutoSyncCodexFlag == nil {
+	if st.Codex == nil || st.Codex.Forcing || AutoSyncCodexFlag == nil {
 		return
 	}
 	if cur, _ := AutoSyncCodexFlag(); cur != st.Codex.Last {
@@ -275,25 +344,64 @@ func autoCodexWatch(st *autoSyncState) {
 	}
 }
 
-func autoCodexRestore(st *autoSyncState) {
-	if st.Codex == nil {
+func autoCodexReconcile() {
+	if AutoSyncCodexFlag == nil || AutoSyncCodexSet == nil {
 		return
 	}
-	if st.Codex.Restore && AutoSyncCodexFlag != nil && AutoSyncCodexSet != nil {
-		if cur, _ := AutoSyncCodexFlag(); !cur {
-			if err := AutoSyncCodexSet(true); err != nil {
-				log.Printf("agent memory: auto sync: codex memories flag not restored (%s)", agentMemErrKind(err))
-				return // keep the record: the next pass tries again
+	st, err := autoUpdate(func(st *autoSyncState) {
+		switch {
+		case st.Phase != autoPhaseOff && st.Codex == nil:
+			// Absent and false are both "off" for codex; only a `true` is switched off, and only
+			// a `true` is restored.
+			val, found := AutoSyncCodexFlag()
+			on := found && val
+			st.Codex = &autoSyncCodex{Restore: on, Last: on, Forcing: on}
+		default:
+			autoCodexWatch(st)
+		}
+	})
+	if err != nil || st.Codex == nil {
+		return
+	}
+	ok := true
+	switch {
+	case st.Phase != autoPhaseOff && st.Codex.Forcing:
+		if cur, _ := AutoSyncCodexFlag(); cur {
+			if err := AutoSyncCodexSet(false); err != nil {
+				log.Printf("agent memory: auto sync: codex memories flag not switched off (%s)", agentMemErrKind(err))
+				ok = false
+				break
 			}
 		}
+		autoUpdate(func(s *autoSyncState) {
+			if s.Codex != nil && s.Codex.Forcing {
+				s.Codex.Forcing, s.Codex.Last = false, false
+			}
+		})
+	case st.Phase == autoPhaseOff:
+		if st.Codex.Restore {
+			if cur, _ := AutoSyncCodexFlag(); !cur {
+				if err := AutoSyncCodexSet(true); err != nil {
+					log.Printf("agent memory: auto sync: codex memories flag not restored (%s)", agentMemErrKind(err))
+					ok = false
+					break
+				}
+			}
+		}
+		autoUpdate(func(s *autoSyncState) {
+			if s.Phase == autoPhaseOff {
+				s.Codex = nil
+			}
+		})
 	}
-	st.Codex = nil
+	autoProblem(autoProblemCodex, !ok)
 }
 
-// autoAdvance applies the phase edges the switch asks for. It only changes the recorded phase
-// (and codex's flag), so the ui-prefs PUT can call it before it answers: a claude session
-// launched right after the flip already sees native memory off.
-func autoAdvance() autoSyncState {
+// autoAdvance applies the phase edges the switch asks for. It only changes the recorded phase,
+// so the ui-prefs PUT can call it before it answers: a claude session launched right after the
+// flip already sees native memory off. Nothing else starts before the new phase is on disk; when
+// it cannot be saved the error says so and the old phase stays.
+func autoAdvance() (autoSyncState, error) {
 	want := autoWant()
 	return autoUpdate(func(st *autoSyncState) {
 		now := autoNow().UTC().Format(time.RFC3339)
@@ -304,12 +412,14 @@ func autoAdvance() autoSyncState {
 			if AutoSyncLiveClaudeSessions != nil {
 				st.CatchUp = AutoSyncLiveClaudeSessions()
 			}
-			autoCodexRecord(st)
 		case st.Phase == autoPhaseOn && !want, st.Phase == autoPhaseImporting && !want:
-			st.Phase, st.Since, st.Attempts, st.NextAttempt, st.CatchUp = autoPhaseWritingBack, now, 0, "", nil
+			// The member's last edit of codex's flag is read before the phase leaves `on`, not at
+			// the next poll. CatchUp is kept: sessions that launched with native memory on are
+			// still owed their catch-up if the switch comes back before the write-back finishes.
+			autoCodexWatch(st)
+			st.Phase, st.Since, st.Attempts, st.NextAttempt = autoPhaseWritingBack, now, 0, ""
 		case st.Phase == autoPhaseWritingBack && want:
 			st.Phase, st.Since, st.Attempts, st.NextAttempt, st.NativeBackOn = autoPhaseImporting, now, 0, "", false
-			autoCodexRecord(st)
 		}
 	})
 }
@@ -317,7 +427,7 @@ func autoAdvance() autoSyncState {
 // AutoSyncWake is called when the switch may have changed. It moves the phase at once and wakes
 // the loop for the work.
 func AutoSyncWake() {
-	autoAdvance()
+	_, _ = autoAdvance() // a failure is in the status and the loop tries again
 	select {
 	case autoWake <- struct{}{}:
 	default:
@@ -339,12 +449,29 @@ func AutoSyncStart() {
 	}()
 }
 
+// AutoSyncRunUntilIdle runs the loop's steps synchronously until there is nothing to do now. The
+// loop does this on its own in production; package main's tests call it instead of starting one.
+func AutoSyncRunUntilIdle() {
+	for i := 0; i < 20; i++ {
+		if autoSyncStep() > 0 {
+			return
+		}
+	}
+}
+
 // autoSyncStep does what the recorded phase calls for and says how long to wait for the next one
 // (0 asks to be called again at once).
 func autoSyncStep() time.Duration {
 	autoRunMu.Lock()
 	defer autoRunMu.Unlock()
-	st := autoAdvance()
+	st, err := autoAdvance()
+	if err != nil {
+		// The phase is not known or not saved: start nothing, keep native memory off (see
+		// AutoSyncNativeMemoryOff) and look again later.
+		return autoBackoff[0]
+	}
+	autoCodexReconcile()
+	defer autoCodexReconcile()
 	switch st.Phase {
 	case autoPhaseImporting:
 		run := autoNewRun(autoRunImport)
@@ -404,7 +531,7 @@ func autoFinishWriteBack(run AutoSyncRun, err error) time.Duration {
 	if err != nil {
 		run.Error = autoErrKind(err)
 	}
-	autoUpdate(func(st *autoSyncState) {
+	_, uerr := autoUpdate(func(st *autoSyncState) {
 		if st.Phase != autoPhaseWritingBack {
 			return
 		}
@@ -416,8 +543,11 @@ func autoFinishWriteBack(run AutoSyncRun, err error) time.Duration {
 			return
 		}
 		st.Phase, st.Since, st.Attempts, st.NextAttempt, st.NativeBackOn = autoPhaseOff, run.Finished, 0, "", false
-		autoCodexRestore(st)
+		st.CatchUp = nil
 	})
+	if uerr != nil && err == nil {
+		return autoBackoff[0] // done, but not recorded: the next pass writes back again (idempotent)
+	}
 	if err == nil {
 		autoNotify(run.Kind)
 		return 0
@@ -428,7 +558,10 @@ func autoFinishWriteBack(run AutoSyncRun, err error) time.Duration {
 // autoOnStep is the `on` phase's upkeep: notice the member's own edit of codex's flag, and run
 // the catch-up import when the last session that launched with native memory on has ended.
 func autoOnStep() time.Duration {
-	st := autoUpdate(func(st *autoSyncState) { autoCodexWatch(st) })
+	st, err := autoUpdate(func(st *autoSyncState) { autoCodexWatch(st) })
+	if err != nil {
+		return autoBackoff[0]
+	}
 	if len(st.CatchUp) == 0 {
 		return autoPoll
 	}
@@ -474,14 +607,14 @@ func autoNotify(kind string) {
 		return
 	}
 	var run *AutoSyncRun
-	autoUpdate(func(st *autoSyncState) {
+	_, err := autoUpdate(func(st *autoSyncState) {
 		if st.Run != nil && st.Run.Kind == kind && !st.Run.Notified && st.Run.leftovers() > 0 {
 			st.Run.Notified = true
 			c := *st.Run
 			run = &c
 		}
 	})
-	if run != nil {
+	if run != nil && err == nil {
 		AutoSyncNotify(*run)
 	}
 }
@@ -679,21 +812,29 @@ type AutoSyncStatus struct {
 	Since   string `json:"since,omitempty"`
 	// Failing: a write-back has failed Attempts times in a row. NativeMemoryOff says claude's
 	// native memory is off for new sessions now.
-	Failing         bool         `json:"failing,omitempty"`
-	Attempts        int          `json:"attempts,omitempty"`
-	NextAttempt     string       `json:"nextAttempt,omitempty"`
-	CatchUpPending  int          `json:"catchUpPending,omitempty"`
-	NativeMemoryOff bool         `json:"nativeMemoryOff"`
-	NativeBackOn    bool         `json:"nativeBackOn,omitempty"`
-	Run             *AutoSyncRun `json:"run,omitempty"`
+	Failing         bool   `json:"failing,omitempty"`
+	Attempts        int    `json:"attempts,omitempty"`
+	NextAttempt     string `json:"nextAttempt,omitempty"`
+	CatchUpPending  int    `json:"catchUpPending,omitempty"`
+	NativeMemoryOff bool   `json:"nativeMemoryOff"`
+	NativeBackOn    bool   `json:"nativeBackOn,omitempty"`
+	// Problems name what the Agent could not do by itself: state_unreadable, state_not_saved,
+	// codex_flag. An unreadable state file shows as phase "unreadable" and failing, with native
+	// memory off, until the member retries or gives up.
+	Problems []string     `json:"problems,omitempty"`
+	Run      *AutoSyncRun `json:"run,omitempty"`
 }
 
 func autoStatus() AutoSyncStatus {
 	autoMu.Lock()
-	st, ok := autoLoadLocked()
+	st, ls := autoLoadLocked()
 	autoMu.Unlock()
 	want := autoWant()
-	if !ok {
+	if ls == autoStateUnreadable {
+		autoProblem(autoProblemUnreadable, true)
+		return AutoSyncStatus{Phase: "unreadable", Want: want, NativeMemoryOff: true, Failing: true, Problems: autoProblemList()}
+	}
+	if ls == autoStateMissing {
 		st.Phase = autoPhaseOff
 		if want {
 			st.Phase = autoPhaseOn
@@ -702,7 +843,7 @@ func autoStatus() AutoSyncStatus {
 	out := AutoSyncStatus{
 		Phase: st.Phase, Want: want, Since: st.Since, Attempts: st.Attempts, NextAttempt: st.NextAttempt,
 		CatchUpPending: len(st.CatchUp), NativeBackOn: st.NativeBackOn, Run: st.Run,
-		NativeMemoryOff: want || st.Phase != autoPhaseOff,
+		NativeMemoryOff: want || st.Phase != autoPhaseOff, Problems: autoProblemList(),
 	}
 	out.Settled = (want && st.Phase == autoPhaseOn) || (!want && st.Phase == autoPhaseOff)
 	out.Failing = st.Phase == autoPhaseWritingBack && st.Attempts >= autoFailureReport
@@ -711,28 +852,44 @@ func autoStatus() AutoSyncStatus {
 
 // autoAbandon is the member's "switch native memory back on anyway" after a write-back that
 // keeps failing: claude's native memory resumes without AF memory having been written into it.
-// It only applies while the switch is off and the write-back is pending.
+// It applies while the switch is off and the write-back is pending, and to a state file that
+// cannot be read, which it replaces with a fresh `off` (the member has chosen to stop waiting).
 func autoAbandon() error {
+	autoMu.Lock()
+	_, ls := autoLoadLocked()
+	if ls == autoStateUnreadable {
+		defer autoMu.Unlock()
+		st := autoSyncState{Phase: autoPhaseOff, Since: autoNow().UTC().Format(time.RFC3339), NativeBackOn: true}
+		if err := autoSaveLocked(st); err != nil {
+			return memoryErrf(http.StatusInternalServerError, errCodeMemorySnapshotFailed, "the state file could not be replaced")
+		}
+		autoProblem(autoProblemUnreadable, false)
+		return nil
+	}
+	autoMu.Unlock()
 	if autoWant() {
 		return memoryErrf(http.StatusConflict, errCodeMemoryConflict, "Agent memory is on; there is no write-back to give up")
 	}
 	var done bool
-	autoUpdate(func(st *autoSyncState) {
+	if _, err := autoUpdate(func(st *autoSyncState) {
 		if st.Phase != autoPhaseWritingBack {
 			return
 		}
 		st.Phase, st.Since, st.Attempts, st.NextAttempt, st.NativeBackOn = autoPhaseOff, autoNow().UTC().Format(time.RFC3339), 0, "", true
-		autoCodexRestore(st)
+		st.CatchUp = nil
 		done = true
-	})
+	}); err != nil {
+		return memoryErrf(http.StatusInternalServerError, errCodeMemorySnapshotFailed, "the state could not be saved")
+	}
 	if !done {
 		return memoryErrf(http.StatusConflict, errCodeMemoryConflict, "no write-back is pending")
 	}
+	autoCodexReconcile()
 	return nil
 }
 
 func autoRetryNow() {
-	autoUpdate(func(st *autoSyncState) {
+	_, _ = autoUpdate(func(st *autoSyncState) {
 		if st.Phase == autoPhaseWritingBack {
 			st.NextAttempt = ""
 		}

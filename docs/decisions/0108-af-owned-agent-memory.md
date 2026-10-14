@@ -747,5 +747,11 @@ while the switch is steady.
   (`import`, `pre-export`), and its result is the persisted run record. What is **not** audited at the CP: a flip
   that never went through the Console's confirmation, and the run itself. If that gap matters, (b) is the
   follow-up.
+- **The phase is durable before anything depends on it.** A phase that cannot be saved starts nothing and the
+  old one stays; a state file that exists but cannot be read is not a first start (nothing is adopted over it,
+  native memory stays off, the status says `unreadable`, and only the member's "switch native memory back on
+  anyway" replaces it). `CatchUp` survives an on → off → on flip before the write-back has run. The codex flag is
+  reconciled from its persisted record on every pass in every phase (record, then touch the flag, then mark
+  done), so a failed write is retried and shown, and the member's last edit is read before the phase leaves `on`.
 - Values are never logged: the run record and the state file hold counts, names the secret scan passed, reason
   codes and rule names.

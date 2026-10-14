@@ -216,3 +216,25 @@ describe("the run's status under the switch", () => {
     expect(apiJSON).toHaveBeenCalledWith("api/agents/memory/auto-sync?action=abandon", "POST", { action: "abandon" });
   });
 });
+
+describe("problems the Agent reports", () => {
+  it("says an unreadable state, offers only the way out, and lists the other problems", async () => {
+    api.mockResolvedValue({
+      phase: "unreadable",
+      want: true,
+      settled: false,
+      failing: true,
+      nativeMemoryOff: true,
+      problems: ["state_unreadable", "codex_flag"],
+    });
+    setSettings({ ...settingsDefaults(), agentMemory: true });
+    await mount();
+    const text = host!.textContent ?? "";
+    expect(text).toContain(t("mem.as_phase_unreadable"));
+    expect(text).toContain(t("mem.as_problem_state_unreadable"));
+    expect(text).toContain(t("mem.as_problem_codex_flag"));
+    const labels = Array.from(host!.querySelectorAll("button")).map((b) => b.textContent);
+    expect(labels).toContain(t("mem.as_abandon"));
+    expect(labels).not.toContain(t("mem.as_retry"));
+  });
+});

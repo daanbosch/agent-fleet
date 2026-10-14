@@ -159,7 +159,10 @@ export function AutoSyncPanel() {
 
   if (!running || !st) return null;
   const run = st.run;
-  const headKey = !st.settled
+  const unreadable = st.phase === "unreadable";
+  const headKey = unreadable
+    ? "mem.as_phase_unreadable"
+    : !st.settled
     ? st.phase === "importing" || (st.want && st.phase !== "on")
       ? "mem.as_phase_importing"
       : "mem.as_phase_writing_back"
@@ -174,13 +177,20 @@ export function AutoSyncPanel() {
       {(st.catchUpPending ?? 0) > 0 && (
         <p className="muted ds-note">{tr("mem.as_catchup_pending", { n: st.catchUpPending ?? 0 })}</p>
       )}
+      {(st.problems ?? []).map((p) => (
+        <p key={p} className="mem-warn">
+          {tMaybe("mem.as_problem_" + p) ?? p}
+        </p>
+      ))}
       {st.failing && (
         <div className="mem-warn">
-          <p>{tr("mem.as_failing", { error: run?.error ?? "" })}</p>
+          {!unreadable && <p>{tr("mem.as_failing", { error: run?.error ?? "" })}</p>}
           <div className="mem-ci-actions">
-            <Button disabled={busy} onClick={() => void act("retry")}>
-              {tr("mem.as_retry")}
-            </Button>
+            {!unreadable && (
+              <Button disabled={busy} onClick={() => void act("retry")}>
+                {tr("mem.as_retry")}
+              </Button>
+            )}
             <Button disabled={busy} onClick={() => void abandon()}>
               {tr("mem.as_abandon")}
             </Button>
