@@ -856,3 +856,40 @@ func TestAutoSyncCodexMemberEditJustBeforeOff(t *testing.T) {
 		t.Error("the restore overwrote the member's last edit")
 	}
 }
+
+// The phase was saved, the import ran, and only the completion record fails: the loop waits
+// instead of spinning, the status keeps the problem, and it settles once saves work again.
+func TestAutoSyncCompletionSaveFailureWaitsAndStaysVisible(t *testing.T) {
+	e := newAutoEnv(t)
+	e.file("one", "one", "project", "body")
+	blocked := false
+	autoChunkHook = func() {
+		if !blocked {
+			blocked = true
+			blockStateSave(t, true)
+		}
+	}
+	e.want = true
+	AutoSyncWake()
+	wait := autoSyncStep()
+	autoChunkHook = nil
+	if got := afNames(t, e.pid); !eq(got, []string{"one"}) {
+		t.Fatalf("the import did not run: %v", got)
+	}
+	if wait <= 0 {
+		t.Fatalf("wait = %v: the loop would spin on an import it cannot record", wait)
+	}
+	if diskPhase(t) != autoPhaseImporting || !strings.Contains(strings.Join(autoStatus().Problems, ","), autoProblemNotSaved) {
+		t.Fatalf("phase %s, status %+v", diskPhase(t), autoStatus())
+	}
+	// A pass that changes nothing must not hide the failure.
+	autoCodexReconcile()
+	if !strings.Contains(strings.Join(autoStatus().Problems, ","), autoProblemNotSaved) {
+		t.Fatal("a no-op update cleared state_not_saved")
+	}
+	blockStateSave(t, false)
+	e.drain()
+	if st := autoStatus(); st.Phase != autoPhaseOn || len(st.Problems) != 0 {
+		t.Fatalf("after saves work again: %+v", st)
+	}
+}

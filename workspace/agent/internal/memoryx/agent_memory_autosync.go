@@ -285,8 +285,10 @@ func autoUpdate(f func(st *autoSyncState)) (autoSyncState, error) {
 			autoProblem(autoProblemNotSaved, true)
 			return durable, errAutoState
 		}
+		// Cleared only by a save that happened: an update that changes nothing proves nothing about
+		// the disk, and must not hide a transition that could not be recorded.
+		autoProblem(autoProblemNotSaved, false)
 	}
-	autoProblem(autoProblemNotSaved, false)
 	return st, nil
 }
 
@@ -373,11 +375,13 @@ func autoCodexReconcile() {
 				break
 			}
 		}
-		autoUpdate(func(s *autoSyncState) {
+		if _, err := autoUpdate(func(s *autoSyncState) {
 			if s.Codex != nil && s.Codex.Forcing {
 				s.Codex.Forcing, s.Codex.Last = false, false
 			}
-		})
+		}); err != nil {
+			ok = false // done but not recorded: the next pass records it
+		}
 	case st.Phase == autoPhaseOff:
 		if st.Codex.Restore {
 			if cur, _ := AutoSyncCodexFlag(); !cur {
@@ -388,11 +392,13 @@ func autoCodexReconcile() {
 				}
 			}
 		}
-		autoUpdate(func(s *autoSyncState) {
+		if _, err := autoUpdate(func(s *autoSyncState) {
 			if s.Phase == autoPhaseOff {
 				s.Codex = nil
 			}
-		})
+		}); err != nil {
+			ok = false
+		}
 	}
 	autoProblem(autoProblemCodex, !ok)
 }
@@ -512,11 +518,15 @@ func autoFinishImport(run AutoSyncRun, stopped bool) time.Duration {
 		})
 		return autoBackoff[0]
 	}
-	autoUpdate(func(st *autoSyncState) {
+	if _, err := autoUpdate(func(st *autoSyncState) {
 		if st.Phase == autoPhaseImporting {
 			st.Phase, st.Since, st.Run = autoPhaseOn, run.Finished, &run
 		}
-	})
+	}); err != nil {
+		// Imported but not recorded: the phase is still `importing`, so wait and run it again
+		// (idempotent) rather than spin; the status carries state_not_saved meanwhile.
+		return autoBackoff[0]
+	}
 	autoNotify(run.Kind)
 	return 0
 }
@@ -592,11 +602,13 @@ func autoOnStep() time.Duration {
 	}
 	run.Finished = autoNow().UTC().Format(time.RFC3339)
 	run.Complete = run.Error == ""
-	autoUpdate(func(s *autoSyncState) {
+	if _, err := autoUpdate(func(s *autoSyncState) {
 		if s.Phase == autoPhaseOn {
 			s.CatchUp, s.Run = nil, &run
 		}
-	})
+	}); err != nil {
+		return autoBackoff[0]
+	}
 	autoNotify(run.Kind)
 	return 0
 }
