@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
@@ -24,13 +25,15 @@ type sharedDaemon struct {
 	srv *httptest.Server
 	mu  sync.Mutex
 	// calls are "METHOD path body", in arrival order.
-	calls    []string
-	sessions map[string]map[string]string // id -> metadata
-	envs     map[string]map[string]string // id -> PUT environment
-	next     int
-	pid      int
-	version  string
-	failEnv  int // fail this many environment PUTs with 503 before accepting
+	calls      []string
+	sessions   map[string]map[string]string // id -> metadata
+	envs       map[string]map[string]string // id -> PUT environment
+	next       int
+	pid        int
+	version    string
+	failGet    map[string]bool // GET of these session ids answers 503
+	failSwitch bool            // model/agent switches answer 500
+	failEnv    int             // fail this many environment PUTs with 503 before accepting
 }
 
 func newSharedDaemon(t *testing.T) *sharedDaemon {
@@ -94,7 +97,18 @@ func (d *sharedDaemon) handle(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+		if d.failGet[id] && r.Method == "GET" && len(parts) == 3 {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		if d.failSwitch && len(parts) == 4 && (parts[3] == "model" || parts[3] == "agent") {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
 		switch {
+		case len(parts) == 3 && r.Method == "DELETE":
+			delete(d.sessions, id)
+			w.WriteHeader(http.StatusNoContent)
 		case len(parts) == 3 && r.Method == "GET":
 			reply(map[string]any{"data": map[string]any{"id": id, "metadata": cur}})
 		case len(parts) == 3 && r.Method == "PATCH":
@@ -854,5 +868,136 @@ func TestForkClaimedFirstKeepsTheSourcePaneOut(t *testing.T) {
 	t.Cleanup(func() { paneEnv = oldEnv })
 	if err := claimSession(d.srv.URL, "pA", sids.Read(sidB), claimOpts{putEnv: true}); !errors.Is(err, errClaimTaken) {
 		t.Errorf("the source pane claimed B's copy: %v", err)
+	}
+}
+
+func mutations(d *sharedDaemon) []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var out []string
+	for _, c := range d.calls {
+		if !strings.HasPrefix(c, "GET ") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// A resume of a session another slot holds is refused BEFORE anything on it changes: switching the
+// model of a conversation that is not this slot's would reach that slot's next turn. The refusal
+// also leaves no claim record behind, so the rightful owner's own resume still works.
+func TestForeignResumeHasNoSideEffectsAndLeavesNoOwner(t *testing.T) {
+	d := newSharedDaemon(t)
+	a, b := terminalMeta(t, "owner"), terminalMeta(t, "intruder")
+	sidA, sidB := session.UUID(a.Dir, a.Name), session.UUID(b.Dir, b.Name)
+	d.sessions["ses_source"] = sharedMetadata(sidA, "owner")
+	sids.Write(sidB, "ses_source") // B's mapping points at A's conversation
+	sids.Write(sidA, "ses_source")
+	t.Cleanup(func() { sids.Remove(sidA); sids.Remove(sidB); slotModes.Remove(sidA); slotModes.Remove(sidB) })
+	b.Model, b.Mode = "stub/foreign", "plan"
+	if _, err := (agentImpl{}).BuildLaunch(b, agents.LaunchOpts{}); err == nil {
+		t.Fatal("a foreign resume must be refused")
+	}
+	if got := mutations(d); len(got) != 0 {
+		t.Errorf("the refused resume changed things: %v", got)
+	}
+	// The rightful owner can still resume (the refusal released what it took).
+	a.Model = "stub/m"
+	if _, err := (agentImpl{}).BuildLaunch(a, agents.LaunchOpts{}); err != nil {
+		t.Errorf("the owner's own resume was blocked: %v", err)
+	}
+}
+
+// A claim record that cannot be trusted must not keep the rightful owner out: an empty one (a
+// crash between creating and writing, from an older build), and one an abandoned claim of another
+// slot left behind. A fresh record of another slot still holds.
+func TestAbandonedClaimRecordsDoNotBlockTheRightfulOwner(t *testing.T) {
+	d := newSharedDaemon(t)
+	a := terminalMeta(t, "legit")
+	sidA := session.UUID(a.Dir, a.Name)
+	d.sessions["ses_x"] = sharedMetadata(sidA, "legit")
+	sids.Write(sidA, "ses_x")
+	t.Cleanup(func() { sids.Remove(sidA); slotModes.Remove(sidA) })
+	record := filepath.Join(paths.AgentStateDir(), "opencode-claim", "ses_x")
+	if err := os.MkdirAll(filepath.Dir(record), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(record, nil, 0o600); err != nil { // the crash state: created, never written
+		t.Fatal(err)
+	}
+	if _, err := (agentImpl{}).BuildLaunch(a, agents.LaunchOpts{}); err != nil {
+		t.Fatalf("an empty record blocked the owner: %v", err)
+	}
+
+	// Another slot's record: fresh holds, abandoned (old, and the tag never followed) does not.
+	if err := os.WriteFile(record, []byte("someone-else"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.sessions["ses_x"] = map[string]string{} // untagged: that claim never completed
+	if err := claimSessionFor(d.srv.URL, a, "ses_x", claimOpts{}); !errors.Is(err, errClaimTaken) {
+		t.Errorf("a fresh record of another slot must hold: %v", err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(record, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := claimSessionFor(d.srv.URL, a, "ses_x", claimOpts{}); err != nil {
+		t.Errorf("an abandoned record blocked the owner: %v", err)
+	}
+	// An old record of a slot whose tag DID follow is a completed claim, not an abandoned one.
+	d.sessions["ses_y"] = sharedMetadata("someone-else", "x")
+	rec2 := filepath.Join(filepath.Dir(record), "ses_y")
+	_ = os.WriteFile(rec2, []byte("someone-else"), 0o600)
+	_ = os.Chtimes(rec2, old, old)
+	if err := claimSessionFor(d.srv.URL, a, "ses_y", claimOpts{}); !errors.Is(err, errClaimTaken) {
+		t.Errorf("a completed claim must hold however old: %v", err)
+	}
+}
+
+// A copy the launch cannot attribute must not be left behind: an API failure while claiming it
+// deletes it; once it is claimed it is recorded before anything else can fail, so a retry resumes it.
+func TestFailedForkNeverLeavesAnUnrecordedCopy(t *testing.T) {
+	d := newSharedDaemon(t)
+	d.sessions["ses_src"] = map[string]string{} // a source with no tag (standalone history)
+	b := terminalMeta(t, "forker")
+	b.ForkFrom = "ses_src"
+	sidB := session.UUID(b.Dir, b.Name)
+	t.Cleanup(func() { sids.Remove(sidB); slotModes.Remove(sidB) })
+
+	d.failGet = map[string]bool{"ses_fork1": true}
+	if _, err := (agentImpl{}).BuildLaunch(b, agents.LaunchOpts{}); err == nil {
+		t.Fatal("the launch must fail when the copy cannot be claimed")
+	}
+	d.mu.Lock()
+	_, left := d.sessions["ses_fork1"]
+	d.mu.Unlock()
+	if left || sids.Read(sidB) != "" {
+		t.Errorf("an unattributed copy was left (exists=%v, mapping=%q)", left, sids.Read(sidB))
+	}
+
+	// Claimed, then the model switch fails: the copy is the slot's and is recorded.
+	d.failGet = nil
+	d.failSwitch = true
+	b.Model = "stub/m"
+	if _, err := (agentImpl{}).BuildLaunch(b, agents.LaunchOpts{}); err == nil {
+		t.Fatal("a failed switch must fail the launch")
+	}
+	rec := sids.Read(sidB)
+	if rec == "" {
+		t.Fatal("a claimed copy must be recorded before the switch")
+	}
+	d.mu.Lock()
+	tag := d.sessions[rec][metaSID]
+	d.mu.Unlock()
+	if tag != sidB {
+		t.Errorf("recorded copy %s is tagged %q", rec, tag)
+	}
+	d.failSwitch = false
+	before := len(d.callsMatching("POST /api/session/ses_src/fork"))
+	if _, err := (agentImpl{}).BuildLaunch(b, agents.LaunchOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(d.callsMatching("POST /api/session/ses_src/fork")); got != before {
+		t.Errorf("the retry forked again instead of resuming the recorded copy")
 	}
 }

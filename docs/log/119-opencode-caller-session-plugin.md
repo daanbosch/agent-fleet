@@ -299,3 +299,10 @@ claim it first and then have its tag overwritten. The Go launch now uses the sam
 (`claimSessionFor`); a copy somebody else got first is left to them and a new one is forked, and the
 tag inherited from the source is accepted only for the claimant that won the file. The TUI plugin
 re-sends environments through `opencode-put-env`, which checks the tag.
+
+Review round 4 (#2123): a resume now takes its claim BEFORE changing anything on the session (a
+refused foreign resume made no mutation; it also gives back the record it took). The claim record
+is written whole and linked into place (never created-but-empty), and a record is replaced when it is
+older than 30 s and the session's tag never followed it (an abandoned claim); a completed claim
+stands however old. A fork's copy that cannot be claimed because of an API error is deleted, and a
+claimed one is recorded as the slot's session before the model switch, so a retry resumes it.

@@ -223,6 +223,13 @@ func forkSharedSession(addr, src, before string) (string, error) {
 	return w.Data.ID, nil
 }
 
+// deleteSharedSession removes a session af made and cannot attribute; best effort.
+func deleteSharedSession(addr, ses string) {
+	if err := apiJSON("DELETE", sessionPathURL(addr, ses), nil, nil); err != nil {
+		log.Printf("opencode: could not remove the unclaimed copy %s: %v", ses, err)
+	}
+}
+
 // afterFork is a test seam: it runs between a fork existing and its claim.
 var afterFork = func(addr, ses string) {}
 
@@ -315,13 +322,14 @@ func buildSharedLaunch(m session.Meta, sid string) (plan sharedPlan, ok bool, er
 	}
 	switch {
 	case ses != "":
-		if err := switchSharedSession(addr, ses, m); err != nil {
-			return sharedPlan{}, false, err
-		}
 		// The slot's own record names it, but a pane of another slot may hold it: refuse, never
-		// overwrite what another pane owns.
+		// overwrite what another pane owns. Before anything is changed on it: switching the model of
+		// a conversation that is not this slot's would reach the other slot's next turn.
 		if err := claimSessionFor(addr, m, ses, claimOpts{}); err != nil {
 			return sharedPlan{}, false, fmt.Errorf("opencode: take the session: %w", err)
+		}
+		if err := switchSharedSession(addr, ses, m); err != nil {
+			return sharedPlan{}, false, err
 		}
 	case m.ForkFrom != "":
 		// A fork carries its source's tag the moment it exists, so the source's pane can claim it
@@ -341,10 +349,18 @@ func buildSharedLaunch(m session.Meta, sid string) (plan sharedPlan, ok bool, er
 			if err == nil {
 				break
 			}
+			if !errors.Is(err, errClaimTaken) {
+				// Nobody holds this copy and this slot could not take it: nothing would ever trace it
+				// back, so it goes (a copy another pane did claim is theirs and stays).
+				deleteSharedSession(addr, ses)
+			}
 			if !errors.Is(err, errClaimTaken) || attempt >= 2 {
 				return sharedPlan{}, false, fmt.Errorf("opencode: claim the fork: %w", err)
 			}
 		}
+		// Recorded at once: a failure or a crash from here on resumes this copy instead of forking
+		// another one nobody can trace.
+		sids.Write(sid, ses)
 		if err := switchSharedSession(addr, ses, m); err != nil {
 			return sharedPlan{}, false, err
 		}
@@ -493,6 +509,76 @@ func claimSession(addr, name, ses string, o claimOpts) error {
 	return claimSessionFor(addr, m, ses, o)
 }
 
+// acquireClaim takes the claim record for a session. The record is written complete under a
+// temporary name and linked into place, so it is either absent or whole: a crash cannot leave a
+// created-but-empty file that refuses the rightful owner. acquired is true when THIS call created
+// it; an existing record of the same slot is fine, another slot's is errClaimTaken. A zero-length
+// record (an older build's crash) belongs to nobody and is replaced.
+func acquireClaim(dir, path, sid string) (acquired bool, err error) {
+	for try := 0; try < 3; try++ {
+		tmp, terr := os.CreateTemp(dir, ".claim-*")
+		if terr != nil {
+			return false, terr
+		}
+		_, werr := tmp.WriteString(sid)
+		if cerr := tmp.Close(); werr == nil {
+			werr = cerr
+		}
+		if werr != nil {
+			os.Remove(tmp.Name())
+			return false, werr
+		}
+		lerr := os.Link(tmp.Name(), path)
+		os.Remove(tmp.Name())
+		switch {
+		case lerr == nil:
+			return true, nil
+		case !errors.Is(lerr, os.ErrExist):
+			return false, lerr
+		}
+		owner, rerr := os.ReadFile(path)
+		switch {
+		case rerr != nil && errors.Is(rerr, os.ErrNotExist):
+			continue // released between the link and the read: try again
+		case rerr != nil:
+			return false, rerr
+		case strings.TrimSpace(string(owner)) == "":
+			_ = os.Remove(path)
+			continue
+		case strings.TrimSpace(string(owner)) == sid:
+			return false, nil
+		}
+		return false, errClaimTaken
+	}
+	return false, errors.New("the claim record keeps changing")
+}
+
+// claimStale is how old a record must be, with the session not tagged for the slot it names, before
+// it is taken to be an abandoned claim (a claim completes in well under a second).
+var claimStale = 30 * time.Second
+
+// staleClaim reports whether the record at path is an abandoned claim: older than claimStale and
+// the session's tag is not the record's slot (it would be, had that claim completed).
+func staleClaim(addr, path string) bool {
+	fi, err := os.Stat(path)
+	if err != nil || time.Since(fi.ModTime()) < claimStale {
+		return false
+	}
+	owner, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	ses, perr := url.PathUnescape(filepath.Base(path))
+	if perr != nil {
+		return false
+	}
+	cur, err := getSharedSession(addr, ses)
+	if err != nil {
+		return false
+	}
+	return cur.Metadata[metaSID] != strings.TrimSpace(string(owner))
+}
+
 func claimSessionFor(addr string, m session.Meta, ses string, o claimOpts) error {
 	name := m.Name
 	sid := session.UUID(m.Dir, m.Name)
@@ -501,42 +587,49 @@ func claimSessionFor(addr string, m session.Meta, ses string, o claimOpts) error
 		return err
 	}
 	path := filepath.Join(dir, url.PathEscape(ses))
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	switch {
-	case err == nil:
-		_, _ = f.WriteString(sid)
-		f.Close()
-	case errors.Is(err, os.ErrExist):
-		if owner, _ := os.ReadFile(path); strings.TrimSpace(string(owner)) != sid {
-			return errClaimTaken
-		}
-	default:
+	acquired, err := acquireClaim(dir, path, sid)
+	if errors.Is(err, errClaimTaken) && staleClaim(addr, path) {
+		// The record names a slot that never finished (no tag in step with it, and it is old): it
+		// belongs to nobody, and must not keep the rightful owner out.
+		_ = os.Remove(path)
+		acquired, err = acquireClaim(dir, path, sid)
+	}
+	if err != nil {
 		return err
+	}
+	// What this call took it gives back when the claim does not complete; a record that was already
+	// the slot's own stays (the tag is the authority once it is set).
+	release := func() {
+		if acquired {
+			_ = os.Remove(path)
+		}
 	}
 	info, gerr := getSharedSession(addr, ses)
 	if gerr != nil {
-		_ = os.Remove(path)
+		release()
 		return gerr
 	}
 	if other := info.Metadata[metaSID]; other != "" && other != sid && (o.inheritedFrom == "" || other != o.inheritedFrom) {
-		return errClaimTaken // the tag is the authority; the file is left as it is
+		release()
+		return errClaimTaken // the tag is the authority
 	}
 	if info.Metadata[metaManaged] != "" {
+		release()
 		return errClaimTaken
 	}
 	if o.putEnv {
 		vars, found := paneEnv(name)
 		if !found {
-			_ = os.Remove(path)
+			release()
 			return fmt.Errorf("no pane environment for %s", name)
 		}
 		if perr := putEnvironment(addr, ses, vars); perr != nil {
-			_ = os.Remove(path)
+			release()
 			return perr
 		}
 	}
 	if terr := tagSharedSession(addr, ses, sid, name); terr != nil {
-		_ = os.Remove(path)
+		release()
 		return terr
 	}
 	return nil
