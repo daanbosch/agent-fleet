@@ -1173,3 +1173,40 @@ func TestAgentMemoryOnABrowsablePathStaysEditable(t *testing.T) {
 		t.Errorf("GET %s: status=%d payload=%#v", rel, rec.Code, payload)
 	}
 }
+
+// A CLAUDE_CONFIG_DIR under home that links out of it puts a home-relative memory path in the
+// strip. The ordinary browse read refuses the symlink, so the memory root serves it instead,
+// and only the memory: the settings file behind the same link stays refused.
+func TestAgentMemoryThroughASymlinkedConfigDirUnderHome(t *testing.T) {
+	home, outside := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AF_BROWSE_ROOT", home)
+	if err := os.Symlink(outside, filepath.Join(home, "claude-state")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude-state"))
+	mem := filepath.Join(outside, "projects", "-x", "memory", "note.md")
+	if err := os.MkdirAll(filepath.Dir(mem), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mem, []byte("memory\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "settings.json"), []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{"claude-state/projects/-x/memory/note.md", filepath.Join(home, "claude-state/projects/-x/memory/note.md"), mem} {
+		rec := httptest.NewRecorder()
+		handleFSFile(rec, httptest.NewRequest(http.MethodGet, "/fs/file?path="+url.QueryEscape(q), nil))
+		var payload map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &payload)
+		if rec.Code != http.StatusOK || payload["content"] != "memory\n" || payload["editabilityReason"] != "read_only_root" {
+			t.Errorf("GET %s: status=%d body=%s", q, rec.Code, rec.Body.String())
+		}
+	}
+	rec := httptest.NewRecorder()
+	handleFSFile(rec, httptest.NewRequest(http.MethodGet, "/fs/file?path="+url.QueryEscape("claude-state/settings.json"), nil))
+	if rec.Code == http.StatusOK {
+		t.Errorf("settings behind the link was served: %s", rec.Body.String())
+	}
+}
