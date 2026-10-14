@@ -853,8 +853,9 @@ CP / Console 側の裏打ちは #1818 / #1819。
 ## stream-json での Managed 方式の再評価（2026-10-15、#2155）
 
 ADR 0008 は「Managed は agy の構造化出力待ち」としていたが、固定中の agy 1.3.5 には
-`--input-format stream-json --output-format stream-json` があり、画像生成（`imagegen/agy.go`）と
-チャット（`chatx` の `chatAgyHome`）が既に使っている。これで「プリセット権限・承認なし」の Managed
+`--input-format stream-json --output-format stream-json` があり、画像生成（`imagegen/agy.go`）が既に使っている。
+チャットは stream-json ではなく `-p <prompt>` の plain text 実行（`agyChat.Send`）で、`chatAgyHome` は
+隔離 HOME と permission の組み立ての参考になるだけ（chat の既存デコーダは流用できない）。これで「プリセット権限・承認なし」の Managed
 方式が成り立つかを実測し、作るかどうかの判断材料にする。**実装はこの PR に含めない**。
 
 ### 実測条件
@@ -902,7 +903,7 @@ ADR 0008 は「Managed は agy の構造化出力待ち」としていたが、�
   `jetski: no output produced — a tool required the "command" permission that headless mode cannot prompt for…`。
 - **プロセスは死なず、次のターンは普通に動く**（`denied_actions` は累積して残る）。text モードで「exit 0・
   stdout 空・理由は stderr のみ」だった静かな終了と違い、stream-json では拒否が構造化されて見える。
-  → 検知は `denied_actions` の有無と、`ERROR` のツールステップを見れば足りる。
+  → 検知の材料にはなるが、判定には累積と一般エラーの区別が要る（下の「soft-deny の扱い」）。
 - `deny` ルール（`write_file(/)`）に当たった場合は `Matches user-configured deny rule.` でステップが `ERROR`。
   **`--dangerously-skip-permissions` でも deny ルールは効いた**（`permission_mode` は `always-proceed` になり、
   `run_command` は通ったが `write_to_file` は deny で落ちた）。
@@ -927,19 +928,23 @@ ADR 0008 は「Managed は agy の構造化出力待ち」としていたが、�
 | 指定 | `init.permission_mode` | 実測 |
 |---|---|---|
 | なし | `request-review` | allow に無い `command` は soft-deny |
-| `--mode accept-edits` | `request-review` | **変化なし**（`command` は soft-deny のまま。`write_to_file` は deny ルールで落ちたため、編集が通るかは未確認） |
+| `--mode accept-edits` | `request-review` | `permission_mode` は変わらず、`command` は soft-deny のまま。`write_to_file` は deny ルール下でしか測っておらず、編集への効果は**未確認** |
 | `--mode auto` | `request-review` | `warning: --mode auto is not available for this account; continuing in the default mode.` |
 | `--mode plan` | `request-review` | 起動し、`permission_mode` は変わらず（plan の挙動は未確認） |
 | `--dangerously-skip-permissions` | `always-proceed` | `command` は無確認で実行。deny ルールは引き続き有効 |
 
-`--mode` は print モードでは `permission_mode` に反映されず、権限の判断材料にならない。実効的な手段は
-`permissions.allow` / `permissions.deny` と `--dangerously-skip-permissions` の 2 つだけ。
+観測できたのは `init.permission_mode` が `--mode` で変わらないことと、`command` の結果だけ。`accept-edits` /
+`plan` が実際の権限処理に影響するかは未確認。採用する `read-only` は `--mode` を権限境界として頼らず、
+`permissions.allow` / `permissions.deny` だけで境界を作る。
 
 ### 提案: 作るなら何ができるか
 
 **できること**: プリセット権限の無人ターン。stdin に複数ターン、構造化された進捗（ツール名・引数・テキスト
 増分・ステップ単位の usage）、soft-deny の検知、`--conversation` による再開、会話 ID の `init` 捕捉。
-読み取り層（`agents/agy` の会話 DB）は既にあるので、Snapshot の突き合わせ（§6）はそれで足りる。
+読み取り層（`agents/agy`）は既にあるが、現状は Agent の実 HOME 固定（`stateDir()` は `paths.GeminiHome()`、
+`conversationDBPath` / `transcriptPath` も同じ root。Transcript は DB ではなく
+`brain/<conv>/.system_generated/logs/transcript_full.jsonl` を読む）。子だけ隔離 HOME にすると、`init` で
+会話 ID を記録しても既存の読み取り層は子の履歴を見つけられない（下の実装の輪郭を参照）。
 
 **できないこと**: 承認（Interaction `approval`）、質問カード、ターンを止めつつプロセスを残す中断、steer
 （実行中ターンへの追加入力。stdin に積むと次ターンになる＝キューとしては使える）、動的なモデル／モード変更
@@ -951,15 +956,30 @@ ADR 0008 は「Managed は agy の構造化出力待ち」としていたが、�
 
 **権限プリセット案**（セッション作成時に選ぶ。承認が無いことを UI 上で明示する）:
 
-1. `read-only`（既定）: `read_file(<作業ディレクトリ>)`、`read_url(*)`、grant した MCP のみ allow、
-   `command(*)` と `write_file(/)` を deny。`chatAgyHome` と同じ組み立てで、実測済みの形。
+1. `read-only`（既定）: `read_file(<作業ディレクトリ>)` と、**明示した読み取り専用ツールだけ**
+   （`af_read` 相当の固定集合。`mcp(<server>/*)` のサーバ単位 wildcard は出さない）を allow、
+   `command(*)` と `write_file(/)` を deny。`chatAgyHome` の組み立てを土台にするが、`agyChatAllowRules` は
+   `mcp(<server>/*)` を生成し `agyChatServers` は書き込み系（`ToolsAFWrite` や任意の接続サーバ）も載せ得る。
+   `command` / `write_file` の deny は MCP 経由の書き込み（`create_session`、更新・送信ツール等）を防がず、
+   隔離 HOME も MCP サーバには実 HOME を戻すのでその書き込みを隔離しない。よって wildcard grant は
+   read-only から外す。
+   `read_url(*)` は任意 URL への通信と、取得内容の URL 埋め込みによる持ち出しを許す。要件は 2 つに分ける:
+   「ファイル・外部状態を変更しない」は上の allow 集合で満たす。「ネットワーク／機密の隔離」が要るなら
+   `read_url` を URL allowlist にするか外す（preset の要件として #2158 で決める。なお本節の preset は前者のみを保証する）。
 2. `unattended`: `--dangerously-skip-permissions` ＋ deny ルール（最低でも `write_file` の作業ディレクトリ外）。
    Claude の `--dangerously-skip-permissions` セッションに相当する。ブロックリスト方式なので、
    deny の網羅性は保証できない点を UI で伝える。
 
-soft-deny は黙って流さない。`denied_actions` が非空、または `ERROR` のツールステップがあれば、ターンを
-`completed` にしつつ「権限で止まった操作」をセッションの通知／Interaction ではない警告として残す
-（承認はできないため、操作者が preset を広げて再実行する）。
+**soft-deny の扱い**: 黙って流さず、呼び出し元が機械判定できる形で返す。
+- `denied_actions` は同一プロセス内で累積する（重複を畳むか集合化するかは未測定）。「非空」では第 1 ターンの
+  拒否の後の正常な第 2 ターンにも警告が付き続けるため、ターン開始時の値との差分（新規要素）で判定する。
+- 一般の `ERROR` ツール（存在しないファイル、MCP の通信失敗等）は権限拒否ではない。`tool_info.error.message` の
+  権限拒否文面（`user denied permission` / `Matches user-configured deny rule`）で拒否と区別する。文面の
+  安定性は 1.3.5 でしか見ていないので、判定は `denied_actions` の差分を主、文面を従とする。
+- 無人／API 用途の「範囲外は失敗として返す」と整合させるため、ターンの終端状態は `completed` のまま、
+  ターン結果に構造化フィールド（例: `permission_denied: [{action,…}]`）を持たせ、API 呼び出し元はそれで
+  拒否を機械判定する。Console は同じ値を警告として表示する（Interaction ではない。承認できないので、
+  操作者が許可範囲を見直して再実行する）。
 
 **実装の輪郭**（`managedDrivers` の契約、`agents.Driver` / `ThreadHandle`）:
 
@@ -968,13 +988,20 @@ soft-deny は黙って流さない。`denied_actions` が非空、または `ERR
 - `Resume(meta)`: セッションごとの HOME（`chatAgyHome` 方式でトークンだけ共有、preset を
   `settings.json` と `config/config.json` に書く。ユーザーの実 `~/.gemini` は触らない）で子プロセスを起動し、
   `ThreadHandle` を返す。会話 ID があれば `--conversation`。
+- **読み取り層の変更が要る**: `agents/agy` の `stateDir()` / `transcriptPath()` / `conversationDBPath()` /
+  Probe / Live / context 等を、`session.Meta` ごとに Managed の state root（隔離 HOME）を解決する形にする。
+  履歴（`transcript_full.jsonl`）と状態 DB の役割も分けて扱う。親 Agent の HOME を丸ごと変えて回避するのは、
+  他セッションに波及するため不可。
 - `Send`: NDJSON 1 行を stdin へ。走行中のターンがあれば driver 内キューへ（他の Managed と同じ
   `queue` 実装を使い回す）。`init` で会話 ID を捕捉して meta に記録。
 - `Events`: `result` → `turn_state`（`SUCCESS` → completed、`ERROR` → failed、`interrupted` → cancelled、
   プロセス死 → unknown/aborted）。`step_update` はミラー面（`mirror.go`）の更新に流す。
-- `Interrupt`: SIGINT → 子の終了を待つ → cancelled。次の `Send` で `--conversation` 付きで再起動。
-  キューは driver が持つので破棄／継続は既存の規則（ADR 0105）に従う。
-- `Snapshot`: 会話 DB（既存の読み取り層）。プロセスが死んでいたら unknown のまま §6 の手順へ。
+- `Interrupt`: SIGINT → 子の終了を待つ → cancelled。キューは driver が持ち、ADR 0105 に従って最初の Stop の
+  後は保持済みのキューを次のターンとして自動継続する。pump が次のターンを取り出す時点で子が居なければ
+  `--conversation` 付きで自動 respawn する（新規入力を待たない）。2 度目の Stop／`DiscardQueue` は
+  キューを破棄し、respawn しない。終端の `result`（`interrupted` → cancelled）が子の exit 1 / EOF で
+  unknown に上書きされないよう、「受信済みの終端 result > プロセス終了」の優先順位にする。
+- `Snapshot`: 上記で Meta ごとに解決した state root の読み取り層。プロセスが死んでいたら unknown のまま §6 の手順へ。
 - 起動条件・自動停止（§7.1）: 子プロセスは per-session。アイドルが続いたら stdin を閉じて終了させる
   （exit 0。次の `Send` で再開）。1 本のコストは小さいが、Workspace のメモリ上限内で同時数を絞る。
 - 先に確認すべき実装上の宿題: (1) `result` が来ないままプロセスが死ぬ経路（OOM 137 など）、
@@ -989,3 +1016,6 @@ soft-deny は黙って流さない。`denied_actions` が非空、または `ERR
 **作る。権限プリセットは `read-only` のみ。** `unattended`（`--dangerously-skip-permissions` ＋ deny）は
 ブロックリスト方式で網羅性を保証できないため採用しない。実装は #2158（Follow-ups: #2158）。
 承認が要る用途は引き続き Terminal (CLI)、構造化 RPC は #1079。
+
+ADR 0008（日英両版）の「Managed は構造化出力待ち」の行は #2157 が訂正する担当。#2157 がマージされない場合は
+#2158 の実装 PR で訂正する（本 PR は log のみ）。
