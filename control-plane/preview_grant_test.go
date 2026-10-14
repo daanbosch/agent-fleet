@@ -484,9 +484,10 @@ func TestPreviewGrantSaveRefusedAfterSlugRotation(t *testing.T) {
 	ag := newGrantAgent(t)
 	e := newPreviewHostEnv(t, ag.srv.URL)
 	old := e.mintSlug(t)
+	oldEpoch, _ := e.mgr.store.PreviewEpoch(context.Background(), e.ws.ID)
 	e.mintSlug(t) // reissue while the old open is still probing
 	res, err := e.mgr.store.SavePreviewTempPort(context.Background(), store.PreviewTempPort{
-		WorkspaceID: e.ws.ID, Port: 5173, Slug: old, Inodes: "1", CreatedAt: store.NowTS()}, maxPreviewTempPorts, store.AuditLog{ID: store.NewID(), TenantID: e.ws.TenantID, Action: "x"})
+		WorkspaceID: e.ws.ID, Port: 5173, Slug: old, Inodes: "1", CreatedAt: store.NowTS()}, oldEpoch, maxPreviewTempPorts, store.AuditLog{ID: store.NewID(), TenantID: e.ws.TenantID, Action: "x"})
 	if err != nil || res != store.PreviewTempStale {
 		t.Fatalf("save under the old slug: %v %v, want stale", res, err)
 	}
@@ -525,4 +526,49 @@ func TestPreviewGrantCapPrunesStoppedListeners(t *testing.T) {
 func (e *previewHostEnv) openOwnDirect(port int) {
 	rec := httptest.NewRecorder()
 	e.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "https://af.example.com"+previewOwnOpenPath+"?port="+strconv.Itoa(port), nil))
+}
+
+// A fixed slug comes back as the SAME string after stop -> start, so the slug cannot tell the
+// previous start's open from this one's: the epoch does. An old open that returns late must be
+// refused and must not overwrite the grant the current start already holds.
+func TestPreviewGrantFromThePreviousStartIsRefusedWithAFixedSlug(t *testing.T) {
+	ag := newGrantAgent(t)
+	e := newPreviewHostEnv(t, ag.srv.URL)
+	e.setPreviewSettings(t, func(st *wsSettings) { st.PreviewFixedSlug = true })
+	ctx := context.Background()
+	slug := e.mintSlug(t)
+	oldEpoch, err := e.mgr.store.PreviewEpoch(ctx, e.ws.ID) // captured by the old open before its probe
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.mgr.store.SetWorkspaceState(ctx, e.ws.ID, "stopped"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.mgr.store.SetWorkspaceState(ctx, e.ws.ID, "running"); err != nil {
+		t.Fatal(err)
+	}
+	if again := e.mintSlug(t); again != slug {
+		t.Fatalf("fixed slug changed: %q -> %q", slug, again)
+	}
+	newEpoch, _ := e.mgr.store.PreviewEpoch(ctx, e.ws.ID)
+	if newEpoch == oldEpoch {
+		t.Fatal("the epoch did not change across stop/start")
+	}
+	audit := func() store.AuditLog {
+		return store.AuditLog{ID: store.NewID(), TenantID: e.ws.TenantID, Action: "workspace.preview_temp_port"}
+	}
+	g := func(inodes string) store.PreviewTempPort {
+		return store.PreviewTempPort{WorkspaceID: e.ws.ID, Port: 5173, Slug: slug, Inodes: inodes, CreatedAt: store.NowTS()}
+	}
+	if res, err := e.mgr.store.SavePreviewTempPort(ctx, g("NEW"), newEpoch, maxPreviewTempPorts, audit()); err != nil || res != store.PreviewTempCreated {
+		t.Fatalf("current start's grant: %v %v", res, err)
+	}
+	res, err := e.mgr.store.SavePreviewTempPort(ctx, g("OLD"), oldEpoch, maxPreviewTempPorts, audit())
+	if err != nil || res != store.PreviewTempStale {
+		t.Fatalf("previous start's late open: %v %v, want stale", res, err)
+	}
+	got, ok, _ := e.mgr.store.GetPreviewTempPort(ctx, e.ws.ID, 5173)
+	if !ok || got.Inodes != "NEW" {
+		t.Fatalf("the current grant was overwritten: %+v", got)
+	}
 }

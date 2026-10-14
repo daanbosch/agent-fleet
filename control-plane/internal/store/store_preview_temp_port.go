@@ -26,7 +26,10 @@ type PreviewTempPortStore interface {
 	// SavePreviewTempPort records a grant under the workspace lock, deciding in one transaction
 	// whether the grant is still for the current running slug, whether the cap allows it, and
 	// whether it is new (audit row written then, in the same transaction).
-	SavePreviewTempPort(ctx context.Context, g PreviewTempPort, maxGrants int, audit AuditLog) (PreviewTempSave, error)
+	SavePreviewTempPort(ctx context.Context, g PreviewTempPort, epoch string, maxGrants int, audit AuditLog) (PreviewTempSave, error)
+	// PreviewEpoch returns the workspace's current preview epoch ("" before the first start).
+	// Capture it BEFORE probing a port and hand it to SavePreviewTempPort.
+	PreviewEpoch(ctx context.Context, workspaceID string) (string, error)
 	// DeletePreviewTempPortIf deletes the grant only while it still holds these inodes, so a
 	// slow "the listener is gone" cannot remove a grant the owner has just renewed.
 	DeletePreviewTempPortIf(ctx context.Context, workspaceID string, port int, inodes string) error
@@ -97,7 +100,7 @@ const (
 	PreviewTempStale
 )
 
-func (s *SQL) SavePreviewTempPort(ctx context.Context, g PreviewTempPort, maxGrants int, audit AuditLog) (PreviewTempSave, error) {
+func (s *SQL) SavePreviewTempPort(ctx context.Context, g PreviewTempPort, epoch string, maxGrants int, audit AuditLog) (PreviewTempSave, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -114,6 +117,13 @@ func (s *SQL) SavePreviewTempPort(ctx context.Context, g PreviewTempPort, maxGra
 		return 0, err
 	}
 	if state != "running" || slug == "" || slug != g.Slug {
+		return PreviewTempStale, nil
+	}
+	// The slug cannot tell this start from the previous one when a fixed slug is pinned: the
+	// epoch changes on every start, reissue and stop.
+	if cur, err := previewEpochTx(ctx, tx, g.WorkspaceID); err != nil {
+		return 0, err
+	} else if cur != epoch {
 		return PreviewTempStale, nil
 	}
 	var prevInodes string
@@ -151,4 +161,29 @@ func (s *SQL) SavePreviewTempPort(ctx context.Context, g PreviewTempPort, maxGra
 		}
 	}
 	return out, tx.Commit()
+}
+
+func (s *SQL) PreviewEpoch(ctx context.Context, workspaceID string) (string, error) {
+	return previewEpochTx(ctx, s.db, workspaceID)
+}
+
+func previewEpochTx(ctx context.Context, q sqlExecQuery, workspaceID string) (string, error) {
+	var e string
+	err := q.QueryRowContext(ctx, `SELECT epoch FROM preview_epoch WHERE workspace_id=?`, workspaceID).Scan(&e)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return e, err
+}
+
+// clearPreviewGrantsTx drops the workspace's grants and moves it to a new preview epoch, in the
+// caller's transaction (start / reissue / stop).
+func clearPreviewGrantsTx(ctx context.Context, tx sqlExecQuery, workspaceID string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM preview_temp_port WHERE workspace_id=?`, workspaceID); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO preview_epoch(workspace_id, epoch) VALUES(?, ?)
+		 ON CONFLICT(workspace_id) DO UPDATE SET epoch=excluded.epoch`, workspaceID, NewID())
+	return err
 }

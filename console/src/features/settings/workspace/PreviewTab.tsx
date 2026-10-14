@@ -22,7 +22,7 @@ import { OnOff, Row } from "../parts/controls.tsx";
 import { useT } from "../../../lib/i18n/index.ts";
 import { Button } from "../../../ui/Button.tsx";
 import { useSettingsUI } from "../store.ts";
-import { previewInfoFrom, usePreviewStore } from "../../preview/previewState.ts";
+import { previewInfoFrom, previewToken, usePreviewStore } from "../../preview/previewState.ts";
 
 // Whether this deployment has preview subdomains at all. null = not known yet; the rail
 // stays empty until it resolves, so the entry never flashes in and disappears again.
@@ -79,10 +79,11 @@ export function PreviewTab() {
   }, []);
 
   const save = async (patch: Record<string, unknown>) => {
+    const from = previewToken(); // the scope and generation this save started under
     const res = await apiJSON("api/env/ws-settings", "PUT", patch);
     if (res && !res.error) {
       setAu(res);
-      usePreviewStore.getState().set(previewInfoFrom(res)); // the port controls follow the list
+      usePreviewStore.getState().set(previewInfoFrom(res), from); // the port controls follow the list
     } else toast(tr("common.save_failed"));
   };
 
@@ -97,10 +98,11 @@ export function PreviewTab() {
       danger: true,
     });
     if (!ok) return;
+    const from = previewToken();
     const res = await apiJSON("api/env/ws-settings/preview/reissue", "POST", {});
     if (res && !res.error) {
       setAu(res);
-      usePreviewStore.getState().set(previewInfoFrom(res));
+      usePreviewStore.getState().set(previewInfoFrom(res), from);
       // While stopped there are no issued URLs to throw away, so a successful reissue
       // changes nothing on screen. Always say which of the two happened, or the button
       // looks dead.

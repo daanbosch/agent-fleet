@@ -160,6 +160,13 @@ type grantRefusal struct {
 // workspace lock (SavePreviewTempPort), which also refuses a grant whose slug was rotated
 // while the probe ran.
 func (a previewHostAPI) grant(ctx context.Context, ws store.Workspace, actorID string, port int) *grantRefusal {
+	// Captured BEFORE the probe: a stop / start / reissue while it runs changes the epoch and
+	// makes the save below refuse (a fixed slug comes back as the same string, so the slug alone
+	// cannot tell).
+	epoch, err := a.mgr.store.PreviewEpoch(ctx, ws.ID)
+	if err != nil {
+		return &grantRefusal{http.StatusInternalServerError, "preview_failed"}
+	}
 	rt := a.mgr.runtimeFor(ws, noSecretKeys)
 	got, status, err := agentPreviewListener(ctx, rt, port, true)
 	switch {
@@ -189,13 +196,13 @@ func (a previewHostAPI) grant(ctx context.Context, ws store.Workspace, actorID s
 		Action: "workspace.preview_temp_port", Target: ws.ID,
 		Detail: "port=" + strconv.Itoa(port), At: store.NowTS(),
 	}
-	res, err := a.mgr.store.SavePreviewTempPort(ctx, g, maxPreviewTempPorts, audit)
+	res, err := a.mgr.store.SavePreviewTempPort(ctx, g, epoch, maxPreviewTempPorts, audit)
 	if err == nil && res == store.PreviewTempCap {
 		// Rows outlive their servers (nothing probes in the background), so a full table may
 		// be all stale. Drop the ones whose listener is gone, then try once more.
 		a.pruneDeadGrants(ctx, ws, rt)
 		audit.ID = store.NewID()
-		res, err = a.mgr.store.SavePreviewTempPort(ctx, g, maxPreviewTempPorts, audit)
+		res, err = a.mgr.store.SavePreviewTempPort(ctx, g, epoch, maxPreviewTempPorts, audit)
 	}
 	switch {
 	case err != nil:

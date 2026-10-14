@@ -6,7 +6,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 const { PortOpen } = await import("./PortOpen.tsx");
-const { usePreviewStore } = await import("./previewState.ts");
+const { usePreviewStore, currentScope, previewToken, previewInfoFrom } = await import("./previewState.ts");
+const { useTenantStore } = await import("../../core/store/tenant.ts");
 const { useLayoutStore } = await import("../../layout/store.ts");
 const { useWorkspaceStore } = await import("../../core/store/workspace.ts");
 const { useSettingsUI } = await import("../settings/store.ts");
@@ -48,7 +49,7 @@ beforeEach(() => {
   openTargetInNew.mockReset();
   useLayoutStore.setState({ openTarget, openTargetInNew });
   // The state is injected; a refresh must not overwrite it from the network.
-  usePreviewStore.setState({ info: info(), tenant: "", refresh: async () => {} });
+  usePreviewStore.setState({ info: info(), scope: currentScope(), refresh: async () => {} });
   open = vi.spyOn(window, "open").mockReturnValue(null);
   host = document.createElement("div");
   document.body.appendChild(host);
@@ -63,6 +64,7 @@ afterEach(() => {
   useWorkspaceStore.setState({ browserUnavailable: "" });
   useSettingsUI.setState({ settingsOpen: false, previewAddPort: null });
   setTenant("");
+  useTenantStore.setState({ identityRev: 0 });
   vi.useRealTimers();
 });
 
@@ -238,7 +240,7 @@ describe("PortOpen state follows tenant and start", () => {
 
   it("does not open another tenant's slug after a tenant switch", async () => {
     setTenant("acme");
-    usePreviewStore.setState({ info: info(), tenant: "acme" });
+    usePreviewStore.setState({ info: info(), scope: currentScope() });
     await render(3000);
     await act(async () => chip().click());
     expect(String(open.mock.calls[0][0])).toContain("abc-3000");
@@ -258,7 +260,7 @@ describe("PortOpen state follows tenant and start", () => {
     const fresh = await import("./previewState.ts");
     const ws = await import("../../core/store/workspace.ts");
     ws.useWorkspaceStore.setState({ state: "stopped" });
-    fresh.usePreviewStore.setState({ info: info(), tenant: "" });
+    fresh.usePreviewStore.setState({ info: info(), scope: "" });
     ws.useWorkspaceStore.setState({ state: "running" }); // → forced refresh (the slow one)
     expect(api).toHaveBeenCalledTimes(1);
     ws.useWorkspaceStore.setState({ state: "stopped" }); // → reset: the old answer is void
@@ -309,5 +311,41 @@ describe("PortOpen long-press", () => {
     await act(async () => root!.render(<div />));
     await act(async () => vi.advanceTimersByTime(600));
     expect(menu()).toBeNull();
+  });
+});
+
+describe("PortOpen state follows identity and settled answers", () => {
+  it("does not open the previous owner's slug after the identity changes within a tenant", async () => {
+    usePreviewStore.setState({ info: info(), scope: currentScope() });
+    await render(3000);
+    useTenantStore.setState({ identityRev: useTenantStore.getState().identityRev + 1 }); // owner A -> B
+    await render(3000);
+    await act(async () => chip().click());
+    expect(open).not.toHaveBeenCalled(); // not A's abc-3000
+    expect(openTarget).toHaveBeenCalled(); // pane until B's answer arrives
+  });
+
+  it("a reissue result settled while an older read is in flight keeps the new URLs", async () => {
+    let releaseOld!: (v: unknown) => void;
+    const api = vi.fn().mockReturnValueOnce(new Promise((r) => (releaseOld = r)));
+    vi.resetModules();
+    vi.doMock("../../core/api/client.ts", async (orig) => ({ ...(await orig<Record<string, unknown>>()), api }));
+    const fresh = await import("./previewState.ts");
+    const store = fresh.usePreviewStore;
+    store.setState({ info: null, scope: "" });
+    const slow = store.getState().refresh({ force: true }); // reads the OLD slug, slowly
+    const from = fresh.previewToken();
+    store.getState().set(fresh.previewInfoFrom({ previewDomain: "pv", previewUrls: { "3000": "https://NEW-3000.pv" } }), from);
+    releaseOld({ previewDomain: "pv", previewUrls: { "3000": "https://OLD-3000.pv" } });
+    await slow;
+    expect(store.getState().info?.urls["3000"]).toBe("https://NEW-3000.pv");
+    vi.doUnmock("../../core/api/client.ts");
+  });
+
+  it("drops a late save/reissue answer when the scope moved since it started", async () => {
+    const from = previewToken();
+    setTenant("globex"); // switched while the request was out
+    usePreviewStore.getState().set(previewInfoFrom({ previewDomain: "pv", previewUrls: { "3000": "https://LATE-3000.pv" } }), from);
+    expect(usePreviewStore.getState().info?.urls["3000"] ?? "").not.toContain("LATE");
   });
 });

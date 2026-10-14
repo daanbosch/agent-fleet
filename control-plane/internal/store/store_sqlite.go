@@ -1624,8 +1624,8 @@ func setWorkspaceStateTx(ctx context.Context, tx *sqlTx, workspaceID, state stri
 		if _, err = tx.ExecContext(ctx, `UPDATE workspace SET preview_slug='' WHERE id=?`, workspaceID); err != nil {
 			return err
 		}
-		// Temporary preview grants die with the slug they were made under.
-		if _, err = tx.ExecContext(ctx, `DELETE FROM preview_temp_port WHERE workspace_id=?`, workspaceID); err != nil {
+		// Temporary preview grants die with the start they were made in.
+		if err = clearPreviewGrantsTx(ctx, tx, workspaceID); err != nil {
 			return err
 		}
 	}
@@ -1781,6 +1781,7 @@ func deleteWorkspaceTx(ctx context.Context, tx *sqlTx, workspaceID string) error
 		`DELETE FROM workspace_auto_stop WHERE workspace_id=?`,
 		`DELETE FROM workspace_activity WHERE workspace_id=?`,
 		`DELETE FROM preview_temp_port WHERE workspace_id=?`,
+		`DELETE FROM preview_epoch WHERE workspace_id=?`,
 		`DELETE FROM shared_session_catalog WHERE workspace_id=?`,
 		`DELETE FROM session WHERE workspace_id=?`,
 		`DELETE FROM wrapped_dek WHERE workspace_id=?`,
@@ -1901,7 +1902,7 @@ func (s *SQL) SetWorkspacePreviewSlug(ctx context.Context, workspaceID, slug str
 	if _, err = tx.ExecContext(ctx, `UPDATE workspace SET preview_slug=? WHERE id=?`, slug, workspaceID); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM preview_temp_port WHERE workspace_id=?`, workspaceID); err != nil {
+	if err = clearPreviewGrantsTx(ctx, tx, workspaceID); err != nil {
 		return err
 	}
 	return tx.Commit()

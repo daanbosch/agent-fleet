@@ -5,6 +5,7 @@
 import { create } from "zustand";
 import { api, getTenant } from "../../core/api/client.ts";
 import { useWorkspaceStore } from "../../core/store/workspace.ts";
+import { useTenantStore } from "../../core/store/tenant.ts";
 
 export interface PreviewInfo {
   /** The deployment's preview domain; "" when host-based previews are off. */
@@ -34,51 +35,74 @@ export function previewInfoFrom(res: any): PreviewInfo | null {
   };
 }
 
+/** Whose answer this is: the tenant AND the identity the Console is acting as. The same tenant
+ *  with another owner (identityRev bumps) has other workspaces and other slugs. */
+export function currentScope(): string {
+  return getTenant() + "|" + useTenantStore.getState().identityRev;
+}
+
 interface PreviewStore {
-  /** The last answer, and the tenant it was read for. */
+  /** The last answer, and the scope (tenant|identity) it was read for. */
   info: PreviewInfo | null;
-  tenant: string;
-  set(info: PreviewInfo | null): void;
-  /** Forget everything (workspace stopped / switched) and ignore any answer still in flight. */
+  scope: string;
+  /** Store a settled answer (a read, a save, a reissue). It voids every older read in flight.
+   *  `from` is what the caller captured when it STARTED (previewToken()): if the scope or the
+   *  generation moved since, the answer is dropped instead of being filed under the new one. */
+  set(info: PreviewInfo | null, from?: PreviewToken): void;
+  /** Forget everything (workspace stopped / scope changed) and ignore any answer in flight. */
   reset(): void;
   /** Re-read from the CP. Without `force`, calls closer than MIN_GAP_MS, or while one is in
-   *  flight for this tenant, share the previous answer. `force` starts a new read and makes
-   *  every older one's answer void. */
+   *  flight for this scope, share the previous answer. `force` starts a new read. */
   refresh(opts?: { force?: boolean }): Promise<void>;
+}
+
+export interface PreviewToken {
+  scope: string;
+  gen: number;
 }
 
 const MIN_GAP_MS = 4000;
 let lastAt = 0;
 let inflight: Promise<void> | null = null;
-let inflightTenant = "";
-// Bumped by every forced read and every reset: an answer from an older generation (a slow
-// reply from before a restart, or from another tenant) must not bring its slug back.
+let inflightScope = "";
+// Bumped by every forced read, reset and settled answer: an older answer (a slow reply from
+// before a restart, a reissue, or from another scope) must not bring its slug back.
 let gen = 0;
+
+/** Capture before an async call that will `set` its result. */
+export function previewToken(): PreviewToken {
+  return { scope: currentScope(), gen };
+}
 
 export const usePreviewStore = create<PreviewStore>((set, get) => ({
   info: null,
-  tenant: "",
-  set: (info) => set({ info, tenant: getTenant() }),
+  scope: "",
+  set(info, from) {
+    if (from && (from.scope !== currentScope() || from.gen !== gen)) return;
+    gen++;
+    inflight = null;
+    set({ info, scope: currentScope() });
+  },
   reset() {
     gen++;
     inflight = null;
     lastAt = 0;
-    set({ info: null, tenant: "" });
+    set({ info: null, scope: "" });
   },
   refresh({ force = false } = {}) {
-    const tenant = getTenant();
-    if (!force && inflight && inflightTenant === tenant) return inflight;
-    if (!force && get().tenant === tenant && get().info && Date.now() - lastAt < MIN_GAP_MS) return Promise.resolve();
+    const scope = currentScope();
+    if (!force && inflight && inflightScope === scope) return inflight;
+    if (!force && get().scope === scope && get().info && Date.now() - lastAt < MIN_GAP_MS) return Promise.resolve();
     const mine = ++gen;
     lastAt = Date.now();
-    inflightTenant = tenant;
+    inflightScope = scope;
     const p: Promise<void> = api("api/env/ws-settings")
       .then(
         (res: any) => {
-          if (mine === gen) set({ info: previewInfoFrom(res), tenant });
+          if (mine === gen) set({ info: previewInfoFrom(res), scope });
         },
         () => {
-          if (mine === gen) set({ info: null, tenant });
+          if (mine === gen) set({ info: null, scope });
         },
       )
       .finally(() => {
@@ -89,18 +113,29 @@ export const usePreviewStore = create<PreviewStore>((set, get) => ({
   },
 }));
 
-/** The info that is valid for the tenant the Console is on now, else null (so a control falls
- *  back to the pane / lightweight preview instead of opening another tenant's slug). */
+/** The info that is valid for the tenant and identity the Console is on now, else null (so a
+ *  control falls back to the pane / lightweight preview instead of opening another owner's slug). */
 export function useCurrentPreviewInfo(): PreviewInfo | null {
-  return usePreviewStore((s) => (s.tenant === getTenant() ? s.info : null));
+  // Subscribed so a tenant / identity change re-renders the control and re-evaluates the scope.
+  useTenantStore((s) => s.tenant + "|" + s.identityRev);
+  return usePreviewStore((s) => (s.scope === currentScope() ? s.info : null));
 }
 
-// A workspace that stops, restarts or is replaced issues a new slug: drop what was read for the
-// old start, and read again once it runs. One subscription here rather than one per control.
+// A workspace that stops, restarts or is replaced issues a new slug, and a tenant or identity
+// switch moves to other workspaces: drop what was read, and read again if one is running.
+// One subscription here rather than one per control.
 let lastWsState = useWorkspaceStore.getState().state;
 useWorkspaceStore.subscribe((s) => {
   if (s.state === lastWsState) return;
   lastWsState = s.state;
   if (s.state === "running") void usePreviewStore.getState().refresh({ force: true });
   else usePreviewStore.getState().reset();
+});
+let lastScope = useTenantStore.getState().tenant + "|" + useTenantStore.getState().identityRev;
+useTenantStore.subscribe((s) => {
+  const now = s.tenant + "|" + s.identityRev;
+  if (now === lastScope) return;
+  lastScope = now;
+  usePreviewStore.getState().reset();
+  if (useWorkspaceStore.getState().state === "running") void usePreviewStore.getState().refresh({ force: true });
 });
