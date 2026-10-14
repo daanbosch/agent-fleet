@@ -344,3 +344,46 @@ func TestBrowserReasonReachesAViewerAttachedAfterTheProbe(t *testing.T) {
 		t.Fatalf("message order %v: ready must come first", types)
 	}
 }
+
+// The probe finishing while a viewer attaches must never put a reason ahead of "ready":
+// the Console reads "ready" as state ready and would drop the reason.
+func TestBrowserReasonNeverPrecedesReadyOnAttach(t *testing.T) {
+	for i := 0; i < 60; i++ {
+		release := make(chan struct{})
+		h := newReasonHarness(t, 3000, func(context.Context, string) string {
+			<-release
+			return portprobe.TLS
+		})
+		h.p.mu.Lock()
+		h.p.viewer = nil
+		h.p.mu.Unlock()
+		h.navigate("L1", "http://127.0.0.1:3000/")
+		h.fail("L1")
+		if !waitFor(5*time.Second, func() bool { return h.probes.Load() == 1 }) {
+			t.Fatal("probe never started")
+		}
+		if _, err := h.m.reserve(h.p.id); err != nil {
+			t.Fatal(err)
+		}
+		v := &browserViewer{control: make(chan browserOutbound, 64), page: h.p}
+		go close(release)
+		if !h.m.attach(h.p, v) {
+			t.Fatal("attach refused")
+		}
+		waitFor(2*time.Second, func() bool { return h.reason() != "" })
+		h.m.detach(h.p, v)
+		var order []string
+		for len(v.control) > 0 {
+			var m map[string]any
+			_ = json.Unmarshal((<-v.control).data, &m)
+			if m["type"] == "state" && m["reason"] != nil {
+				order = append(order, "reason")
+			} else {
+				order = append(order, m["type"].(string))
+			}
+		}
+		if len(order) == 0 || order[0] != "ready" {
+			t.Fatalf("iteration %d: message order %v, ready must come first", i, order)
+		}
+	}
+}

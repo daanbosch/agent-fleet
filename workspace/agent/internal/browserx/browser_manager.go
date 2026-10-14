@@ -485,6 +485,15 @@ func (m *browserManager) attach(p *browserPage, v *browserViewer) bool {
 	p.reserved = false
 	p.viewer = v
 	p.visible = true
+	// The initial messages go out in the same critical section that publishes the viewer:
+	// published first, a CDP-driven state could be queued ahead of "ready" (which the
+	// Console reads as state ready), and released in between, a newer state could be
+	// followed by this older one.
+	v.enqueueText(p.readyMessageLocked())
+	if m := p.reasonMessageLocked(); m != nil {
+		// A probe that finished before this viewer attached had nobody to tell.
+		v.enqueueText(m)
+	}
 	return true
 }
 
