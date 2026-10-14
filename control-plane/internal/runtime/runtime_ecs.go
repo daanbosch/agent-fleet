@@ -546,6 +546,7 @@ func (e *ecsRuntime) accessPoints(ctx context.Context) ([]efstypes.AccessPointDe
 // the part of the teardown that is identical on both launch types. Split out so the EC2
 // adapter can run it in its own order (slot and volume first, then this).
 func (e *ecsRuntime) destroySharedResources(ctx context.Context) ([]string, error) {
+	e.homeUnproven = false
 	aps, err := e.accessPoints(ctx)
 	if err != nil {
 		return nil, err
@@ -568,6 +569,7 @@ func (e *ecsRuntime) destroySharedResources(ctx context.Context) ([]string, erro
 			}
 		} else {
 			// Rooted at the file system's root: unknowable, kept for the same reason.
+			leftovers = append(leftovers, "efs-access-point:"+e.cfg.efsFileSystem+"/"+aws.ToString(ap.AccessPointId))
 			e.homeUnproven = true
 			continue
 		}

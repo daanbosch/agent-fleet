@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -86,18 +87,22 @@ func TestECSDestroyProvesTheHomeGoneOnlyForTheDirectoriesTheTaskRemoves(t *testi
 		aps      []efstypes.AccessPointDescription
 		exit     int32
 		want     HomeVerdict
-		wantLeft int // access points left after the first and the retry
+		wantLeft int    // access points left after the first and the retry
+		report   string // what both Destroy calls must name as left over ("" = nothing)
 	}{
-		{"standard access points", []efstypes.AccessPointDescription{ap("a", dir("/home/M-1")), ap("b", dir("/claude-config/M-1"))}, 0, HomeGone, 0},
-		{"no access point at all", nil, 0, HomeGone, 0},
-		{"access point elsewhere", []efstypes.AccessPointDescription{ap("a", dir("/home/M-1")), ap("b", dir("/old-home/M-1"))}, 0, HomeUnknown, 1},
-		{"access point with no root", []efstypes.AccessPointDescription{ap("a", nil)}, 0, HomeUnknown, 1},
-		{"task failed", []efstypes.AccessPointDescription{ap("a", dir("/home/M-1"))}, HomeOpExitFailed, HomeUnknown, 0},
+		{"standard access points", []efstypes.AccessPointDescription{ap("a", dir("/home/M-1")), ap("b", dir("/claude-config/M-1"))}, 0, HomeGone, 0, ""},
+		{"no access point at all", nil, 0, HomeGone, 0, ""},
+		{"access point elsewhere", []efstypes.AccessPointDescription{ap("a", dir("/home/M-1")), ap("b", dir("/old-home/M-1"))}, 0, HomeUnknown, 1, "/old-home/M-1"},
+		{"access point with no root", []efstypes.AccessPointDescription{ap("a", nil)}, 0, HomeUnknown, 1, "efs-access-point:"},
+		{"task failed", []efstypes.AccessPointDescription{ap("a", dir("/home/M-1"))}, HomeOpExitFailed, HomeUnknown, 0, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ff, ft := &fakeEFS{aps: tc.aps}, &fakeTasks{exitCode: exit(tc.exit)}
 			rt := newHomeTaskECS(&fakeECS{}, ff, ft)
-			_, _ = rt.Destroy(context.Background())
+			left, _ := rt.Destroy(context.Background())
+			if !reported(left, tc.report) {
+				t.Fatalf("first Destroy reported %v, want it to name %q", left, tc.report)
+			}
 			if v, why := rt.ProveHomeGone(context.Background()); v != tc.want {
 				t.Fatalf("after Destroy: %s (%s), want %s", v, why, tc.want)
 			}
@@ -106,7 +111,10 @@ func TestECSDestroyProvesTheHomeGoneOnlyForTheDirectoriesTheTaskRemoves(t *testi
 			}
 			// A retry on a new runtime value (the CP restarted) sees what the first left.
 			rt2 := newHomeTaskECS(&fakeECS{}, ff, &fakeTasks{exitCode: exit(0)})
-			_, _ = rt2.Destroy(context.Background())
+			left2, _ := rt2.Destroy(context.Background())
+			if !reported(left2, tc.report) {
+				t.Fatalf("the retry reported %v, want it to name %q", left2, tc.report)
+			}
 			want2 := tc.want
 			if tc.name == "task failed" {
 				want2 = HomeGone // the retry's task succeeded and there was nothing odd to forget
@@ -116,4 +124,17 @@ func TestECSDestroyProvesTheHomeGoneOnlyForTheDirectoriesTheTaskRemoves(t *testi
 			}
 		})
 	}
+}
+
+// reported: nothing is expected when want is "", else some residue contains it.
+func reported(left []string, want string) bool {
+	if want == "" {
+		return len(left) == 0
+	}
+	for _, l := range left {
+		if strings.Contains(l, want) {
+			return true
+		}
+	}
+	return false
 }
