@@ -234,15 +234,15 @@ body on demand) is a second way to the same text; the other kinds have only the 
 
 With opencode 2, Terminal (CLI) sessions attach to the one opencode server the Workspace Agent
 runs ([member/06](../member/06-agents.md#with-opencode-2)). To force a private server per
-Terminal session instead (the opencode 1 memory profile, about 150-250 MB more per session),
-set this in the environment of the Workspace Agent process:
+Terminal session instead (about 150-250 MB more memory per session, measured idle), start the
+Workspace Agent with this in its environment:
 
 ```
 AF_OPENCODE_TUI_STANDALONE=1
 ```
 
-- The Agent reads it on every launch, so no restart is needed. It affects sessions launched
-  afterwards; a running session keeps the mode it started in.
+- It takes effect for Terminal sessions launched after the Agent starts with it; running
+  sessions keep the mode they started in.
 - `AF_OPENCODE_SERVE_DISABLE=1` (managed opencode off) also gives private servers, because
   there is no shared server to attach to.
 - With opencode 1 neither variable has an effect on Terminal sessions.
