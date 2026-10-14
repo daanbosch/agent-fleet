@@ -106,12 +106,21 @@ func resolveFDReadPath(input string) (fdReadPath, *fsAPIError) {
 	// the browse root ($CLAUDE_CONFIG_DIR) or under a denylisted directory (~/.codex). Only
 	// what the memory snapshot allowlist versions is served, read-only and opened beneath
 	// its memory root, so the transcripts and credentials next to it stay unreachable.
-	memoryCandidate := input
-	if !strings.HasPrefix(input, "/") {
-		memoryCandidate = filepath.Join(browse, input)
+	// It applies only where the browse root would refuse the path: memory under a
+	// non-denied part of home (a custom CLAUDE_CONFIG_DIR) stays an ordinary browse path,
+	// so GET and PUT agree on its editability and the GET still waits on an in-flight PUT.
+	memoryCandidate, browsable := input, false
+	if strings.HasPrefix(input, "/") {
+		if relative, ok := pathUnderRoot(input, browse); ok {
+			browsable = !isDenied(relative)
+		}
+	} else {
+		memoryCandidate, browsable = filepath.Join(browse, input), !isDenied(input)
 	}
-	if _, root, relative, ok := memoryx.MemoryFile(memoryCandidate); ok {
-		return fdReadPath{root: root, relative: relative, display: input, readOnly: true}, nil
+	if !browsable {
+		if _, root, relative, ok := memoryx.MemoryFile(memoryCandidate); ok {
+			return fdReadPath{root: root, relative: relative, display: input, readOnly: true}, nil
+		}
 	}
 	generatedRoot, err := absoluteTrustedRoot(codexGeneratedImagesRoot())
 	if err == nil {

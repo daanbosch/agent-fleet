@@ -62,7 +62,8 @@ const (
 	// session's diff.
 	FileScopeOtherRepo = "other-repo"
 	// FileScopeMemory is a file an agent memory root versions (internal/memoryx): Claude's
-	// projects/<slug>/memory or Codex's memories. The file reader serves it read-only.
+	// projects/<slug>/memory or Codex's memories. Outside a browsable path the file reader
+	// serves it read-only.
 	FileScopeMemory = "memory"
 )
 

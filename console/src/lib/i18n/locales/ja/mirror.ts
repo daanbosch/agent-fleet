@@ -167,7 +167,7 @@ export const mirror = {
   "mirror.files.st_memory": "エージェントのメモリ",
   "mirror.files.st_memory_claude": "Claude のメモリ",
   "mirror.files.st_memory_codex": "Codex のメモリ",
-  "mirror.files.st_memory_hint": "エージェントのメモリファイル。読み取り専用で開きます",
+  "mirror.files.st_memory_hint": "エージェントのメモリに保存されたファイル",
   "mirror.files.other_repo": "別の作業コピー（{repo}）のファイル。このセッションの作業コピーの差分ではありません",
   "mirror.files.sort_recent": "新しい順",
   "mirror.files.sort_path": "パス順",

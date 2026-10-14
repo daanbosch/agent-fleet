@@ -34,7 +34,7 @@ export interface SessionFile {
   sidechain?: boolean; // ONLY subagents touched it
   // Where it sits relative to the session (transcript.FileScope*). "other-repo" keeps its git
   // state but is not this session's diff; "workdir" is ~/.af-work, the throwaway directory;
-  // "memory" is a file an agent memory root versions, which the Agent serves read-only.
+  // "memory" is a file an agent memory root versions.
   scope?: "workdir" | "other-repo" | "memory";
   memoryKind?: string; // whose memory a "memory" row is ("claude" | "codex")
 }

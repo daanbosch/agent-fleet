@@ -160,7 +160,7 @@ export const mirror: Record<keyof typeof jaMirror, string> = {
   "mirror.files.st_memory": "Agent memory",
   "mirror.files.st_memory_claude": "Claude memory",
   "mirror.files.st_memory_codex": "Codex memory",
-  "mirror.files.st_memory_hint": "The agent's memory file. It opens read-only",
+  "mirror.files.st_memory_hint": "A file in the agent's memory",
   "mirror.files.other_repo": "A file in another working copy ({repo}), not part of this session's working-copy diff",
   "mirror.files.sort_recent": "Most recent",
   "mirror.files.sort_path": "By path",

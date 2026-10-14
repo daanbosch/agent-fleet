@@ -1110,3 +1110,66 @@ func TestAgentMemoryFilesAreReadOnlyAndNothingElseOpens(t *testing.T) {
 		t.Errorf("GET symlink in memory: status=%d body=%s", sym.Code, sym.Body.String())
 	}
 }
+
+// A memory root that is a symlink is not trusted: ~/.codex/memories -> ~/.codex must not
+// turn codex's auth.json into readable "memory".
+func TestAgentMemorySymlinkedRootDoesNotExposeItsTarget(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AF_BROWSE_ROOT", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	codexHome := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(codexHome, filepath.Join(codexHome, "memories")); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		filepath.Join(codexHome, "auth.json"),
+		filepath.Join(codexHome, "memories", "auth.json"),
+		".codex/auth.json",
+		".codex/memories/auth.json",
+	} {
+		rec := httptest.NewRecorder()
+		handleFSFile(rec, httptest.NewRequest(http.MethodGet, "/fs/file?path="+url.QueryEscape(q), nil))
+		if rec.Code == http.StatusOK {
+			t.Errorf("GET %s was served: body=%s", q, rec.Body.String())
+		}
+	}
+}
+
+// Memory that already sits on a browsable path (a CLAUDE_CONFIG_DIR under home, outside the
+// denylist) keeps the ordinary browse treatment, so GET does not call it read-only while a
+// PUT to the same path succeeds.
+func TestAgentMemoryOnABrowsablePathStaysEditable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AF_BROWSE_ROOT", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude-state"))
+	rel := "claude-state/projects/-x/memory/note.md"
+	if err := os.MkdirAll(filepath.Join(home, filepath.Dir(rel)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, rel), []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{rel, filepath.Join(home, rel)} {
+		path, aerr := resolveFDReadPath(q)
+		if aerr != nil || !path.browseRoot || path.readOnly {
+			t.Errorf("resolveFDReadPath(%s) = %+v, %v; want the ordinary browse path", q, path, aerr)
+		}
+	}
+	rec := httptest.NewRecorder()
+	handleFSFile(rec, httptest.NewRequest(http.MethodGet, "/fs/file?path="+url.QueryEscape(rel), nil))
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK || payload["editable"] != true {
+		t.Errorf("GET %s: status=%d payload=%#v", rel, rec.Code, payload)
+	}
+}

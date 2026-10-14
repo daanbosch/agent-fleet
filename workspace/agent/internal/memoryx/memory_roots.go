@@ -183,24 +183,58 @@ func memoryAllowed(r memoryRoot, rel string) bool {
 	return true
 }
 
-// MemoryFile reports whether abs, a clean absolute path, is a file a memory root versions,
-// and if so which kind's memory it is, the root directory, and the path relative to it. The
-// file reader opens it beneath that root, so nothing above it (transcripts, credentials,
-// settings) becomes reachable: the allowlist is the same one snapshots use. A root is
-// matched in the spelling it was declared in and in its resolved one, because an edit path
-// arrives in either.
-func MemoryFile(abs string) (kind, root, rel string, ok bool) {
+// MemoryRootDir is one memory root as a path: whose memory it is, and its live directory.
+type MemoryRootDir struct{ Kind, Dir string }
+
+// MemoryRootDirs returns the declared memory roots, minus any whose directory is itself a
+// symlink. Such a root is not a memory root at all: memoryCollect does not walk it, and taking
+// its target as the root would let ~/.codex/memories -> ~/.codex expose codex's auth.json as
+// "memory". A symlink above the root is fine; the directory stays the same one.
+func MemoryRootDirs() []MemoryRootDir {
+	var out []MemoryRootDir
 	for _, r := range memoryRootDecls() {
-		dirs := []string{filepath.Clean(r.Dir)}
-		if resolved, err := filepath.EvalSymlinks(r.Dir); err == nil && resolved != dirs[0] {
-			dirs = append(dirs, resolved)
+		dir := filepath.Clean(r.Dir)
+		if st, err := os.Lstat(dir); err == nil && st.Mode()&os.ModeSymlink != 0 {
+			continue
 		}
-		for _, d := range dirs {
-			p, err := filepath.Rel(d, abs)
-			if err != nil || !memoryAllowed(r, p) {
-				continue
+		out = append(out, MemoryRootDir{Kind: r.Kind, Dir: dir})
+	}
+	return out
+}
+
+// MemoryFileUnder reports whether abs, a clean absolute path, is a file the kind's memory
+// allowlist versions when that root is spelled dir, and its path relative to dir. It is
+// lexical only, so a caller can resolve dir once and classify many paths against it.
+func MemoryFileUnder(abs, kind, dir string) (rel string, ok bool) {
+	for _, r := range memoryRootDecls() {
+		if r.Kind != kind {
+			continue
+		}
+		p, err := filepath.Rel(dir, abs)
+		if err != nil || !memoryAllowed(r, p) {
+			return "", false
+		}
+		return filepath.ToSlash(p), true
+	}
+	return "", false
+}
+
+// MemoryFile reports whether abs, a clean absolute path, is a file a memory root versions, and
+// if so which kind's memory it is, the root directory to open it beneath, and the path relative
+// to it. The file reader opens it beneath that root, so nothing above it (transcripts,
+// credentials, settings) becomes reachable: the allowlist is the same one snapshots use. abs may
+// be spelled through the root's resolved form (an edit path arrives in either), but the root
+// returned is always the declared one, which the reader opens without following a final
+// symlink.
+func MemoryFile(abs string) (kind, root, rel string, ok bool) {
+	for _, r := range MemoryRootDirs() {
+		if p, ok := MemoryFileUnder(abs, r.Kind, r.Dir); ok {
+			return r.Kind, r.Dir, p, true
+		}
+		if resolved, err := filepath.EvalSymlinks(r.Dir); err == nil && resolved != r.Dir {
+			if p, ok := MemoryFileUnder(abs, r.Kind, resolved); ok {
+				return r.Kind, r.Dir, p, true
 			}
-			return r.Kind, d, filepath.ToSlash(p), true
 		}
 	}
 	return "", "", "", false
