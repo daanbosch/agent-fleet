@@ -184,3 +184,63 @@ func TestMemoryInactiveRootsExplainCodex(t *testing.T) {
 		t.Fatal("codex root did not become active once ~/.codex/memories existed")
 	}
 }
+
+// MemoryFile is what lets the file reader open a memory file outside the browse root, so it
+// must answer only for what the snapshot allowlist versions: never a transcript or a
+// credential sitting next to it.
+func TestMemoryFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	real := t.TempDir()
+	memoryMkdirAll(t, filepath.Join(real, "projects"))
+	link := filepath.Join(t.TempDir(), "claude")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", link)
+	codexDir := filepath.Join(home, ".codex", "memories")
+
+	cases := []struct {
+		abs, kind, root, rel string
+	}{
+		{filepath.Join(link, "projects", "-home-dev-repos-x", "memory", "note.md"), "claude", filepath.Join(link, "projects"), "-home-dev-repos-x/memory/note.md"},
+		// The resolved spelling still opens beneath the declared root.
+		{filepath.Join(real, "projects", "-home-dev-repos-x", "memory", "note.md"), "claude", filepath.Join(link, "projects"), "-home-dev-repos-x/memory/note.md"},
+		{filepath.Join(codexDir, "MEMORY.md"), "codex", codexDir, "MEMORY.md"},
+		{filepath.Join(link, "projects", "-home-dev-repos-x", "abc.jsonl"), "", "", ""},
+		{filepath.Join(link, ".credentials.json"), "", "", ""},
+		{filepath.Join(link, "settings.json"), "", "", ""},
+		{filepath.Join(codexDir, ".git", "config"), "", "", ""},
+		{filepath.Join(home, ".codex", "auth.json"), "", "", ""},
+		{filepath.Join(home, "repos", "x", "memory", "note.md"), "", "", ""},
+	}
+	for _, c := range cases {
+		kind, root, rel, ok := MemoryFile(c.abs)
+		if ok != (c.kind != "") || kind != c.kind || root != c.root || rel != c.rel {
+			t.Errorf("MemoryFile(%q) = (%q, %q, %q, %v), want (%q, %q, %q)", c.abs, kind, root, rel, ok, c.kind, c.root, c.rel)
+		}
+	}
+}
+
+// A memory root that is itself a symlink is not a root: its target would otherwise become the
+// trusted directory, and ~/.codex/memories -> ~/.codex would serve codex's auth.json.
+func TestMemoryFileRefusesASymlinkedRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
+	codexHome := filepath.Join(home, ".codex")
+	memoryMkdirAll(t, codexHome)
+	if err := os.Symlink(codexHome, filepath.Join(codexHome, "memories")); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{filepath.Join(codexHome, "auth.json"), filepath.Join(codexHome, "memories", "auth.json")} {
+		if kind, root, rel, ok := MemoryFile(p); ok {
+			t.Errorf("MemoryFile(%q) = (%q, %q, %q), want refused", p, kind, root, rel)
+		}
+	}
+	for _, r := range MemoryRootDirs() {
+		if r.Kind == "codex" {
+			t.Errorf("symlinked codex root listed: %+v", r)
+		}
+	}
+}

@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memoryx"
 )
 
 const (
@@ -100,6 +102,27 @@ func resolveFDReadPath(input string) (fdReadPath, *fsAPIError) {
 	if err != nil {
 		return fdReadPath{}, fsErr(500, errCodeFSReadFailed, "cannot resolve browse root")
 	}
+	// A session's changed-files list links to the agent memory it wrote, which sits outside
+	// the browse root ($CLAUDE_CONFIG_DIR) or under a denylisted directory (~/.codex). Only
+	// what the memory snapshot allowlist versions is served, read-only and opened beneath
+	// its memory root, so the transcripts and credentials next to it stay unreachable.
+	// It applies only where the browse root would refuse the path: memory under a
+	// non-denied part of home (a custom CLAUDE_CONFIG_DIR) stays an ordinary browse path,
+	// so GET and PUT agree on its editability and the GET still waits on an in-flight PUT.
+	// A browse path that crosses a symlink is refused too (and so is its PUT), which is
+	// how a CLAUDE_CONFIG_DIR linked out of home reaches the strip.
+	memoryCandidate, browsable := input, false
+	if strings.HasPrefix(input, "/") {
+		if relative, ok := pathUnderRoot(input, browse); ok {
+			browsable = !isDenied(relative)
+		}
+	} else {
+		memoryCandidate, browsable = filepath.Join(browse, input), !isDenied(input)
+	}
+	if _, root, relative, ok := memoryx.MemoryFile(memoryCandidate); ok &&
+		(!browsable || browseReadCrossesSymlink(browse, memoryCandidate)) {
+		return fdReadPath{root: root, relative: relative, display: input, readOnly: true}, nil
+	}
 	generatedRoot, err := absoluteTrustedRoot(codexGeneratedImagesRoot())
 	if err == nil {
 		// Transcript userfile paths below the browse root are deliberately
@@ -154,6 +177,22 @@ func resolveFDReadPath(input string) (fdReadPath, *fsAPIError) {
 		}, nil
 	}
 	return fdReadPath{}, fsErr(400, errCodeFSBadPath, "absolute path is outside allowed read roots")
+}
+
+// browseReadCrossesSymlink reports whether full's directory is reached from the browse root
+// through a symlink, which the ordinary browse read (openat2 RESOLVE_NO_SYMLINKS) refuses.
+func browseReadCrossesSymlink(browse, full string) bool {
+	dir := filepath.Dir(full)
+	rel, err := filepath.Rel(browse, dir)
+	if err != nil {
+		return false
+	}
+	resolvedBrowse, err := filepath.EvalSymlinks(browse)
+	if err != nil {
+		return false
+	}
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	return err == nil && resolvedDir != filepath.Join(resolvedBrowse, rel)
 }
 
 func resolveFDWritePath(input string) (string, *fsAPIError) {
