@@ -26,7 +26,7 @@ import (
 func TestContractTerminalFormRespond(t *testing.T) {
 	_, addr, dir := startStubbedV2(t)
 	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("needs tmux")
+		skipUnlessV2Required(t, "needs tmux")
 	}
 	testguard.IsolateTmux(t)
 	st := agents.ThreadSettings{Model: "stub/m"}
