@@ -527,6 +527,11 @@ func buildMux() *http.ServeMux {
 	mux.HandleFunc("GET /agents/memory/claude-export", memoryx.HandleAgentMemoryClaudeExportSources)
 	mux.HandleFunc("GET /agents/memory/claude-export/preview", memoryx.HandleAgentMemoryClaudeExportPreview)
 	mux.HandleFunc("POST /agents/memory/claude-export", memoryx.HandleAgentMemoryClaudeExportApply)
+	// What the Agent memory switch does by itself with claude's native memory (#1972): where the
+	// reconciler is, the counts the confirmation shows, and the member's retry / give-up.
+	mux.HandleFunc("GET /agents/memory/auto-sync", memoryx.HandleAutoSyncStatus)
+	mux.HandleFunc("GET /agents/memory/auto-sync/preview", memoryx.HandleAutoSyncPreview)
+	mux.Handle("POST /agents/memory/auto-sync", memberorigin.Require(memoryx.MemberWriteMaxRequest, http.HandlerFunc(memoryx.HandleAutoSyncAction)))
 
 	// Toolchain selection (node via nvm / java via pre-baked Temurin) — Console.
 	mux.HandleFunc("GET /env/toolchains", handleToolchainsGet)

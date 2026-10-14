@@ -581,7 +581,7 @@ func TestClaudeImportParentSwapDoesNotRedirect(t *testing.T) {
 	if err := os.Symlink(other, dir); err != nil {
 		t.Fatal(err)
 	}
-	it, _ := agentMemImportEvaluate(mem, "real.md", e.slug, "projects/"+e.pid, map[string]bool{})
+	it, _ := agentMemImportEvaluate(mem, "real.md", e.slug, "projects/"+e.pid, map[string]bool{}, false)
 	if it.Status != claudeImportNew || it.entry.Body != "original" {
 		t.Errorf("read followed the swapped parent: %+v", it)
 	}

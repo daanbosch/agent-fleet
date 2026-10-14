@@ -21,6 +21,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/chatx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/mcpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memoryx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/uiprefs"
 )
@@ -320,6 +321,9 @@ func handlePutUIPrefs(w http.ResponseWriter, r *http.Request) {
 	// is on, removed when it goes off. Sessions already running have read their instructions.
 	if uiprefs.AgentMemory() != agentMemoryBefore {
 		reconcileAgentInstructions()
+		// The import (on) or write-back (off) of claude's native memory follows the switch
+		// (#1972). Only the phase moves here, before the answer; the work runs in the background.
+		memoryx.AutoSyncWake()
 	}
 	// Switching the tier changes the env that is injected (the free tier drops
 	// OPENCODE_API_KEY). Treated like a key change: without recreating the running serve, it

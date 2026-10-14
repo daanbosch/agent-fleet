@@ -13,10 +13,11 @@ import { useToast } from "../../../ui/ToastProvider.tsx";
 import { useConfirm } from "../../../ui/ConfirmProvider.tsx";
 import { Diff } from "../../scm/GitDiff.tsx";
 import { OnOff, Row } from "../parts/controls.tsx";
-import { setSetting, useSettings } from "../../../lib/settings.ts";
+import { useSettings } from "../../../lib/settings.ts";
 import { useT, tMaybe } from "../../../lib/i18n/index.ts";
 import { fmtDateTime, DATETIME_FULL } from "../../../lib/intl.ts";
 import { ClaudeImportPanel } from "./memoryClaudeImport.tsx";
+import { AutoSyncPanel, useFlipAgentMemory } from "./memoryAutoSync.tsx";
 import { ProjectMovePanel } from "./memoryProjectMove.tsx";
 import { MuseImportPanel } from "./memoryMuseImport.tsx";
 import { ClaudeExportPanel } from "./memoryClaudeExport.tsx";
@@ -33,11 +34,14 @@ const opLabel = (op: string): string => tMaybe("mem.af_op_" + op) ?? op;
 export function AgentMemorySwitch() {
   const tr = useT();
   const enabled = useSettings().agentMemory;
+  // The flip asks first, with the counts of what the Agent will import or write back by itself.
+  const flip = useFlipAgentMemory();
   return (
     <>
       <Row label={tr("mem.af_switch")}>
-        <OnOff value={enabled} onChange={(v) => setSetting("agentMemory", v)} />
+        <OnOff value={enabled} onChange={(v) => void flip(v)} />
       </Row>
+      <AutoSyncPanel />
       <p className="muted ds-note">{tr("mem.af_switch_note")}</p>
       {!enabled && <p className="muted ds-note">{tr("mem.af_switch_off_export")}</p>}
     </>

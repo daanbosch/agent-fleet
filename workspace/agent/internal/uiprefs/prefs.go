@@ -322,6 +322,7 @@ func init() {
 	// AF memory (ADR 0108) takes the same double gate: the tool set and the Agent routes.
 	mcpreg.AgentMemoryEnabled = AgentMemory
 	memoryx.AgentMemoryEnabled = AgentMemory
+	memoryx.AutoSyncWant = AgentMemory
 	imagegen.ProviderOrderPref = ImageProviderOrder
 }
 

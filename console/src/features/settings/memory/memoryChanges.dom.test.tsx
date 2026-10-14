@@ -109,7 +109,10 @@ describe("AgentMemorySection", () => {
     expect(getSettings().agentMemory).toBe(false);
     const [on, off] = Array.from(row!.querySelectorAll<HTMLButtonElement>(".seg-btn"));
     expect(off.className).toContain("active");
-    await act(async () => on.click());
+    // The flip asks first; nothing is saved until the member agrees (#1972).
+    await click(on);
+    expect(getSettings().agentMemory).toBe(false);
+    await click(confirmButton()!);
     expect(getSettings().agentMemory).toBe(true);
     setSettings(settingsDefaults());
   });

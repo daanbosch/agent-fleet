@@ -60,6 +60,9 @@ var memberOriginRoutes = map[string]bool{
 	"POST /api/agents/memory/entries/project-move": true,
 	// Importing AF memory out of a bundle (#1983).
 	"POST /api/agents/memory/af-import": true,
+	// The member's part in what the Agent memory switch does by itself with claude's native
+	// memory (#1972): waking the run after the confirmation, retrying, giving up.
+	"POST /api/agents/memory/auto-sync": true,
 	// The 0022 history routes only the Console calls (ADR 0113, 2026-10-13 note): a manual
 	// snapshot and the apply step of a bundle import.
 	"POST /api/agents/memory/snapshots":    true,
