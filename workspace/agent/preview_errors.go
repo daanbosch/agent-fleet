@@ -147,10 +147,11 @@ func sniffPlainHTTPToTLS(resp *http.Response) error {
 	select {
 	case <-sn.finished:
 	case <-time.After(sniffWait):
+		// "finished" and "abandoned" are decided under the one mutex, so exactly one of
+		// them holds: a sniff that ended on its own can never also be abandoned (nobody
+		// would be left to close lateDone).
 		sn.mu.Lock()
-		select {
-		case <-sn.finished: // finished in the meantime
-		default:
+		if !sn.done {
 			// Out of time: hand over what has been read so far. The Read in flight is not
 			// waited for and its result is not tied to forwarding the prefix; it is
 			// delivered after the prefix when it completes.
@@ -172,6 +173,10 @@ func sniffPlainHTTPToTLS(resp *http.Response) error {
 	return nil
 }
 
+// sniffDecidedHook, when set by a test, runs after the sniff has decided it is done and
+// before it announces so, to stretch the window a timeout could otherwise slip into.
+var sniffDecidedHook func()
+
 // sniffer reads the head of a body on its own goroutine so the caller can stop waiting.
 // The goroutine is the only reader of orig until it finishes or is abandoned.
 type sniffer struct {
@@ -181,7 +186,8 @@ type sniffer struct {
 	got       []byte // bytes read so far
 	err       error  // read error that ended the sniff
 	abandoned bool
-	finished  chan struct{} // closed when the sniff ended on its own (match, limit, error)
+	done      bool          // the sniff ended on its own; exclusive with abandoned, set under mu
+	finished  chan struct{} // closed, with mu held, when done is set
 	lateDone  chan struct{} // closed when the Read in flight at abandonment returned
 	late      []byte
 	lateErr   error
@@ -203,8 +209,12 @@ func (sn *sniffer) collect() {
 		have = len(sn.got)
 		if err != nil || len(sn.got) >= sniffLimit || looksLikeHTTPToHTTPSNotice(sn.got) {
 			sn.err = err
-			sn.mu.Unlock()
+			sn.done = true
+			if sniffDecidedHook != nil {
+				sniffDecidedHook()
+			}
 			close(sn.finished)
+			sn.mu.Unlock()
 			return
 		}
 		sn.mu.Unlock()
