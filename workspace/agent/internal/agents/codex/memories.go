@@ -43,6 +43,34 @@ func MemoriesEnabled() bool {
 	return memoriesEnabled(b)
 }
 
+// MemoriesFlag reads features.memories with found=false when the key is absent.
+func MemoriesFlag() (val, found bool) {
+	b, _ := os.ReadFile(codexConfigPath())
+	return tomlBool(b, "features", "memories")
+}
+
+// SetMemoriesFlag writes features.memories alone: no tuning is seeded, because the Agent memory
+// switch only puts back the value the member had (#1972), and nothing else in config.toml moves.
+func SetMemoriesFlag(on bool) error {
+	path := codexConfigPath()
+	b, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	tmp := path + ".af-tmp"
+	if err := os.WriteFile(tmp, tomlSetBool(b, "features", "memories", on), 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 func memoriesEnabled(b []byte) bool {
 	v, found := tomlBool(b, "features", "memories")
 	return found && v

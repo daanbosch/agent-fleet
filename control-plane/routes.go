@@ -955,6 +955,12 @@ func registerAgentEnvRoutes(mux *http.ServeMux, cfg config) {
 	mux.HandleFunc("GET /api/agents/memory/claude-export", rest)
 	mux.HandleFunc("GET /api/agents/memory/claude-export/preview", rest)
 	mux.HandleFunc("POST /api/agents/memory/claude-export", rest)
+	// What the Agent memory switch does by itself with claude's native memory (#1972): the
+	// reconciler's state, the counts the confirmation shows, and the member's wake / retry /
+	// give-up (signed and audited).
+	mux.HandleFunc("GET /api/agents/memory/auto-sync", rest)
+	mux.HandleFunc("GET /api/agents/memory/auto-sync/preview", rest)
+	mux.HandleFunc("POST /api/agents/memory/auto-sync", rest)
 	// Transfer between environments (P3). export streams the body with its
 	// Content-Disposition untouched and import hands the multipart straight to the
 	// Agent; rest passes body and headers through.

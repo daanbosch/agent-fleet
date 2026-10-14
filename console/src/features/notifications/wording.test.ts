@@ -106,6 +106,22 @@ describe("notification row headings", () => {
     expect(sub).toBe("demo/node_modules, mytool");
   });
 
+  // The Agent memory switch's own run left files to look at (#1972). The workspace is the
+  // subject, so the row's body has to carry the counts, and each kind of run has its own title.
+  it("a memory-sync run words its kind and counts on the notification and the row", () => {
+    setLocale("ja");
+    const payload = { run: "write_back", leftovers: 3, conflicts: 2, secrets: 1 };
+    const w = notificationWording({ kind: "memory-sync", displayName: "", payload });
+    expect(w.title).toBe(ja["notif.memory_sync.write_back.title"]);
+    expect(w.body).toBe("確認が必要なファイルが 3 件あります（競合 2 件、秘密情報あり 1 件）。設定 > Agent Fleet のメモリに一覧があります。");
+    expect(notificationRowSubtitle({ kind: "memory-sync", displayName: "", payload })).toBe(w.body);
+    expect(notificationWording({ kind: "memory-sync", displayName: "", payload: { run: "catch_up" } }).title).toBe(
+      ja["notif.memory_sync.catch_up.title"],
+    );
+    expect(notificationWording({ kind: "memory-sync", displayName: "", payload: {} }).title).toBe(ja["notif.memory_sync.import.title"]);
+    expect(notificationKindLabel("memory-sync")).toBe(ja["noti.kind_memory_sync"]);
+  });
+
   // The start deadline stopped a launch that never finished (#1298). The workspace is the
   // subject, so displayName is empty, and the last phase is the only record of why: on ecs-ec2
   // the stop clears it from the workspace itself. Row and OS notification must both carry it.

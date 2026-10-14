@@ -689,3 +689,63 @@ What it does, and what it decided:
 
 What it does not do: it cannot reach copies outside the repo (exports, a session's own files), and a session
 with a shell can still read the store's files directly, as in decision 8.
+
+## Note (2026-10-14): the switch imports and writes back by itself (#1972)
+
+Decision 6 left the import and the write-back as two manual steps per project, and the guide asked the
+member to remember both. Flipping the switch now carries claude's native memory across without them. The
+continuous mirror stays rejected: this runs at the edges only (a flip, and one catch-up after it), never
+while the switch is steady.
+
+- **A level-triggered reconciler, not an edge handler** (`memoryx/agent_memory_autosync.go`). The phase is
+  persisted in `<claude config>/af-agent-memory.mode.json`, beside the store and outside it so that no store
+  walk, snapshot or restore can touch it: `off → importing → on → writing_back → off`. The ui-prefs `PUT` only moves
+  the phase (synchronously, before it answers) and wakes the loop; the loop also runs at Agent start. A flip
+  back during a run turns the phase around (`importing ⇄ writing_back`) and the run in flight stops at its next
+  chunk (25 files) or, for a write-back, project boundary. A crash mid-run resumes by running again: both
+  operations are idempotent. One run at a time, under the store locks the manual routes take. An Agent that
+  starts with no recorded phase adopts the switch as it finds it (`on` owes no import; it predates this).
+- **Native memory follows the effective state.** `claude.AutoMemoryOff` reads the phase, not the raw pref:
+  claude's auto-memory is off in `importing`, `on` and `writing_back`, and resumes only in `off`. Otherwise a
+  session started right after switching off would write native files the write-back then sees as conflicts.
+- **The import is stricter than the member's own.** It drives the manual import's evaluation, secret scan and
+  publish path (`agentMemImportBuildAuto`), with one difference: a claude file newer than an AF copy that was
+  edited in AF (the import's own text is the `intact` tri-state of #1921; anything else, `unknown` included)
+  is a `conflict` (`af_changed`), listed and not applied. The manual import keeps replacing it, which decision
+  6 calls the member's choice; here nobody chose. Forgotten memories are never brought back, secret hits are
+  skipped and listed by rule name only, unmapped claude directories (`no_project`, `ambiguous`) are counted.
+- **Catch-up.** Claude sessions running at the switch-on launched with native memory on; their names are
+  recorded, and when the last of them has ended (`SessionAlive`, any execution method) the same import runs once
+  more under the same rules.
+- **The write-back never uses `--overwrite`.** It is the manual write-back (`agentMemExportApply` with the
+  preview's token): a `pre-export` snapshot first, `new`/`update`/`remove` applied, `conflict` and `secret` kept
+  and listed. A snapshot failure, a leaf that changed under the apply or an unwritable `MEMORY.md` keeps the
+  phase at `writing_back`: claude's native memory stays off, and the loop retries after 30 s, 1, 2, 5 and then
+  every 10 minutes. From the third failure the status says `failing`; the Console then offers "retry now" and
+  "switch native memory back on anyway" (`abandon`: phase `off`, `nativeBackOn` recorded; AF memory is not
+  written, and the manual write-back is still there).
+- **codex, stage A.** Switching on records codex's `features.memories` when it was `true` and sets it `false`;
+  switching off puts `true` back and never forces it on. A value the member sets while the switch is on replaces
+  the record. Nothing is imported from or written to codex (stage B waits for #1950, stage C for a
+  measurement). The flag is written alone (`SetMemoriesFlag`): no `[memories]` tuning is seeded.
+- **Telling the member.** The Console asks before it flips, with counts from `GET …/auto-sync/preview?to=on|off`
+  ("Import 474 memories from 6 projects; 1 skipped (secret)"), shows the phase, the last run and its leftover
+  files under the switch (`GET …/auto-sync`), and one notification (`memory-sync`, workspace-targeted, row
+  "other") is raised for a finished run that left rows. With the workspace stopped there are no counts and the
+  dialog says so; the Agent reconciles when it starts, and equally when the pref flips without the dialog
+  (another device, a settings import).
+- **Audit (the open point of the issue's §5).** The run happens inside the Agent, which has no channel to the
+  Control Plane ledger; `memory.claude_import` / `memory.claude_export` are recorded where the member's `POST`
+  passes through the CP proxy. Two ways to keep a record were weighed: (a) have the Console drive the run
+  through those audited routes, or (b) report each run from the Agent to the CP. (a) cannot be level-triggered
+  (a flip from another device, a settings import or a restart mid-run has no Console to drive it) and would
+  need a second code path next to the reconciler; (b) needs a new Agent → CP route with its own auth and failure
+  mode. Chosen instead, the smaller change: the member's *decisions* pass through the CP and are audited as
+  `memory.auto_sync` (target `wake:on`, `wake:off`, `retry`, `abandon`; the Console sends a wake after a
+  confirmed flip, which also starts the run without waiting for the settings sync), signed with the member-origin
+  mark ([0113](0113-member-origin-mark.md)); the run's effects are each a commit by the member in the 0022 history
+  (`import`, `pre-export`), and its result is the persisted run record. What is **not** audited at the CP: a flip
+  that never went through the Console's confirmation, and the run itself. If that gap matters, (b) is the
+  follow-up.
+- Values are never logged: the run record and the state file hold counts, names the secret scan passed, reason
+  codes and rule names.

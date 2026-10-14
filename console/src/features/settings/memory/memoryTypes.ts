@@ -318,3 +318,62 @@ export interface MoveResultItem {
   reason?: string;
   commit?: string;
 }
+
+/** Where the Agent memory switch's reconciler is (`auto-sync`, #1972). */
+export type AutoSyncPhase = "off" | "importing" | "on" | "writing_back";
+
+export interface AutoSyncProject {
+  id: string;
+  display?: string;
+  /** import: imported, updated, unchanged, conflict, secret, invalid, forgotten, skipped; write-back: written, updated, removed, unchanged, conflict, secret, skipped */
+  counts: Record<string, number>;
+}
+
+/** One file a run did not apply. Names passed the scan; a secret row carries rule names only. */
+export interface AutoSyncRow {
+  project: string;
+  name: string;
+  status: string;
+  reason?: string;
+  rules?: string[];
+}
+
+export interface AutoSyncRun {
+  kind: "import" | "write_back" | "catch_up";
+  started: string;
+  finished?: string;
+  /** The kind of failure that stopped the run. */
+  error?: string;
+  complete: boolean;
+  projects: AutoSyncProject[];
+  unmapped?: number;
+  noRoot?: number;
+  rows?: AutoSyncRow[];
+  rowsCut?: number;
+}
+
+export interface AutoSyncStatus {
+  phase: AutoSyncPhase;
+  want: boolean;
+  /** Phase and switch agree: nothing is running. */
+  settled: boolean;
+  since?: string;
+  failing?: boolean;
+  attempts?: number;
+  nextAttempt?: string;
+  catchUpPending?: number;
+  nativeMemoryOff: boolean;
+  nativeBackOn?: boolean;
+  run?: AutoSyncRun;
+}
+
+/** What flipping the switch would do (`auto-sync/preview?to=`). */
+export interface AutoSyncPreview {
+  to: "on" | "off";
+  projects: AutoSyncProject[];
+  totals: Record<string, number>;
+  /** What a run would write: import new + update, write-back new + update + remove. */
+  apply: number;
+  unmapped?: number;
+  noRoot?: number;
+}
