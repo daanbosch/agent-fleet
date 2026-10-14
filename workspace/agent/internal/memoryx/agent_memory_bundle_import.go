@@ -24,7 +24,7 @@ package memoryx
 // evaluation, and the apply repeats it under the store locks per request.
 
 import (
-	"bytes"
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -44,11 +44,17 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin"
 )
 
+// agentMemBundleMaxBytes bounds the memory text one evaluation reads from a bundle, counting each
+// distinct blob once; a variable so a test can lower it.
+var agentMemBundleMaxBytes int64 = 64 << 20
+
 const (
 	// agentMemBundleMaxFiles bounds what one preview evaluates; a bundle with more is cut and says so.
 	agentMemBundleMaxFiles = 5000
 	// agentMemBundleBatch bounds the memories one apply request writes (a commit each, under both locks).
 	agentMemBundleBatch = 50
+	// agentMemBundleInfoMax bounds a project.json that is read.
+	agentMemBundleInfoMax = 64 << 10
 
 	bundleStatusNew       = "new"
 	bundleStatusUnchanged = "unchanged"
@@ -59,8 +65,9 @@ const (
 
 	bundleScopeUser = "user"
 
-	bundleNoLocal   = "no_local_project"
-	bundleAmbiguous = "ambiguous"
+	bundleNoLocal    = "no_local_project"
+	bundleAmbiguous  = "ambiguous"
+	bundleIncomplete = "search_incomplete"
 )
 
 // agentMemBundleItem is one memory of the bundle as the preview shows it.
@@ -84,7 +91,7 @@ type agentMemBundleScope struct {
 	Target  *agentMemProject `json:"target,omitempty"`
 	// Match says how the target was found: id | remote | user.
 	Match string `json:"match,omitempty"`
-	// Reason is set when there is no target: no_local_project | ambiguous.
+	// Reason is set when there is no target: no_local_project | ambiguous | search_incomplete.
 	Reason string               `json:"reason,omitempty"`
 	Items  []agentMemBundleItem `json:"items"`
 	Counts map[string]int       `json:"counts"`
@@ -97,6 +104,9 @@ type agentMemBundlePreview struct {
 	// HasAF is false when the bundle carries no AF memory at all.
 	HasAF  bool                  `json:"hasAF"`
 	Scopes []agentMemBundleScope `json:"scopes"`
+	// Withheld counts source projects left out because their directory name fails the scan; they
+	// are never named.
+	Withheld int `json:"withheld,omitempty"`
 	// Truncated: the bundle holds more files than one preview evaluates.
 	Truncated bool `json:"truncated,omitempty"`
 	// Incomplete: the search for local working copies could not be completed, so an unmatched
@@ -115,6 +125,8 @@ type agentMemBundleFile struct {
 	name  string
 	sha   string
 	size  int64
+	// skip says why the blob is not read at all: too_large | over_budget.
+	skip string
 }
 
 // agentMemBundleHead resolves an import id to the head commit of its lineage.
@@ -135,12 +147,12 @@ func agentMemBundleHead(importID string) (string, error) {
 
 // agentMemBundleList reads the blobs under af/ of a commit: memory files by scope, and each
 // project's project.json. Tombstones, usage sidecars and anything else are not memories.
-func agentMemBundleList(head string) (files []agentMemBundleFile, infos map[string]string, truncated bool, err error) {
+func agentMemBundleList(head string) (files []agentMemBundleFile, infos map[string]agentMemBundleFile, truncated bool, err error) {
 	out, err := memoryGitRun("ls-tree", "-r", "--long", head, "--", agentMemRepoPrefix+"/")
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("read the bundle: %w", err)
 	}
-	infos = map[string]string{}
+	infos = map[string]agentMemBundleFile{}
 	for _, line := range strings.Split(out, "\n") {
 		meta, p, ok := strings.Cut(line, "\t")
 		if !ok {
@@ -170,60 +182,79 @@ func agentMemBundleList(head string) (files []agentMemBundleFile, infos map[stri
 		}
 		if rest, ok := strings.CutPrefix(p, agentMemRepoPrefix+"/projects/"); ok {
 			if id, tail, ok := strings.Cut(rest, "/"); ok && tail == "project.json" && agentMemValidProjectID(id) {
-				infos[id] = f[2]
+				infos[id] = agentMemBundleFile{scope: id, name: "project.json", sha: f[2], size: size}
 			}
 		}
 	}
 	return files, infos, false, nil
 }
 
-// agentMemBundleBlobs reads blobs with one git process.
+// agentMemBundleBlobs reads blobs with one git process, streaming its answer: a blob over maxSize
+// is skipped without being buffered, and a sha asked for twice is read once. The caller has already
+// dropped what ls-tree says is too large, so this is the second line of defence, not the first.
 func agentMemBundleBlobs(shas []string, maxSize int64) (map[string][]byte, error) {
 	out := map[string][]byte{}
-	if len(shas) == 0 {
+	seen := map[string]bool{}
+	var uniq []string
+	for _, s := range shas {
+		if !seen[s] {
+			seen[s] = true
+			uniq = append(uniq, s)
+		}
+	}
+	if len(uniq) == 0 {
 		return out, nil
 	}
 	cmd := memoryGit("cat-file", "--batch")
-	cmd.Stdin = strings.NewReader(strings.Join(shas, "\n") + "\n")
-	b, err := cmd.Output()
+	in, err := cmd.StdinPipe()
 	if err != nil {
+		return nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("read the bundle: %w", err)
 	}
-	r := bytes.NewReader(b)
-	for range shas {
-		var hdr string
-		var line []byte
-		for {
-			c, err := r.ReadByte()
-			if err != nil {
-				return nil, errors.New("read the bundle: short answer")
-			}
-			if c == '\n' {
-				break
-			}
-			line = append(line, c)
+	go func() {
+		_, _ = io.WriteString(in, strings.Join(uniq, "\n")+"\n")
+		_ = in.Close()
+	}()
+	fail := func(msg string) (map[string][]byte, error) {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, errors.New("read the bundle: " + msg)
+	}
+	r := bufio.NewReader(stdout)
+	for range uniq {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return fail("short answer")
 		}
-		hdr = string(line)
-		f := strings.Fields(hdr)
+		f := strings.Fields(line)
 		if len(f) != 3 || f[1] != "blob" {
 			continue // missing or not a blob: left out, the caller reads it as unreadable
 		}
 		n, err := strconv.ParseInt(f[2], 10, 64)
 		if err != nil || n < 0 {
-			return nil, errors.New("read the bundle: bad header")
+			return fail("bad header")
 		}
 		if n > maxSize {
-			if _, err := r.Seek(n+1, io.SeekCurrent); err != nil {
-				return nil, err
+			if _, err := io.CopyN(io.Discard, r, n+1); err != nil {
+				return fail("short body")
 			}
 			continue
 		}
 		body := make([]byte, n)
 		if _, err := io.ReadFull(r, body); err != nil {
-			return nil, errors.New("read the bundle: short body")
+			return fail("short body")
 		}
 		_, _ = r.ReadByte() // the newline after the body
 		out[f[0]] = body
+	}
+	if err := cmd.Wait(); err != nil {
+		return nil, fmt.Errorf("read the bundle: %w", err)
 	}
 	return out, nil
 }
@@ -244,9 +275,14 @@ func agentMemBundleSourceInfo(raw []byte, id string) *agentMemProject {
 }
 
 // agentMemBundleTarget maps a source project to a live local one.
-func agentMemBundleTarget(src *agentMemProject, live map[string]*agentMemProject) (t *agentMemProject, match, reason string) {
+func agentMemBundleTarget(src *agentMemProject, live map[string]*agentMemProject, complete bool) (t *agentMemProject, match, reason string) {
 	if p := live[src.ID]; p != nil {
 		return p, "id", ""
+	}
+	if !complete {
+		// "The one project with this remote" cannot be shown from a search that missed some: an
+		// id match above is certain, this one is not.
+		return nil, "", bundleIncomplete
 	}
 	if src.Remote == "" {
 		return nil, "", bundleNoLocal
@@ -283,7 +319,10 @@ func agentMemBundleEvaluate(raw []byte, f agentMemBundleFile, importID, scope, r
 		return it, nil, false
 	}
 	if raw == nil {
-		if f.size > agentMemMaxFile {
+		switch {
+		case f.skip != "":
+			return invalid(f.skip)
+		case f.size > agentMemMaxFile:
 			return invalid("too_large")
 		}
 		return invalid("unreadable")
@@ -395,6 +434,11 @@ func agentMemBundleSame(a, b agentMemEntry) bool {
 }
 
 // agentMemBundleBuild evaluates the AF memory of an imported lineage. Callers hold agentMemMu.
+//
+// Only what is needed is read from the bundle: the small project.json files first, to find each
+// scope's target, then the memory files of the scopes that have one, never a blob git says is
+// over the limit, each distinct blob once and within agentMemBundleMaxBytes in all. A project
+// that is not imported is not read at all.
 func agentMemBundleBuild(importID string, live map[string]*agentMemProject, complete bool) (*agentMemBundlePreview, error) {
 	head, err := agentMemBundleHead(importID)
 	if err != nil {
@@ -408,64 +452,123 @@ func agentMemBundleBuild(importID string, live map[string]*agentMemProject, comp
 		return nil, err
 	}
 	pv.Truncated, pv.HasAF = truncated, len(files) > 0
-	var shas []string
+
+	byScope := map[string][]agentMemBundleFile{}
+	dirty := map[string]bool{}
 	for _, f := range files {
-		shas = append(shas, f.sha)
+		// A scope id is a directory name the bundle's author chose: one that fails the scan is
+		// only counted, never named or read.
+		if f.scope != bundleScopeUser && !agentMemCleanText(f.scope) {
+			dirty[f.scope] = true
+			continue
+		}
+		byScope[f.scope] = append(byScope[f.scope], f)
 	}
-	for _, s := range infos {
-		shas = append(shas, s)
+	pv.Withheld = len(dirty)
+	ids := make([]string, 0, len(byScope))
+	for id := range byScope {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	// Each project's record, to match it.
+	var infoShas []string
+	for _, id := range ids {
+		if i, ok := infos[id]; ok && i.size <= agentMemBundleInfoMax {
+			infoShas = append(infoShas, i.sha)
+		}
+	}
+	infoBlobs, err := agentMemBundleBlobs(infoShas, agentMemBundleInfoMax)
+	if err != nil {
+		return nil, err
+	}
+	type plan struct {
+		sc     agentMemBundleScope
+		scope  string
+		rel    string
+		target *agentMemProject
+	}
+	plans := map[string]*plan{}
+	for _, id := range ids {
+		pl := &plan{sc: agentMemBundleScope{Source: id, Items: []agentMemBundleItem{}, Counts: map[string]int{}}, scope: agentMemScopeProject}
+		if id == bundleScopeUser {
+			pl.scope, pl.rel, pl.sc.Match = agentMemScopeUser, "user", "user"
+		} else {
+			src := &agentMemProject{ID: id, Display: id}
+			if i, ok := infos[id]; ok {
+				if raw := infoBlobs[i.sha]; raw != nil {
+					src = agentMemBundleSourceInfo(raw, id)
+				}
+			}
+			pl.sc.Display, pl.sc.Remote = src.Display, src.Remote
+			var match, reason string
+			pl.target, match, reason = agentMemBundleTarget(src, live, complete)
+			pl.sc.Target, pl.sc.Match, pl.sc.Reason = pl.target, match, reason
+			if pl.target != nil {
+				pl.rel = "projects/" + pl.target.ID
+			}
+		}
+		plans[id] = pl
+	}
+
+	// The memory blobs of the scopes that will be imported: within the limit git reports, once each,
+	// within the byte budget.
+	var shas []string
+	seen := map[string]bool{}
+	var budget int64
+	for _, id := range ids {
+		if plans[id].rel == "" {
+			continue
+		}
+		for i, f := range byScope[id] {
+			switch {
+			case f.size > agentMemMaxFile:
+				byScope[id][i].skip = "too_large"
+			case seen[f.sha]:
+			case budget+f.size > agentMemBundleMaxBytes:
+				byScope[id][i].skip = "over_budget"
+				pv.Truncated = true
+			default:
+				seen[f.sha] = true
+				budget += f.size
+				shas = append(shas, f.sha)
+			}
+		}
 	}
 	blobs, err := agentMemBundleBlobs(shas, agentMemMaxFile)
 	if err != nil {
 		return nil, err
 	}
 
-	byScope := map[string][]agentMemBundleFile{}
-	for _, f := range files {
-		byScope[f.scope] = append(byScope[f.scope], f)
-	}
-	ids := make([]string, 0, len(byScope))
-	for id := range byScope {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
+	// A name two source scopes would both publish into one target is imported once, from the first
+	// scope in id order; the other is `exists`, as it would be once the first has been written.
+	claimed := map[string]bool{}
 	for _, id := range ids {
-		sc := agentMemBundleScope{Source: id, Items: []agentMemBundleItem{}, Counts: map[string]int{}}
-		scope, rel := agentMemScopeProject, "projects/"
-		var target *agentMemProject
-		if id == bundleScopeUser {
-			scope, rel, sc.Match = agentMemScopeUser, "user", "user"
-		} else {
-			src := &agentMemProject{ID: id, Display: id}
-			if sha, ok := infos[id]; ok {
-				if raw := blobs[sha]; raw != nil {
-					src = agentMemBundleSourceInfo(raw, id)
-				}
-			}
-			sc.Display, sc.Remote = src.Display, src.Remote
-			var match, reason string
-			target, match, reason = agentMemBundleTarget(src, live)
-			sc.Target, sc.Match, sc.Reason = target, match, reason
-			if target != nil {
-				rel = "projects/" + target.ID
-			}
-		}
-		if id != bundleScopeUser && target == nil {
+		pl := plans[id]
+		sc := pl.sc
+		if pl.rel == "" {
 			// Listed with its counts only: nothing of an unmatched project is read or shown.
 			sc.Counts["skipped"] = len(byScope[id])
 			pv.Scopes = append(pv.Scopes, sc)
 			continue
 		}
-		history, err := agentMemImportHistory(rel)
+		history, err := agentMemImportHistory(pl.rel)
 		if err != nil {
 			return nil, err
 		}
 		pv.byKey[id], pv.entries[id] = map[string]*agentMemBundleItem{}, map[string]*agentMemImportItem{}
 		for _, f := range byScope[id] {
-			it, conv, withheld := agentMemBundleEvaluate(blobs[f.sha], f, importID, scope, rel, history)
+			it, conv, withheld := agentMemBundleEvaluate(blobs[f.sha], f, importID, pl.scope, pl.rel, history)
 			if withheld {
 				sc.Withheld++
 				continue
+			}
+			if it.Status == bundleStatusNew {
+				if key := pl.rel + "/" + f.name; claimed[key] {
+					it.Status, it.Reason, conv = bundleStatusExists, "duplicate_in_bundle", nil
+				} else {
+					claimed[key] = true
+				}
 			}
 			if conv != nil {
 				pv.entries[id][f.name] = conv
@@ -555,6 +658,13 @@ func agentMemBundleApply(req agentMemBundleReq, now time.Time) (agentMemBundleAp
 	var order []string
 	for _, ri := range req.Items {
 		res := agentMemBundleResult{Scope: ri.Scope, Name: ri.Name, Result: "skipped"}
+		// The scope and the name came from the request and are echoed only when they could be a
+		// directory name and a memory name that pass the scan.
+		if ri.Scope != bundleScopeUser && (!agentMemValidProjectID(ri.Scope) || !agentMemCleanText(ri.Scope)) {
+			res.Scope, res.Name, res.Reason = "", "", "bad_scope"
+			out.Results = append(out.Results, res)
+			continue
+		}
 		if !agentMemValidName(ri.Name) || len(agentMemScanText("name", ri.Name)) > 0 {
 			res.Name, res.Reason = "", "bad_name"
 			out.Results = append(out.Results, res)

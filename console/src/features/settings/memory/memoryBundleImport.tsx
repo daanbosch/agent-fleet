@@ -7,8 +7,9 @@
 // history do not (the Agent resets them and records where each came from), a memory that already
 // exists here is never replaced, and one forgotten here is never brought back.
 
-import { useCallback, useState } from "react";
-import { api, apiJSON, errDetail, errText, isTransientErr } from "../../../core/api/client.ts";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api, apiJSON, errDetail, errText, getTenant, isTransientErr } from "../../../core/api/client.ts";
+import { useTenantStore } from "../../../core/store/tenant.ts";
 import { useRetryLoad } from "../../../lib/retryLoad.ts";
 import { useToast } from "../../../ui/ToastProvider.tsx";
 import { Button } from "../../../ui/Button.tsx";
@@ -24,7 +25,20 @@ const reasonLabel = (r: string): string => tMaybe("mem.bi_reason_" + r) ?? tMayb
 const scopeName = (s: BundleScope, tr: (k: "mem.bi_user_scope") => string): string =>
   s.source === "user" ? tr("mem.bi_user_scope") : (s.display ?? s.source);
 
-export function BundleAfPanel({ importId, onChanged }: { importId: string; onChanged: () => void }) {
+// owner names who is asking: the tenant the client sends to and the signed-in user. An apply that
+// started under one must not send its next batch under another.
+const ownerNow = (): string => getTenant() + "\u0000" + (useTenantStore.getState().whoami?.user ?? "");
+
+export function BundleAfPanel({
+  importId,
+  onChanged,
+  parentBusy = false,
+}: {
+  importId: string;
+  onChanged: () => void;
+  /** The surrounding import is uploading or applying: no second action at the same time. */
+  parentBusy?: boolean;
+}) {
   const tr = useT();
   const toast = useToast();
   const [preview, setPreview] = useState<BundlePreview | null>(null);
@@ -32,6 +46,18 @@ export function BundleAfPanel({ importId, onChanged }: { importId: string; onCha
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [again, setAgain] = useState(0);
+  // The run in flight holds the generation it started under; leaving the panel, picking another
+  // bundle or another tenant moves it on, and an old run stops at its next await without a toast,
+  // a state change or a refresh of someone else's list.
+  const gen = useRef(0);
+  useEffect(() => {
+    setPreview(null);
+    setProgress(null);
+    setBusy(false);
+    return () => {
+      gen.current++;
+    };
+  }, [importId]);
 
   const load = useCallback(
     async (signal: AbortSignal) => {
@@ -59,18 +85,23 @@ export function BundleAfPanel({ importId, onChanged }: { importId: string; onCha
   );
 
   const run = async () => {
+    const mine = ++gen.current;
+    const owner = ownerNow();
+    const live = () => gen.current === mine && ownerNow() === owner;
     setBusy(true);
     setProgress({ done: 0, total: todo.length });
     let imported = 0;
     let skipped = 0;
     try {
       for (let at = 0; at < todo.length; at += BUNDLE_BATCH) {
+        if (!live()) return;
         const items = todo.slice(at, at + BUNDLE_BATCH);
         // The import id also goes in the query: the CP audit ledger reads the URL only.
         const res = await apiJSON("api/agents/memory/af-import?importId=" + encodeURIComponent(importId), "POST", {
           importId,
           items,
         });
+        if (!live()) return;
         if (res?.error) {
           toast(errDetail(res.error));
           return;
@@ -86,12 +117,14 @@ export function BundleAfPanel({ importId, onChanged }: { importId: string; onCha
       });
     } catch {
       // The request may or may not have reached the Agent: read what is there now.
-      toast(tr("mem.bi_failed"));
+      if (live()) toast(tr("mem.bi_failed"));
     } finally {
-      setBusy(false);
-      setProgress(null);
-      setAgain((n) => n + 1);
-      onChanged();
+      if (live()) {
+        setBusy(false);
+        setProgress(null);
+        setAgain((n) => n + 1);
+        onChanged();
+      }
     }
   };
 
@@ -101,6 +134,7 @@ export function BundleAfPanel({ importId, onChanged }: { importId: string; onCha
       <p className="muted ds-hint">{tr("mem.bi_intro")}</p>
       {preview.incomplete && <p className="mem-warn">{tr("mem.bi_incomplete")}</p>}
       {preview.truncated && <p className="mem-warn">{tr("mem.ci_truncated")}</p>}
+      {(preview.withheld ?? 0) > 0 && <p className="mem-warn">{tr("mem.bi_withheld", { n: preview.withheld ?? 0 })}</p>}
       {preview.scopes.map((s) => (
         <details key={s.source} className="mem-ci-group" open={!!s.target || s.source === "user"}>
           <summary>
@@ -113,9 +147,14 @@ export function BundleAfPanel({ importId, onChanged }: { importId: string; onCha
             ) : s.source !== "user" ? (
               <span className="muted">
                 {" — "}
-                {tr(s.reason === "ambiguous" ? "mem.bi_ambiguous" : "mem.bi_no_local", {
-                  n: s.counts["skipped"] ?? 0,
-                })}
+                {tr(
+                  s.reason === "ambiguous"
+                    ? "mem.bi_ambiguous"
+                    : s.reason === "search_incomplete"
+                      ? "mem.bi_incomplete_scope"
+                      : "mem.bi_no_local",
+                  { n: s.counts["skipped"] ?? 0 },
+                )}
               </span>
             ) : null}
           </summary>
@@ -151,7 +190,7 @@ export function BundleAfPanel({ importId, onChanged }: { importId: string; onCha
         </details>
       ))}
       <div className="mem-ci-actions">
-        <Button variant="primary" disabled={busy || todo.length === 0} onClick={() => void run()}>
+        <Button variant="primary" disabled={busy || parentBusy || todo.length === 0} onClick={() => void run()}>
           {progress ? tr("mem.ci_progress", { done: progress.done, total: progress.total }) : tr("mem.bi_apply", { n: todo.length })}
         </Button>
       </div>

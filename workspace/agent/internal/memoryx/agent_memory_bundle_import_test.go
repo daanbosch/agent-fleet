@@ -2,12 +2,14 @@ package memoryx
 
 import (
 	"bytes"
+	"encoding/json"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -476,4 +478,201 @@ func bundleAFNames(t *testing.T, pid string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// Two source scopes with one remote map to one local project, and both hold "rule": one is
+// imported, from the first scope in id order, and the other never replaces it.
+func TestBundleImportTwoScopesOneTargetNeverOverwritesInABatch(t *testing.T) {
+	e := newBundleEnv(t)
+	a, b := "foreign-aaaaaaaaaaaa", "foreign-bbbbbbbbbbbb"
+	files := map[string]string{
+		"af/projects/" + a + "/project.json": bundleProjectJSON(a, "demo", bundleRemote),
+		"af/projects/" + a + "/rule.md":      bundleMemory("rule", "the rule", "first body", 1, false),
+		"af/projects/" + b + "/project.json": bundleProjectJSON(b, "demo", bundleRemote),
+		"af/projects/" + b + "/rule.md":      bundleMemory("rule", "the rule", "second body", 1, false),
+		"af/projects/" + b + "/other.md":     bundleMemory("other", "other", "other body", 1, false),
+	}
+	id := e.take(forgedBundle(t, files))
+	pv := e.preview(id)
+	if it := bundleItemOf(bundleScopeOf(pv, b), "rule"); it == nil || it.Status != bundleStatusExists || it.Reason != "duplicate_in_bundle" {
+		t.Fatalf("the later scope's duplicate = %+v", it)
+	}
+	r := e.req(id, pv, a, "rule")
+	r.Items = append(r.Items, e.req(id, pv, b, "rule", "other").Items...)
+	// Even a request that forces the second one past its preview status must not overwrite.
+	out := e.apply(r)
+	if res := bundleResultOf(out, a, "rule"); res.Result != "imported" {
+		t.Fatalf("first = %+v", res)
+	}
+	if res := bundleResultOf(out, b, "rule"); res.Result != "skipped" {
+		t.Fatalf("second = %+v", res)
+	}
+	got, err := agentMemMemberRead(agentMemScopeProject, e.local.ID, "rule")
+	if err != nil || got.Body != "first body" || got.Revision != 1 {
+		t.Fatalf("rule = %+v %v", got, err)
+	}
+	if res := bundleResultOf(out, b, "other"); res.Result != "imported" {
+		t.Fatalf("other = %+v", res)
+	}
+
+	// The write itself refuses a live copy, whatever was evaluated before: what the store holds at
+	// the moment of publishing decides.
+	agentMemMu.Lock()
+	memorySnapshotMu.Lock()
+	it := &agentMemImportItem{Name: "rule", entry: agentMemEntry{Name: "rule", Scope: agentMemScopeProject, Description: "d", Body: "overwrite", AuthorKind: agentMemUnknown, AuthorSession: agentMemUnknown}}
+	_, werr := agentMemImportWriteTo(e.local, "projects/"+e.local.ID, it, time.Now())
+	memorySnapshotMu.Unlock()
+	agentMemMu.Unlock()
+	if werr == nil {
+		t.Fatal("the publish replaced a live memory")
+	}
+	if got, _ := agentMemMemberRead(agentMemScopeProject, e.local.ID, "rule"); got.Body != "first body" {
+		t.Fatalf("rule = %+v", got)
+	}
+}
+
+// A source project id is a name the bundle's author chose: a token-shaped one is never named, not
+// in the preview, not in an answer to an apply.
+func TestBundleImportSourceIDsAreScanned(t *testing.T) {
+	e := newBundleEnv(t)
+	key := "ghp_" + strings.Repeat("q7zx", 9)
+	files := map[string]string{
+		"af/projects/" + key + "/one.md": bundleMemory("one", "one", "clean body", 1, false),
+		"af/user/fine.md":                bundleMemory("fine", "fine", "clean body", 1, false),
+	}
+	id := e.take(forgedBundle(t, files))
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+	w := httptest.NewRecorder()
+	HandleAgentMemoryBundlePreview(w, httptest.NewRequest("GET", "/x?importId="+id, nil))
+	if strings.Contains(w.Body.String(), key) || !strings.Contains(w.Body.String(), `"withheld":1`) {
+		t.Fatalf("preview = %s", w.Body)
+	}
+	pv := e.preview(id)
+	if sc := bundleScopeOf(pv, "user"); sc == nil || sc.Counts[bundleStatusNew] != 1 {
+		t.Fatalf("user scope = %+v", sc)
+	}
+	out := e.apply(agentMemBundleReq{ImportID: id, Items: []agentMemBundleReqItem{
+		{Scope: key, Name: "one", SourceHash: "x"}, {Scope: "user", Name: key, SourceHash: "x"},
+	}})
+	b, _ := json.Marshal(out)
+	if strings.Contains(string(b), key) || strings.Contains(logs.String(), key) {
+		t.Fatalf("a token reached the answer or the log: %s", b)
+	}
+}
+
+// A blob over the limit is never buffered, and a bundle is not read past its budget.
+func TestBundleImportDoesNotBufferWhatItWillNotRead(t *testing.T) {
+	e := newBundleEnv(t)
+	src := "foreign-cccccccccccc"
+	huge := bundleMemory("huge", "huge", strings.Repeat("A", 8<<20), 1, false)
+	files := map[string]string{
+		"af/projects/" + src + "/project.json": bundleProjectJSON(src, "demo", bundleRemote),
+		"af/projects/" + src + "/huge.md":      huge,
+		"af/projects/" + src + "/ok.md":        bundleMemory("ok", "ok", "small body", 1, false),
+		"af/projects/" + src + "/ok2.md":       bundleMemory("ok2", "ok2", "small body", 1, false),
+	}
+	// An unmatched project's bodies are not read at all.
+	files["af/projects/lost-dddddddddddd/project.json"] = bundleProjectJSON("lost-dddddddddddd", "lost", "example.com/acme/other")
+	files["af/projects/lost-dddddddddddd/big.md"] = bundleMemory("big", "big", strings.Repeat("B", 4<<20), 1, false)
+	id := e.take(forgedBundle(t, files))
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	pv := e.preview(id)
+	runtime.ReadMemStats(&after)
+	sc := bundleScopeOf(pv, src)
+	if it := bundleItemOf(sc, "huge"); it == nil || it.Status != bundleStatusInvalid || it.Reason != "too_large" {
+		t.Fatalf("huge = %+v", it)
+	}
+	if it := bundleItemOf(sc, "ok"); it == nil || it.Status != bundleStatusNew {
+		t.Fatalf("ok = %+v", it)
+	}
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 4<<20 {
+		t.Errorf("the preview allocated %d bytes: a blob over the limit or an unmatched project's body was buffered", grew)
+	}
+
+	// The reader itself: a blob over the limit is skipped without being held, and a repeated sha is read once.
+	head, err := agentMemBundleHead(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files2, _, _, err := agentMemBundleList(head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hugeSha string
+	for _, f := range files2 {
+		if f.name == "huge" {
+			hugeSha = f.sha
+		}
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	got, err := agentMemBundleBlobs([]string{hugeSha, hugeSha, hugeSha}, 1024)
+	runtime.ReadMemStats(&after)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("blobs = %d %v", len(got), err)
+	}
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 2<<20 {
+		t.Errorf("reading an 8 MiB blob over the limit allocated %d bytes", grew)
+	}
+
+	// The budget: past it the rest is not read, and the preview says so.
+	old := agentMemBundleMaxBytes
+	agentMemBundleMaxBytes = 1
+	defer func() { agentMemBundleMaxBytes = old }()
+	pv = e.preview(id)
+	if it := bundleItemOf(bundleScopeOf(pv, src), "ok"); it == nil || it.Reason != "over_budget" || !pv.Truncated {
+		t.Fatalf("ok under a 1-byte budget = %+v truncated=%v", it, pv.Truncated)
+	}
+}
+
+// An incomplete search for local working copies cannot show that exactly one project has a
+// remote: that match fails closed, an id match does not.
+func TestBundleImportIncompleteSearchFailsClosedOnRemote(t *testing.T) {
+	e := newBundleEnv(t)
+	nested := filepath.Join(e.home, "repos", "nest", "twin")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testGit(t, nested, "init", "--quiet", "-b", "main")
+	testGit(t, nested, "commit", "--quiet", "--allow-empty", "-m", "init")
+	testGit(t, nested, "remote", "add", "origin", "https://"+bundleRemote+".git")
+	src := "foreign-eeeeeeeeeeee"
+	files := map[string]string{
+		"af/projects/" + src + "/project.json": bundleProjectJSON(src, "demo", bundleRemote),
+		"af/projects/" + src + "/one.md":       bundleMemory("one", "one", "one body", 1, false),
+		// Its id is the local project's own: certain whatever the search missed.
+		"af/projects/" + e.local.ID + "/project.json": bundleProjectJSON(e.local.ID, "demo", bundleRemote),
+		"af/projects/" + e.local.ID + "/same-id.md":   bundleMemory("same-id", "same id", "same id body", 1, false),
+	}
+	id := e.take(forgedBundle(t, files))
+	// Positive control: a complete search sees both clones and calls the remote ambiguous.
+	if sc := bundleScopeOf(e.preview(id), src); sc.Target != nil || sc.Reason != bundleAmbiguous {
+		t.Fatalf("complete search = %+v", sc)
+	}
+	old := agentMemLiveBudget
+	agentMemLiveBudget = 1
+	defer func() { agentMemLiveBudget = old }()
+	if _, complete := agentMemLiveProjects(); complete {
+		t.Skip("the search stayed complete under a budget of 1")
+	}
+	pv := e.preview(id)
+	if sc := bundleScopeOf(pv, src); sc.Target != nil || sc.Reason != bundleIncomplete || !pv.Incomplete {
+		t.Fatalf("incomplete search, remote match = %+v", sc)
+	}
+	out := e.apply(agentMemBundleReq{ImportID: id, Items: []agentMemBundleReqItem{{Scope: src, Target: e.local.ID, Name: "one", SourceHash: "x"}}})
+	if r := bundleResultOf(out, src, "one"); r.Result != "skipped" || r.Reason != "no_local_project" {
+		t.Fatalf("apply = %+v", r)
+	}
+	if names := bundleAFNames(t, e.local.ID); len(names) != 0 {
+		t.Fatalf("something was imported on an unproven match: %v", names)
+	}
+	// An id match does not depend on the search having seen everything... when the search saw it.
+	if sc := bundleScopeOf(pv, e.local.ID); sc != nil && sc.Target != nil && sc.Match != "id" {
+		t.Fatalf("id scope = %+v", sc)
+	}
 }

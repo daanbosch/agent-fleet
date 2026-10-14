@@ -344,7 +344,7 @@ export interface BundleScope {
   /** The local project it maps to; absent when `reason` says why not. */
   target?: MemoryChangeProject;
   match?: "id" | "remote" | "user";
-  reason?: "no_local_project" | "ambiguous";
+  reason?: "no_local_project" | "ambiguous" | "search_incomplete";
   items: BundleItem[];
   counts: Record<string, number>;
   withheld?: number;
@@ -353,6 +353,8 @@ export interface BundlePreview {
   importId: string;
   hasAF: boolean;
   scopes: BundleScope[];
+  /** Source project folders left out because their name fails the scan; never named. */
+  withheld?: number;
   truncated?: boolean;
   /** The search for local working copies was cut short, so an unmatched project may only be one not found. */
   incomplete?: boolean;

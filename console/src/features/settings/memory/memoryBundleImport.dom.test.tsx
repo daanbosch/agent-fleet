@@ -6,12 +6,14 @@ import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
+const state = vi.hoisted(() => ({ tenant: "acme" }));
 const api = vi.fn();
 const apiJSON = vi.fn();
 vi.mock("../../../core/api/client.ts", async (importActual) => ({
   ...(await importActual<typeof import("../../../core/api/client.ts")>()),
   api: (...args: unknown[]) => api(...args),
   apiJSON: (...args: unknown[]) => apiJSON(...args),
+  getTenant: () => state.tenant,
 }));
 
 import { BundleAfPanel, BUNDLE_BATCH } from "./memoryBundleImport.tsx";
@@ -24,16 +26,17 @@ const flush = () =>
   act(async () => {
     for (let i = 0; i < 6; i++) await Promise.resolve();
   });
+const view = (importId: string, onChanged: () => void) => (
+  <ToastProvider>
+    <BundleAfPanel importId={importId} onChanged={onChanged} />
+  </ToastProvider>
+);
 async function mount(onChanged = () => {}) {
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
   await act(async () => {
-    root!.render(
-      <ToastProvider>
-        <BundleAfPanel importId="20261014T093000Z" onChanged={onChanged} />
-      </ToastProvider>,
-    );
+    root!.render(view("20261014T093000Z", onChanged));
   });
   await flush();
 }
@@ -41,6 +44,7 @@ const item = (name: string, status: string, extra = {}) => ({ name, status, sour
 const target = { id: "demo-1", display: "demo", root: "/r/demo", vcs: "git" };
 
 beforeEach(() => {
+  state.tenant = "acme";
   apiJSON.mockResolvedValue({ results: [] });
 });
 afterEach(() => {
@@ -117,5 +121,89 @@ describe("BundleAfPanel", () => {
     expect(apiJSON).toHaveBeenCalledTimes(2);
     expect(apiJSON.mock.calls[0][2].items).toHaveLength(BUNDLE_BATCH);
     expect(apiJSON.mock.calls[1][2].items).toHaveLength(5);
+  });
+});
+
+describe("an apply that outlives its panel", () => {
+  const many = () => {
+    const items = Array.from({ length: BUNDLE_BATCH + 5 }, (_, i) => item("m" + i, "new"));
+    api.mockResolvedValue({
+      importId: "20261014T093000Z",
+      hasAF: true,
+      scopes: [{ source: "src-1", display: "demo", target, match: "id", counts: { new: items.length }, items }],
+    });
+    return items.length;
+  };
+  const press = async (n: number) => {
+    const btn = Array.from(host!.querySelectorAll("button")).find((b) => b.textContent === t("mem.bi_apply", { n }));
+    await act(async () => btn!.click());
+  };
+  const held = () => {
+    let release: (v: unknown) => void = () => {};
+    apiJSON.mockImplementationOnce(() => new Promise((r) => (release = r)));
+    return () => release({ results: [] });
+  };
+
+  it("stops sending batches once the panel is gone", async () => {
+    const n = many();
+    const changed = vi.fn();
+    await mount(changed);
+    const release = held();
+    await press(n);
+    expect(apiJSON).toHaveBeenCalledTimes(1);
+    act(() => root!.unmount());
+    root = null;
+    release();
+    await flush();
+    expect(apiJSON).toHaveBeenCalledTimes(1);
+    expect(changed).not.toHaveBeenCalled();
+  });
+
+  it("stops when another bundle is picked, and the new panel is not left busy", async () => {
+    const n = many();
+    const changed = vi.fn();
+    await mount(changed);
+    const release = held();
+    await press(n);
+    await act(async () => {
+      root!.render(view("20261014T093001Z", changed));
+    });
+    await flush();
+    release();
+    await flush();
+    expect(apiJSON).toHaveBeenCalledTimes(1);
+    expect(changed).not.toHaveBeenCalled();
+    const btn = Array.from(host!.querySelectorAll("button")).find((b) => b.textContent === t("mem.bi_apply", { n }));
+    expect(btn?.hasAttribute("disabled")).toBe(false);
+  });
+
+  it("does not send the next batch under another tenant", async () => {
+    const n = many();
+    const changed = vi.fn();
+    await mount(changed);
+    const release = held();
+    await press(n);
+    state.tenant = "globex";
+    release();
+    await flush();
+    expect(apiJSON).toHaveBeenCalledTimes(1);
+    expect(changed).not.toHaveBeenCalled();
+  });
+
+  it("is not offered while the surrounding import is busy", async () => {
+    many();
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => {
+      root!.render(
+        <ToastProvider>
+          <BundleAfPanel importId="20261014T093000Z" onChanged={() => {}} parentBusy />
+        </ToastProvider>,
+      );
+    });
+    await flush();
+    const btn = Array.from(host.querySelectorAll("button")).find((b) => (b.textContent ?? "").includes(String(BUNDLE_BATCH + 5)));
+    expect(btn?.hasAttribute("disabled")).toBe(true);
   });
 });

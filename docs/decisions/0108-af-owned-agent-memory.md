@@ -730,19 +730,25 @@ It does not touch the generic paths, which keep skipping `af/`.
 
 - **Where it starts.** The bundle is taken in by the existing `POST /agents/memory/import`
   (`refs/imports/<id>/*`), whose apply still writes no AF memory. `GET /agents/memory/af-import/preview?importId=`
-  reads `af/` at the head of that lineage (one `git cat-file --batch`, no history walk) and
+  reads `af/` at the head of that lineage (one streamed `git cat-file --batch`, no history walk; only the small project.json files and the memory files
+  of projects that will be imported are requested, never a blob over the limit, each distinct blob once, 64 MiB in all) and
   `POST /agents/memory/af-import` publishes. The POST answers only the member-origin mark
   ([0113](0113-member-origin-mark.md)), is audited as `memory.af_import` (import id only), and has no MCP tool.
   tar.gz is not read: the generic tar import drops `af/` before it is committed.
 - **Mapping.** A source project maps to a live local project (a working copy under `~/repos`) by id; when the id
   differs, which is the usual case because it derives from the clone's path, by the one live project with the same
   normalised remote (#2110). None or two: listed as `no_local_project` / `ambiguous`, nothing of it read or shown,
-  nothing imported. The user scope maps to itself. There is no manual mapping.
+  nothing imported. A search for working copies that did not complete proves nothing about "the one project
+  with this remote", so then only an id match maps and the rest is `search_incomplete` (checked again at the
+  apply). A source project directory whose name fails the secret scan is counted (`withheld`), never named or read. The user scope maps to itself. There is no manual mapping.
 - **Evaluation.** The claude import's scan and publish path, on a file already in memory: the raw file, every
   decoded field, the description, body, type and kinds, and the rendered file are scanned (no override; findings
   are masked, a name that fails the scan is withheld), then the limits. The statuses are `new`, `unchanged` (same
-  description, type, body and kinds), `exists` (a live memory of that name with other text: **never replaced**, the
-  member edits or forgets it and imports again), `forgotten` (a tombstone, or the name is anywhere in this scope's
+  description, type, body and kinds), `exists` (a live memory of that name with other text: **never replaced**: to
+  take the bundle's text the member edits the memory here by hand, since forgetting it would make it
+  `forgotten` for good; the same name from two source projects that map to one target is imported once, from
+  the first in id order, and the other is `exists` with reason `duplicate_in_bundle`; the publish itself refuses
+  a live copy, whatever was evaluated before), `forgotten` (a tombstone, or the name is anywhere in this scope's
   history: never brought back, which includes one forgotten long ago; a memory forgotten on the bundle's side has no
   live file in the bundle and is simply not there), `secret` and `invalid`. The apply repeats the evaluation under both store locks per request of up to
   50 items and refuses an item whose hash or target changed since the preview; the write is

@@ -719,6 +719,8 @@ func agentMemImportApplyRel(rel string, p *agentMemProject, byName map[string]*a
 			commit, err := agentMemImportWriteTo(p, rel, it, now)
 			if errors.Is(err, errAgentMemImportForgotten) {
 				res.Reason = "status_forgotten"
+			} else if errors.Is(err, errAgentMemImportExists) {
+				res.Reason = "status_exists"
 			} else if err != nil {
 				res.Reason = "write_failed"
 				// Only the kind of failure is logged: a path in the error carries a name.
@@ -736,6 +738,11 @@ func agentMemImportApplyRel(rel string, p *agentMemProject, byName map[string]*a
 	return out
 }
 
+// errAgentMemImportExists: a live memory of this name is there now. An import never replaces what
+// it did not evaluate against; the check is made at the write, under the locks, so a copy another
+// item of the same request just published is seen.
+var errAgentMemImportExists = errors.New("memory exists")
+
 // errAgentMemImportForgotten: a tombstone says this name was forgotten, whatever the history lists.
 var errAgentMemImportForgotten = errors.New("memory was forgotten")
 
@@ -752,6 +759,11 @@ func agentMemImportWriteTo(p *agentMemProject, rel string, it *agentMemImportIte
 	if it.live != nil {
 		e.Revision, e.Created, e.Kinds, e.Pinned = it.live.Revision+1, it.live.Created, it.live.Kinds, it.live.Pinned
 	} else {
+		if _, ok, err := agentMemReadFile(filepath.Join(agentMemDir(), filepath.FromSlash(rel), e.Name+".md")); err != nil {
+			return "", err
+		} else if ok {
+			return "", errAgentMemImportExists
+		}
 		tomb, err := agentMemTombRevision(rel, e.Name)
 		if err != nil {
 			return "", err

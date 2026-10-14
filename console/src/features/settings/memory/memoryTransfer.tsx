@@ -341,7 +341,7 @@ export function TransferSection({
             </button>
           </div>
           {/* The restore above never writes AF memory (no secret scan); this is where it comes in. */}
-          {preview.format === "bundle" && <BundleAfPanel importId={preview.importId} onChanged={onApplied} />}
+          {preview.format === "bundle" && <BundleAfPanel importId={preview.importId} onChanged={onApplied} parentBusy={busy} />}
         </div>
       )}
     </section>
