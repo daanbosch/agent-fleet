@@ -985,6 +985,7 @@ type Store interface {
 	TenantGitOAuthStore
 	EngineAccessStore
 	TenantBranchRulesStore
+	PreviewTempPortStore
 	MemberUIStateStore
 	TenantMemberDefaultsStore
 	HomeOperationStore

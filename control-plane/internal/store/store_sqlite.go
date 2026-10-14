@@ -1776,6 +1776,7 @@ func deleteWorkspaceTx(ctx context.Context, tx *sqlTx, workspaceID string) error
 		`DELETE FROM workspace_stop_intent WHERE workspace_id=?`,
 		`DELETE FROM workspace_auto_stop WHERE workspace_id=?`,
 		`DELETE FROM workspace_activity WHERE workspace_id=?`,
+		`DELETE FROM preview_temp_port WHERE workspace_id=?`,
 		`DELETE FROM shared_session_catalog WHERE workspace_id=?`,
 		`DELETE FROM session WHERE workspace_id=?`,
 		`DELETE FROM wrapped_dek WHERE workspace_id=?`,

@@ -207,3 +207,57 @@ func (c *Cache) Get(now time.Time) map[string][]int {
 	c.at = now
 	return c.val
 }
+
+// Inodes returns the inodes of the sockets listening on port (reachable bind addresses
+// only, tcp and tcp6 — one server often holds both), ascending. Unlike Scan it never walks
+// /proc/<pid>/fd, so it is cheap enough to ask per request.
+func Inodes(root string, port int) []string {
+	return inodesOf(listeners(root), port)
+}
+
+func listeners(root string) map[string]int {
+	m := map[string]int{}
+	readListeners(filepath.Join(root, "net", "tcp"), m)
+	readListeners(filepath.Join(root, "net", "tcp6"), m)
+	return m
+}
+
+func inodesOf(m map[string]int, port int) []string {
+	var out []string
+	for inode, p := range m {
+		if p == port {
+			out = append(out, inode)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// InodeCache holds the listener table for a moment, so a relay checking a grant on every
+// request reads /proc/net/tcp* at most once per TTL. The TTL is how long a stopped
+// listener can still pass.
+type InodeCache struct {
+	Root string
+	TTL  time.Duration
+
+	mu  sync.Mutex
+	at  time.Time
+	val map[string]int
+}
+
+// Alive reports whether any of inodes is still a listening socket on port.
+func (c *InodeCache) Alive(now time.Time, port int, inodes []string) bool {
+	c.mu.Lock()
+	if c.val == nil || now.Sub(c.at) >= c.TTL {
+		c.val = listeners(c.Root)
+		c.at = now
+	}
+	m := c.val
+	c.mu.Unlock()
+	for _, in := range inodes {
+		if p, ok := m[in]; ok && p == port {
+			return true
+		}
+	}
+	return false
+}
