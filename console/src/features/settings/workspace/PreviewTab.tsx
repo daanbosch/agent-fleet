@@ -22,7 +22,7 @@ import { OnOff, Row } from "../parts/controls.tsx";
 import { useT } from "../../../lib/i18n/index.ts";
 import { Button } from "../../../ui/Button.tsx";
 import { useSettingsUI } from "../store.ts";
-import { previewInfoFrom, previewToken, usePreviewStore } from "../../preview/previewState.ts";
+import { previewInfoFrom, previewScopeUnchanged, previewToken, usePreviewStore } from "../../preview/previewState.ts";
 
 // Whether this deployment has preview subdomains at all. null = not known yet; the rail
 // stays empty until it resolves, so the entry never flashes in and disappears again.
@@ -57,6 +57,8 @@ export function usePreviewAvailable(): boolean | null {
 
 // Writes go one after another, so their answers settle in the order they were sent and the last
 // save is the one the shared state ends on (a field blur and a toggle click can overlap).
+// What a queued write resolves to when its scope changed before it was sent.
+const CANCELLED = Symbol("cancelled");
 let writeChain: Promise<unknown> = Promise.resolve();
 function serialized<T>(fn: () => Promise<T>): Promise<T> {
   const run = writeChain.then(fn, fn);
@@ -88,12 +90,16 @@ export function PreviewTab() {
   }, []);
 
   const save = async (patch: Record<string, unknown>) => {
+    const from = previewToken(); // taken NOW, when the person acted, not when the queue gets to it
     const res = await serialized(async () => {
-      const from = previewToken(); // the scope and epoch this save started under
+      // A write queued under another tenant / identity is cancelled, not sent: fetch stamps the
+      // tenant current at send time, so it would land on the wrong workspace.
+      if (!previewScopeUnchanged(from)) return CANCELLED;
       const r = await apiJSON("api/env/ws-settings", "PUT", patch);
       if (r && !r.error) usePreviewStore.getState().set(previewInfoFrom(r), from); // the port controls follow
       return r;
     });
+    if (res === CANCELLED) return;
     if (res && !res.error) {
       setAu(res);
     } else toast(tr("common.save_failed"));
@@ -110,12 +116,14 @@ export function PreviewTab() {
       danger: true,
     });
     if (!ok) return;
+    const from = previewToken();
     const res = await serialized(async () => {
-      const from = previewToken();
+      if (!previewScopeUnchanged(from)) return CANCELLED;
       const r = await apiJSON("api/env/ws-settings/preview/reissue", "POST", {});
       if (r && !r.error) usePreviewStore.getState().set(previewInfoFrom(r), from);
       return r;
     });
+    if (res === CANCELLED) return;
     if (res && !res.error) {
       setAu(res);
       // While stopped there are no issued URLs to throw away, so a successful reissue

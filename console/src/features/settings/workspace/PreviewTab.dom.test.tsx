@@ -11,10 +11,11 @@ import { createRoot, type Root } from "react-dom/client";
 
 const api = vi.fn();
 const apiJSON = vi.fn();
+const tenantNow = { v: "default" };
 vi.mock("../../../core/api/client.ts", () => ({
   api: (...args: unknown[]) => api(...args),
   apiJSON: (...args: unknown[]) => apiJSON(...args),
-  getTenant: () => "default",
+  getTenant: () => tenantNow.v,
   errText: (e: { message?: string }) => e?.message || "",
   isTransientErr: () => false,
   raw: () => Promise.resolve(new Response("")),
@@ -144,6 +145,47 @@ describe("PreviewTab", () => {
   });
 });
 
+
+describe("writes queued across a scope change", () => {
+  const queueSecondWrite = async () => {
+    api.mockResolvedValue(wsSettings());
+    const { PreviewTab } = await freshModule();
+    const { t } = await import("../../../lib/i18n/index.ts");
+    const { useTenantStore } = await import("../../../core/store/tenant.ts");
+    const pending: Array<(v: unknown) => void> = [];
+    apiJSON.mockImplementation(() => new Promise((r) => pending.push(r)));
+    await mount(<PreviewTab />);
+    const input = document.querySelector<HTMLInputElement>(".ds-select")!;
+    await act(async () => input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }))); // write 1 is out
+    const label = [...document.querySelectorAll("*")].find((e) => e.children.length === 0 && e.textContent === t("env.preview_public_label"))!;
+    const on = [...label.parentElement!.querySelectorAll("button")].find((b) => b.textContent === t("common.on"))!;
+    await act(async () => on.click()); // write 2 waits behind it
+    expect(apiJSON).toHaveBeenCalledTimes(1);
+    return { pending, useTenantStore };
+  };
+
+  it("does not send a queued write to another tenant", async () => {
+    const { pending } = await queueSecondWrite();
+    tenantNow.v = "other"; // the tenant switched before the queue reached the second write
+    await act(async () => pending[0](wsSettings()));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(apiJSON).toHaveBeenCalledTimes(1); // the public toggle was cancelled, not sent to "other"
+    tenantNow.v = "default";
+  });
+
+  it("does not send a queued write after the identity changed within the tenant", async () => {
+    const { pending, useTenantStore } = await queueSecondWrite();
+    useTenantStore.setState({ identityRev: useTenantStore.getState().identityRev + 1 });
+    await act(async () => pending[0](wsSettings()));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(apiJSON).toHaveBeenCalledTimes(1);
+    useTenantStore.setState({ identityRev: 0 });
+  });
+});
 
 describe("overlapping saves", () => {
   it("a field blur and a toggle click in flight together end on the last save", async () => {

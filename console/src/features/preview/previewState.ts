@@ -75,6 +75,15 @@ let inflightScope = "";
 let epoch = 0;
 let gen = 0;
 
+/** Whether the tenant and identity are still the ones the token was taken under. A queued
+ *  write checks this right before it is SENT: the request carries the tenant current at send
+ *  time, so a write typed under another tenant must be dropped, not sent to this one. (Only the
+ *  scope, not the epoch: settings are editable while the workspace is stopped, and a stop must
+ *  not eat a pending save.) */
+export function previewScopeUnchanged(t: PreviewToken): boolean {
+  return t.scope === currentScope();
+}
+
 /** Capture before an async call that will `set` its result. */
 export function previewToken(): PreviewToken {
   return { scope: currentScope(), epoch };
