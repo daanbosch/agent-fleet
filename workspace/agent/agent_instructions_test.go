@@ -27,6 +27,9 @@ const fleetFixture = "# Workspace Guide (operating policy)\n\ndo not delete othe
 func instrEnv(t *testing.T) {
 	t.Helper()
 	isolateAgentConfigDirs(t)
+	// The opencode delivery depends on the installed major; default these tests to 1.x
+	// whatever is installed on the machine running them.
+	t.Cleanup(opencode.SetBinaryForTest(""))
 	notes := filepath.Join(t.TempDir(), "workspace-notes.md")
 	if err := os.WriteFile(notes, []byte(fleetFixture), 0o644); err != nil {
 		t.Fatal(err)
@@ -604,5 +607,63 @@ func TestPreviewCoversEverySupportedKind(t *testing.T) {
 		if !strings.Contains(body.Content, "PREVIEWME") {
 			t.Fatalf("%s: preview does not show the user text:\n%s", kind, body.Content)
 		}
+	}
+}
+
+// useOpencodeV2 makes the opencode delivery see an installed @opencode/cli.
+func useOpencodeV2(t *testing.T) {
+	t.Helper()
+	pkg := filepath.Join(t.TempDir(), "node_modules", "@opencode", "cli")
+	if err := os.MkdirAll(filepath.Join(pkg, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "package.json"), []byte(`{"name":"@opencode/cli","version":"2.0.28"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(pkg, "bin", "opencode.exe")
+	if err := os.WriteFile(exe, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(opencode.SetBinaryForTest(exe))
+}
+
+// opencode 2 does not apply the config's `instructions` array (measured on 2.0.28), so the
+// member's text has to reach it through the global AGENTS.md, and the config must not keep a
+// reference that only looks like delivery.
+func TestReconcileDeliversUserInstructionsToOpencode2ThroughAgentsMD(t *testing.T) {
+	instrEnv(t)
+	useOpencodeV2(t)
+	if err := userinstr.SaveText("Always report in Japanese.\n"); err != nil {
+		t.Fatal(err)
+	}
+	reconcileAgentInstructions()
+
+	if got := read(t, opencode.AgentsPath()); !strings.Contains(got, "Always report in Japanese.") {
+		t.Fatalf("opencode 2: user text missing from AGENTS.md:\n%s", got)
+	}
+	if fileExists(instrOpencodeFile()) || opencodeRefers(instrOpencodeFile()) {
+		t.Fatal("opencode 2: the instructions-array delivery must not be written")
+	}
+	var found bool
+	for _, tgt := range instrState().Targets {
+		if tgt.Kind == "opencode" {
+			found = true
+			if !tgt.Applied || tgt.Path != opencode.AgentsPath() {
+				t.Fatalf("opencode 2 row must measure the AGENTS.md block: %+v", tgt)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no opencode row")
+	}
+
+	// Back on 1.x (a downgrade): the text moves to the array and leaves AGENTS.md.
+	opencode.SetBinaryForTest("")
+	reconcileAgentInstructions()
+	if strings.Contains(read(t, opencode.AgentsPath()), "Always report in Japanese.") {
+		t.Fatal("opencode 1: user text must leave AGENTS.md again")
+	}
+	if !opencodeRefers(instrOpencodeFile()) {
+		t.Fatal("opencode 1: config does not reference the AF file again")
 	}
 }

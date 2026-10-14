@@ -826,9 +826,7 @@ func (opencodeChat) Send(ctx context.Context, c *ChatConversation, prompt string
 	cmd := exec.CommandContext(ctx, "opencode", args...)
 	cmd.Dir = dir
 	env := opencode.Env()
-	if cfg := opencodeChatConfig(c); cfg != "" {
-		env = append(env, "OPENCODE_CONFIG="+cfg)
-	}
+	env = append(env, opencodeConfigEnv(opencodeChatConfig(c))...)
 	cmd.Env = envWith(env...)
 	out, err := cmd.Output()
 	// Parse BEFORE the error branch: a failed run still prints its events, and both the
@@ -881,6 +879,67 @@ func (opencodeChat) Send(ctx context.Context, c *ChatConversation, prompt string
 // deny also beats whatever the user's global opencode config says.
 func opencodeChatPolicy() map[string]any {
 	return map[string]any{"edit": "deny", "bash": "deny"}
+}
+
+// opencodeConfigEnv hands a config file to `opencode run`. opencode 1 reads it from
+// OPENCODE_CONFIG. opencode 2 ignores that variable (measured on 2.0.28: a `model` in it is
+// not used, and a deny rule in it does not stop the shell tool) but reads
+// OPENCODE_CONFIG_CONTENT, so there the same JSON also rides inline. Without it a one-shot,
+// which has no project config, would run with the read-only posture silently gone, and a chat
+// would lose its af MCP server. Empty path: no variables.
+func opencodeConfigEnv(path string) []string {
+	if path == "" {
+		return nil
+	}
+	env := []string{"OPENCODE_CONFIG=" + path}
+	if opencode.InstalledMajor() < 2 {
+		return env
+	}
+	if inline := opencodeInlineConfig(path); inline != "" {
+		env = append(env, "OPENCODE_CONFIG_CONTENT="+inline)
+	}
+	return env
+}
+
+// opencodeHardDenyPolicies are the opencode 2 `experimental.policies` that keep a chat or
+// one-shot from editing or running a shell. The `permission` deny of the file is a plain
+// permission rule, and a project or agent rule (`agents.build.permissions`) that comes later
+// wins over it: measured on 2.0.28, an agent-level allow brought shell/edit/write back and a
+// shell call created a file. A policy is evaluated after every permission rule and cannot be
+// lifted by a project, agent or session. `tool.use` matches `<action>:<resource>`; a bare
+// tool name matches nothing, `<action>:*` does (measured). Code Mode cannot reach the
+// built-in shell in this build (measured), so it needs no entry of its own.
+func opencodeHardDenyPolicies() []any {
+	var out []any
+	for _, action := range []string{"shell", "edit", "write", "subagent"} {
+		out = append(out, map[string]any{"action": "tool.use", "resource": action + ":*", "effect": "deny"})
+	}
+	return out
+}
+
+// opencodeInlineConfig is the config file's JSON for OPENCODE_CONFIG_CONTENT with the hard
+// deny policies added to its experimental block; "" when the file cannot be read as an object.
+func opencodeInlineConfig(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var cfg map[string]any
+	if json.Unmarshal(b, &cfg) != nil || cfg == nil {
+		return ""
+	}
+	exp, _ := cfg["experimental"].(map[string]any)
+	if exp == nil {
+		exp = map[string]any{}
+	}
+	pol, _ := exp["policies"].([]any)
+	exp["policies"] = append(pol, opencodeHardDenyPolicies()...)
+	cfg["experimental"] = exp
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		return ""
+	}
+	return string(out)
 }
 
 // opencodeChatDir prepares the working dir for a chat's opencode run, with an
@@ -2057,9 +2116,7 @@ func OneShotHeadlessRun(ctx context.Context, feature string, tier OneShotTier, p
 		// one that takes effect (merge precedence measured on 1.18.7: project >
 		// OPENCODE_CONFIG > global — see opencodeChatDir). If it cannot be written the run
 		// goes bare as before, degrading on a broken home rather than breaking title/reply.
-		if cfg := OpencodeOneShotConfig(); cfg != "" {
-			env = append(env, "OPENCODE_CONFIG="+cfg)
-		}
+		env = append(env, opencodeConfigEnv(OpencodeOneShotConfig())...)
 		// NOTE: deliberately NOT auto-picking a cheap model here (docs/log/46 §1-a-2). opencode's
 		// catalog is a LISTING, not an entitlement: `opencode/claude-haiku-4-5` is listed and
 		// selectable, yet running it returns "Unexpected server error" on an account without

@@ -165,3 +165,58 @@ stub OpenAI-compatible endpoint and a stub MCP server (no real model).
   `session.created` and are left out so their end does not flip the badge.
 - Not covered: a Terminal (CLI) opencode 2 shares one background service, so
   `AF_SESSION_SID` in the plugin's environment is the service starter's (#2105).
+
+## 2026-10-14: opencode 2 TUI launch, service, install (#2105, part of #2101)
+
+Measured on `@opencode/cli` 2.0.28 in an isolated `HOME`, a loopback stub OpenAI-compatible
+provider with an explicit stub model, service port moved off 49374.
+
+**Shared service.** A bare `opencode` (and `opencode models`, `run`, `session list`) starts
+`opencode serve --service`, one per user, and that process keeps the environment of whoever
+started it (`AF_SESSION_SID` of the first session was in its `/proc/<pid>/environ`). Per-session
+env therefore never reaches a plugin or a provider on a second session. `opencode service set
+disabled true` (file `~/.config/opencode/service.json`; keys: disabled, remote, hostname, port,
+password, cors, env) makes every command run a private `serve --stdio --port 0` instead: no
+service process afterwards. Decision: **`--standalone` per TUI** rather than `--server` to af's
+serve.
+
+| layout (idle, RSS) | per TUI | server | 3 sessions |
+|---|---|---|---|
+| `--standalone` | ~160 MB | ~245 MB each | ~1.2 GB |
+| shared service or `--server` to one serve | ~160 MB | ~300 MB once | ~0.8 GB |
+
+`--server` works (`OPENCODE_SERVER_PASSWORD` in the TUI's environment carries the password), but
+the server's environment, not the TUI's, is what plugins see, so the status badge, slot-id capture
+and the session-scoped engine token would break, and Terminal sessions would have to count as
+daemon dependents and survive a serve restart. The price of `--standalone` is ~245 MB per Terminal
+session; v1's TUI embeds its server in-process, so this is the v2 equivalent.
+
+**Model, agent, fork.** `--model/--agent/--fork` are not TUI flags. `OPENCODE_CONFIG_CONTENT`
+(`model`, `default_agent`) picks them for a *new* session; a session that exists keeps its own
+whatever the config says. `opencode api --standalone POST /api/session/{id}/model|agent|fork`
+(~1 s each) works against the same database, so a resume sets them before attaching and a fork is
+made first and the copy resumed. Forking an empty session is refused by v2.
+
+**Config.** `OPENCODE_CONFIG` (a file path) is ignored by v2; `OPENCODE_CONFIG_CONTENT` and the
+project `opencode.json` are read. The chat read-only policy (`permission: {edit, bash: deny}`, v1
+shape) held in a project `opencode.json` on v2 (the shell tool is removed from the model's list) but
+not when delivered through `OPENCODE_CONFIG`, so chat and one-shot runs now also pass the same JSON
+inline on v2. Instructions: the global `~/.config/opencode/AGENTS.md` is read (fleet policy and
+memory guide arrive); `CLAUDE.md` (project, global, `~/.claude`) and the `instructions[]` array are
+not. The member's own instructions are therefore composed into that AGENTS.md as the `user-notes`
+block on v2 and kept in `instructions[]` on v1.
+
+**Install.** `@opencode/cli` installs `opencode` and `opencode2` bins (the same executable), and
+`opencode-ai` and it both claim `opencode`, so a lean-variant boot that crosses the major
+uninstalls the other package first. The auto-updater is `update: "disable"` in the config, seeded
+by the entrypoint when the installed major is 2.
+
+Nothing was run against a real provider. The pin stays 1.19.0.
+
+Review round 1 (#2118): a top-level `permission` deny is only a rule, and a later project or agent
+rule (`agents.build.permissions` allow) brings shell/edit/write back (a shell call created a file).
+`experimental.policies` entries (`tool.use`, resource `<action>:*`, deny) are evaluated after every
+rule and held (`Blocked by configuration policy`) with the same agent allow in place; a bare tool
+name as the resource matched nothing. Chat and one-shot runs on v2 now carry `shell:*`, `edit:*`,
+`write:*` and `subagent:*` denies inline. Code Mode's `execute` did not reach the built-in shell
+even without a policy (control run), so it has no entry of its own.

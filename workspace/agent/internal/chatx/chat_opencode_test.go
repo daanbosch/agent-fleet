@@ -2,6 +2,7 @@ package chatx
 
 import (
 	"encoding/json"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/opencode"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/assistants"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/mcpreg"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
@@ -204,5 +205,78 @@ func TestChatAFServerCarriesBrowserUnavailable(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// fakeOpencode installs a manifest-only opencode of the given package and version and makes
+// the major detection read it.
+func fakeOpencode(t *testing.T, pkg, version string) {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "node_modules", filepath.FromSlash(pkg))
+	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"name":"` + pkg + `","version":"` + version + `"}`
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "bin", "opencode.exe")
+	if err := os.WriteFile(exe, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(opencode.SetBinaryForTest(exe))
+}
+
+// opencode 2 ignores OPENCODE_CONFIG (measured on 2.0.28), so the one-shot read-only policy
+// and the per-conversation af MCP server must also ride OPENCODE_CONFIG_CONTENT there. 1.x
+// keeps exactly the one variable.
+func TestOpencodeConfigEnvByMajor(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := OpencodeOneShotConfig()
+	if path == "" {
+		t.Fatal("no one-shot config written")
+	}
+
+	fakeOpencode(t, "opencode-ai", "1.19.0")
+	env := opencodeConfigEnv(path)
+	if len(env) != 1 || env[0] != "OPENCODE_CONFIG="+path {
+		t.Fatalf("opencode 1 env = %q, want only OPENCODE_CONFIG", env)
+	}
+
+	fakeOpencode(t, "@opencode/cli", "2.0.28")
+	env = opencodeConfigEnv(path)
+	if len(env) != 2 || env[0] != "OPENCODE_CONFIG="+path {
+		t.Fatalf("opencode 2 env = %q, want OPENCODE_CONFIG and OPENCODE_CONFIG_CONTENT", env)
+	}
+	inline, ok := strings.CutPrefix(env[1], "OPENCODE_CONFIG_CONTENT=")
+	if !ok {
+		t.Fatalf("second variable = %q", env[1])
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(inline), &cfg); err != nil {
+		t.Fatalf("inline config is not JSON: %v", err)
+	}
+	if perm, _ := cfg["permission"].(map[string]any); perm["edit"] != "deny" || perm["bash"] != "deny" {
+		t.Fatalf("inline config lost the read-only policy: %v", cfg)
+	}
+	// A permission deny loses to a later agent-level allow (measured on 2.0.28), so the inline
+	// config also carries policies a project or agent cannot lift.
+	exp, _ := cfg["experimental"].(map[string]any)
+	pols, _ := exp["policies"].([]any)
+	got := map[string]bool{}
+	for _, p := range pols {
+		m, _ := p.(map[string]any)
+		if m["action"] == "tool.use" && m["effect"] == "deny" {
+			got[m["resource"].(string)] = true
+		}
+	}
+	for _, want := range []string{"shell:*", "edit:*", "write:*", "subagent:*"} {
+		if !got[want] {
+			t.Fatalf("no hard deny for %s in %v", want, pols)
+		}
+	}
+
+	if got := opencodeConfigEnv(""); got != nil {
+		t.Fatalf("no config must add no variables, got %q", got)
 	}
 }

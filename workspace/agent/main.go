@@ -156,6 +156,11 @@ func serve() {
 	// destroyed anything the user had added to those files on every container start.
 	// Sessions are started by us, so nothing can read a half-composed file.
 	reconcileAgentInstructions()
+	// opencode 2 starts a shared background service that outlives, and takes the environment of,
+	// the first command that needs it; keep every command on a private server instead.
+	if err := opencode.EnsureServiceDisabled(); err != nil {
+		log.Printf("opencode service: %v (left as is)", err)
+	}
 	// Mint this boot's name for af's own MCP server, BEFORE anything materializes a
 	// config. A repository's project-scoped MCP config beats af's user-scope one on
 	// every kind but claude (docs/log/48 §8.4), so a repo that happens to define a server

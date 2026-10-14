@@ -91,7 +91,7 @@ if [ -n "$af_arch_now" ] && [ -n "$af_arch_was" ] && [ "$af_arch_was" != "$af_ar
     const fs = require("fs"), path = require("path");
     const root = process.argv[1];
     // Skip what boot-install restores itself (it would be installed twice).
-    const skip = new Set(["@anthropic-ai/claude-code", "opencode-ai", "@openai/codex", "@github/copilot"]);
+    const skip = new Set(["@anthropic-ai/claude-code", "opencode-ai", "@opencode/cli", "@openai/codex", "@github/copilot"]);
     const out = [];
     const add = (rel) => {
       try {
@@ -329,6 +329,11 @@ fi
 VJ=/usr/local/share/agent-fleet/versions.json
 vj_pin() { node -e 'try{process.stdout.write(String(require(process.argv[1])[process.argv[2]]||""))}catch{}' "$VJ" "$1" 2>/dev/null; }
 cli_present() { [ -x "/usr/local/bin/$1" ] || [ -e "$HOME/.local/bin/$1" ]; }
+# opencode's npm package follows the major of its pin: opencode-ai (1.x) or @opencode/cli (2.x).
+# Both claim the `opencode` bin, so they never coexist in one prefix (see the pair loop below).
+oc_pkg() { case "${1%%.*}" in ''|*[!0-9]*|0|1) echo opencode-ai ;; *) echo @opencode/cli ;; esac; }
+OC_PKG="$(oc_pkg "$(vj_pin opencode)")"
+OC_OTHER=@opencode/cli; [ "$OC_PKG" = opencode-ai ] || OC_OTHER=opencode-ai
 # agy_effective_version — the version of the agy that is actually installed now.
 #
 # The marker (.agy.version) is the version AF last installed, not the one present now. agy
@@ -396,11 +401,18 @@ if [ "$LEAN_CLIS" = 1 ]; then
     NPM_LS="$NPM_LS" node -e 'try{const d=JSON.parse(process.env.NPM_LS).dependencies||{};process.stdout.write(((d[process.argv[1]]||{}).version)||"")}catch{}' "$1" 2>/dev/null
   }
   NPM_BOOT=""
-  for pair in "claude=@anthropic-ai/claude-code" "opencode=opencode-ai" \
+  NPM_DROP=""
+  for pair in "claude=@anthropic-ai/claude-code" "opencode=$OC_PKG" \
               "codex=@openai/codex" "copilot=@github/copilot"; do
     cli="${pair%%=*}"; pkg="${pair#*=}"; ver="$(vj_pin "$cli")"
     [ -n "$ver" ] || continue
     if ! cli_present "$cli"; then
+      NPM_BOOT="$NPM_BOOT ${pkg}@${ver}"
+    elif [ "$cli" = opencode ] && [ "$REPIN" = 1 ] && [ -e "$HOME/.local/bin/opencode" ] \
+         && [ -z "$(npm_cur "$pkg")" ] && [ -n "$(npm_cur "$OC_OTHER")" ]; then
+      # The copy in ~/.local is the other major's package (the pin crossed 1 <-> 2). It owns
+      # the `opencode` bin, so npm would refuse to link the new one: drop it first.
+      NPM_DROP="$NPM_DROP $OC_OTHER"
       NPM_BOOT="$NPM_BOOT ${pkg}@${ver}"
     elif [ "$REPIN" = 1 ] && [ -e "$HOME/.local/bin/$cli" ]; then
       # Move a drifted copy back to the pin. Installs npm does not manage (no version) are left alone.
@@ -410,6 +422,8 @@ if [ "$LEAN_CLIS" = 1 ]; then
   done
   if [ -n "$NPM_BOOT" ]; then
     echo "[entrypoint] boot-install (pinned):$NPM_BOOT ..."
+    # shellcheck disable=SC2086
+    [ -z "$NPM_DROP" ] || npm uninstall -g --prefix "$HOME/.local" $NPM_DROP >/dev/null 2>&1 || true
     # shellcheck disable=SC2086
     npm install -g --prefix "$HOME/.local" $NPM_BOOT >/dev/null 2>&1 \
       && echo "[entrypoint] boot-install ok" \
@@ -638,14 +652,14 @@ elif [ "${AF_AGENT_SELF_UPDATE_ALLOWED:-0}" = "1" ] && [ "${AF_AGENT_SELF_UPDATE
   # Skip when unchanged: if every package's installed version (in the effective PATH
   # prefix) equals the registry latest, skip the reinstall entirely (tarballs are fetched
   # only on a new release). When it cannot be decided, update.
-  NPM_NEED=$(NPM_PREFIX_DIR="$NPM_PREFIX_DIR" node -e '
+  NPM_NEED=$(NPM_PREFIX_DIR="$NPM_PREFIX_DIR" OC_PKG="$OC_PKG" node -e '
     const { execSync } = require("child_process");
     const pfx = process.env.NPM_PREFIX_DIR ? " --prefix " + process.env.NPM_PREFIX_DIR : "";
     const run = (c) => execSync(c, { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
     try {
       const ls = JSON.parse(run("npm ls -g --depth=0 --json" + pfx));
       let need = 0;
-      for (const p of ["@anthropic-ai/claude-code", "opencode-ai", "@openai/codex", "@github/copilot"]) {
+      for (const p of ["@anthropic-ai/claude-code", process.env.OC_PKG, "@openai/codex", "@github/copilot"]) {
         const cur = ((ls.dependencies || {})[p] || {}).version || "";
         const latest = run("npm view " + p + " version");
         if (!cur || !latest || cur !== latest) { need = 1; break; }
@@ -655,7 +669,7 @@ elif [ "${AF_AGENT_SELF_UPDATE_ALLOWED:-0}" = "1" ] && [ "${AF_AGENT_SELF_UPDATE
   ' 2>/dev/null || echo 1)
   if [ "$NPM_NEED" = "0" ]; then
     echo "[entrypoint] agent CLIs already latest; skip"
-  elif npm install -g $NPM_PREFIX_ARG @anthropic-ai/claude-code@latest opencode-ai@latest @openai/codex@latest @github/copilot@latest >/dev/null 2>&1; then
+  elif npm install -g $NPM_PREFIX_ARG @anthropic-ai/claude-code@latest "$OC_PKG@latest" @openai/codex@latest @github/copilot@latest >/dev/null 2>&1; then
     echo "[entrypoint] agent CLIs updated${NPM_PREFIX_DIR:+ (~/.local)}: claude $(claude --version 2>/dev/null | head -1) | opencode $(opencode --version 2>/dev/null | head -1) | codex $(codex --version 2>/dev/null | head -1) | copilot $(copilot --version 2>/dev/null | head -1)"
   else
     echo "[entrypoint] WARN: agent CLI update failed (using baked versions)"
@@ -753,7 +767,7 @@ else
   # so PATH falls back to it at once (never in lean, where ~/.local is the pin itself).
   if [ -x /usr/local/bin/claude ]; then
     npm uninstall -g --prefix "$HOME/.local" \
-      @anthropic-ai/claude-code opencode-ai @openai/codex @github/copilot >/dev/null 2>&1 || true
+      @anthropic-ai/claude-code opencode-ai @opencode/cli @openai/codex @github/copilot >/dev/null 2>&1 || true
   fi
   if [ -x /usr/local/bin/rtk ]; then rm -f "$HOME/.local/bin/rtk"; fi
   if [ -x /usr/local/bin/agy ]; then rm -f "$HOME/.local/bin/agy" "$HOME/.local/bin/.agy.version"; fi
@@ -843,7 +857,10 @@ fi
 # Best-effort: skips if the file isn't plain JSON (e.g. the user added comments).
 OC_CFG="$HOME/.config/opencode/opencode.jsonc"
 mkdir -p "$HOME/.config/opencode"
-python3 - "$OC_CFG" <<'PY' && echo "[entrypoint] set opencode permission=allow" || echo "[entrypoint] WARN: skipped opencode permission config"
+# opencode 2 (@opencode/cli) prints "opencode v2.0.28", opencode-ai 1.x "1.19.0": the leading
+# integer is the major. Anything unreadable counts as 1, the pinned default.
+OC_MAJOR="$(opencode --version 2>/dev/null | head -1 | sed -nE 's/^[^0-9]*([0-9]+)\..*/\1/p')"
+python3 - "$OC_CFG" "${OC_MAJOR:-1}" <<'PY' && echo "[entrypoint] set opencode permission=allow" || echo "[entrypoint] WARN: skipped opencode permission config"
 import json, os, sys
 p = sys.argv[1]
 cfg = {}
@@ -862,6 +879,10 @@ if not isinstance(perm, dict):
 for k in ("edit", "bash", "webfetch", "doom_loop", "external_directory"):
     perm[k] = "allow"
 cfg["permission"] = perm
+# v2 turns its auto-updater off through config (`update`); v1 keeps the
+# OPENCODE_DISABLE_AUTOUPDATE env from the Dockerfile and does not know the key.
+if sys.argv[2].isdigit() and int(sys.argv[2]) >= 2:
+    cfg["update"] = "disable"
 tmp = p + ".af-tmp"
 with open(tmp, "w") as f:
     json.dump(cfg, f, indent=2)

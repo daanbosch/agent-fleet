@@ -330,6 +330,10 @@ jobs:
                       "codex=@openai/codex" "copilot=@github/copilot"; do
             k="${pair%%=*}"; pkg="${pair#*=}"
             pin="$(jq -r ".$k" "$VJ")"
+            # opencode's npm package follows the pin's major (opencode-ai 1.x, @opencode/cli 2.x).
+            if [ "$k" = opencode ]; then
+              case "${pin%%.*}" in 0|1) pkg=opencode-ai ;; *) pkg=@opencode/cli ;; esac
+            fi
             got="$(jq -r .version "$HOMEDIR/.local/lib/node_modules/$pkg/package.json")"
             test "$got" = "$pin" || { echo "NG: $k $got != pin $pin"; exit 1; }
             echo "ok  $k $got (pinned)"
