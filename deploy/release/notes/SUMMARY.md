@@ -14,6 +14,50 @@ From 0.24.0, a line that came from a GitHub issue ends with its number, linked t
 
 ---
 
+## [0.31.0](0.31.0.md) — 2026-10-14
+
+**CLI pins** — Claude Code 2.1.300, Codex 0.162.1, Copilot 1.0.97, Antigravity 1.3.5, Cursor 2026.10.12-d47ca18, Kiro 2.31.0, OpenCode 1.19.0, Muse Code 1.4.8-R6256.1
+
+**New / Improved**
+
+- **[members]** Inbox: messages and requests between tenant members; a request is taken by one recipient, who can start a session from it ([#1961](https://github.com/k-k1/agent-fleet/issues/1961))
+- **[members]** Opt-in limit board: publish your usage-limit state to the tenant or chosen members ([#1962](https://github.com/k-k1/agent-fleet/issues/1962))
+- **[onboarding]** Home view with what is waiting, what to continue and what to start; the first-run checklist moves there ([#2028](https://github.com/k-k1/agent-fleet/issues/2028), [#2027](https://github.com/k-k1/agent-fleet/issues/2027))
+- **[admin / tenants]** Member defaults name the agent new members connect ([#2026](https://github.com/k-k1/agent-fleet/issues/2026))
+- **[agent memory]** Memory browser in Settings: all scopes, body search, create/edit, forget/restore, purge past revisions ([#1985](https://github.com/k-k1/agent-fleet/issues/1985), [#1999](https://github.com/k-k1/agent-fleet/issues/1999), [#2003](https://github.com/k-k1/agent-fleet/issues/2003), [#2007](https://github.com/k-k1/agent-fleet/issues/2007), [#1997](https://github.com/k-k1/agent-fleet/issues/1997), [#1982](https://github.com/k-k1/agent-fleet/issues/1982))
+- **[agent memory]** Import from muse and from a memory bundle; move or merge an orphaned project's memories, suggested by remote ([#1991](https://github.com/k-k1/agent-fleet/issues/1991), [#2005](https://github.com/k-k1/agent-fleet/issues/2005), [#1983](https://github.com/k-k1/agent-fleet/issues/1983), [#1984](https://github.com/k-k1/agent-fleet/issues/1984), [#2110](https://github.com/k-k1/agent-fleet/issues/2110))
+- **[agent memory]** Turning the switch on imports claude's memory and off writes it back; muse's own memory is off while it is on ([#1972](https://github.com/k-k1/agent-fleet/issues/1972), [#1990](https://github.com/k-k1/agent-fleet/issues/1990))
+- **[agent memory]** `memory_search` ranks by relevance and falls back to any word ([#1981](https://github.com/k-k1/agent-fleet/issues/1981), [#1995](https://github.com/k-k1/agent-fleet/issues/1995))
+- **[mirror]** A memory write in the changed-files strip opens ([#2148](https://github.com/k-k1/agent-fleet/issues/2148))
+- **[preview]** The owner can open any listening port on the preview subdomain without registering it ([#2138](https://github.com/k-k1/agent-fleet/issues/2138))
+- **[preview]** The preview and browser pane say why a port failed (nothing listening / not HTTP / HTTPS) ([#2139](https://github.com/k-k1/agent-fleet/issues/2139), [#2151](https://github.com/k-k1/agent-fleet/issues/2151))
+- **[Markdown]** Right-click menu for file and folder links ([#2059](https://github.com/k-k1/agent-fleet/issues/2059))
+- **[workspace]** The Bitbucket CLI `bkt` is bundled and signs in through the Bitbucket connection ([#2079](https://github.com/k-k1/agent-fleet/issues/2079))
+- **[ECS]** Opt-in per-home credential-store keys (`WorkspaceDekRandom`) and `af-cp rewrap-keys` for the KMS custodian ([#1646](https://github.com/k-k1/agent-fleet/issues/1646), [#1979](https://github.com/k-k1/agent-fleet/issues/1979), [#1645](https://github.com/k-k1/agent-fleet/issues/1645), [#1956](https://github.com/k-k1/agent-fleet/issues/1956))
+- **[handoff]** Received handoffs in the inbox, members named by e-mail, and "Push, then send" ([#2075](https://github.com/k-k1/agent-fleet/issues/2075), [#2072](https://github.com/k-k1/agent-fleet/issues/2072))
+- **[sharing]** Sharing and handoff dialogs open quickly with many sessions ([#2074](https://github.com/k-k1/agent-fleet/issues/2074), [#2098](https://github.com/k-k1/agent-fleet/issues/2098))
+- **[agents]** Stopped claude conversations are kept, backed up and restored on resume ([#2062](https://github.com/k-k1/agent-fleet/issues/2062), [#2073](https://github.com/k-k1/agent-fleet/issues/2073))
+- **[agents]** claude's `/model` skips the "Switch model?" dialog ([#1920](https://github.com/k-k1/agent-fleet/issues/1920))
+- **[agents]** An expired Claude login offers Re-authenticate from a refused send and the start dialog ([#2125](https://github.com/k-k1/agent-fleet/issues/2125))
+- **[AWS]** A role-chaining profile follows its source's sign-in in the WS bar ([#1109](https://github.com/k-k1/agent-fleet/issues/1109))
+- **[idle stop]** A frozen Terminal session of codex, cursor, copilot, kiro or opencode stops holding its workspace after an hour ([#1830](https://github.com/k-k1/agent-fleet/issues/1830))
+- **[agy]** Terminal sessions track conversation and working/idle through agy's own hooks ([#2156](https://github.com/k-k1/agent-fleet/issues/2156))
+- **[opencode]** A Managed session shows a provider error while retrying and fails on a permanent one ([#2129](https://github.com/k-k1/agent-fleet/issues/2129))
+- **[lcpp]** Many MCP tools are reached through a search tool ([#1565](https://github.com/k-k1/agent-fleet/issues/1565))
+- **[ecs-ec2]** Slots from an older launch template are replaced at the next Start ([#1934](https://github.com/k-k1/agent-fleet/issues/1934))
+- **[ECS]** Admins are warned when `Persistence=retain` has no EFS backup ([#2063](https://github.com/k-k1/agent-fleet/issues/2063), [#2066](https://github.com/k-k1/agent-fleet/issues/2066))
+
+**Fixed**
+
+- **[handoff]** A recipient could start a just-withdrawn offer; a closed offer's notification opened it ([#2020](https://github.com/k-k1/agent-fleet/issues/2020), [#2040](https://github.com/k-k1/agent-fleet/issues/2040), [#2058](https://github.com/k-k1/agent-fleet/issues/2058), [#2041](https://github.com/k-k1/agent-fleet/issues/2041))
+- **[handoff]** "Hand off to a member" said the workspace was not running for members with very many sessions ([#2064](https://github.com/k-k1/agent-fleet/issues/2064))
+- **[worktrees]** A new-branch session failed with `invalid reference` on a base pushed after the last fetch ([#2019](https://github.com/k-k1/agent-fleet/issues/2019))
+- **[sessions]** "Ask AI to suggest" a title was refused for minutes after a failed automatic attempt ([#2061](https://github.com/k-k1/agent-fleet/issues/2061))
+- **[opencode]** Terminal sessions lost their conversation after an Agent restart ([#2122](https://github.com/k-k1/agent-fleet/issues/2122))
+- **[console]** Dialogs closed when a selection ended on the backdrop; text boxes could grow wider than the dialog ([#2054](https://github.com/k-k1/agent-fleet/issues/2054), [#2056](https://github.com/k-k1/agent-fleet/issues/2056))
+- **[mirror]** A band appearing above the conversation shifted the view while reading further up ([#2144](https://github.com/k-k1/agent-fleet/issues/2144))
+- **[admin / ecs-ec2]** On a phone the EC2 pool tables pushed the page sideways; Slots tab actions did not look like buttons ([#1959](https://github.com/k-k1/agent-fleet/issues/1959), [#1935](https://github.com/k-k1/agent-fleet/issues/1935))
+
 ## [0.30.0](0.30.0.md) — 2026-10-09
 
 **CLI pins** — Claude Code 2.1.295, Codex 0.162.0, Copilot 1.0.94, Antigravity 1.3.2, Muse Code 1.4.4-R5419.1

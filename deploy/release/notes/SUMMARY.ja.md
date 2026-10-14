@@ -13,6 +13,50 @@
 
 ---
 
+## [0.31.0](0.31.0.ja.md) — 2026-10-14
+
+**CLI ピン** — Claude Code 2.1.300 / Codex 0.162.1 / Copilot 1.0.97 / Antigravity 1.3.5 / Cursor 2026.10.12-d47ca18 / Kiro 2.31.0 / OpenCode 1.19.0 / Muse Code 1.4.8-R6256.1
+
+**New / Improved**
+
+- **[メンバー]** 受信箱：テナントのメンバー同士でメッセージと依頼を送り合う。依頼は受け手の 1 人が引き受け、そこからセッションを始められる ([#1961](https://github.com/k-k1/agent-fleet/issues/1961))
+- **[メンバー]** 利用枠ボード（任意）：利用枠の状況をテナントか選んだメンバーに公開する ([#1962](https://github.com/k-k1/agent-fleet/issues/1962))
+- **[オンボーディング]** 待っているもの・続き・新しく始めるものを並べたホーム。初回のチェックリストもここへ移った ([#2028](https://github.com/k-k1/agent-fleet/issues/2028), [#2027](https://github.com/k-k1/agent-fleet/issues/2027))
+- **[管理 / テナント]** 「メンバーの既定」で新しいメンバーが接続するエージェントを指定する ([#2026](https://github.com/k-k1/agent-fleet/issues/2026))
+- **[メモリ管理]** 設定のメモリ閲覧：すべての範囲、本文の検索、作成・編集、忘れさせる・復元、過去の版の削除 ([#1985](https://github.com/k-k1/agent-fleet/issues/1985), [#1999](https://github.com/k-k1/agent-fleet/issues/1999), [#2003](https://github.com/k-k1/agent-fleet/issues/2003), [#2007](https://github.com/k-k1/agent-fleet/issues/2007), [#1997](https://github.com/k-k1/agent-fleet/issues/1997), [#1982](https://github.com/k-k1/agent-fleet/issues/1982))
+- **[メモリ管理]** muse とメモリのバンドルから取り込む。作業コピーのなくなったプロジェクトのメモリを移動・統合し、リモートで移動先を提案する ([#1991](https://github.com/k-k1/agent-fleet/issues/1991), [#2005](https://github.com/k-k1/agent-fleet/issues/2005), [#1983](https://github.com/k-k1/agent-fleet/issues/1983), [#1984](https://github.com/k-k1/agent-fleet/issues/1984), [#2110](https://github.com/k-k1/agent-fleet/issues/2110))
+- **[メモリ管理]** オンにすると claude のメモリを取り込み、オフにすると書き戻す。オンの間は muse 自身のメモリもオフ ([#1972](https://github.com/k-k1/agent-fleet/issues/1972), [#1990](https://github.com/k-k1/agent-fleet/issues/1990))
+- **[メモリ管理]** `memory_search` を一致の度合いで並べ、どれかの語での一致に切り替える ([#1981](https://github.com/k-k1/agent-fleet/issues/1981), [#1995](https://github.com/k-k1/agent-fleet/issues/1995))
+- **[ミラー]** 変更ファイルの帯に出たメモリの書き込みを開ける ([#2148](https://github.com/k-k1/agent-fleet/issues/2148))
+- **[プレビュー]** 持ち主は待ち受けているポートを登録せずにプレビュー用サブドメインで開ける ([#2138](https://github.com/k-k1/agent-fleet/issues/2138))
+- **[プレビュー]** プレビューとブラウザペインがポートを開けなかった理由（待ち受けていない・HTTP でない・HTTPS）を伝える ([#2139](https://github.com/k-k1/agent-fleet/issues/2139), [#2151](https://github.com/k-k1/agent-fleet/issues/2151))
+- **[Markdown]** ファイル・フォルダのリンクの右クリックメニュー ([#2059](https://github.com/k-k1/agent-fleet/issues/2059))
+- **[ワークスペース]** Bitbucket の CLI `bkt` を同梱し、Bitbucket の接続でサインインする ([#2079](https://github.com/k-k1/agent-fleet/issues/2079))
+- **[ECS]** home ごとの資格情報ストアの鍵（任意・`WorkspaceDekRandom`）と、KMS の鍵管理向けの `af-cp rewrap-keys` ([#1646](https://github.com/k-k1/agent-fleet/issues/1646), [#1979](https://github.com/k-k1/agent-fleet/issues/1979), [#1645](https://github.com/k-k1/agent-fleet/issues/1645), [#1956](https://github.com/k-k1/agent-fleet/issues/1956))
+- **[引き継ぎ]** 受け取った引き継ぎを受信箱に表示し、メンバーをメールアドレスで示し、「push してから送る」を出す ([#2075](https://github.com/k-k1/agent-fleet/issues/2075), [#2072](https://github.com/k-k1/agent-fleet/issues/2072))
+- **[共有]** セッションが多くても共有と引き継ぎのダイアログがすぐ開く ([#2074](https://github.com/k-k1/agent-fleet/issues/2074), [#2098](https://github.com/k-k1/agent-fleet/issues/2098))
+- **[エージェント]** 停止した claude の会話を残し、バックアップして再開時に戻す ([#2062](https://github.com/k-k1/agent-fleet/issues/2062), [#2073](https://github.com/k-k1/agent-fleet/issues/2073))
+- **[エージェント]** claude の `/model` が「Switch model?」のダイアログを飛ばす ([#1920](https://github.com/k-k1/agent-fleet/issues/1920))
+- **[エージェント]** Claude のログイン切れで、断られた送信と開始ダイアログから再認証へ進める ([#2125](https://github.com/k-k1/agent-fleet/issues/2125))
+- **[AWS]** ロールを引き受けるプロファイルが WS バーで元のプロファイルのログインに従う ([#1109](https://github.com/k-k1/agent-fleet/issues/1109))
+- **[アイドル停止]** codex・cursor・copilot・kiro・opencode のターミナルのセッションが固まっても 1 時間でワークスペースを放す ([#1830](https://github.com/k-k1/agent-fleet/issues/1830))
+- **[agy]** ターミナルのセッションが agy 自身のフックで会話と作業中・アイドルを追う ([#2156](https://github.com/k-k1/agent-fleet/issues/2156))
+- **[opencode]** マネージドのセッションが再試行中のプロバイダーのエラーを表示し、直らないエラーなら失敗にする ([#2129](https://github.com/k-k1/agent-fleet/issues/2129))
+- **[lcpp]** 多数の MCP ツールを検索ツール経由で使う ([#1565](https://github.com/k-k1/agent-fleet/issues/1565))
+- **[ecs-ec2]** 古い起動テンプレートのスロットを次の起動で入れ替える ([#1934](https://github.com/k-k1/agent-fleet/issues/1934))
+- **[ECS]** `Persistence=retain` で EFS のバックアップがないと管理者に警告する ([#2063](https://github.com/k-k1/agent-fleet/issues/2063), [#2066](https://github.com/k-k1/agent-fleet/issues/2066))
+
+**Fixed**
+
+- **[引き継ぎ]** 取り下げ直後の引き継ぎを受け手が始められ、終わった引き継ぎの通知を押すと開いた ([#2020](https://github.com/k-k1/agent-fleet/issues/2020), [#2040](https://github.com/k-k1/agent-fleet/issues/2040), [#2058](https://github.com/k-k1/agent-fleet/issues/2058), [#2041](https://github.com/k-k1/agent-fleet/issues/2041))
+- **[引き継ぎ]** セッションがとても多いメンバーで「メンバーに引き継ぐ」がワークスペースが動いていないと表示した ([#2064](https://github.com/k-k1/agent-fleet/issues/2064))
+- **[ワークツリー]** 最後の fetch の後に push されたベースで、新しいブランチのセッションが `invalid reference` で失敗した ([#2019](https://github.com/k-k1/agent-fleet/issues/2019))
+- **[セッション]** 自動のタイトル生成の失敗後、数分間「AI に提案してもらう」が断られた ([#2061](https://github.com/k-k1/agent-fleet/issues/2061))
+- **[opencode]** ターミナルのセッションが Agent の再起動後に会話を見失った ([#2122](https://github.com/k-k1/agent-fleet/issues/2122))
+- **[Console]** 選択を背景の上で終えるとダイアログが閉じ、テキスト欄をダイアログより広げられた ([#2054](https://github.com/k-k1/agent-fleet/issues/2054), [#2056](https://github.com/k-k1/agent-fleet/issues/2056))
+- **[ミラー]** 上の方を読んでいるとき、会話の上に帯が出ると表示がずれた ([#2144](https://github.com/k-k1/agent-fleet/issues/2144))
+- **[管理 / ecs-ec2]** スマートフォンで EC2 プールの表がページを横にはみ出させ、スロットのタブの操作がボタンに見えなかった ([#1959](https://github.com/k-k1/agent-fleet/issues/1959), [#1935](https://github.com/k-k1/agent-fleet/issues/1935))
+
 ## [0.30.0](0.30.0.ja.md) — 2026-10-09
 
 **CLI ピン** — Claude Code 2.1.295 / Codex 0.162.0 / Copilot 1.0.94 / Antigravity 1.3.2 / Muse Code 1.4.4-R5419.1
