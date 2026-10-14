@@ -284,7 +284,10 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 	if s.Disabled() {
 		return "", 0, errors.New("opencode serve is disabled (AF_OPENCODE_SERVE_DISABLE=1)")
 	}
-	if err := s.retireStale(); err != nil {
+	// One reading of the switch for this start: the replacement check, the binary, the
+	// database and the recorded key all come from it.
+	spec := CurrentLaunch()
+	if err := s.retireStaleFor(spec.Key); err != nil {
 		return "", 0, err
 	}
 	s.mu.Lock()
@@ -337,11 +340,11 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 			useServePassword(prevPassword)
 		}
 	}()
-	cmd := exec.Command(Binary(), "serve", "--hostname", host, "--port", port)
+	cmd := exec.Command(spec.Bin, "serve", "--hostname", host, "--port", port)
 	// Provider keys are env-injected (auth.go) — the same set a TUI launch gets, so
 	// managed turns authenticate identically. Re-keying requires a Restart (§7). The
 	// auth variables come last: a duplicate key keeps its final value.
-	cmd.Env = append(append(withoutEnv(os.Environ(), "AF_SESSION_SID", "AF_SESSION_NAME"), env()...),
+	cmd.Env = append(append(withoutEnv(os.Environ(), "AF_SESSION_SID", "AF_SESSION_NAME"), spec.Env()...),
 		"OPENCODE_SERVER_USERNAME="+serveUser, "OPENCODE_SERVER_PASSWORD="+password)
 	if sharedDaemonWanted() {
 		// Tells the plugins this is af's shared server: no AF_SESSION_SID here, sessions are told
@@ -369,7 +372,7 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 			s.cmd = cmd
 			s.up = true
 			s.stopping = false
-			s.key = launchKey()
+			s.key = spec.Key
 			noteServeStart(cmd.Process.Pid, s.key)
 			gen := s.gen
 			s.armIdleWatchLocked()

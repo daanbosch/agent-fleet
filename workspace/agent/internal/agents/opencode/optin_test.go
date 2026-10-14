@@ -1,9 +1,12 @@
 package opencode
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -153,9 +156,14 @@ func TestOptInKeepsTheDatabasePathOutOfSessionShells(t *testing.T) {
 }
 
 func sleepServe(t *testing.T) *exec.Cmd {
+	return sleepArgs(t, "serve", "--hostname", "127.0.0.1", "--port", "7799")
+}
+
+// sleepArgs starts a process that is not a daemon but carries the given argv tokens. The `; :`
+// keeps sh from exec'ing straight into sleep, which would drop the tokens.
+func sleepArgs(t *testing.T, tokens ...string) *exec.Cmd {
 	t.Helper()
-	// "serve" in argv is what recordedServe checks before it trusts a pid.
-	cmd := exec.Command("sh", "-c", "sleep 30", "serve")
+	cmd := exec.Command("sh", append([]string{"-c", "sleep 30; :", "sh"}, tokens...)...)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -319,5 +327,175 @@ func TestEnsureReplacesADaemonStartedUnderTheOtherSetting(t *testing.T) {
 	_, _, _ = s.Ensure()
 	if !exitedBySignal(t, cmd, syscall.SIGTERM) {
 		t.Fatal("Ensure left the daemon of the other setting running")
+	}
+}
+
+func recordOf(t *testing.T, cmd *exec.Cmd) serveRecord {
+	t.Helper()
+	exe, _ := os.Readlink("/proc/" + strconv.Itoa(cmd.Process.Pid) + "/exe")
+	return serveRecord{PID: cmd.Process.Pid, Key: "v2:x", Start: procStart(cmd.Process.Pid), Exe: exe,
+		Boot: bootID(), Port: "7799"}
+}
+
+// The record names a process instance; a recycled pid, another program, another port, or a command
+// line that merely contains "serve" must never be taken for the daemon (and so never signalled).
+func TestRecordedServeIdentity(t *testing.T) {
+	good := sleepServe(t)
+	if r := recordOf(t, good); !isRecordedServe(r) {
+		t.Fatalf("the daemon itself was not recognised: %+v", r)
+	}
+	r := recordOf(t, good)
+	r.Start++ // a different process instance that got the same pid
+	if isRecordedServe(r) {
+		t.Fatal("a pid whose start time differs was accepted")
+	}
+	r = recordOf(t, good)
+	r.Exe = "/usr/bin/other"
+	if isRecordedServe(r) {
+		t.Fatal("another executable was accepted")
+	}
+	r = recordOf(t, good)
+	r.Boot = "another-boot"
+	if isRecordedServe(r) {
+		t.Fatal("a record from another boot was accepted")
+	}
+	// Another opencode serve (other port).
+	if r := recordOf(t, sleepArgs(t, "serve", "--hostname", "127.0.0.1", "--port", "1234")); isRecordedServe(r) {
+		t.Fatal("a serve on another port was accepted")
+	}
+	// A command line that only contains the word.
+	for _, tok := range [][]string{{"unrelated-language-server", "--port", "7799"}, {"observe-server", "--port=7799"}, {"--stdio", "myserver", "--port", "7799"}} {
+		if r := recordOf(t, sleepArgs(t, tok...)); isRecordedServe(r) {
+			t.Fatalf("%v was taken for the daemon", tok)
+		}
+	}
+}
+
+func TestSignalRecordedRefusesAMismatchedProcess(t *testing.T) {
+	cmd := sleepServe(t)
+	r := recordOf(t, cmd)
+	r.Start++
+	if signalRecorded(r, syscall.SIGTERM) {
+		t.Fatal("signalled a process whose identity does not match")
+	}
+	if cmd.Process.Signal(syscall.Signal(0)) != nil {
+		t.Fatal("the process died")
+	}
+}
+
+// recorder scripts: "<who> <OPENCODE_DB>" appended to a log per run.
+func recorderBins(t *testing.T) (log string) {
+	t.Helper()
+	home := os.Getenv("HOME")
+	log = filepath.Join(home, "ran.log")
+	script := func(who string) []byte {
+		return []byte("#!/bin/sh\necho \"" + who + " ${OPENCODE_DB:-none}\" >> " + log + "\n")
+	}
+	bin := filepath.Join(home, "bin")
+	_ = os.MkdirAll(bin, 0o755)
+	if err := os.WriteFile(filepath.Join(bin, "opencode"), script("v1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := installFakeV2(t)
+	if err := os.WriteFile(exe, script("v2"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return log
+}
+
+// A switch that flips while a start is being prepared must not pair one major's binary with the
+// other's database. Models reads the environment first and the binary after a daemon probe; the
+// flip is injected exactly between them, in both directions.
+func TestModelsTakesBinaryAndDatabaseFromOneReading(t *testing.T) {
+	optInHome(t)
+	log := recorderBins(t)
+	old := modelsFromDaemon
+	t.Cleanup(func() { modelsFromDaemon = old })
+	run := func() string {
+		modelsAt = time.Time{}
+		_ = os.Remove(log)
+		_ = Models()
+		b, _ := os.ReadFile(log)
+		return strings.TrimSpace(string(b))
+	}
+	modelsFromDaemon = func() []string { _ = SetWantsV2(true); return nil } // 1 → 2 at the probe
+	_ = SetWantsV2(false)
+	if got := run(); got != "v1 none" {
+		t.Fatalf("flip to 2 during the probe: ran %q, want the 1.x binary without OPENCODE_DB", got)
+	}
+	modelsFromDaemon = func() []string { _ = SetWantsV2(false); return nil } // 2 → 1 at the probe
+	_ = SetWantsV2(true)
+	if got := run(); got != "v2 "+V2DBPath() {
+		t.Fatalf("flip to 1 during the probe: ran %q, want the 2.x binary with its own database", got)
+	}
+}
+
+func TestLaunchSpecIsFixedAtTheReading(t *testing.T) {
+	optInHome(t)
+	installFakeV2(t)
+	off := CurrentLaunch()
+	_ = SetWantsV2(true)
+	on := CurrentLaunch()
+	_ = SetWantsV2(false)
+	if off.Bin != "opencode" || strings.Contains(strings.Join(off.Env(), " "), "OPENCODE_DB") {
+		t.Fatalf("reading taken while off: %+v %v", off, off.Env())
+	}
+	if on.Bin != V2Binary() || !strings.Contains(strings.Join(on.Env(), " "), "OPENCODE_DB=") {
+		t.Fatalf("reading taken while on: %+v %v", on, on.Env())
+	}
+	if p := buildProgramFor(on, "", "", "", false); !strings.HasPrefix(p, "'"+V2Binary()+"' --standalone") {
+		t.Fatalf("a reading taken while on launched %q after the switch went off", p)
+	}
+}
+
+// 2 → 1: the old 2.x Terminal panes are still attached to the serve being replaced, so the drain
+// must count them even though the switch no longer says 2.
+func TestSwitchingToV1StillDrainsRunningV2TerminalPanes(t *testing.T) {
+	optInHome(t)
+	installFakeV2(t)
+	_ = SetWantsV2(true)
+	m := session.Meta{Name: "oc-term", Dir: t.TempDir(), Kind: session.KindOpencode, Driver: session.DriverTUI}
+	markSlotMode(session.UUID(m.Dir, m.Name), modeShared) // what the 2.x launch recorded
+	t.Cleanup(func() { slotModes.Remove(session.UUID(m.Dir, m.Name)) })
+	if !sharedSlot(m) {
+		t.Fatal("precondition: shared pane not recognised while on")
+	}
+	_ = SetWantsV2(false)
+	if !sharedSlot(m) {
+		t.Fatal("after the switch went to 1, the pane that is still on the 2.x serve dropped out of sharedSlot (drain and dependents skip it)")
+	}
+}
+
+// The same through the drain's own query: after 2 → 1 a busy 2.x pane is still reported busy, so
+// the drain waits for it (and aborts it at the timeout) before the serve is replaced.
+func TestDrainSeesABusyV2PaneAfterTheSwitchWentToV1(t *testing.T) {
+	optInHome(t)
+	installFakeV2(t)
+	_ = SetWantsV2(true)
+	m := session.Meta{Name: "oc-busy", Dir: t.TempDir(), Kind: session.KindOpencode, Driver: session.DriverTUI}
+	sid := session.UUID(m.Dir, m.Name)
+	markSlotMode(sid, modeShared)
+	sids.Write(sid, "ses_busy")
+	t.Cleanup(func() { slotModes.Remove(sid); sids.Remove(sid) })
+	oldSlots := terminalSlots
+	terminalSlots = func() []session.Meta {
+		if sharedSlot(m) {
+			return []session.Meta{m}
+		}
+		return nil
+	}
+	t.Cleanup(func() { terminalSlots = oldSlots })
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"ses_busy":{"type":"running"}}}`))
+	}))
+	t.Cleanup(srv.Close)
+	detectedMajor.Store(int32(apiV2))
+	t.Cleanup(func() { detectedMajor.Store(int32(apiV1)) })
+
+	_ = SetWantsV2(false)
+	if got := busyTerminals(srv.URL); len(got) != 1 || got[0] != "ses_busy" {
+		t.Fatalf("busy terminals after 2 → 1 = %v, want the running 2.x pane", got)
 	}
 }

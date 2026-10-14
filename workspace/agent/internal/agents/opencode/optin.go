@@ -84,19 +84,29 @@ func SetWantsV2(on bool) error {
 // binary falls back to the pinned 1.x, with its own data, instead of failing every launch.
 func UseV2() bool { return WantsV2() && V2Binary() != "" }
 
-// Binary is what af executes for opencode: the bare name (resolved through PATH, the pinned 1.x)
-// unless the opt-in is active.
-func Binary() string {
-	if UseV2() {
-		return V2Binary()
-	}
-	return "opencode"
+// LaunchSpec is one reading of the switch: which binary, which database and which key a start
+// uses. A start takes it once and builds the command and the environment from it, so a switch
+// that flips in between cannot give the v2 binary the 1.x database (or the reverse).
+type LaunchSpec struct {
+	V2  bool
+	Bin string // "opencode" (resolved through PATH) or the opt-in binary's path
+	Key string // launchKey as of the reading
 }
 
-// v2ProcessEnv is what an opencode 2 process af starts gets in addition to its usual
-// environment; nil unless the opt-in is active.
-func v2ProcessEnv() []string {
-	if !UseV2() {
+// CurrentLaunch reads the switch once.
+func CurrentLaunch() LaunchSpec {
+	if bin := V2Binary(); bin != "" && WantsV2() {
+		return LaunchSpec{V2: true, Bin: bin, Key: "v2:" + bin}
+	}
+	return LaunchSpec{Bin: "opencode"}
+}
+
+// Env is the provider keys plus, for the opt-in, its own database: the whole environment an
+// opencode process af starts gets from af, as of this reading.
+func (l LaunchSpec) Env() []string { return append(keyEnv(), l.processEnv()...) }
+
+func (l LaunchSpec) processEnv() []string {
+	if !l.V2 {
 		return nil
 	}
 	// opencode 2 does not create the directory of OPENCODE_DB (measured: ENOENT on start).
@@ -104,23 +114,34 @@ func v2ProcessEnv() []string {
 	return []string{"OPENCODE_DB=" + V2DBPath()}
 }
 
-// ProcessEnv is the exported form, for the one-shot callers outside this package.
+// Major is the opencode major this reading launches: 2 for the opt-in, else what the PATH one is.
+func (l LaunchSpec) Major() int {
+	if l.V2 {
+		return 2
+	}
+	return installedMajor()
+}
+
+func (l LaunchSpec) shellBin() string {
+	if l.Bin == "opencode" {
+		return l.Bin
+	}
+	return session.ShellQuote(l.Bin)
+}
+
+// Binary is what af executes for opencode as of one reading; callers that also need the
+// environment must use CurrentLaunch instead.
+func Binary() string { return CurrentLaunch().Bin }
+
+// v2ProcessEnv is the opt-in's own variables as of one reading; nil unless active.
+func v2ProcessEnv() []string { return CurrentLaunch().processEnv() }
+
+// ProcessEnv is the exported form, for the callers outside this package.
 func ProcessEnv() []string { return v2ProcessEnv() }
 
 // launchKey identifies which opencode a daemon was started as. A running daemon whose key is not
 // the current one was started under the other setting.
-func launchKey() string {
-	if UseV2() {
-		return "v2:" + V2Binary()
-	}
-	return ""
-}
+func launchKey() string { return CurrentLaunch().Key }
 
 // shellBinary is Binary for a command line that a shell will parse.
-func shellBinary() string {
-	b := Binary()
-	if b == "opencode" {
-		return b
-	}
-	return session.ShellQuote(b)
-}
+func shellBinary() string { return CurrentLaunch().shellBin() }

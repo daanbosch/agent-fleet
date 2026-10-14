@@ -55,8 +55,10 @@ const (
 
 // sharedTUI reports whether Terminal sessions attach to af's serve: opencode 2 only (v1 has no
 // per-session environment to keep sessions apart with), unless switched back.
-func sharedTUI() bool {
-	return installedMajor() >= 2 && os.Getenv(standaloneEnv) != "1" && !Serve().Disabled()
+func sharedTUI() bool { return sharedTUIFor(CurrentLaunch()) }
+
+func sharedTUIFor(spec LaunchSpec) bool {
+	return spec.Major() >= 2 && os.Getenv(standaloneEnv) != "1" && !Serve().Disabled()
 }
 
 // slotModes records how each Terminal slot's pane was last launched. The workspace-wide switch
@@ -74,7 +76,7 @@ func markSlotMode(sid, mode string) { slotModes.Write(sid, mode) }
 // part of it: flipping it changes the NEXT launch, and a pane still attached to the serve keeps
 // being a dependent, restored, drained and interrupted.
 func sharedSlot(m session.Meta) bool {
-	return installedMajor() >= 2 && m.Kind == session.KindOpencode && m.DriverKind() == session.DriverTUI &&
+	return m.Kind == session.KindOpencode && m.DriverKind() == session.DriverTUI &&
 		slotModes.Read(session.UUID(m.Dir, m.Name)) == modeShared
 }
 

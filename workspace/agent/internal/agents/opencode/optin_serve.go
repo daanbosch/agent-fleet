@@ -19,14 +19,53 @@ import (
 // the opencode it was started as: flipping the switch must replace it, and nothing else may
 // ever talk to the old one as if it were the new.
 
-// serveRecord says which opencode the daemon af started is. It exists only while the opt-in is
-// the way the daemon was started, so a workspace that never opts in never gets the file.
+// serveRecord says which opencode the daemon af started is, and which process it was. It exists
+// only while the opt-in is the way the daemon was started, so a workspace that never opts in
+// never gets the file. Start, Exe and Boot identify the process instance: a pid alone is
+// recycled.
 type serveRecord struct {
-	PID int    `json:"pid"`
-	Key string `json:"key"`
+	PID   int    `json:"pid"`
+	Key   string `json:"key"`
+	Start uint64 `json:"start"` // /proc/<pid>/stat field 22, clock ticks since boot
+	Exe   string `json:"exe"`
+	Boot  string `json:"boot"`
+	Port  string `json:"port"`
 }
 
 func serveRecordFile() string { return filepath.Join(paths.AgentStateDir(), "opencode-serve.json") }
+
+// procStart is the start time of pid in clock ticks since boot; 0 when unreadable.
+func procStart(pid int) uint64 {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return 0
+	}
+	// comm (field 2) may hold spaces and parentheses: fields resume after the last ')'.
+	i := strings.LastIndex(string(b), ") ")
+	if i < 0 {
+		return 0
+	}
+	f := strings.Fields(string(b)[i+2:])
+	if len(f) < 20 { // field 22 overall = index 19 here (fields start at 3)
+		return 0
+	}
+	n, _ := strconv.ParseUint(f[19], 10, 64)
+	return n
+}
+
+func bootID() string {
+	b, _ := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	return strings.TrimSpace(string(b))
+}
+
+// servePort is the port of the configured serve address.
+func servePort(addr string) string {
+	i := strings.LastIndex(strings.TrimSuffix(addr, "/"), ":")
+	if i < 0 {
+		return ""
+	}
+	return strings.TrimSuffix(addr, "/")[i+1:]
+}
 
 // noteServeStart records the daemon just started, or removes the record when it was started the
 // default way.
@@ -36,7 +75,9 @@ func noteServeStart(pid int, key string) {
 		_ = os.Remove(f)
 		return
 	}
-	b, err := json.Marshal(serveRecord{PID: pid, Key: key})
+	exe, _ := os.Readlink("/proc/" + strconv.Itoa(pid) + "/exe")
+	rec := serveRecord{PID: pid, Key: key, Start: procStart(pid), Exe: exe, Boot: bootID(), Port: servePort(serveAddr())}
+	b, err := json.Marshal(rec)
 	if err == nil {
 		err = writeAtomic(f, b, 0o600)
 	}
@@ -45,22 +86,74 @@ func noteServeStart(pid int, key string) {
 	}
 }
 
-// recordedServe is the record, and false when there is none or its process is not an
-// `opencode serve` any more (a recycled pid must never be signalled).
-func recordedServe() (serveRecord, bool) {
+// isRecordedServe says whether pid is still the process that record describes: the same boot,
+// the same start time, the same executable, and an argv that is exactly an `serve` on the
+// recorded port (NUL-separated tokens, not a substring of the command line).
+func isRecordedServe(r serveRecord) bool {
+	if r.PID <= 0 || r.Key == "" || r.Start == 0 || r.Exe == "" || r.Boot == "" || r.Boot != bootID() {
+		return false
+	}
+	pid := strconv.Itoa(r.PID)
+	if procStart(r.PID) != r.Start {
+		return false
+	}
+	if exe, err := os.Readlink("/proc/" + pid + "/exe"); err != nil || exe != r.Exe {
+		return false
+	}
+	raw, err := os.ReadFile("/proc/" + pid + "/cmdline")
+	if err != nil {
+		return false
+	}
+	args := strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00")
+	serve, port := false, false
+	for i, a := range args {
+		if i > 0 && a == "serve" {
+			serve = true
+		}
+		if a == "--port" && i+1 < len(args) && args[i+1] == r.Port {
+			port = true
+		}
+	}
+	return serve && port && r.Port != ""
+}
+
+// readRecord is the record file, whatever process it names.
+func readRecord() (serveRecord, bool) {
 	b, err := os.ReadFile(serveRecordFile())
 	if err != nil {
 		return serveRecord{}, false
 	}
 	var r serveRecord
-	if json.Unmarshal(b, &r) != nil || r.PID <= 0 || r.Key == "" {
-		return serveRecord{}, false
-	}
-	cmdline, err := os.ReadFile("/proc/" + strconv.Itoa(r.PID) + "/cmdline")
-	if err != nil || !strings.Contains(string(cmdline), "serve") {
+	if json.Unmarshal(b, &r) != nil {
 		return serveRecord{}, false
 	}
 	return r, true
+}
+
+// recordedServe is the record, and false when there is none or its process is not that
+// `opencode serve` any more (a recycled pid must never be signalled).
+func recordedServe() (serveRecord, bool) {
+	r, ok := readRecord()
+	if !ok || !isRecordedServe(r) {
+		return serveRecord{}, false
+	}
+	return r, true
+}
+
+// signalRecorded sends sig to the recorded process through a pidfd opened BEFORE the identity is
+// checked, so the pid cannot be recycled between the check and the signal.
+func signalRecorded(r serveRecord, sig syscall.Signal) bool {
+	const sysPidfdOpen, sysPidfdSendSignal = 434, 424 // the same number on every architecture
+	fd, _, errno := syscall.Syscall(sysPidfdOpen, uintptr(r.PID), 0, 0)
+	if errno != 0 {
+		return false
+	}
+	defer syscall.Close(int(fd))
+	if !isRecordedServe(r) {
+		return false
+	}
+	_, _, errno = syscall.Syscall6(sysPidfdSendSignal, fd, uintptr(sig), 0, 0, 0, 0)
+	return errno == 0
 }
 
 // adoptedKey is how a daemon found already running was started: by the record when there is
@@ -76,8 +169,10 @@ func adoptedKey() string {
 // runs before ensure takes the lock because the replacement drains (up to the drain timeout),
 // which must not hold the lock the Console's polling needs. Restart is the same path a key
 // change takes: running turns finish or are aborted, handles are re-resumed.
-func (s *Supervisor) retireStale() error {
-	want := launchKey()
+func (s *Supervisor) retireStale() error { return s.retireStaleFor(launchKey()) }
+
+// retireStaleFor is retireStale against the key of a reading the caller already took.
+func (s *Supervisor) retireStaleFor(want string) error {
 	s.mu.Lock()
 	up, have, owned := s.up, s.key, s.cmd != nil
 	s.mu.Unlock()
@@ -101,17 +196,10 @@ func (s *Supervisor) retireStale() error {
 	return s.retireAdopted(serveAddr(), up)
 }
 
-// readRecordKey reads the record's key without the liveness check, for the cheap "is there
+// readRecordKey reads the record's key without the identity check, for the cheap "is there
 // anything to compare" test on every ensure.
 func readRecordKey() (serveRecord, string) {
-	b, err := os.ReadFile(serveRecordFile())
-	if err != nil {
-		return serveRecord{}, ""
-	}
-	var r serveRecord
-	if json.Unmarshal(b, &r) != nil {
-		return serveRecord{}, ""
-	}
+	r, _ := readRecord()
 	return r, r.Key
 }
 
@@ -129,13 +217,13 @@ func (s *Supervisor) retireAdopted(addr string, supervised bool) error {
 	if supervised {
 		s.drain(addr)
 	}
-	_ = syscall.Kill(r.PID, syscall.SIGTERM)
+	signalRecorded(r, syscall.SIGTERM)
 	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) && healthy(addr) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	if healthy(addr) {
-		_ = syscall.Kill(r.PID, syscall.SIGKILL)
+		signalRecorded(r, syscall.SIGKILL)
 		time.Sleep(500 * time.Millisecond)
 	}
 	if healthy(addr) {
