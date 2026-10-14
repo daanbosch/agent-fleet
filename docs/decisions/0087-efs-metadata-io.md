@@ -1273,3 +1273,14 @@ numbers**.
   but "A and B are absorbed at very different rates" can be said.
 - **What migration does to existing boxes under decision 4 (b).** If the Agent dies mid-way
   through the one-way migration, something has to decide which side wins.
+
+## Note 2026-10-14: opencode slot ids written by older plugins
+
+The opencode status plugin kept writing `opencode-sid/<sid>` under `AgentConfigDir` after
+this move, so the Agent never read ids captured after the boot-time copy (#2122). The plugin now
+writes only `AgentStateDir` (staged and renamed). The Agent's opencode sid store compares the
+modification times of the state-directory and old-directory records and reads the newer one,
+the state directory winning a tie. Reading never copies, moves or deletes, and a write goes to
+the state directory only, so a stale old record loses to any later write. This costs one extra
+stat of the old directory per read. The other kinds' `*-sid` stores are written only by the Agent
+and are unaffected.

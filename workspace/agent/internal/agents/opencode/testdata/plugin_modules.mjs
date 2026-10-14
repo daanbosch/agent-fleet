@@ -3,9 +3,9 @@
 //
 //   node --experimental-strip-types plugin_modules.mjs <plugin dir> <fake rtk dir> <fake agent log>
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, existsSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, writeFileSync, rmSync, readdirSync, statSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const [dir, , agentLog] = process.argv.slice(2);
@@ -123,9 +123,15 @@ assert.equal(ids.size, 3, "plugin ids must be distinct");
 // status: states reported in order, ids recorded, subagent sessions left out.
 {
   const states = () => (existsSync(agentLog) ? readFileSync(agentLog, "utf8").trim().split("\n").filter(Boolean) : []);
-  const ocid = () => readFileSync(join(process.env.HOME, ".config/agent-fleet/opencode-sid", process.env.AF_SESSION_SID), "utf8");
+  const ocid = () => readFileSync(join(process.env.HOME, ".local/state/agent-fleet/opencode-sid", process.env.AF_SESSION_SID), "utf8");
+  const stagedLeft = () => readdirSync(join(process.env.HOME, ".local/state/agent-fleet/opencode-sid/.staging"));
   const ev = (type, data) => ({ type, data });
   const h = v2Host();
+  // A record an older plugin left in the old directory: the plugin must neither read, move nor
+  // delete it (the Agent arbitrates by age), however many events it records.
+  const legacyRec = join(process.env.HOME, ".config/agent-fleet/opencode-sid", process.env.AF_SESSION_SID);
+  mkdirSync(dirname(legacyRec), { recursive: true });
+  writeFileSync(legacyRec, "ses_stale_from_old_plugin");
   const cleanup = mods.status.setup(h.ctx);
   assert.equal(typeof cleanup, "function", "v2 setup must return its cleanup");
   const settle = async (n, what) => {
@@ -208,6 +214,9 @@ assert.equal(ids.size, 3, "plugin ids must be distinct");
   await sleep(200);
   assert.deepEqual(states().slice(before), ["session-status working sid-test", "session-status idle sid-test"]);
   assert.equal(ocid(), "ses_v1");
+  assert.equal(readFileSync(legacyRec, "utf8"), "ses_stale_from_old_plugin", "the plugin must leave the old directory alone");
+  assert.deepEqual(stagedLeft(), [], "no staged file may be left behind");
+  assert.equal(statSync(join(process.env.HOME, ".local/state/agent-fleet/opencode-sid", process.env.AF_SESSION_SID)).mode & 0o777, 0o600);
 }
 // --- the shared opencode 2 server (issue #2120) -------------------------------------------------
 

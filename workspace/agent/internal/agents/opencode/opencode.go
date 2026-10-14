@@ -17,11 +17,6 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/transcript"
 )
 
-// sids maps our deterministic slot sid to opencode's own session id ("ses_…"):
-// written externally by the bundled plugin (on session.created, keyed by
-// AF_SESSION_SID); the agent only reads/removes it.
-var sids = agents.NewSidStore("opencode-sid")
-
 // SlotSessionID is the opencode session id ("ses_…") slot m is mapped to, "" when it has
 // none yet. The af MCP server matches the id the caller plugin stamps on a tools/call
 // against it (#989), so AF's own mapping — never the caller's claim — decides ownership.
