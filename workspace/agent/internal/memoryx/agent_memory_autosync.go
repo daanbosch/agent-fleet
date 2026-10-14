@@ -346,10 +346,17 @@ func autoCodexWatch(st *autoSyncState) {
 	}
 }
 
+// autoCodexMu makes the whole of a codex reconcile (record, touch the flag, mark done) one
+// flight, whoever calls it: the loop, or a member action such as abandon. Lock order: autoCodexMu
+// before autoMu, never the other way round.
+var autoCodexMu sync.Mutex
+
 func autoCodexReconcile() {
 	if AutoSyncCodexFlag == nil || AutoSyncCodexSet == nil {
 		return
 	}
+	autoCodexMu.Lock()
+	defer autoCodexMu.Unlock()
 	st, err := autoUpdate(func(st *autoSyncState) {
 		switch {
 		case st.Phase != autoPhaseOff && st.Codex == nil:

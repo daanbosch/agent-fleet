@@ -893,3 +893,42 @@ func TestAutoSyncCompletionSaveFailureWaitsAndStaysVisible(t *testing.T) {
 		t.Fatalf("after saves work again: %+v", st)
 	}
 }
+
+// The member gives up the write-back while the loop is still switching codex's flag off: the
+// restore must wait for that flight, not see a flag that is not yet false and drop the record.
+func TestAutoSyncAbandonDuringCodexDisableKeepsTheRestore(t *testing.T) {
+	e := newAutoEnv(t)
+	e.codexVal, e.codexFound = true, true
+	inSet := make(chan struct{})
+	release := make(chan struct{})
+	AutoSyncCodexSet = func(on bool) error {
+		if !on {
+			close(inSet)
+			<-release // the setter is slow
+		}
+		e.codexVal, e.codexFound = on, true
+		return nil
+	}
+	e.want = true
+	AutoSyncWake()
+	stepDone := make(chan struct{})
+	go func() { autoSyncStep(); close(stepDone) }()
+	<-inSet
+	// Now: switch off, and the write-back is pending, then give up — all while set(false) is in flight.
+	e.want = false
+	if _, err := autoAdvance(); err != nil {
+		t.Fatal(err)
+	}
+	abandoned := make(chan error)
+	go func() { abandoned <- autoAbandon() }()
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	if err := <-abandoned; err != nil {
+		t.Fatal(err)
+	}
+	<-stepDone
+	e.drain()
+	if !e.codexVal {
+		t.Fatal("the flag stayed false: the in-flight disable outlived the record")
+	}
+}
