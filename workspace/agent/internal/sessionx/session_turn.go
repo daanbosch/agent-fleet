@@ -260,11 +260,15 @@ func handleQueueEdit(w http.ResponseWriter, d agents.Driver, meta session.Meta, 
 	}
 }
 
+// respondKeysMsg: a Terminal question this route cannot answer is driven with keys.
+const respondKeysMsg = "tui セッションの質問は keys/seq（/input）で TUI モーダルを駆動して答えます"
+
 // HandleSessionRespond (POST /sessions/{name}/respond) answers a pending
-// Interaction by id (docs/log/27 §5 — the general form of approvals and questions). This
-// semantic route is for managed drivers only: a tui session's question is still answered
-// through /input keys/seq, with the Console navigating the TUI modal, because a TUI modal
-// offers no way to answer by id.
+// Interaction by id (docs/log/27 §5 — the general form of approvals and questions). It is for
+// managed drivers, and for a tui session only when its driver can answer through the runtime's
+// API (agents.TerminalResponder: opencode 2 on the shared serve). Any other tui question is
+// answered through /input keys/seq, with the Console navigating the TUI modal, because a TUI
+// modal offers no way to answer by id.
 func HandleSessionRespond(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !session.ValidName(name) {
@@ -291,23 +295,36 @@ func HandleSessionRespond(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusNotFound, "not_found", "no such session: "+name)
 		return
 	}
+	var respond func(agents.InteractionReply) error
 	if meta.DriverKind() != session.DriverManaged {
-		httpx.WriteErr(w, http.StatusNotImplemented, "respond_unsupported",
-			"tui セッションの質問は keys/seq（/input）で TUI モーダルを駆動して答えます")
-		return
+		// A Terminal slot whose runtime has an API for the pending Interaction (opencode 2 on
+		// af's shared serve) is answered by id; every other one is driven with keys.
+		d, _ := driverOf(meta)
+		tr, ok := d.(agents.TerminalResponder)
+		if !ok {
+			httpx.WriteErr(w, http.StatusNotImplemented, "respond_unsupported", respondKeysMsg)
+			return
+		}
+		respond = func(r agents.InteractionReply) error { return tr.RespondTerminal(meta, r) }
+	} else {
+		d, ok := driverOf(meta)
+		if !ok {
+			httpx.WriteErr(w, http.StatusNotImplemented, "driver_unavailable",
+				"managed driver はこの kind ではまだ利用できません")
+			return
+		}
+		h, err := d.Resume(meta)
+		if err != nil {
+			writeRuntimeErr(w, err)
+			return
+		}
+		respond = h.Respond
 	}
-	d, ok := driverOf(meta)
-	if !ok {
-		httpx.WriteErr(w, http.StatusNotImplemented, "driver_unavailable",
-			"managed driver はこの kind ではまだ利用できません")
-		return
-	}
-	h, err := d.Resume(meta)
-	if err != nil {
-		writeRuntimeErr(w, err)
-		return
-	}
-	if err := h.Respond(reply); err != nil {
+	if err := respond(reply); err != nil {
+		if errors.Is(err, agents.ErrTerminalRespond) {
+			httpx.WriteErr(w, http.StatusNotImplemented, "respond_unsupported", respondKeysMsg)
+			return
+		}
 		httpx.WriteErr(w, http.StatusConflict, "respond_failed", err.Error())
 		return
 	}

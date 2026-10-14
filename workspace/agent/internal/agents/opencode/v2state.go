@@ -440,7 +440,7 @@ func readTranscriptV2(t apiTarget, m session.Meta) agents.TranscriptData {
 		// Tasks stays empty: opencode 2.0.28 has no todo route, event or tool (its tool list is
 		// edit glob grep question read shell skill subagent webfetch websearch write execute).
 	}
-	td.Pending = questionsV2(pendingFormsV2(t, m, info.ID), m.DriverKind() == session.DriverManaged)
+	td.Pending = questionsV2(pendingFormsV2(t, m, info.ID))
 	managedEnrich(m, &td)
 	return td
 }
