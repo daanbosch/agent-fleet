@@ -11,6 +11,7 @@
 package agents
 
 import (
+	"errors"
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
@@ -255,6 +256,17 @@ type ThreadHandle interface {
 type LiveHandles interface {
 	LiveHandle(m session.Meta) (ThreadHandle, bool)
 }
+
+// TerminalResponder is implemented by a driver that can answer a Terminal (CLI) slot's pending
+// Interaction by id through the runtime's own API instead of keys into the pane (the TUI follows
+// the answer). A slot it cannot reach that way returns ErrTerminalRespond, and the Console keeps
+// driving the modal with keys.
+type TerminalResponder interface {
+	RespondTerminal(m session.Meta, reply InteractionReply) error
+}
+
+// ErrTerminalRespond: this Terminal slot has no API route for its pending Interaction.
+var ErrTerminalRespond = errors.New("this terminal session cannot be answered by id")
 
 // QueueingSender is implemented by a handle whose Send can hold input behind a running turn.
 // SendQueued is Send that also says which happened: queued = true when the input waits in the

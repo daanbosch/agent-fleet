@@ -389,9 +389,10 @@ export function useMirrorActions({
     return res.ok;
   };
 
-  // sendRespond answers a MANAGED session's pending question by interaction id —
-  // a structured answer (docs/log/27 §5). A tui question is still answered by navigating the
-  // TUI modal with sendKeys/sendSeq; the server rejects /respond for tui anyway.
+  // sendRespond answers a pending question by interaction id — a structured answer
+  // (docs/log/27 §5): a MANAGED session's, or a Terminal one whose question carries an id
+  // (opencode 2 on the shared serve). Any other tui question is answered by navigating the TUI
+  // modal with sendKeys/sendSeq; the server rejects /respond for those.
   const sendRespond = async (id: string, answers: InteractionAnswer[]): Promise<boolean> => {
     if (sending) return false;
     if (wsDown()) return false; // WS stopped: the managed session's structured answer can't be delivered
