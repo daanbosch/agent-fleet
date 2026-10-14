@@ -2,7 +2,7 @@
 -- that is not on the preview list, and the CP bound that open to the listening sockets it saw
 -- then (inodes, comma separated: one server often holds a tcp and a tcp6 socket for the port).
 -- The row is only ever honoured for the slug it was made under, for the owner, and while the
--- Agent still sees one of those sockets; slug rotation and stop delete the workspace's rows.
+-- Agent still sees one of those sockets, and slug rotation and stop delete the workspace's rows.
 --
 -- No foreign key to workspace: deleteWorkspaceTx lists what it removes, and a row whose slug no
 -- longer matches the workspace's is inert anyway.

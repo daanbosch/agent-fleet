@@ -15,6 +15,13 @@ import (
 // previewProbeTimeout bounds the one HTTP request a grant probe sends.
 const previewProbeTimeout = 2 * time.Second
 
+// previewListenerReply is the body of GET /preview-listener/{port}. Probe is absent unless
+// probe=1 was asked for and something listens.
+type previewListenerReply struct {
+	Inodes []string `json:"inodes"`
+	Probe  string   `json:"probe,omitempty"`
+}
+
 // handlePreviewListener answers GET /preview-listener/{port}[?probe=1] for the Control
 // Plane when the owner opens a port that is not on the preview list: the inodes of the
 // sockets listening on it now (the grant binds to them), and with probe=1 whether the port
@@ -36,9 +43,9 @@ func handlePreviewListener(w http.ResponseWriter, r *http.Request) {
 	if inodes == nil {
 		inodes = []string{}
 	}
-	out := map[string]any{"inodes": inodes}
+	out := previewListenerReply{Inodes: inodes}
 	if r.URL.Query().Get("probe") == "1" && len(inodes) > 0 {
-		out["probe"] = probePreviewPort(port)
+		out.Probe = probePreviewPort(port)
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
 }

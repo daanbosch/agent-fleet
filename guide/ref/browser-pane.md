@@ -37,7 +37,9 @@ exception for "I just need to see one HTTP response".
 7. Check the **Console** drawer's badge for `warn` and `error` from the page.
 
 Shortcut: when the server was started by a session, its row in the left pane lists the port
-(`:5173`) on a second line; clicking it opens the pane at that port and `/`
+(`:5173`) on a second line; clicking it opens that port in the workspace's default target — the preview
+subdomain where one is issued, otherwise the pane at that port and `/` — and Ctrl/⌘-click or middle-click
+always opens the pane in a new tab. The `⋯` beside the port offers all three targets
 ([badges](../member/badges-and-menus.md#session-display)).
 
 Reconnect, a Console reload and a Workspace stop/start all create a *new* Page at the

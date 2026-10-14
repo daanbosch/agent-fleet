@@ -143,3 +143,55 @@ describe("PreviewTab", () => {
     expect(apiJSON).toHaveBeenCalledWith("api/env/ws-settings", "PUT", { previewPorts: [3000, 5173] });
   });
 });
+
+
+describe("Expose this port… strip", () => {
+  const addStrip = () => host!.querySelector(".pv-add-strip");
+  const click = async (label: string) => {
+    const b = [...host!.querySelectorAll("button")].find((x) => x.textContent === label)!;
+    await act(async () => b.click());
+  };
+  const tabWith = async (extra: Record<string, unknown> = {}) => {
+    api.mockResolvedValue(wsSettings(extra));
+    const { PreviewTab } = await freshModule();
+    const { useSettingsUI } = await import("../store.ts"); // after the reset: the tab's own copy
+    return { useSettingsUI, PreviewTab };
+  };
+
+  it("asks first and saves nothing until Add; Cancel saves nothing", async () => {
+    const { PreviewTab, useSettingsUI } = await tabWith();
+    useSettingsUI.setState({ previewAddPort: 5173 });
+    await mount(<PreviewTab />);
+    expect(addStrip()?.textContent).toContain("5173");
+    expect(apiJSON).not.toHaveBeenCalled();
+    await click("キャンセル");
+    expect(addStrip()).toBeNull();
+    expect(apiJSON).not.toHaveBeenCalled();
+    expect(useSettingsUI.getState().previewAddPort).toBeNull();
+  });
+
+  it("Add saves the list with the port appended", async () => {
+    const { PreviewTab, useSettingsUI } = await tabWith();
+    apiJSON.mockResolvedValue(wsSettings({ previewPorts: [3000, 8080, 5173] }));
+    useSettingsUI.setState({ previewAddPort: 5173 });
+    await mount(<PreviewTab />);
+    await click("追加");
+    expect(apiJSON).toHaveBeenCalledWith("api/env/ws-settings", "PUT", { previewPorts: [3000, 8080, 5173] });
+    expect(addStrip()).toBeNull();
+  });
+
+  it("shows no strip for an already listed port, and the cap message at the cap", async () => {
+    const { PreviewTab, useSettingsUI } = await tabWith();
+    useSettingsUI.setState({ previewAddPort: 3000 });
+    await mount(<PreviewTab />);
+    expect(addStrip()).toBeNull();
+    act(() => root?.unmount());
+    host?.remove();
+
+    const full = await tabWith({ previewMaxPorts: 2 });
+    full.useSettingsUI.setState({ previewAddPort: 5173 });
+    await mount(<full.PreviewTab />);
+    expect(addStrip()?.textContent).toContain("2");
+    expect([...host!.querySelectorAll("button")].some((b) => b.textContent === "追加")).toBe(false);
+  });
+});

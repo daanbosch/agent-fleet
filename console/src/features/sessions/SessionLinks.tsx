@@ -1,5 +1,6 @@
 // SessionLinks — a session row's second line (#1062): the pull request of the branch the
-// session works on, and the ports its processes listen on, each opening the browser pane.
+// session works on, and the ports its processes listen on. A port opens in the workspace's
+// default target (subdomain, else browser pane, else lightweight preview — see features/preview).
 //
 // A line of its own rather than chips beside the title: the rail is narrow and the title is
 // already the part that gets cut. A row with neither draws nothing and stays one line, so the
@@ -7,9 +8,7 @@
 import { useState } from "react";
 import { Icon } from "../../ui/Icon.tsx";
 import { useT } from "../../lib/i18n/index.ts";
-import { useLayoutStore } from "../../layout/store.ts";
-import { previewURL } from "../../core/api/client.ts";
-import { useBrowserUnavailable } from "../browser/availability.ts";
+import { PortOpen } from "../preview/PortOpen.tsx";
 import { CHECK_ICON, PR_ICON, prChecks, prStateKey, rowPorts, safePRURL } from "./sessionLinks.ts";
 import type { Session } from "../../types/session.ts";
 
@@ -23,26 +22,12 @@ export function hasSessionLinks(s: Session, running: boolean): boolean {
 
 export function SessionLinks({ s, running }: { s: Session; running: boolean }) {
   const tr = useT();
-  const openTarget = useLayoutStore((st) => st.openTarget);
-  const openTargetInNew = useLayoutStore((st) => st.openTargetInNew);
   const [allPorts, setAllPorts] = useState(false);
-  const browserUnavailable = useBrowserUnavailable();
   const pr = s.pr;
   const href = pr ? safePRURL(pr.url) : null;
   // A port is only worth offering while the Workspace runs: the pane cannot reach it otherwise.
   const ports = running && s.alive ? rowPorts(s.ports) : [];
   if (!(pr && href) && ports.length === 0) return null;
-
-  const openPort = (port: number, inNew: boolean) => {
-    // Without browser features the port still opens, in the lightweight preview's new tab.
-    if (browserUnavailable) {
-      window.open(previewURL(port, "/"), "_blank", "noopener");
-      return;
-    }
-    const target = { content: { kind: "browser" as const, port, path: "/" } };
-    if (inNew) openTargetInNew(target, true);
-    else openTarget(target);
-  };
 
   return (
     <div className="sess-links" aria-label={tr("srow.links")}>
@@ -70,21 +55,7 @@ export function SessionLinks({ s, running }: { s: Session; running: boolean }) {
         <span className="sess-ports">
           <Icon name="globe" />
           {(allPorts ? ports : ports.slice(0, PORTS_SHOWN)).map((port) => (
-            <button
-              key={port}
-              type="button"
-              className="sess-port"
-              title={tr(browserUnavailable ? "srow.port_title_preview" : "srow.port_title", { port })}
-              onClick={(e) => openPort(port, e.ctrlKey || e.metaKey)}
-              onMouseDown={(e) => e.button === 1 && e.preventDefault()}
-              onAuxClick={(e) => {
-                if (e.button !== 1) return;
-                e.preventDefault();
-                openPort(port, true);
-              }}
-            >
-              :{port}
-            </button>
+            <PortOpen key={port} port={port} running={running} variant="chip" />
           ))}
           {!allPorts && ports.length > PORTS_SHOWN && (
             <button

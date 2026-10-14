@@ -20,6 +20,9 @@ import { useConfirm } from "../../../ui/ConfirmProvider.tsx";
 import { api, apiJSON } from "../../../core/api/client.ts";
 import { OnOff, Row } from "../parts/controls.tsx";
 import { useT } from "../../../lib/i18n/index.ts";
+import { Button } from "../../../ui/Button.tsx";
+import { useSettingsUI } from "../store.ts";
+import { previewInfoFrom, usePreviewStore } from "../../preview/previewState.ts";
 
 // Whether this deployment has preview subdomains at all. null = not known yet; the rail
 // stays empty until it resolves, so the entry never flashes in and disappears again.
@@ -77,8 +80,10 @@ export function PreviewTab() {
 
   const save = async (patch: Record<string, unknown>) => {
     const res = await apiJSON("api/env/ws-settings", "PUT", patch);
-    if (res && !res.error) setAu(res);
-    else toast(tr("common.save_failed"));
+    if (res && !res.error) {
+      setAu(res);
+      usePreviewStore.getState().set(previewInfoFrom(res)); // the port controls follow the list
+    } else toast(tr("common.save_failed"));
   };
 
   // Reissue (docs/log/81 §4.1) throws away URLs that have already been handed out. It
@@ -95,6 +100,7 @@ export function PreviewTab() {
     const res = await apiJSON("api/env/ws-settings/preview/reissue", "POST", {});
     if (res && !res.error) {
       setAu(res);
+      usePreviewStore.getState().set(previewInfoFrom(res));
       // While stopped there are no issued URLs to throw away, so a successful reissue
       // changes nothing on screen. Always say which of the two happened, or the button
       // looks dead.
@@ -134,6 +140,22 @@ function PreviewSection({
   const issuedPorts = Object.keys(au.previewUrls || {}).sort((a, b) => Number(a) - Number(b));
   // Save only on blur. A PUT per keystroke would persist half-typed input such as
   // "3000, 80" and end up allowing port 80.
+  // "Expose this port…" from a port control asks to add one port. Adding is an explicit act
+  // here (the field above saves on blur, so prefilling it would persist on the next click
+  // anywhere). Nothing is saved until Add; Cancel or closing the dialog saves nothing.
+  const addPort = useSettingsUI((st) => st.previewAddPort);
+  const clearAddPort = useSettingsUI((st) => st.clearPreviewAddPort);
+  const current: number[] = au.previewPorts || [];
+  const maxPorts: number = au.previewMaxPorts || 8;
+  const showAdd = addPort != null && !current.includes(addPort);
+  const atCap = current.length >= maxPorts;
+  const confirmAdd = () => {
+    if (addPort == null) return;
+    const next = [...current, addPort];
+    setPorts(next.join(", "));
+    save({ previewPorts: next });
+    clearAddPort();
+  };
   const commitPorts = () => {
     const parsed = ports
       .split(/[\s,]+/)
@@ -144,6 +166,23 @@ function PreviewSection({
   return (
     <section className="ds-group">
       <h4 className="ds-title">{tr("env.preview_title")}</h4>
+      {showAdd && (
+        <div className="pv-add-strip" role="alert">
+          <span>
+            {atCap
+              ? tr("env.preview_add_cap", { port: addPort!, n: maxPorts })
+              : tr("env.preview_add_ask", { port: addPort! })}
+          </span>
+          {!atCap && (
+            <Button variant="primary" small onClick={confirmAdd}>
+              {tr("env.preview_add_go")}
+            </Button>
+          )}
+          <Button variant="ghost" small onClick={clearAddPort}>
+            {atCap ? tr("common.close") : tr("env.preview_add_cancel")}
+          </Button>
+        </div>
+      )}
       {/* Show what is currently assigned before any setting is touched. Without it both
           the port list and reissue act on something invisible, and pressing them shows no
           change (reissue was reported as doing nothing). */}

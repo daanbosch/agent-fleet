@@ -348,6 +348,20 @@ export function previewURL(port: string | number, path = "/"): string {
   return u.toString();
 }
 
+// The owner-only entry that opens an UNLISTED port on its preview subdomain
+// (control-plane/preview_grant.go). A top-level navigation on the Console origin, so like
+// previewURL the tenant rides as a query param. It acts on the caller's own workspace and is
+// never a link to share.
+export function previewOwnOpenURL(port: string | number, path = "/"): string {
+  const u = new URL(rel("preview-open-own"));
+  u.searchParams.set("port", String(port));
+  if (path.startsWith("/") && !path.startsWith("//") && !path.startsWith("/\\") && path !== "/") {
+    u.searchParams.set("next", path);
+  }
+  if (selectedTenant) u.searchParams.set("tenant", selectedTenant);
+  return u.toString();
+}
+
 // Build a download URL for a home-relative file. Opened as a top-level
 // navigation (anchor), so — like preview/terminal — the tenant rides as a query
 // param (a download click can't carry the X-AF-Tenant header fetch() injects).

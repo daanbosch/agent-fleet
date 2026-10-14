@@ -1234,6 +1234,8 @@ func registerTerminalPreviewRoutes(mux *http.ServeMux, cfg config) {
 	// must sit on the Console origin, inside authGate, so a logged-out visitor meets the
 	// login first.
 	mux.HandleFunc("GET "+previewOpenPath, newPreviewHostAPI(cfg).openStable)
+	// The owner opening an unlisted port on their own subdomain (preview_grant.go).
+	mux.HandleFunc("GET "+previewOwnOpenPath, newPreviewHostAPI(cfg).openOwn)
 }
 
 // Legacy path compatibility: the deployment used to be served under

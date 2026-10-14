@@ -246,3 +246,13 @@ slug は起動ごとに変わる（決定 3）ので、**生 URL を貼る運用
   `X-AF-Preview-Error` を付ける。CP のリレー（パス方式・サブドメイン方式）はそのコードを言語に合わせたページ
   （ナビゲーションは HTML、それ以外は JSON）にして返し、CP 自身の Agent への接続失敗は
   `preview_workspace_unreachable` として別に扱う。
+
+- 2026-10-14: 決定 6 をオーナーについて狭めた（#2138）。プレビュー一覧が決めるのは**他人**が届く範囲
+  （公開モードの訪問者・テナント共有の同僚）のままで、オーナー本人の未登録ポートへのアクセスは「生きている listener ごと」に
+  なる。オーナーは Console オリジンの `GET /preview-open-own?port=N` で開く。CP は Agent にそのポートの listen ソケットの inode
+  （とそのクリック時だけ HTTP 疎通 1 回）を尋ね、`{workspace, port, slug, inodes}` の grant を保存する。`serve`・`handshake`・
+  `siblingOrigin` は**オーナーの cookie がある場合だけ**（公開モードでも）grant を尊重し、他の全員には未知のポートと同じ素の 404 を返す。
+  中継のたびに grant の inode を `X-AF-Preview-Listener` で渡し（CP が付与、クライアント由来は破棄）、どれも listen していなければ
+  Agent が 410 を返す（キャッシュ 2 秒＝止まった listener がなお通りうる上限）。その後 CP が grant を消す。slug の再発行と停止で
+  grant は全消去、Workspace あたり最大 16 件、grant 1 件ごとに監査 1 行（`workspace.preview_temp_port`）。`/preview-listener` を
+  持たない Agent では fail closed。

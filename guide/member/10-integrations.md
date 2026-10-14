@@ -81,6 +81,15 @@ https://k7f2q9x1w3ub5nzt0abc-8080.pv.example.com/   → port 8080 (e.g. Spring B
 - **You choose which ports are exposed.** The default is `3000, 8080`; change it under Settings ›
   **Preview subdomains**. A port that is not listed has no URL; the list is what keeps an admin console you
   did not mean to expose off the internet.
+- **Any other port opens for you alone.** A port the workspace is listening on but that is not listed (Vite on
+  `5173`, a throwaway server on `4000`) opens on its subdomain from the port chip in the session row or from the
+  Preview popover, with no setting to change. The click is a plain click on the chip when a preview URL is
+  issued, and a menu behind the chip's `⋯` (or right-click, or long-press) offers browser pane, subdomain and
+  lightweight preview side by side. This opening is **yours only**, public mode and tenant sharing included, and
+  it ends when that server stops: a different process that later takes the port is not reachable until you open
+  it again. It needs the port to answer plain HTTP (a database, SSH or an HTTPS-only dev server is refused with
+  the reason), and it does not set `AF_PREVIEW_URL_<port>`; list the port (the menu's **Expose this port…**)
+  when the app has to know its public URL or when someone else should see it.
 
 #### What the app has to get right
 

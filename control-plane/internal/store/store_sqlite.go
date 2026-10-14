@@ -1624,6 +1624,10 @@ func setWorkspaceStateTx(ctx context.Context, tx *sqlTx, workspaceID, state stri
 		if _, err = tx.ExecContext(ctx, `UPDATE workspace SET preview_slug='' WHERE id=?`, workspaceID); err != nil {
 			return err
 		}
+		// Temporary preview grants die with the slug they were made under.
+		if _, err = tx.ExecContext(ctx, `DELETE FROM preview_temp_port WHERE workspace_id=?`, workspaceID); err != nil {
+			return err
+		}
 	}
 	if state == "running" {
 		if _, err = tx.ExecContext(ctx, `DELETE FROM workspace_auto_stop WHERE workspace_id=?`, workspaceID); err != nil {
