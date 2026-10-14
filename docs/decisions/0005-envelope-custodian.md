@@ -252,13 +252,22 @@ migration.
   The proof is a separate port (`runtime.ProveHomeGone`: gone / present / unknown, unknown
   being the zero value), asked after the destroy under the membership's lifecycle lease. It is
   never derived from "Destroy returned no leftovers", which PR #1955 showed to be empty on
-  `ecs` without the home task. `docker` and `native` observe the home directory under a
-  present data root; `kubernetes` and `ecs`/`ecs-ec2` answer only from the Destroy of the same
-  runtime value (the StatefulSet deleted after the inventory showed every claim and volume
-  gone; the EFS home task exiting 0), because the Control Plane cannot list volumes back or
-  mount EFS. A fresh runtime value, such as an orphan sweep would build, answers unknown.
-- **The delete is one conditional statement**: it names the row read (sealed key, confirm
-  epoch), requires scheme `random`, and requires that no workspace row names the membership.
+  `ecs` without the home task. `docker` and `native` can say present but never gone: a missing
+  directory is also what a detached volume's empty mountpoint or a mistaken `WS_DATA` looks
+  like, so their keys go through the operator path. `kubernetes` and `ecs`/`ecs-ec2` answer only
+  from the Destroy of the same runtime value (the StatefulSet deleted after the inventory showed
+  every claim and volume gone; the EFS home task exiting 0 with every access point rooted at a
+  directory the task removes), because the Control Plane cannot list volumes back or mount EFS.
+  An access point rooted elsewhere (or nowhere) is no longer deleted by Destroy, so that a retry
+  cannot forget it and prove the home gone; it is reported on every Destroy until an operator
+  deals with the directory. A fresh runtime value, such as an orphan sweep would build, answers
+  unknown.
+- **The delete is conditional and fenced**: in one transaction it locks the membership row
+  (`FOR UPDATE` on Postgres, which a workspace insert's foreign key also needs), checks that the
+  destroy's lifecycle lease token is still the stored, unexpired one, and then deletes by the row
+  read (sealed key, confirm epoch), scheme `random` and no workspace row for the membership. A
+  destroy that lost its lease keeps the key. The operator removal takes the same lock and
+  refuses while any lease on the membership is live.
   A re-created home, a remigrate and a re-mint therefore cannot be undone by a stale decision.
   A row still `migrating` is never deleted automatically, since its confirm may only have been
   lost while the store is already re-sealed; that leaves the `migrating` probe rows of a golden
@@ -268,9 +277,6 @@ migration.
   `--remove-orphan <membership-id> --force` removes one. The command has no runtime, so
   `--force` is the operator's statement that the home is gone; it still refuses a key a
   workspace names.
-- **Residual race.** Under Postgres' read committed isolation the "no workspace row" check
-  cannot see a row committed after the statement began. Starts of the membership hold the same
-  lifecycle lease that the delete runs under, which closes it.
 
 Verified by unit tests (SQLite and Postgres for the store; fakes for the runtimes). No real ECS,
 EFS, EBS, EKS or KMS run: `ecs`, `ecs-ec2` and `kubernetes` proofs are unverified on a real

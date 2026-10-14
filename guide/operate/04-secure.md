@@ -202,10 +202,12 @@ together with `CustodianKmsKeyArn`; only the Control Plane task definition chang
   a kept home keeps the key. A key is removed in one case: Destroy finished, a workspace row no
   longer names the home, and the runtime **proves** the whole home is gone. A key dropped while
   part of the home survives makes that part unreadable, so any other answer keeps it.
-  What each runtime can prove: `docker` and `native` see the home directory on the Control Plane's
-  host (absent under a present data root); `kubernetes` and `ecs`/`ecs-ec2` can only say so
+  What each runtime can prove: `docker` and `native` cannot (a missing directory is also what a
+  detached volume or a wrong `WS_DATA` looks like), so their keys go through the operator
+  path below; `kubernetes` and `ecs`/`ecs-ec2` can only say so
   from the Destroy they just ran (the StatefulSet deleted after every claim and volume was
-  confirmed gone; the EFS home task exiting 0), never afterwards, and never from "no leftovers"
+  confirmed gone; the EFS home task exiting 0 with every access point rooted at a directory it
+  removes; an access point rooted elsewhere is kept and reported, not deleted), never afterwards, and never from "no leftovers"
   (`ecs` without the home task removes only the access points, and a retry then reports none).
   A key still `migrating` is never removed this way, and a runtime that cannot prove it keeps
   the key. Once that crypto-shredding happens, the key's ciphertext is gone with the row, so

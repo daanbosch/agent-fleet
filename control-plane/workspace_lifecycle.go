@@ -882,7 +882,7 @@ func (m *manager) beginDestroyWorkspace(ctx context.Context, membershipID string
 		leftovers, err := runtime.DestroyRuntime(lease.Context(), rt)
 		if record != nil {
 			if m.finishHomeOperation(*record, err, leftovers) && err == nil {
-				m.releaseHomeDEKAfterDestroy(membershipID, rt)
+				m.releaseHomeDEKAfterDestroy(membershipID, rt, lease)
 			}
 			return leftovers, err
 		}
@@ -890,7 +890,7 @@ func (m *manager) beginDestroyWorkspace(ctx context.Context, membershipID string
 			if err = lease.checkpoint(ctx); err == nil {
 				if err = m.store.DeleteWorkspace(ctx, ws.ID); err == nil {
 					m.evictMembershipCache(membershipID)
-					m.releaseHomeDEKAfterDestroy(membershipID, rt)
+					m.releaseHomeDEKAfterDestroy(membershipID, rt, lease)
 				}
 			}
 		}

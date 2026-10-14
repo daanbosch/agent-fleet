@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 )
 
 // Home DEK schemes (migrations/0090_home_dek.sql).
@@ -103,23 +104,69 @@ func (s *SQL) RemigrateHomeDEK(ctx context.Context, membershipID string) (bool, 
 	return n == 1, err
 }
 
-// DeleteHomeDEK drops the key of a home that is proven gone. It is conditioned on the row
-// that was read (sealed key, confirm epoch), on the scheme being 'random', and on no
-// workspace row naming the membership, all in the one statement: a key that was rotated or
-// re-minted since the read, a migrating key, and a home that has a workspace again are all
-// left alone, and the answer is false. A migrating key may already seal a store (its confirm
-// may only have been lost), so only the operator path may drop one (DeleteOrphanHomeDEK).
-func (s *SQL) DeleteHomeDEK(ctx context.Context, read HomeDEK) (bool, error) {
-	res, err := s.db.ExecContext(ctx,
+// DeleteHomeDEK drops the key of a home that is proven gone, on behalf of the holder of the
+// membership's lifecycle lease (leaseToken). In one transaction it locks the membership row,
+// the lock every lease acquire, renew and release also takes, and (FOR UPDATE on Postgres) the
+// one a workspace insert's foreign key needs, checks that the lease is still the holder's and unexpired, and then
+// deletes the row, conditioned on the row that was read (sealed key, confirm epoch), on the
+// scheme being 'random' and on no workspace row naming the membership. The statement starts
+// after the lock, so under Postgres' READ COMMITTED it sees every workspace committed before
+// it. A lease that was lost, a key rotated or re-minted since the read, a migrating key and a
+// home that has a workspace again all answer false. A migrating key may already seal a store
+// (its confirm may only have been lost), so only the operator path may drop one.
+func (s *SQL) DeleteHomeDEK(ctx context.Context, read HomeDEK, leaseToken string) (bool, error) {
+	if leaseToken == "" {
+		return false, nil
+	}
+	return s.deleteHomeDEKLocked(ctx, read.MembershipID, leaseToken,
 		`DELETE FROM home_dek
 		 WHERE membership_id=? AND ciphertext=? AND scheme='random' AND confirm_epoch=?
 		   AND NOT EXISTS (SELECT 1 FROM workspace w WHERE w.membership_id = home_dek.membership_id)`,
 		read.MembershipID, read.Ciphertext, read.ConfirmEpoch)
+}
+
+// deleteHomeDEKLocked runs del under the membership lock. leaseToken "" means the caller holds
+// no lease, so any live lease on the membership (an operation in progress) refuses it.
+func (s *SQL) deleteHomeDEKLocked(ctx context.Context, membershipID, leaseToken, del string, args ...any) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if err = lockSessionShareOwner(ctx, tx, membershipID); err != nil {
+		return false, err
+	}
+	if s.dialect == "postgres" {
+		// The UPDATE above leaves the key column alone, so Postgres takes only a lock a
+		// workspace insert's foreign key does not conflict with. FOR UPDATE does.
+		var one int
+		if err = tx.QueryRowContext(ctx, `SELECT 1 FROM membership WHERE id=? FOR UPDATE`, membershipID).Scan(&one); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return false, err
+		}
+	}
+	// The lease timestamps use this one fixed-width format (workspace_handlers.go leaseTS).
+	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
+	var held, live int
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM session_share_owner_lease
+		WHERE owner_membership_id=? AND operation_id=? AND expires_at>?`, membershipID, leaseToken, now).Scan(&held); err != nil {
+		return false, err
+	}
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM session_share_owner_lease
+		WHERE owner_membership_id=? AND expires_at>?`, membershipID, now).Scan(&live); err != nil {
+		return false, err
+	}
+	if (leaseToken != "" && held != 1) || (leaseToken == "" && live != 0) {
+		return false, nil
+	}
+	res, err := tx.ExecContext(ctx, del, args...)
 	if err != nil {
 		return false, err
 	}
 	n, err := res.RowsAffected()
-	return n == 1, err
+	if err != nil {
+		return false, err
+	}
+	return n == 1, tx.Commit()
 }
 
 // OrphanHomeDEK is a home_dek row with no workspace row. That is a candidate, not a proof:
@@ -155,16 +202,12 @@ func (s *SQL) ListOrphanHomeDEKs(ctx context.Context) ([]OrphanHomeDEK, error) {
 }
 
 // DeleteOrphanHomeDEK is the operator's removal: any scheme, still only while no workspace
-// row names the membership. The caller has to hold the operator's word that the home is gone.
+// row names the membership and no operation holds the membership's lease. The caller has to
+// hold the operator's word that the home is gone.
 func (s *SQL) DeleteOrphanHomeDEK(ctx context.Context, membershipID string) (bool, error) {
-	res, err := s.db.ExecContext(ctx,
+	return s.deleteHomeDEKLocked(ctx, membershipID, "",
 		`DELETE FROM home_dek
 		 WHERE membership_id=?
 		   AND NOT EXISTS (SELECT 1 FROM workspace w WHERE w.membership_id = home_dek.membership_id)`,
 		membershipID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n == 1, err
 }

@@ -281,7 +281,7 @@ func (m *manager) resumeHomeOperation(ctx context.Context, op store.HomeOperatio
 		return
 	}
 	if m.finishHomeOperation(op, err, leftovers) && err == nil && op.Kind == store.HomeOpDestroy {
-		m.releaseHomeDEKAfterDestroy(op.MembershipID, rt)
+		m.releaseHomeDEKAfterDestroy(op.MembershipID, rt, lease)
 	}
 }
 

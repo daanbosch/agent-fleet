@@ -287,6 +287,44 @@ func TestRecordedDestroyDropsProvenHomeDEK(t *testing.T) {
 	}
 }
 
+// A destroy whose lifecycle lease is gone (lost to a takeover, or expired) keeps the key: its
+// proof may describe a home an earlier generation had, and another CP may have re-created it.
+func TestReleaseHomeDEKNeedsTheLiveLease(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name     string
+		mutate   func(*workspaceLifecycleLeaseGuard)
+		wantKept bool
+	}{
+		{"held", func(*workspaceLifecycleLeaseGuard) {}, false},
+		{"marked lost", func(g *workspaceLifecycleLeaseGuard) { g.lost.Store(true) }, true},
+		{"taken over", func(g *workspaceLifecycleLeaseGuard) {
+			g.token = "someone-elses-token" // what the guard holds is no longer the stored lease
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &destroyingFactory{verdict: runtime.HomeGone}
+			st, mgr, victim, tn := destroyFixture(t, f)
+			memID := membershipIDOf(t, st, victim, tn)
+			ws, _, _ := st.GetWorkspaceByMembership(ctx, memID)
+			seedHomeDEK(t, st, memID, tn.ID, store.HomeDEKRandom)
+			if err := st.DeleteWorkspace(ctx, ws.ID); err != nil {
+				t.Fatal(err)
+			}
+			lease, err := acquireWorkspaceLifecycleLease(ctx, st, memID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lease.Close()
+			tc.mutate(lease)
+			mgr.releaseHomeDEK(ctx, memID, f.New(runtime.Workspace(ws), runtime.SecretKeys{}, nil), lease)
+			if _, ok, _ := st.GetHomeDEK(ctx, memID); ok != tc.wantKept {
+				t.Fatalf("key kept = %v, want %v", ok, tc.wantKept)
+			}
+		})
+	}
+}
+
 func TestHomeDEKOrphanCLI(t *testing.T) {
 	ctx := context.Background()
 	st := ssmAPIStores(t)["sqlite"]

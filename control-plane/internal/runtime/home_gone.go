@@ -66,23 +66,21 @@ var (
 	_ homeProver = (*kubeRuntime)(nil)
 )
 
-// proveLocalHomeGone is docker's and native's proof: their whole home is <dataDir> on the
-// CP's own host. Absence counts only while the data root above it is there, so a CP started
-// with the wrong WS_DATA (or without its volume) does not read an unmounted tree as "gone".
+// proveLocalHomeGone is docker's and native's observation: their whole home is <dataDir> on
+// the CP's own host. It can say "present", but never "gone": a directory missing under an
+// existing parent is also what a detached volume (WS_DATA=/mnt/x with an empty mountpoint
+// left behind) or a WS_DATA pointed at the wrong place looks like, and nothing the CP can
+// read tells the real persistent root from those. The key stays; the operator path removes it.
 func proveLocalHomeGone(dataDir string) (HomeVerdict, string) {
 	if dataDir == "" || !filepath.IsAbs(dataDir) {
 		return HomeUnknown, "no data directory is known for this home"
 	}
-	root, err := os.Stat(filepath.Dir(dataDir))
-	if err != nil || !root.IsDir() {
-		return HomeUnknown, "the data root above the home is not readable"
-	}
-	_, err = os.Lstat(dataDir)
+	_, err := os.Lstat(dataDir)
 	switch {
 	case err == nil:
 		return HomePresent, "the data directory exists"
 	case errors.Is(err, os.ErrNotExist):
-		return HomeGone, "the data directory is absent under a present data root"
+		return HomeUnknown, "the data directory is absent, which a detached or mistaken data root looks like too"
 	}
 	return HomeUnknown, "the data directory cannot be read: " + err.Error()
 }
