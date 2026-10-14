@@ -1143,10 +1143,36 @@ func agentMemProjectInfoAddRemote(info string, old []byte, p agentMemProject) ([
 	}
 	rem, _ := json.Marshal(p.Remote)
 	next := append(bytes.TrimRight(body[:len(body)-1], " \t\r\n"), []byte(",\n  \"remote\": "+string(rem)+"\n}\n")...)
-	if len(agentMemScanText("project", string(next))) > 0 {
+	// The raw bytes hide what a JSON escape spells (\u0067hp_…), so the decoded keys and strings
+	// of the whole record, unknown members and nesting included, are scanned too.
+	var doc any
+	if json.Unmarshal(next, &doc) != nil || len(agentMemScanText("project", string(next)+"\n"+agentMemJSONStrings(doc))) > 0 {
 		return nil, nil
 	}
 	return []agentMemChange{{Rel: info, Data: next}}, nil
+}
+
+// agentMemJSONStrings joins every object key and string value of a decoded JSON document.
+func agentMemJSONStrings(v any) string {
+	var b strings.Builder
+	var walk func(any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case string:
+			b.WriteString(x + "\n")
+		case []any:
+			for _, e := range x {
+				walk(e)
+			}
+		case map[string]any:
+			for k, e := range x {
+				b.WriteString(k + "\n")
+				walk(e)
+			}
+		}
+	}
+	walk(v)
+	return b.String()
 }
 
 func agentMemProjectInfoRel(p agentMemProject) string { return "projects/" + p.ID + "/project.json" }

@@ -293,3 +293,33 @@ func TestAgentMemoryRemoteMatchSuggestion(t *testing.T) {
 		t.Errorf("two live projects share the remote: %+v", r)
 	}
 }
+
+// A record is only extended when its decoded content is clean too: a JSON escape must not carry
+// a secret into a new commit.
+func TestAgentMemoryBackfillScansTheDecodedRecord(t *testing.T) {
+	home, _, _ := agentMemTestEnv(t)
+	dir := remoteRepo(t, home, "esc", "")
+	c := agentMemCallerT(t, "claude-esc")
+	now := time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC)
+	agentMemSaveN(t, c, "one", "project", now)
+	remoteGit(t, dir, "remote", "add", "origin", "git@github.com:k-k1/esc.git")
+	path := filepath.Join(agentMemDir(), "projects", c.Project.ID, "project.json")
+	const tok = `\u0067hp_0123456789abcdefghijklmnopqrstuvwxyzAB`
+	for name, rec := range map[string]string{
+		"root":   `{"id": "` + c.Project.ID + `", "root": "/r/` + tok + `", "display": "esc"}`,
+		"nested": `{"id": "` + c.Project.ID + `", "display": "esc", "future": {"a": ["` + tok + `"]}}`,
+		"key":    `{"id": "` + c.Project.ID + `", "display": "esc", "` + tok + `": 1}`,
+	} {
+		if err := os.WriteFile(path, []byte(rec), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		head, _ := exec.Command("git", "-C", memoryRepoDir(), "rev-parse", "HEAD").Output()
+		agentMemBackfillRemotes(now.Add(time.Hour))
+		if after, _ := exec.Command("git", "-C", memoryRepoDir(), "rev-parse", "HEAD").Output(); string(head) != string(after) {
+			t.Errorf("%s: a record with a hidden secret was committed", name)
+		}
+		if got := projectJSON(t, c.Project.ID); got != rec {
+			t.Errorf("%s: record changed: %s", name, got)
+		}
+	}
+}
