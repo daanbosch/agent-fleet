@@ -183,6 +183,29 @@ func memoryAllowed(r memoryRoot, rel string) bool {
 	return true
 }
 
+// MemoryFile reports whether abs, a clean absolute path, is a file a memory root versions,
+// and if so which kind's memory it is, the root directory, and the path relative to it. The
+// file reader opens it beneath that root, so nothing above it (transcripts, credentials,
+// settings) becomes reachable: the allowlist is the same one snapshots use. A root is
+// matched in the spelling it was declared in and in its resolved one, because an edit path
+// arrives in either.
+func MemoryFile(abs string) (kind, root, rel string, ok bool) {
+	for _, r := range memoryRootDecls() {
+		dirs := []string{filepath.Clean(r.Dir)}
+		if resolved, err := filepath.EvalSymlinks(r.Dir); err == nil && resolved != dirs[0] {
+			dirs = append(dirs, resolved)
+		}
+		for _, d := range dirs {
+			p, err := filepath.Rel(d, abs)
+			if err != nil || !memoryAllowed(r, p) {
+				continue
+			}
+			return r.Kind, d, filepath.ToSlash(p), true
+		}
+	}
+	return "", "", "", false
+}
+
 // memoryGlobMatch is a glob match that understands `**` (zero or more segments), delegating
 // wildcards within a segment to path.Match. This thin wrapper exists because path/filepath's
 // Match cannot handle `**` and its `*` does not cross a separator.

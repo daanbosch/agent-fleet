@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memoryx"
 )
 
 const (
@@ -99,6 +101,17 @@ func resolveFDReadPath(input string) (fdReadPath, *fsAPIError) {
 	browse, err := absoluteTrustedRoot(browseRoot())
 	if err != nil {
 		return fdReadPath{}, fsErr(500, errCodeFSReadFailed, "cannot resolve browse root")
+	}
+	// A session's changed-files list links to the agent memory it wrote, which sits outside
+	// the browse root ($CLAUDE_CONFIG_DIR) or under a denylisted directory (~/.codex). Only
+	// what the memory snapshot allowlist versions is served, read-only and opened beneath
+	// its memory root, so the transcripts and credentials next to it stay unreachable.
+	memoryCandidate := input
+	if !strings.HasPrefix(input, "/") {
+		memoryCandidate = filepath.Join(browse, input)
+	}
+	if _, root, relative, ok := memoryx.MemoryFile(memoryCandidate); ok {
+		return fdReadPath{root: root, relative: relative, display: input, readOnly: true}, nil
 	}
 	generatedRoot, err := absoluteTrustedRoot(codexGeneratedImagesRoot())
 	if err == nil {

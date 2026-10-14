@@ -21,6 +21,7 @@ import (
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/gitx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memoryx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/transcript"
@@ -100,7 +101,7 @@ func sessionFileTouches(name, dir, src, head string, n, stable int, edits func(f
 	for _, k := range out.order {
 		if t := out.acc[k]; t != nil {
 			row := *t
-			row.Scope = fileScope(k, row.Repo, own, roots.work)
+			row.Scope, row.MemoryKind = fileScope(k, row.Repo, own, roots.work)
 			list = append(list, row)
 		}
 	}
@@ -328,18 +329,22 @@ func ownRepoOf(dir, reposRoot string) string {
 // fileScope classifies one resolved absolute path. A file in another working copy is only called
 // that when the session's own copy is known: with own == "" there is nothing to compare
 // against, and claiming "other" would mislabel every row of a session started in ~.
-func fileScope(abs, repo, own, workRoot string) string {
+// memoryKind is set only with FileScopeMemory.
+func fileScope(abs, repo, own, workRoot string) (scope, memoryKind string) {
 	if repo != "" {
 		if own != "" && repo != own {
-			return transcript.FileScopeOtherRepo
+			return transcript.FileScopeOtherRepo, ""
 		}
-		return ""
+		return "", ""
+	}
+	if kind, _, _, ok := memoryx.MemoryFile(abs); ok {
+		return transcript.FileScopeMemory, kind
 	}
 	r, err := filepath.Rel(workRoot, abs)
 	if err != nil || r == "." || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
-		return ""
+		return "", ""
 	}
-	return transcript.FileScopeWorkDir
+	return transcript.FileScopeWorkDir, ""
 }
 
 // evictFileAggs keeps the cache bounded. Entries are small (a few hundred rows), so this

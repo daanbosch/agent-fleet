@@ -132,7 +132,7 @@ function FileChangeStripImpl({ session, files }: { session: string; files: Sessi
       <DisclosureContent open={open} className="mirror-files-list-wrap">
         <ul className="mirror-files-list">
           {rows.map((r) => {
-            const badge = stateBadge(r.state);
+            const badge = stateBadge(r.state, r.memoryKind);
             const openable = !r.deleted || r.state === "unstaged" || r.state === "staged";
             return (
               <li
@@ -145,7 +145,13 @@ function FileChangeStripImpl({ session, files }: { session: string; files: Sessi
                   type="button"
                   className="mfl-row"
                   disabled={!openable}
-                  title={r.state === "workdir" ? r.path + "\n" + tr("mirror.files.st_workdir_hint") : r.path}
+                  title={
+                    r.state === "workdir"
+                      ? r.path + "\n" + tr("mirror.files.st_workdir_hint")
+                      : r.state === "memory"
+                        ? r.path + "\n" + tr("mirror.files.st_memory_hint")
+                        : r.path
+                  }
                   onClick={(e) => openRow(r, e.ctrlKey || e.metaKey)}
                 >
                   <span className="mfl-ic">

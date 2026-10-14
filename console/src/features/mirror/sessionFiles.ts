@@ -33,8 +33,10 @@ export interface SessionFile {
   lastTs?: string;
   sidechain?: boolean; // ONLY subagents touched it
   // Where it sits relative to the session (transcript.FileScope*). "other-repo" keeps its git
-  // state but is not this session's diff; "workdir" is ~/.af-work, the throwaway directory.
-  scope?: "workdir" | "other-repo";
+  // state but is not this session's diff; "workdir" is ~/.af-work, the throwaway directory;
+  // "memory" is a file an agent memory root versions, which the Agent serves read-only.
+  scope?: "workdir" | "other-repo" | "memory";
+  memoryKind?: string; // whose memory a "memory" row is ("claude" | "codex")
 }
 
 /** One working-tree change from GET /fs/changes. */
@@ -60,10 +62,20 @@ export interface FsChange {
  *   workdir — edited in ~/.af-work ($AF_WORK_DIR): the throwaway directory agents are told
  *             to use. Kept apart from `outside` so a report or probe the session was asked
  *             to write there does not read as a stray edit somewhere unrelated.
+ *   memory  — agent memory (Claude's projects/<slug>/memory, Codex's memories). Kept apart from
+ *             `outside` so a memory write reads as one, and badged with whose memory it is.
  *   outside — edited anywhere else outside ~/repos (an agent config, a file in the home
  *             dir). Listed, but there is no git side and no diff to open.
  */
-export type FileState = "unstaged" | "staged" | "untracked" | "committed" | "clean" | "workdir" | "outside";
+export type FileState =
+  | "unstaged"
+  | "staged"
+  | "untracked"
+  | "committed"
+  | "clean"
+  | "workdir"
+  | "memory"
+  | "outside";
 
 export interface FileRow extends SessionFile {
   name: string; // basename, the row's main label
@@ -98,7 +110,7 @@ export function joinChanges(files: SessionFile[], changes: FsChange[], committed
     const slash = rel.lastIndexOf("/");
     const change = f.repo && rel ? byKey.get(changeKey(f.repo, rel)) : undefined;
     let state: FileState = "clean";
-    if (!f.repo || !rel) state = f.scope === "workdir" ? "workdir" : "outside";
+    if (!f.repo || !rel) state = f.scope === "workdir" || f.scope === "memory" ? f.scope : "outside";
     else if (change?.untracked) state = "untracked";
     else if (change) state = change.worktree && change.worktree !== " " ? "unstaged" : "staged";
     else if (wasCommitted?.has(rel)) state = "committed";
@@ -123,9 +135,10 @@ export function sortRows(rows: FileRow[], sort: FileSort): FileRow[] {
   );
 }
 
-/** The badge a row shows for its git state. `clean`, `workdir` and `outside` are muted on purpose:
- *  they are still part of the session's work, they just have no diff behind them. */
-export function stateBadge(state: FileState): { cls: string; label: MsgKey } {
+/** The badge a row shows for its git state. `clean`, `workdir`, `memory` and `outside` are muted on
+ *  purpose: they are still part of the session's work, they just have no diff behind them.
+ *  `memoryKind` names the agent on a `memory` badge; an unknown kind gets the generic label. */
+export function stateBadge(state: FileState, memoryKind?: string): { cls: string; label: MsgKey } {
   switch (state) {
     case "untracked":
       return { cls: "st-add", label: "pj.st_untracked" };
@@ -137,6 +150,16 @@ export function stateBadge(state: FileState): { cls: string; label: MsgKey } {
       return { cls: "st-done", label: "mirror.files.st_committed" };
     case "workdir":
       return { cls: "st-muted", label: "mirror.files.st_workdir" };
+    case "memory":
+      return {
+        cls: "st-muted",
+        label:
+          memoryKind === "claude"
+            ? "mirror.files.st_memory_claude"
+            : memoryKind === "codex"
+              ? "mirror.files.st_memory_codex"
+              : "mirror.files.st_memory",
+      };
     case "outside":
       return { cls: "st-muted", label: "mirror.files.st_outside" };
     default:

@@ -600,3 +600,30 @@ func TestSessionFileTouchesResolvesRootsPerPollNotPerRow(t *testing.T) {
 		t.Fatalf("one poll over 20 rows resolved roots %d times; want it independent of the rows", n)
 	}
 }
+
+// A memory write is labelled as that agent's memory, not as a stray edit outside ~/repos;
+// a neighbouring transcript or settings file is not.
+func TestSessionFileTouchesMemoryScope(t *testing.T) {
+	base := symlinkTree(t, []string{"h/repos/r", "h/.codex/memories", "claude/projects/-x/memory"}, nil)
+	home, claudeDir := filepath.Join(base, "h"), filepath.Join(base, "claude")
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	got := symlinkSession(t, home, filepath.Join(home, "repos/r"),
+		filepath.Join(claudeDir, "projects/-x/memory/note.md"),
+		filepath.Join(home, ".codex/memories/MEMORY.md"),
+		filepath.Join(claudeDir, "settings.json"),
+	)
+	want := map[string][2]string{
+		"note.md":       {transcript.FileScopeMemory, "claude"},
+		"MEMORY.md":     {transcript.FileScopeMemory, "codex"},
+		"settings.json": {"", ""},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d rows, want %d: %+v", len(got), len(want), got)
+	}
+	for _, r := range got {
+		w := want[filepath.Base(r.Path)]
+		if r.Scope != w[0] || r.MemoryKind != w[1] {
+			t.Errorf("%s: (scope, memoryKind) = (%q, %q), want (%q, %q)", r.Path, r.Scope, r.MemoryKind, w[0], w[1])
+		}
+	}
+}

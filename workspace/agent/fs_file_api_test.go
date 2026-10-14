@@ -1020,3 +1020,93 @@ func TestFSFileMarksNestedGitRoot(t *testing.T) {
 		}
 	}
 }
+
+// The changed-files strip links to the agent memory a session wrote. Those files open
+// read-only; everything else under the same agent state (transcripts, credentials,
+// settings, codex's auth) stays refused, and the memory roots are not enumerable.
+func TestAgentMemoryFilesAreReadOnlyAndNothingElseOpens(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AF_BROWSE_ROOT", home)
+	claudeDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+
+	write := func(p, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	claudeMem := filepath.Join(claudeDir, "projects", "-home-dev-repos-x", "memory", "note.md")
+	write(claudeMem, "claude memory\n")
+	codexMem := filepath.Join(home, ".codex", "memories", "MEMORY.md")
+	write(codexMem, "codex memory\n")
+	refused := map[string]string{
+		"transcript":  filepath.Join(claudeDir, "projects", "-home-dev-repos-x", "abc.jsonl"),
+		"credentials": filepath.Join(claudeDir, ".credentials.json"),
+		"settings":    filepath.Join(claudeDir, "settings.json"),
+		"codex auth":  filepath.Join(home, ".codex", "auth.json"),
+		"codex git":   filepath.Join(home, ".codex", "memories", ".git", "config"),
+	}
+	for _, p := range refused {
+		write(p, "secret\n")
+	}
+
+	for _, c := range []struct{ query, want string }{
+		{claudeMem, "claude memory\n"},
+		{codexMem, "codex memory\n"},
+		{".codex/memories/MEMORY.md", "codex memory\n"}, // the strip's home-relative spelling
+	} {
+		rec := httptest.NewRecorder()
+		handleFSFile(rec, httptest.NewRequest(http.MethodGet, "/fs/file?path="+url.QueryEscape(c.query), nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s: status=%d body=%s", c.query, rec.Code, rec.Body.String())
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["content"] != c.want || payload["path"] != c.query || payload["editabilityReason"] != "read_only_root" {
+			t.Errorf("GET %s = %#v", c.query, payload)
+		}
+	}
+
+	for name, p := range refused {
+		rec := httptest.NewRecorder()
+		handleFSFile(rec, httptest.NewRequest(http.MethodGet, "/fs/file?path="+url.QueryEscape(p), nil))
+		if rec.Code == http.StatusOK {
+			t.Errorf("GET %s (%s) was served: body=%s", name, p, rec.Body.String())
+		}
+	}
+
+	put := doAgentFSPut(t, putJSONBody(".codex/memories/MEMORY.md", "new\n", fileRevision([]byte("codex memory\n"))), "application/json")
+	if put.Code != http.StatusForbidden || responseErrorCode(t, put) != errCodeFSDenied {
+		t.Errorf("PUT codex memory: status=%d body=%s", put.Code, put.Body.String())
+	}
+
+	for _, dir := range []string{filepath.Dir(claudeMem), filepath.Dir(codexMem)} {
+		tree := httptest.NewRecorder()
+		handleFSTree(tree, httptest.NewRequest(http.MethodGet, "/fs/tree?path="+url.QueryEscape(dir), nil))
+		if tree.Code == http.StatusOK {
+			t.Errorf("tree %s was listed: body=%s", dir, tree.Body.String())
+		}
+		search := httptest.NewRecorder()
+		handleFSSearch(search, httptest.NewRequest(http.MethodGet, "/fs/search?q=note&path="+url.QueryEscape(dir), nil))
+		if search.Code == http.StatusOK {
+			t.Errorf("search %s was served: body=%s", dir, search.Body.String())
+		}
+	}
+
+	link := filepath.Join(filepath.Dir(claudeMem), "linked.md")
+	if err := os.Symlink(refused["credentials"], link); err != nil {
+		t.Fatal(err)
+	}
+	sym := httptest.NewRecorder()
+	handleFSFile(sym, httptest.NewRequest(http.MethodGet, "/fs/file?path="+url.QueryEscape(link), nil))
+	if sym.Code != http.StatusBadRequest || responseErrorCode(t, sym) != errCodeFSSymlinkNotAllowed {
+		t.Errorf("GET symlink in memory: status=%d body=%s", sym.Code, sym.Body.String())
+	}
+}

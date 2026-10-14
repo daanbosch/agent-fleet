@@ -239,6 +239,7 @@
 .mfl-clean .mfl-name,
 .mfl-committed .mfl-name,
 .mfl-workdir .mfl-name,
+.mfl-memory .mfl-name,
 .mfl-outside .mfl-name,
 .mfl-other-repo .mfl-name {
   color: var(--muted);

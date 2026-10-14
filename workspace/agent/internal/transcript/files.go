@@ -45,7 +45,10 @@ type FileTouch struct {
 	LastIdx   int    `json:"lastIdx"`             // transcript index of the newest call
 	LastTS    string `json:"lastTs,omitempty"`    // RFC3339 of the newest call
 	Sidechain bool   `json:"sidechain,omitempty"` // ONLY subagents touched it
-	Scope     string `json:"scope,omitempty"`     // FileScopeWorkDir | FileScopeOtherRepo | "" (no claim)
+	Scope     string `json:"scope,omitempty"`     // FileScopeWorkDir | FileScopeOtherRepo | FileScopeMemory | "" (no claim)
+	// MemoryKind names whose memory a FileScopeMemory row is ("claude" | "codex"), so the
+	// Console can badge it as that agent's memory rather than a stray edit outside ~/repos.
+	MemoryKind string `json:"memoryKind,omitempty"`
 }
 
 // Where a touched file sits relative to the session. "" makes no claim: the session's own
@@ -58,6 +61,9 @@ const (
 	// (another session's worktree, the parent clone). Its git state is real but is not this
 	// session's diff.
 	FileScopeOtherRepo = "other-repo"
+	// FileScopeMemory is a file an agent memory root versions (internal/memoryx): Claude's
+	// projects/<slug>/memory or Codex's memories. The file reader serves it read-only.
+	FileScopeMemory = "memory"
 )
 
 // EditVerb decides how to label an edit-family part. `explicit` is the parser's own
