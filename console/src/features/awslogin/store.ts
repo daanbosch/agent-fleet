@@ -43,8 +43,8 @@ export interface AwsProfileState {
    * missing or not exported, so there is no login to follow.
    */
   state: string;
-  /** The Settings profile a role-chaining profile follows; "" for an SSO profile. */
-  source: string;
+  /** The Settings profile a role-chaining profile follows; absent on an SSO profile and from an older Agent. */
+  source?: string;
   /** The login's end when it cannot renew, RFC 3339 UTC; "" when no end is known. */
   expiresAt: string;
   expiring: boolean;
