@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"reflect"
@@ -291,7 +292,47 @@ func terminalForm(t *testing.T) (*formDaemon, session.Meta) {
 	m := session.Meta{Name: "v2term", Dir: "/work", Kind: session.KindOpencode, Driver: session.DriverTUI}
 	sids.Write(session.UUID(m.Dir, m.Name), "ses_a")
 	t.Cleanup(func() { sids.Remove(session.UUID(m.Dir, m.Name)) })
+	fd.tag("ses_a", m)
 	return fd, m
+}
+
+// tag makes the daemon's session carry slot m's ownership tags, as the shared launch writes them.
+func (fd *formDaemon) tag(ses string, m session.Meta) {
+	fd.sessions[ses] = fmt.Sprintf(`{"data":{"id":%q,"parentID":"","projectID":"p","cost":0,"time":{"created":1791931000000,"updated":1791931000000},"location":{"directory":"/work"},"metadata":{"af.sid":%q,"af.name":%q}}}`,
+		ses, session.UUID(m.Dir, m.Name), m.Name)
+}
+
+// Another slot's form is never reachable from this one: the write follows the recorded
+// conversation only, and only while it carries this slot's tags. Nothing is posted otherwise.
+func TestV2RespondTerminalOnlyTouchesItsOwnConversation(t *testing.T) {
+	fd, m := terminalForm(t)
+	id := fixtureForms(t, "form-single.pending.json")[0].ID
+	reply := agents.InteractionReply{ID: id, Decision: agents.DecisionAnswer, Answers: []agents.InteractionAnswer{{Options: []int{0}}}}
+	posted := func() int {
+		fd.fmu.Lock()
+		defer fd.fmu.Unlock()
+		return len(fd.replies) + len(fd.deletes)
+	}
+	sid := session.UUID(m.Dir, m.Name)
+
+	sids.Remove(sid) // no recorded conversation: the directory guess would find ses_a
+	if err := (managedDriver{}).RespondTerminal(m, reply); err == nil || posted() != 0 {
+		t.Fatalf("no recorded sid: %v, posted %d", err, posted())
+	}
+	sids.Write(sid, "ses_deleted") // recorded but gone (404): same
+	if err := (managedDriver{}).RespondTerminal(m, reply); err == nil || posted() != 0 {
+		t.Fatalf("404 sid: %v, posted %d", err, posted())
+	}
+	sids.Write(sid, "ses_a")
+	other := session.Meta{Name: "someone-else", Dir: "/work", Kind: session.KindOpencode, Driver: session.DriverTUI}
+	fd.tag("ses_a", other) // the conversation belongs to another slot
+	if err := (managedDriver{}).RespondTerminal(m, reply); err == nil || posted() != 0 {
+		t.Fatalf("foreign tags: %v, posted %d", err, posted())
+	}
+	fd.tag("ses_a", m) // control: the rightful owner is answered
+	if err := (managedDriver{}).RespondTerminal(m, reply); err != nil || posted() != 1 {
+		t.Fatalf("owner: %v, posted %d", err, posted())
+	}
 }
 
 func TestV2RespondTerminalAnswersAndDismisses(t *testing.T) {

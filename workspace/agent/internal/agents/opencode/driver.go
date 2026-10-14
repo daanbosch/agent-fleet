@@ -213,12 +213,22 @@ func (managedDriver) RespondTerminal(m session.Meta, reply agents.InteractionRep
 	if !ok || m.DriverKind() != session.DriverTUI {
 		return agents.ErrTerminalRespond
 	}
-	info, err := t.v2Session(m)
+	// A write is aimed at the conversation af recorded for this slot, never at the directory guess
+	// the readers fall back to (another slot in the same directory could be that conversation), and
+	// the conversation must still carry this slot's tags (the invariant putEnvironmentFor holds).
+	ses := sids.Read(session.UUID(m.Dir, m.Name))
+	if ses == "" {
+		return errFormSettled
+	}
+	info, err := getSharedSession(t.Addr, ses)
 	if err != nil {
+		if errors.Is(err, statusError(http.StatusNotFound)) {
+			return errFormSettled
+		}
 		return err
 	}
-	if info == nil {
-		return errFormSettled
+	if info.Metadata[metaName] != m.Name || info.Metadata[metaSID] != session.UUID(m.Dir, m.Name) {
+		return fmt.Errorf("session %s does not belong to %s", ses, m.Name)
 	}
 	var waiting bool
 	for _, f := range pendingFormsV2(t, m, info.ID) {
@@ -227,7 +237,7 @@ func (managedDriver) RespondTerminal(m session.Meta, reply agents.InteractionRep
 	if !waiting {
 		return fmt.Errorf("interaction %s は待機中ではありません: %w", reply.ID, errFormSettled)
 	}
-	return respondForm(t.Addr, info.ID, reply)
+	return respondForm(t.Addr, ses, reply)
 }
 
 // --- handle registry ---------------------------------------------------------

@@ -45,6 +45,9 @@ func TestContractTerminalFormRespond(t *testing.T) {
 		}
 		m := session.Meta{Name: name, Dir: dir, Kind: session.KindOpencode, Driver: session.DriverTUI}
 		sids.Write(session.UUID(m.Dir, m.Name), ses)
+		if err := tagSharedSession(addr, ses, session.UUID(m.Dir, m.Name), name); err != nil {
+			t.Fatal(err)
+		}
 		t.Cleanup(func() { sids.Remove(session.UUID(m.Dir, m.Name)) })
 
 		target := session.TmuxName(name)

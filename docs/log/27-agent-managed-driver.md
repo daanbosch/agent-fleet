@@ -958,19 +958,19 @@ written up at the top of `workspace/agent/internal/agents/opencode/v2form.go`; t
   keys: a single question answers with Down×i + Enter; several questions are tabbed (`Color
   Toppings Submit`), Enter confirms a single choice and advances, Enter *toggles* a multiple-choice
   option, and the last step is the Submit tab (Tab, then Enter). The Console's `buildMenuSeq` does not
-  produce that for a multi-question form or a multiple-choice question (answered through the form API since, see the #2127 note below).
+  produce that for a multi-question form or a multiple-choice question (follow-up: #2127).
 - **Todos**: the 2.0.28 tool list (read off the provider request: edit glob grep question read shell
   skill subagent webfetch websearch write execute) has no todo tool, and the OpenAPI spec has no todo or
   task route. `@opencode/cli` `latest` is 2.0.28 (the newest 2.x on npm), so `Tasks` stays empty on v2.
 
 ## 2026-10-14 note: a Terminal slot's form is answered through the form API (#2127, part of #2101)
 
-- **Decision**: a Terminal slot attached to af's shared serve is answered by form id, not by keys. The
+- **Decision** (resolves the follow-up #2127 above): a Terminal slot attached to af's shared serve is answered by form id, not by keys. The
   mirror stamps the pending form's id on the card, the Console then takes the same `/respond` route as
   Managed, and `/respond` hands a Terminal (`tui`) session to the driver's `RespondTerminal`
   (`agents.TerminalResponder`; opencode answers only a slot on the serve, others get 501 and keep
   keys). Terminal has no handle, so the daemon's list is the source: the id must still be in the
-  running session's pending list, `respondForm` reads the form again before replying, and a settled
+  running session's pending list, the write follows only the conversation af recorded for the slot (never the directory guess the readers use) and only while it carries the slot's `af.sid`/`af.name` tags, `respondForm` reads the form again before replying, and a settled
   form, a forgotten one (404) or a 409 is `errFormSettled` (HTTP 409 `respond_failed`) — an answer
   typed in the TUI at the same moment is never doubled. Dismiss is the same call as for Managed
   (`DELETE`; the turn continues).
