@@ -145,6 +145,31 @@ describe("PreviewTab", () => {
 });
 
 
+describe("overlapping saves", () => {
+  it("a field blur and a toggle click in flight together end on the last save", async () => {
+    api.mockResolvedValue(wsSettings());
+    const { PreviewTab } = await freshModule();
+    const { usePreviewStore } = await import("../../preview/previewState.ts");
+    const { t } = await import("../../../lib/i18n/index.ts");
+    const pending: Array<(v: unknown) => void> = [];
+    apiJSON.mockImplementation(() => new Promise((r) => pending.push(r)));
+    await mount(<PreviewTab />);
+    const input = document.querySelector<HTMLInputElement>(".ds-select")!;
+    await act(async () => input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }))); // ports save
+    const label = [...document.querySelectorAll("*")].find((e) => e.children.length === 0 && e.textContent === t("env.preview_public_label"))!;
+    const on = [...label.parentElement!.querySelectorAll("button")].find((b) => b.textContent === t("common.on"))!;
+    await act(async () => on.click()); // public save, while the ports save is still out
+    await act(async () => pending[0](wsSettings({ previewPublic: false }))); // ports answers first
+    expect(usePreviewStore.getState().info?.public).toBe(false);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(apiJSON).toHaveBeenCalledTimes(2); // sent in order, one after the other
+    await act(async () => pending[1](wsSettings({ previewPublic: true })));
+    expect(usePreviewStore.getState().info?.public).toBe(true); // the last save wins
+  });
+});
+
 describe("Expose this port… strip", () => {
   const addStrip = () => host!.querySelector(".pv-add-strip");
   const click = async (label: string) => {

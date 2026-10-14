@@ -55,6 +55,15 @@ export function usePreviewAvailable(): boolean | null {
   return ok;
 }
 
+// Writes go one after another, so their answers settle in the order they were sent and the last
+// save is the one the shared state ends on (a field blur and a toggle click can overlap).
+let writeChain: Promise<unknown> = Promise.resolve();
+function serialized<T>(fn: () => Promise<T>): Promise<T> {
+  const run = writeChain.then(fn, fn);
+  writeChain = run.catch(() => {});
+  return run;
+}
+
 export function PreviewTab() {
   const tr = useT();
   const toast = useToast();
@@ -79,11 +88,14 @@ export function PreviewTab() {
   }, []);
 
   const save = async (patch: Record<string, unknown>) => {
-    const from = previewToken(); // the scope and generation this save started under
-    const res = await apiJSON("api/env/ws-settings", "PUT", patch);
+    const res = await serialized(async () => {
+      const from = previewToken(); // the scope and epoch this save started under
+      const r = await apiJSON("api/env/ws-settings", "PUT", patch);
+      if (r && !r.error) usePreviewStore.getState().set(previewInfoFrom(r), from); // the port controls follow
+      return r;
+    });
     if (res && !res.error) {
       setAu(res);
-      usePreviewStore.getState().set(previewInfoFrom(res), from); // the port controls follow the list
     } else toast(tr("common.save_failed"));
   };
 
@@ -98,11 +110,14 @@ export function PreviewTab() {
       danger: true,
     });
     if (!ok) return;
-    const from = previewToken();
-    const res = await apiJSON("api/env/ws-settings/preview/reissue", "POST", {});
+    const res = await serialized(async () => {
+      const from = previewToken();
+      const r = await apiJSON("api/env/ws-settings/preview/reissue", "POST", {});
+      if (r && !r.error) usePreviewStore.getState().set(previewInfoFrom(r), from);
+      return r;
+    });
     if (res && !res.error) {
       setAu(res);
-      usePreviewStore.getState().set(previewInfoFrom(res), from);
       // While stopped there are no issued URLs to throw away, so a successful reissue
       // changes nothing on screen. Always say which of the two happened, or the button
       // looks dead.

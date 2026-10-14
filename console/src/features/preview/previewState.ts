@@ -58,32 +58,39 @@ interface PreviewStore {
 
 export interface PreviewToken {
   scope: string;
-  gen: number;
+  /** The epoch (see below), not the read generation: a legitimate write must survive other writes. */
+  epoch: number;
 }
 
 const MIN_GAP_MS = 4000;
 let lastAt = 0;
 let inflight: Promise<void> | null = null;
 let inflightScope = "";
-// Bumped by every forced read, reset and settled answer: an older answer (a slow reply from
-// before a restart, a reissue, or from another scope) must not bring its slug back.
+// Two counters, because they answer different questions.
+//  - epoch: which workspace start / tenant / identity the held state belongs to. Bumped only
+//    by reset(). A write (save, reissue) that began under an older epoch is refused; two writes
+//    that began under the same epoch are both legitimate, whatever order they settle in.
+//  - readGen: which read is the newest. Bumped by every forced read, reset and settled write,
+//    so a slow older READ can never bring old URLs back over a newer answer.
+let epoch = 0;
 let gen = 0;
 
 /** Capture before an async call that will `set` its result. */
 export function previewToken(): PreviewToken {
-  return { scope: currentScope(), gen };
+  return { scope: currentScope(), epoch };
 }
 
 export const usePreviewStore = create<PreviewStore>((set, get) => ({
   info: null,
   scope: "",
   set(info, from) {
-    if (from && (from.scope !== currentScope() || from.gen !== gen)) return;
+    if (from && (from.scope !== currentScope() || from.epoch !== epoch)) return;
     gen++;
     inflight = null;
     set({ info, scope: currentScope() });
   },
   reset() {
+    epoch++;
     gen++;
     inflight = null;
     lastAt = 0;
