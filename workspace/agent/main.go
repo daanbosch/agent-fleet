@@ -291,6 +291,9 @@ func serve() {
 	// (memory_trigger.go), committing only when the changes have gone quiet and the
 	// session in question is not running. AF_MEMORY_SNAPSHOT=off disables it.
 	memoryx.StartMemorySnapshotLoop()
+	// The Agent memory switch's import / write-back of claude's native memory (#1972). Level
+	// triggered: starting it is what resumes a run a restart interrupted.
+	memoryx.AutoSyncStart()
 
 	// Automatic recovery of a claude session stopped by a rate limit (docs/log/47 §4-4):
 	// dismiss the menu on its default ("wait for the reset") and hand the CP a one-shot

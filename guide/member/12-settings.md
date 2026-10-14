@@ -322,14 +322,28 @@ Version control over the memory an agent accumulates by itself (claude's auto-me
     working copy under `~/repos`; one with no match, or two, is listed but cannot be imported. Importing needs
     Agent Fleet memory to be on; the preview works either way. The imported memories show in the list as
     **imported**, with the author unknown, and each can be reverted like any other change.
-  - **Claude Code's own memory**: while "Let sessions use Agent Fleet memory" is on, Agent Fleet starts Claude
-    sessions with Claude Code's auto-memory switched off, so Claude does not load its own `MEMORY.md` (about
-    25 KB at the start of every session) and uses the af tools like every other kind; its own memory files
-    stay where they are, unread. Three things follow. Turn the switch on (previewing the import first is possible while it is off), then run
-    **Import from Claude Code** once more *before you start new Claude sessions*: what Claude saved or changed
-    natively since the last import is not read until you do (applying needs the switch on). Turning the
-    switch off again returns later Claude sessions to their own memory, but what was saved in Agent Fleet
-    memory does not appear there on its own (one way; **Write back to Claude Code**, below, carries it over when you ask). And only Claude sessions *started* after the change are
+  - **Claude Code's own memory**: the switch carries it across by itself. Flipping "Let sessions use Agent Fleet
+    memory" first shows what will happen, from a preview ("Import 474 memories from 6 projects; 1 skipped
+    (secret)" on the way in, "Write back 473 memories to Claude Code; 0 conflicts" on the way out), and only
+    then flips. **On**: Agent Fleet imports every Claude project it can match to a working copy under `~/repos`
+    in the background, and starts new Claude sessions with Claude Code's auto-memory switched off, so Claude
+    does not load its own `MEMORY.md` (about 25 KB at the start of every session) and uses the af tools like
+    every other kind. The automatic import is stricter than **Import from Claude Code** below: a Claude file
+    newer than an Agent Fleet copy *you edited here* is reported as a conflict and left alone (the manual
+    import still replaces it, as your own choice); a memory you forgot is never brought back; a file that looks
+    like it holds a secret is skipped and listed. Claude sessions that were already running keep their own memory on; when the last
+    of them ends, what they saved is imported once more. **Off**: Agent Fleet writes every project back into
+    Claude Code's memory (the same rules as **Write back to Claude Code**, below: a snapshot first, nothing
+    overwritten, conflicts and secrets kept and listed), and Claude Code's own memory stays off until that has
+    finished, so a session started in between cannot write files the write-back would then trip over. If the
+    write-back keeps failing, Claude Code's memory stays off and Agent Fleet retries with growing pauses; the
+    page then offers **Retry now** and **Switch native memory back on anyway**. Under the switch the page shows
+    where the run is, what the last one did and the files it left (conflicts, skipped secrets), and one
+    notification tells you when a run left any. The work survives a restart of the workspace: it
+    resumes where the phase says it was, and a switch that changed while the workspace was stopped is carried
+    across when it starts. Codex: turning the switch on switches codex's own `features.memories` off, and
+    turning it off puts back the value you had (never turns it on); nothing is imported from or written into
+    codex. If you edit that flag while the switch is on, your value is the one restored. Only Claude sessions *started* after the change are
     affected; a running session keeps what it started with.
   - **Muse Code's own memory**: while the switch is on, Agent Fleet starts Muse Code with its native memory
     switched off (`MUSE_EXPERIMENTAL_MEMORY=0`): Muse has no `read_memory` / `add_memory` / `edit_memory`
@@ -366,9 +380,10 @@ Version control over the memory an agent accumulates by itself (claude's auto-me
     `af-memory muse-import-sources`, `af-memory muse-import --dir <name> [--scope project|personal_project] [--dry-run]`
     and `af-memory muse-import --scope personal --into-user [--dry-run]`. The imports are
     gated by the same switch and the same secret scan as the Console.
-  - **Write back to Claude Code**: below the import, the other direction, once and only when you ask. When you
-    turn Agent Fleet memory off, Claude Code goes back to its own memory, which lacks what was learned through
-    Agent Fleet in between; this copies it over (Claude Code only; codex is not covered). Pick a project and you see what
+  - **Write back to Claude Code**: below the import, the other direction, by hand and for one project at a
+    time. Turning the switch off already writes every project back by itself (see above); use this to
+    resolve a conflict it left, or after switching Claude Code's memory back on anyway. It copies what was
+    learned through Agent Fleet into Claude Code's memory (Claude Code only; codex is not covered). Pick a project and you see what
     would happen first: **new**, **newer in Agent Fleet** (updates a file written back earlier), **forgotten in
     Agent Fleet** (removes a file written back earlier), **conflict** (a Claude file Agent Fleet did not write, or
     that you changed since: kept unless you tick it; a file that is still exactly the one imported counts as

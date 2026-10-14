@@ -13,7 +13,10 @@ vi.mock("../../../core/api/client.ts", async (importActual) => ({
   apiJSON: (...args: unknown[]) => apiJSON(...args),
 }));
 vi.mock("../../../ui/ToastProvider.tsx", () => ({ useToast: () => () => {} }));
-vi.mock("../../../ui/ConfirmProvider.tsx", () => ({ useConfirm: () => async () => false }));
+// The flip asks first (#1972); here the member says yes. What the dialog says is pinned in
+// memoryAutoSync.dom.test.tsx.
+const askConfirm = vi.fn(async (_opts: unknown) => true);
+vi.mock("../../../ui/ConfirmProvider.tsx", () => ({ useConfirm: () => askConfirm }));
 vi.mock("../../../core/store/workspace.ts", () => ({
   useWorkspaceStore: (sel: (s: { state: string; start: () => void }) => unknown) => sel({ state: "stopped", start: () => {} }),
   wsStartBusy: () => false,
@@ -33,6 +36,7 @@ afterEach(() => {
   host = null;
   api.mockReset();
   apiJSON.mockReset();
+  askConfirm.mockClear();
   setSettings(settingsDefaults());
 });
 
@@ -55,6 +59,9 @@ describe("MemoryTab while the workspace is stopped", () => {
     expect(getSettings().agentMemory).toBe(true);
     await act(async () => off.click());
     expect(getSettings().agentMemory).toBe(false);
+    expect(askConfirm).toHaveBeenCalledTimes(2);
+    // No Agent to ask: no preview, no wake. It reconciles when the workspace starts.
     expect(api).not.toHaveBeenCalled();
+    expect(apiJSON).not.toHaveBeenCalled();
   });
 });

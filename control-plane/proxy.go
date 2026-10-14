@@ -107,6 +107,14 @@ func auditActionTarget(r *http.Request) (action, target string, ok bool) {
 			// ADR 0108 decision 6: the one-time import of claude's memory writes the store. The
 			// Console repeats the project id in the query; only an id-shaped value is recorded.
 			return "memory.claude_import", auditProjectHint(q.Get("project")), true
+		case p == "/api/agents/memory/auto-sync":
+			// #1972: the Agent memory switch imports / writes back by itself, so nothing else
+			// passes through here for those runs (the Agent has no channel to this ledger; each
+			// memory change is a commit by the member in the 0022 history). What does pass is
+			// the member's part: the Console wakes the run once the confirmation flipped the
+			// switch, retries a failed write-back, or gives it up. The Console repeats the action
+			// (and the direction of a wake) in the query; only those words are recorded.
+			return "memory.auto_sync", auditAutoSyncHint(q.Get("action"), q.Get("to")), true
 		case p == "/api/agents/memory/muse-import":
 			// #1991: the one-time import of muse's project memory writes the store; the project id
 			// in the query is the only value recorded, as for the claude import.
@@ -574,6 +582,21 @@ var agentMemProjectIDRe = regexp.MustCompile(`^[a-z0-9._-]{1,40}-[0-9a-f]{12}$`)
 func auditProjectHint(s string) string {
 	if agentMemProjectIDRe.MatchString(s) {
 		return s
+	}
+	return ""
+}
+
+// auditAutoSyncHint keeps the member's action on the Agent memory switch's run, and for a wake the
+// direction ("wake:on"); anything else is recorded as an empty target.
+func auditAutoSyncHint(action, to string) string {
+	switch action {
+	case "retry", "abandon":
+		return action
+	case "wake":
+		if to == "on" || to == "off" {
+			return action + ":" + to
+		}
+		return action
 	}
 	return ""
 }

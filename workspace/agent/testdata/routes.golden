@@ -1,7 +1,10 @@
 # Every (method, path) buildMux() registers. Generated - do not edit by hand.
 # Update: cd workspace/agent && go test -run TestRouteTableGolden -update-routes-golden .
 # ANY = registered without a method.
-# count: 377
+# count: 380
+GET /agents/memory/auto-sync
+POST /agents/memory/auto-sync
+GET /agents/memory/auto-sync/preview
 GET /agents/memory/claude-export
 POST /agents/memory/claude-export
 GET /agents/memory/claude-export/preview

@@ -52,6 +52,9 @@ const (
 	claudeImportForgotten = "forgotten"
 	claudeImportSecret    = "secret"
 	claudeImportInvalid   = "invalid"
+	// claudeImportConflict is only ever produced by the automatic import (agentMemImportSrc.Auto):
+	// the claude file is newer than an AF copy that AF has edited since.
+	claudeImportConflict = "conflict"
 
 	claudeImportNoProject = "no_project"
 	claudeImportAmbiguous = "ambiguous"
@@ -370,8 +373,12 @@ func agentMemImportOpen(mem *os.File, file string) (*os.File, error) {
 // agentMemImportSrc says where an evaluated file comes from and which rule decides an update.
 type agentMemImportSrc struct {
 	Source string // the AF memory's `source` field
-	Muse   bool   // muse rules: an update only replaces a copy that is still the muse import's own
-	Shared bool   // the file is tracked by git in its working copy
+	// Auto is the import the memory switch runs by itself (#1972). Nobody previewed it, so it
+	// never replaces an AF copy that was edited in AF: that is reported as a conflict, where the
+	// member's own import overwrites it ("the member's choice", ADR 0108 decision 6).
+	Auto   bool
+	Muse   bool // muse rules: an update only replaces a copy that is still the muse import's own
+	Shared bool // the file is tracked by git in its working copy
 	// Scope is the AF scope the memory lands in; empty means project.
 	Scope string
 	// ForgottenHashes (muse): source hashes of memories that no longer exist, so the same bytes
@@ -381,8 +388,8 @@ type agentMemImportSrc struct {
 
 // agentMemImportEvaluate reads one claude file and decides its status. withheld=true: the file
 // name itself cannot be shown, so the caller only counts it. Callers hold agentMemMu.
-func agentMemImportEvaluate(mem *os.File, file, slug, rel string, history map[string]bool) (it agentMemImportItem, withheld bool) {
-	return agentMemImportEvaluateSrc(mem, file, agentMemImportSrc{Source: "claude:projects/" + slug + "/memory/" + file}, rel, history)
+func agentMemImportEvaluate(mem *os.File, file, slug, rel string, history map[string]bool, auto bool) (it agentMemImportItem, withheld bool) {
+	return agentMemImportEvaluateSrc(mem, file, agentMemImportSrc{Source: "claude:projects/" + slug + "/memory/" + file, Auto: auto}, rel, history)
 }
 
 // agentMemImportEvaluateSrc is agentMemImportEvaluate for any source directory.
@@ -557,6 +564,10 @@ func agentMemImportEvaluateSrc(mem *os.File, file string, src agentMemImportSrc,
 		case perr != nil:
 			// Overwriting needs proof that the claude file is newer.
 			return invalid("store_unreadable")
+		case st.ModTime().After(at) && src.Auto && agentMemImportStateFor(rel, stem) != agentMemImportIntact:
+			// Not "unknown" either: when the history cannot prove the copy is still the import's
+			// own text, it is not replaced unattended.
+			it.Status, it.Reason = claudeImportConflict, "af_changed"
 		case st.ModTime().After(at):
 			it.Status = claudeImportUpdate
 		default:
@@ -582,11 +593,16 @@ func agentMemImportStateFor(rel, name string) agentMemImportState {
 
 var claudeImportOrder = map[string]int{
 	claudeImportNew: 0, claudeImportUpdate: 1, claudeImportUnchanged: 2,
-	claudeImportForgotten: 3, museImportDiverged: 3, claudeImportSecret: 4, claudeImportInvalid: 5,
+	claudeImportForgotten: 3, museImportDiverged: 3, claudeImportConflict: 3, claudeImportSecret: 4, claudeImportInvalid: 5,
 }
 
 // agentMemImportBuild evaluates every file of a source. Callers hold agentMemMu.
 func agentMemImportBuild(slug string) (*agentMemImportPreview, error) {
+	return agentMemImportBuildAuto(slug, false)
+}
+
+// agentMemImportBuildAuto is agentMemImportBuild under the automatic import's stricter rules.
+func agentMemImportBuildAuto(slug string, auto bool) (*agentMemImportPreview, error) {
 	mem, p, reason, err := agentMemImportResolve(slug)
 	if err != nil {
 		return nil, err
@@ -605,7 +621,7 @@ func agentMemImportBuild(slug string) (*agentMemImportPreview, error) {
 	files, trunc := agentMemImportFiles(mem)
 	pv.Truncate = trunc
 	for _, f := range files {
-		it, withheld := agentMemImportEvaluate(mem, f, slug, rel, history)
+		it, withheld := agentMemImportEvaluate(mem, f, slug, rel, history, auto)
 		if withheld {
 			pv.Withheld++
 			continue
@@ -660,6 +676,11 @@ type agentMemImportApplied struct {
 // agentMemImportApply imports the listed items, one commit each. The caller has checked the
 // switch. Each item is evaluated again under the locks: the preview is a proposal, not a grant.
 func agentMemImportApply(req agentMemImportReq, now time.Time) (agentMemImportApplied, error) {
+	return agentMemImportApplyAuto(req, now, false)
+}
+
+// agentMemImportApplyAuto is agentMemImportApply evaluating under the automatic import's rules.
+func agentMemImportApplyAuto(req agentMemImportReq, now time.Time, auto bool) (agentMemImportApplied, error) {
 	if len(req.Items) == 0 || len(req.Items) > agentMemImportMaxItems {
 		return agentMemImportApplied{}, memoryErrf(http.StatusBadRequest, errCodeMemoryBadRequest,
 			"send between 1 and %d items per request", agentMemImportMaxItems)
@@ -669,7 +690,7 @@ func agentMemImportApply(req agentMemImportReq, now time.Time) (agentMemImportAp
 	memorySnapshotMu.Lock()
 	defer memorySnapshotMu.Unlock()
 
-	pv, err := agentMemImportBuild(req.Slug)
+	pv, err := agentMemImportBuildAuto(req.Slug, auto)
 	if err != nil {
 		return agentMemImportApplied{}, err
 	}
