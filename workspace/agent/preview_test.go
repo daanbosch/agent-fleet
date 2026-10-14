@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -342,5 +343,49 @@ func TestPreviewFirstBodyChunkOf400StreamIsNotParked(t *testing.T) {
 	got := make([]byte, len("streaming..."))
 	if _, err := io.ReadFull(resp.Body, got); err != nil || string(got) != "streaming..." {
 		t.Fatalf("first chunk = %q, err %v (upstream still open)", got, err)
+	}
+}
+
+type headEOFBody struct{ data []byte }
+
+func (b *headEOFBody) Read(p []byte) (int, error) {
+	n := copy(p, b.data)
+	b.data = b.data[n:]
+	if len(b.data) == 0 {
+		return n, io.EOF
+	}
+	return n, nil
+}
+func (b *headEOFBody) Close() error { return nil }
+
+// The sniff finishing exactly as the wait runs out must not be mistaken for an abandon: the
+// body and its EOF still arrive.
+func TestPreviewSniffFinishingAtTheTimeoutBoundary(t *testing.T) {
+	sniffDecidedHook = func() { time.Sleep(sniffWait + 50*time.Millisecond) }
+	t.Cleanup(func() { sniffDecidedHook = nil })
+	resp := &http.Response{StatusCode: 400, Header: http.Header{}, ContentLength: -1,
+		Body: &headEOFBody{data: []byte("bad input")}}
+	if err := sniffPlainHTTPToTLS(resp); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan string, 1)
+	go func() { b, err := io.ReadAll(resp.Body); done <- string(b) + "|" + fmt.Sprint(err) }()
+	select {
+	case got := <-done:
+		if got != "bad input|<nil>" {
+			t.Fatalf("got %q", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("body read hung at the sniff boundary")
+	}
+}
+
+func TestPreviewSniffTLSNoticeAtTheTimeoutBoundary(t *testing.T) {
+	sniffDecidedHook = func() { time.Sleep(sniffWait + 50*time.Millisecond) }
+	t.Cleanup(func() { sniffDecidedHook = nil })
+	resp := &http.Response{StatusCode: 400, Header: http.Header{}, ContentLength: -1,
+		Body: &headEOFBody{data: []byte("Client sent an HTTP request to an HTTPS server.\n")}}
+	if err := sniffPlainHTTPToTLS(resp); !errors.Is(err, errPlainHTTPToTLS) {
+		t.Fatalf("err = %v, want errPlainHTTPToTLS", err)
 	}
 }
