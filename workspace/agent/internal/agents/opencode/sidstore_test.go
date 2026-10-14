@@ -135,3 +135,28 @@ func TestSlotSidsScanIsThrottled(t *testing.T) {
 		t.Fatalf("second Read inside the interval looked at the old directory: %q", got)
 	}
 }
+
+// When the old directory cannot even be examined at Remove time, the clear must still stick
+// once it becomes readable again.
+func TestSlotSidsRemoveSurvivesUnreadableLegacyDir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permissions do not bind root")
+	}
+	t.Setenv("HOME", t.TempDir())
+	sids.lastScan = time.Time{}
+	lp := filepath.Join(legacySidDir(), "slot1")
+	putSid(t, lp, "ses_cleared", time.Now().Add(-time.Minute))
+	sids.Write("slot1", "ses_cleared")
+	if err := os.Chmod(filepath.Dir(lp), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Dir(lp), 0o700) })
+	sids.Remove("slot1")
+	if err := os.Chmod(filepath.Dir(lp), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sids.lastScan = time.Time{}
+	if got := sids.Read("slot1"); got != "" {
+		t.Fatalf("Read after Remove = %q, want none", got)
+	}
+}

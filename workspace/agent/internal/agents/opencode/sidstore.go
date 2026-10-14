@@ -1,6 +1,8 @@
 package opencode
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,7 +25,9 @@ const legacyScanEvery = 30 * time.Second
 // directory is adopted (moved into the state directory) when it is newer than the state one or
 // that one is missing; otherwise the state directory wins. mu orders adoption against this
 // process's Write and Remove, so an adoption never resurrects what Remove just cleared; a
-// pre-fix plugin writing in the same instant is outside it (its next event rewrites the record).
+// plugin writing the state file in the same instant is outside it. The one such window that matters
+// is a relaunched pane's first write, and the updated plugin removes the slot's old record before
+// it publishes the new one, which leaves only a read-then-remove overlap a few microseconds wide.
 type slotSids struct {
 	agents.SidStore
 	mu       sync.Mutex
@@ -55,12 +59,9 @@ func (s *slotSids) Remove(sid string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.SidStore.Remove(sid)
-	lp := filepath.Join(legacySidDir(), sid)
-	if _, err := os.Stat(lp); err != nil {
-		return
-	}
-	if os.Remove(lp) != nil {
-		// Could not delete it (ownership, a flaky mount): make the clear durable instead.
+	// No Stat first: when the old directory cannot even be examined (permissions, a flaky mount)
+	// the record may still be there, so anything but "does not exist" leaves the tombstone.
+	if err := os.Remove(filepath.Join(legacySidDir(), sid)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		_ = s.SidStore.Put(sid+".cleared", "x")
 	}
 }
