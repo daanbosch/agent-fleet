@@ -56,14 +56,14 @@ async function type(input: HTMLInputElement, value: string): Promise<void> {
   });
 }
 
-async function mount(kinds: string[] = ["claude"]): Promise<void> {
+async function mount(kinds: string[] = ["claude"], claudeExpired = false): Promise<void> {
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
   await act(async () => {
     root!.render(
       <ToastProvider>
-        <StartModal kinds={kinds} onClose={() => {}} onPickRepo={onPickRepo} />
+        <StartModal kinds={kinds} claudeExpired={claudeExpired} onClose={() => {}} onPickRepo={onPickRepo} />
       </ToastProvider>,
     );
   });
@@ -221,5 +221,31 @@ describe("StartModal — home stage lcpp model requirement (docs/log/109)", () =
     await click(footButton(t("launch.launch")));
     const call = apiPost.mock.calls.find((c) => c[0] === "api/sessions");
     expect(call?.[2]).toMatchObject({ model: "m1" });
+  });
+});
+
+// An expired Claude login: the home stage says so and links to Settings > Agents, but Claude
+// stays launchable (/login in the pane is a valid recovery), so the launch button is not gated.
+describe("StartModal — home stage expired Claude login", () => {
+  const notice = () => document.querySelector(".ui-field-hint .linklike");
+
+  it("shows a Re-authenticate link that opens Settings > Agents, and keeps Begin enabled", async () => {
+    unmount();
+    await mount(["claude"], true);
+    await click(rowFor(t("start.home_title")));
+    expect(notice()?.textContent).toBe(t("mirror.error_auth_action"));
+    expect(footButton(t("launch.launch")).disabled).toBe(false);
+
+    await click(notice()!);
+    const s = (await import("../settings/store.ts")).useSettingsUI.getState();
+    expect(s.settingsOpen).toBe(true);
+    expect(s.settingsSection).toBe("agents");
+  });
+
+  it("shows nothing while the login is valid", async () => {
+    unmount();
+    await mount(["claude"], false);
+    await click(rowFor(t("start.home_title")));
+    expect(notice()).toBeNull();
   });
 });

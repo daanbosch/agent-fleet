@@ -15,6 +15,7 @@ import {
 } from "../../../core/api/client.ts";
 import type { Discard, InteractionAnswer, QueueItem, TurnResult } from "../../../core/api/client.ts";
 import type { Attachment } from "../../../lib/attachDraft.ts";
+import { toastSendFailure } from "../../../lib/authExpiredToast.tsx";
 import { t as tr } from "../../../lib/i18n/index.ts";
 import { takeLaunchSeed } from "../../../lib/launchSeed.ts";
 import type { useToast } from "../../../ui/ToastProvider.tsx";
@@ -148,7 +149,7 @@ export function useMirrorActions({
       // toast the reason and restore the draft that send() already cleared — without
       // clobbering anything the user has started retyping.
       applyEchoes((p) => p.filter((e) => e.id !== echoId));
-      toast(res.message || tr("mirror.send_failed"));
+      toastSendFailure(toast, res, tr("mirror.send_failed"));
       // A held queue item goes back to the queue, not into the draft (restoreDraft=false).
       if (restoreDraft) setDraft((d) => d || restoreText || t);
     }
@@ -214,7 +215,7 @@ export function useMirrorActions({
     if (!ok) {
       statusRef.current = prev;
       setStatus(prev);
-      toast(res?.error ? errText(res.error) : tr("mirror.answer_send_failed"));
+      toastSendFailure(toast, { code: res?.error?.code, message: res?.error ? errText(res.error) : "" }, tr("mirror.answer_send_failed"));
     }
     setSending(false);
     setTimeout(() => tickRef.current?.(), 400);
@@ -267,7 +268,7 @@ export function useMirrorActions({
   const cancelQuestion = async (id: string) => {
     if (wsDown()) return;
     const res = await sessionCancelInteraction(session, id);
-    if (!res.ok) toast(res.message || tr("mirror.answer_send_failed"));
+    if (!res.ok) toastSendFailure(toast, res, tr("mirror.answer_send_failed"));
     setTimeout(() => tickRef.current?.(), 400);
   };
 
@@ -335,7 +336,7 @@ export function useMirrorActions({
       }
     } else if (res.code === "already_started") toast(tr("mirror.queued_already_started"));
     else if (res.code === "not_queued") toast(tr("mirror.queued_gone"));
-    else toast(res.message || tr("mirror.send_failed"));
+    else toastSendFailure(toast, res, tr("mirror.send_failed"));
     setTimeout(() => tickRef.current?.(), 250);
   };
 
@@ -382,7 +383,7 @@ export function useMirrorActions({
     if (!res.ok) {
       statusRef.current = prev;
       setStatus(prev);
-      toast(res.message || tr("mirror.answer_send_failed"));
+      toastSendFailure(toast, res, tr("mirror.answer_send_failed"));
     }
     setSending(false);
     setTimeout(() => tickRef.current?.(), 400);
@@ -407,7 +408,7 @@ export function useMirrorActions({
       // one. The next poll resyncs the real state.
       statusRef.current = prev;
       setStatus(prev);
-      toast(res.message || tr("mirror.answer_send_failed"));
+      toastSendFailure(toast, res, tr("mirror.answer_send_failed"));
     }
     setSending(false);
     setTimeout(() => tickRef.current?.(), 400);

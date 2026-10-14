@@ -1,4 +1,5 @@
 import type { Session } from "../../../types/session.ts";
+import { toastSendFailure } from "../../../lib/authExpiredToast.tsx";
 import type { useToast } from "../../../ui/ToastProvider.tsx";
 import { CarriedBlock } from "../CarriedBlock.tsx";
 import { PLAN_APPROVE_KEYS } from "../planDecision.ts";
@@ -54,7 +55,7 @@ export function MirrorPendingCards({
           session={session}
           agentName={agentName}
           onOpenPlan={openPlan}
-          onError={(m) => toast(m)}
+          onError={(m, code) => toastSendFailure(toast, { message: m, code }, m)}
           onDone={() => setCarried(null)}
           translate={translate}
         />

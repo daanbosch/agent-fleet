@@ -20,7 +20,7 @@ import { useChatStore } from "../chat/store.ts";
 import { chatList } from "../chat/api.ts";
 import { openAssistantDraft } from "../chat/open.ts";
 import { useUIStateStore } from "../../core/store/uiState.ts";
-import { AGENTS, MEMBER_DEFAULT_AGENTS, agentOf } from "../../agents/registry.ts";
+import { AGENTS, MEMBER_DEFAULT_AGENTS, agentOf, loginExpired } from "../../agents/registry.ts";
 import type { ConnectionsStatus } from "../../types/session.ts";
 
 // The flagship builtin assistant (workspace/agent/assistants.go: afAssistantID).
@@ -69,7 +69,7 @@ function useGuideState(): GuideState {
     gitOk: !!(conns?.github?.connected || conns?.bitbucket?.connected),
     // Any kind a tenant may name completes the step, judged by the registry's own launch
     // predicate: a tenant that names Cursor must not leave its members stuck after connecting it.
-    agentOk: MEMBER_DEFAULT_AGENTS.some((k) => AGENTS[k].available({ conns })),
+    agentOk: MEMBER_DEFAULT_AGENTS.some((k) => AGENTS[k].available({ conns }) && !loginExpired(k, conns)),
     conns,
     startWs,
     openStart,

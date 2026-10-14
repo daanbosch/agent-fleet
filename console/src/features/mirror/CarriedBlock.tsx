@@ -36,7 +36,7 @@ export function CarriedBlock({
   agentName: string;
   /** Send/discard was accepted — retract the card and let polling take over. */
   onDone: () => void;
-  onError: (message: string) => void;
+  onError: (message: string, code?: string) => void;
   onOpenPlan?: (plan: string) => void;
   translate?: TranscriptTranslateWiring;
 }) {
@@ -57,7 +57,7 @@ export function CarriedBlock({
     setSending(false);
     // Silence is indistinguishable from success (docs/build/92 §92.3), so always toast a failure.
     if (!r.ok) {
-      onError(r.message || tr("err.send_failed"));
+      onError(r.message || tr("err.send_failed"), r.code);
       return false;
     }
     onDone();
