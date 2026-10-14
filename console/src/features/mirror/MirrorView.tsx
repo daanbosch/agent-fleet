@@ -168,7 +168,7 @@ function MirrorViewBody({
   const modSend = settings.mirrorSend !== "enter";
   const st = useMirrorState({ session, sessionMeta, settings });
   const {
-    turns, pendingSends, applyEchoes, loaded, handoffs, updateHandoff, termState, compactProg, status, bgBusy,
+    turns, pendingSends, applyEchoes, loaded, handoffs, updateHandoff, termState, compactProg, retry, status, bgBusy,
     bgBusyReason, finalizing, busy, tasks, files, queuedPrompts, pendingPeers, queueShown, discardView, alive,
     dirGone, pending, liveText, pendingPlan, pendingPerm, pendingApproval, carried, mode, agentCtx,
     suggestedTitle, titleActing, setManagedSettingsOpen, managedSettings, setForkAtTarget, draft, setDraft,
@@ -562,6 +562,7 @@ function MirrorViewBody({
         isPlan={isPlan}
         termState={termState}
         compactProg={compactProg}
+        retry={retry}
         suggestedTitle={suggestedTitle}
         titleActing={titleActing}
         onOpenTerminal={() => onToggleMirror(false)}

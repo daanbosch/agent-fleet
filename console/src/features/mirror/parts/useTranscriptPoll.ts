@@ -15,6 +15,7 @@ import type { Turn } from "../transcript/types.ts";
 import { isPendingApproval } from "../transcript/types.ts";
 import { parsePendingPeers } from "./PendingPeersNotice.tsx";
 import { echoStore } from "./sendEcho.ts";
+import { parseRetry } from "./retryNote.ts";
 import type { MirrorState } from "./useMirrorState.ts";
 import type { useMirrorScroll } from "./useMirrorScroll.ts";
 import type { useMirrorTts } from "./useMirrorTts.tsx";
@@ -47,7 +48,7 @@ export function useTranscriptPoll({
 }) {
   const {
     setTurns, setStateSession, setPendingSends, pendingSendsRef, applyEchoes, setLoaded, setTermState,
-    setCompactProg, setStatus, setBgBusy, setBgBusyReason, setFinalizing, finalizingRef, wasWorkingRef,
+    setCompactProg, setRetry, setStatus, setBgBusy, setBgBusyReason, setFinalizing, finalizingRef, wasWorkingRef,
     setTasks, setFiles, setQueuedPrompts, setQueuedItems, setDiscards, setDiscardNotices, setPendingPeers,
     queueOpsRef, setAlive, setPending, setPendingText, liveOnRef, setLiveText, setPendingPlan, setPendingPerm,
     setPendingApproval, setCarried, rejectedPlansRef, setMode, lastNonPlanMode, setAgentCtx,
@@ -296,6 +297,7 @@ export function useTranscriptPoll({
                 ? { pct: d.compactProgress.pct, elapsed: d.compactProgress.elapsed }
                 : null,
             );
+            setRetry(parseRetry(d.retry));
             setSuggestedTitle(typeof d.suggestedTitle === "string" ? d.suggestedTitle : "");
             setLoaded(true); // first (and every) successful fetch: drop the loading spinner
           }

@@ -52,6 +52,8 @@ export const mirror = {
     "codex のアップデート確認待ちです。「1. Update now」を選ぶとプロセスが終了しセッションが切れるため、スキップを推奨します（更新はイメージ再ビルドで反映されます）。",
   "mirror.skip_continue": "スキップして続行",
   "mirror.compacting": "コンテキストを圧縮中…",
+  "mirror.retrying": "プロバイダがエラーを返し、エージェントが再試行しています（{n} 回目）: {msg}",
+  "mirror.retry_failed": "プロバイダのエラーは再試行しても直らないため、ターンを停止しました: {msg}",
   // タイトル提案
   "mirror.title_suggestion": "タイトル案: <0>{title}</0>",
   "mirror.adopt": "採用",

@@ -1,5 +1,6 @@
 import { Icon } from "../../../ui/Icon.tsx";
 import { t as tr } from "../../../lib/i18n/index.ts";
+import type { RetryNote } from "./retryNote.ts";
 import { Trans } from "../../../lib/i18n/Trans.tsx";
 
 /**
@@ -11,6 +12,7 @@ export function MirrorBanners({
   isPlan,
   termState,
   compactProg,
+  retry,
   suggestedTitle,
   titleActing,
   onOpenTerminal,
@@ -21,6 +23,7 @@ export function MirrorBanners({
   isPlan: boolean;
   termState: string;
   compactProg: { pct: number; elapsed?: string } | null;
+  retry: RetryNote | null;
   suggestedTitle: string;
   titleActing: boolean;
   onOpenTerminal: () => void;
@@ -72,6 +75,18 @@ export function MirrorBanners({
               <div className="mc-fill" style={{ width: compactProg.pct + "%" }} />
             </div>
           )}
+        </div>
+      )}
+      {retry && (
+        // The agent keeps retrying a provider error (or gave up on one that cannot succeed):
+        // without this the session reads as plain "working" with an empty answer.
+        <div className="mirror-attention" role="status">
+          <Icon name={retry.failed ? "warning" : "loading"} spin={!retry.failed} />
+          <span className="ma-text">
+            {retry.failed
+              ? tr("mirror.retry_failed", { msg: retry.message })
+              : tr("mirror.retrying", { n: retry.attempt, msg: retry.message })}
+          </span>
         </div>
       )}
       {suggestedTitle && (

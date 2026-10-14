@@ -962,3 +962,24 @@ written up at the top of `workspace/agent/internal/agents/opencode/v2form.go`; t
 - **Todos**: the 2.0.28 tool list (read off the provider request: edit glob grep question read shell
   skill subagent webfetch websearch write execute) has no todo tool, and the OpenAPI spec has no todo or
   task route. `@opencode/cli` `latest` is 2.0.28 (the newest 2.x on npm), so `Tasks` stays empty on v2.
+
+### 2026-10-14 — a provider error under retry (#2129)
+
+Measured with loopback stub providers, one status per run (v1 1.19.0, v2 2.0.28):
+
+- **v1** fails at once on 400 / 401 / 402 / 403 / 404 / 413. It retries without end on 429 (a rate
+  limit and `insufficient_quota` alike), 500, 503 and 529: `GET /session/status` and the SSE
+  `session.status` event carry `{"type":"retry","attempt":N,"message":…,"next":<epoch ms>}`, the
+  status flips to `busy` between two attempts, no `message.part.updated` is sent for a failing
+  attempt, and `/message` never returns. Aborting a retrying session returns a completed message with
+  `error: null` and no parts, so the failure text has to be carried by the driver.
+- **v2** reports the retry only as `session.retry.scheduled` (`attempt`, `at`, `error`);
+  `/api/session/active` stays `running`. It fails a 401 / 403 / quota-429 at once
+  (`provider.auth`, `provider.quota`) and gives up on a 5xx after about eleven attempts.
+
+The driver keeps the live retry on the handle (`RetryInfo`, cleared by output, idle and every
+terminal state) and `/transcript` serves it as `retry`; the mirror draws it as a band. A message
+that no retry can fix (region / privacy, quota and billing, bad key; `retry.go`) seen from the
+second attempt on aborts the turn and lands it failed with that message, and the band stays until
+the next input. Anything else keeps retrying: no attempt cap, because a provider that is down for
+ten minutes does recover and a member can press stop.
