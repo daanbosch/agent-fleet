@@ -59,7 +59,6 @@ const bridge = () => {
   // Where the Agent reads slot -> session ids (paths.AgentStateDir/opencode-sid). It does not
   // follow XDG_STATE_HOME, so neither does this.
   const sidDir = process.env.HOME ? join(process.env.HOME, ".local/state/agent-fleet/opencode-sid") : null;
-  const legacyDir = process.env.HOME ? join(process.env.HOME, ".config/agent-fleet/opencode-sid") : null;
   let queue = Promise.resolve();
   // Set when the plugin unloads. Whatever is still in flight (a session lookup, a queued report)
   // must not write the slot or report a state after a reload's new bridge took over.
@@ -99,15 +98,6 @@ const bridge = () => {
     try {
       mkdirSync(staging, { recursive: true });
       writeFileSync(tmp, ocid, { mode: 0o600 });
-      // A record an older plugin left for this slot would be adopted over this one by the Agent's
-      // fallback if it raced the rename below, so it goes first.
-      if (legacyDir) {
-        try {
-          unlinkSync(join(legacyDir, sid));
-        } catch {
-          /* none there */
-        }
-      }
       renameSync(tmp, join(sidDir, sid));
     } catch {
       try {

@@ -20,30 +20,27 @@ func putSid(t *testing.T, path, val string, mtime time.Time) {
 	}
 }
 
-func TestSlotSidsLegacyFallback(t *testing.T) {
+func TestSlotSidsReadsTheNewerRecord(t *testing.T) {
 	now := time.Now()
 	old, newer := now.Add(-time.Hour), now
 	cases := []struct {
-		name         string
-		legacy       string
-		legacyTime   time.Time
-		state        string
-		stateTime    time.Time
-		want         string
-		legacyStays  bool
-		stateAfterwd string
+		name       string
+		legacy     string
+		legacyTime time.Time
+		state      string
+		stateTime  time.Time
+		want       string
 	}{
-		{name: "state missing adopts legacy", legacy: "ses_old", legacyTime: old, want: "ses_old", stateAfterwd: "ses_old"},
-		{name: "newer legacy wins", legacy: "ses_new", legacyTime: newer, state: "ses_stale", stateTime: old, want: "ses_new", stateAfterwd: "ses_new"},
-		{name: "state wins when newer", legacy: "ses_stale", legacyTime: old, state: "ses_new", stateTime: newer, want: "ses_new", legacyStays: true, stateAfterwd: "ses_new"},
-		{name: "state wins on equal mtime", legacy: "ses_a", legacyTime: newer, state: "ses_b", stateTime: newer, want: "ses_b", legacyStays: true, stateAfterwd: "ses_b"},
-		{name: "empty legacy ignored", legacy: "", legacyTime: newer, state: "ses_b", stateTime: old, want: "ses_b", legacyStays: true, stateAfterwd: "ses_b"},
+		{name: "state missing uses legacy", legacy: "ses_old", legacyTime: old, want: "ses_old"},
+		{name: "newer legacy wins", legacy: "ses_new", legacyTime: newer, state: "ses_stale", stateTime: old, want: "ses_new"},
+		{name: "state wins when newer", legacy: "ses_stale", legacyTime: old, state: "ses_new", stateTime: newer, want: "ses_new"},
+		{name: "state wins on equal mtime", legacy: "ses_a", legacyTime: newer, state: "ses_b", stateTime: newer, want: "ses_b"},
+		{name: "empty legacy ignored", legacy: "", legacyTime: newer, state: "ses_b", stateTime: old, want: "ses_b"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
-			sids.lastScan = time.Time{}
-			lp := filepath.Join(legacySidDir(), "slot1")
+			lp := legacySidPath("slot1")
 			putSid(t, lp, c.legacy, c.legacyTime)
 			if c.state != "" {
 				putSid(t, sids.Path("slot1"), c.state, c.stateTime)
@@ -51,20 +48,34 @@ func TestSlotSidsLegacyFallback(t *testing.T) {
 			if got := sids.Read("slot1"); got != c.want {
 				t.Fatalf("Read = %q, want %q", got, c.want)
 			}
-			if _, err := os.Stat(lp); (err == nil) != c.legacyStays {
-				t.Fatalf("legacy file present = %v, want %v", err == nil, c.legacyStays)
+			// Read never touches either file: nothing to race a plugin's write.
+			if b, err := os.ReadFile(lp); err != nil || string(b) != c.legacy {
+				t.Fatalf("legacy file changed by Read: %q, %v", b, err)
 			}
-			if got := sids.SidStore.Read("slot1"); got != c.stateAfterwd {
-				t.Fatalf("state dir holds %q, want %q", got, c.stateAfterwd)
+			if c.state != "" {
+				if got := sids.SidStore.Read("slot1"); got != c.state {
+					t.Fatalf("state file changed by Read: %q", got)
+				}
+			} else if _, err := os.Stat(sids.Path("slot1")); err == nil {
+				t.Fatal("Read created a state file")
 			}
 		})
 	}
 }
 
+// A Write after the legacy record was captured makes the stale legacy file lose by itself.
+func TestSlotSidsWriteOutranksStaleLegacy(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	putSid(t, legacySidPath("slot1"), "ses_legacy", time.Now().Add(-time.Minute))
+	sids.Write("slot1", "ses_current")
+	if got := sids.Read("slot1"); got != "ses_current" {
+		t.Fatalf("Read = %q", got)
+	}
+}
+
 func TestSlotSidsRemoveDropsLegacyToo(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	sids.lastScan = time.Time{}
-	putSid(t, filepath.Join(legacySidDir(), "slot1"), "ses_x", time.Now())
+	putSid(t, legacySidPath("slot1"), "ses_x", time.Now())
 	sids.Remove("slot1")
 	if got := sids.Read("slot1"); got != "" {
 		t.Fatalf("Read after Remove = %q, want none", got)
@@ -77,8 +88,7 @@ func TestSlotSidsRemoveSurvivesUndeletableLegacy(t *testing.T) {
 		t.Skip("permissions do not bind root")
 	}
 	t.Setenv("HOME", t.TempDir())
-	sids.lastScan = time.Time{}
-	lp := filepath.Join(legacySidDir(), "slot1")
+	lp := legacySidPath("slot1")
 	putSid(t, lp, "ses_cleared", time.Now().Add(-time.Minute))
 	sids.Write("slot1", "ses_cleared")
 	if err := os.Chmod(filepath.Dir(lp), 0o500); err != nil {
@@ -86,53 +96,14 @@ func TestSlotSidsRemoveSurvivesUndeletableLegacy(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(filepath.Dir(lp), 0o700) })
 	sids.Remove("slot1")
-	sids.lastScan = time.Time{}
 	if got := sids.Read("slot1"); got != "" {
 		t.Fatalf("Read after Remove = %q, want none", got)
 	}
 	// A later write by an old plugin is newer than the tombstone and counts again.
 	_ = os.Chmod(filepath.Dir(lp), 0o700)
 	putSid(t, lp, "ses_again", time.Now().Add(time.Minute))
-	sids.lastScan = time.Time{}
 	if got := sids.Read("slot1"); got != "ses_again" {
 		t.Fatalf("Read after a fresh legacy write = %q, want ses_again", got)
-	}
-}
-
-// The old record is the only copy until the state write lands.
-func TestSlotSidsKeepsLegacyWhenStateWriteFails(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	sids.lastScan = time.Time{}
-	lp := filepath.Join(legacySidDir(), "slot1")
-	putSid(t, lp, "ses_only", time.Now())
-	staging := filepath.Join(sids.SidStore.Path("x"), "..", ".staging")
-	if err := os.MkdirAll(filepath.Dir(staging), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(staging, nil, 0o600); err != nil { // a file where the staging dir goes
-		t.Fatal(err)
-	}
-	if got := sids.Read("slot1"); got != "" {
-		t.Fatalf("Read = %q with an unwritable state dir", got)
-	}
-	if _, err := os.Stat(lp); err != nil {
-		t.Fatalf("legacy record lost: %v", err)
-	}
-	os.Remove(staging)
-	sids.lastScan = time.Time{}
-	if got := sids.Read("slot1"); got != "ses_only" {
-		t.Fatalf("Read after recovery = %q", got)
-	}
-}
-
-// Polled readers must not re-list the old directory every call.
-func TestSlotSidsScanIsThrottled(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	sids.lastScan = time.Time{}
-	_ = sids.Read("slot1")
-	putSid(t, filepath.Join(legacySidDir(), "slot1"), "ses_late", time.Now())
-	if got := sids.Read("slot1"); got != "" {
-		t.Fatalf("second Read inside the interval looked at the old directory: %q", got)
 	}
 }
 
@@ -143,8 +114,7 @@ func TestSlotSidsRemoveSurvivesUnreadableLegacyDir(t *testing.T) {
 		t.Skip("permissions do not bind root")
 	}
 	t.Setenv("HOME", t.TempDir())
-	sids.lastScan = time.Time{}
-	lp := filepath.Join(legacySidDir(), "slot1")
+	lp := legacySidPath("slot1")
 	putSid(t, lp, "ses_cleared", time.Now().Add(-time.Minute))
 	sids.Write("slot1", "ses_cleared")
 	if err := os.Chmod(filepath.Dir(lp), 0o000); err != nil {
@@ -155,7 +125,6 @@ func TestSlotSidsRemoveSurvivesUnreadableLegacyDir(t *testing.T) {
 	if err := os.Chmod(filepath.Dir(lp), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	sids.lastScan = time.Time{}
 	if got := sids.Read("slot1"); got != "" {
 		t.Fatalf("Read after Remove = %q, want none", got)
 	}

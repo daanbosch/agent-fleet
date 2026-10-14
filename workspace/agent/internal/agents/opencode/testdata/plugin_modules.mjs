@@ -127,6 +127,8 @@ assert.equal(ids.size, 3, "plugin ids must be distinct");
   const stagedLeft = () => readdirSync(join(process.env.HOME, ".local/state/agent-fleet/opencode-sid/.staging"));
   const ev = (type, data) => ({ type, data });
   const h = v2Host();
+  // A record an older plugin left in the old directory: the plugin must neither read, move nor
+  // delete it (the Agent arbitrates by age), however many events it records.
   const legacyRec = join(process.env.HOME, ".config/agent-fleet/opencode-sid", process.env.AF_SESSION_SID);
   mkdirSync(dirname(legacyRec), { recursive: true });
   writeFileSync(legacyRec, "ses_stale_from_old_plugin");
@@ -212,7 +214,7 @@ assert.equal(ids.size, 3, "plugin ids must be distinct");
   await sleep(200);
   assert.deepEqual(states().slice(before), ["session-status working sid-test", "session-status idle sid-test"]);
   assert.equal(ocid(), "ses_v1");
-  assert.equal(existsSync(legacyRec), false, "the old record must go when the slot is published");
+  assert.equal(readFileSync(legacyRec, "utf8"), "ses_stale_from_old_plugin", "the plugin must leave the old directory alone");
   assert.deepEqual(stagedLeft(), [], "no staged file may be left behind");
   assert.equal(statSync(join(process.env.HOME, ".local/state/agent-fleet/opencode-sid", process.env.AF_SESSION_SID)).mode & 0o777, 0o600);
 }
