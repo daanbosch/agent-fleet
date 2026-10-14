@@ -342,6 +342,9 @@ type threadHandle struct {
 	mcpCtx    context.Context
 	mcpCancel context.CancelFunc
 	mcpMgr    *mcpc.Manager
+	// mcpDescribed is the set of MCP tools the model has read the schema of through the
+	// tool_describe bridge tool (mcp_bridge.go).
+	mcpDescribed describedSet
 	// mcpFailures is the per-server backoff/error state syncMCPServers (mcp.go) maintains
 	// across turns: a server present here is known broken as of its own mcpFailure.err, and is
 	// skipped (not retried) until mcpFailure.next. See syncMCPServers' own doc comment for why

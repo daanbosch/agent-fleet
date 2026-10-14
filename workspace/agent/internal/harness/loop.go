@@ -246,7 +246,7 @@ func Run(ctx context.Context, client Client, reg *Registry, rt *Runtime, message
 
 		// The same-name gate (repeat.go) catches what the exact-call gate above cannot:
 		// one tool called turn after turn with arguments that change every time.
-		nameStreak := nameTracker.note(turn.ToolCalls)
+		nameStreak := nameTracker.note(judgedCalls(reg, turn.ToolCalls))
 		nameAction := gate.decideName(nameStreak)
 		if nameAction == repeatAbort {
 			name := turn.ToolCalls[0].Name
@@ -451,11 +451,14 @@ func runOne(ctx context.Context, reg *Registry, rt *Runtime, call ToolCall) (str
 	if !ok {
 		return fmt.Sprintf("error: unknown tool %q", call.Name), nil
 	}
-	if tool.Mutates && rt.Plan {
-		return fmt.Sprintf("error: %s is unavailable in plan mode", call.Name), nil
+	judged := reg.judged(tool, call)
+	if judged.Mutates && rt.Plan {
+		return fmt.Sprintf("error: %s is unavailable in plan mode", judged.Def.Name), nil
 	}
-	if tool.Mutates {
-		if err := approve(ctx, rt, call, tool); err != nil {
+	if judged.Mutates {
+		gateCall := call
+		gateCall.Name = judged.Def.Name
+		if err := approve(ctx, rt, gateCall, judged); err != nil {
 			if isCancellation(err) {
 				return "", err
 			}
@@ -478,4 +481,18 @@ func runOne(ctx context.Context, reg *Registry, rt *Runtime, call ToolCall) (str
 
 func toolResult(call ToolCall, content string) Message {
 	return Message{Role: RoleTool, Content: content, ToolCallID: call.ID}
+}
+
+// judgedCalls is calls with each bridge call (Tool.Target) renamed to the tool it forwards
+// to, so the same-name streak counts the real work: twenty different tools reached through
+// one bridge are not twenty repeats of the bridge's name.
+func judgedCalls(reg *Registry, calls []ToolCall) []ToolCall {
+	out := make([]ToolCall, len(calls))
+	for i, c := range calls {
+		out[i] = c
+		if tool, ok := reg.lookup(c.Name); ok {
+			out[i].Name = reg.judged(tool, c).Def.Name
+		}
+	}
+	return out
 }
