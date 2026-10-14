@@ -117,7 +117,7 @@ func startStubbedV2(t *testing.T) (stub *stubProvider, addr, dir string) {
 	t.Helper()
 	requireOpencode(t)
 	if !strings.HasPrefix(strings.TrimPrefix(opencodeVersion(t), "opencode v"), "2.") {
-		t.Skip("needs opencode 2")
+		skipUnlessV2Required(t, "needs opencode 2")
 	}
 	stub = &stubProvider{}
 	llm := httptest.NewServer(http.HandlerFunc(stub.handler))

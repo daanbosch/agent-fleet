@@ -13,7 +13,7 @@ import (
 func TestOpencodePluginModulesServeBothMajors(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
-		t.Skip("node is needed to load the plugin modules")
+		skipUnlessV2Required(t, "node is needed to load the plugin modules")
 	}
 	bin, home := t.TempDir(), t.TempDir()
 	failPutEnv := filepath.Join(t.TempDir(), "fail-put-env")

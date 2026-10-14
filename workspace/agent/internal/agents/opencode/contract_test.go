@@ -36,13 +36,13 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 )
 
-// requireOpencode skips (or fails under E2E_REQUIRE=1, like e2e/) when the CLI is absent,
+// requireOpencode skips (or fails under E2E_REQUIRE=1 or AF_REQUIRE_OPENCODE2=1) when the CLI is absent,
 // so a dev box without opencode doesn't fail while CI insists on a real run.
 func requireOpencode(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("opencode"); err != nil {
-		if os.Getenv("E2E_REQUIRE") == "1" {
-			t.Fatalf("opencode not on PATH and E2E_REQUIRE=1: %v", err)
+		if os.Getenv("E2E_REQUIRE") == "1" || os.Getenv("AF_REQUIRE_OPENCODE2") == "1" {
+			t.Fatalf("opencode not on PATH and a run was demanded (E2E_REQUIRE / AF_REQUIRE_OPENCODE2): %v", err)
 		}
 		t.Skip("opencode not on PATH — contract test skipped (set E2E_REQUIRE=1 to demand it)")
 	}

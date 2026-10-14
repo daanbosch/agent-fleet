@@ -15,6 +15,10 @@
 #   - pinned: the Dockerfile ARG pin (= the version baked into the image now)
 #   - latest: the version the fleet actually runs
 #
+# A second job (contract-v2) runs the opencode 2 (@opencode/cli) contract tests: no model, no
+# credentials, nothing beyond the npm install. It needs no quota, so unlike the job above it also
+# runs on PRs to develop.
+#
 # Note: no image build is needed (just node+tmux+Go on the runner), so this is
 # independent of e2e.yml and finishes in minutes.
 #
@@ -37,9 +41,10 @@ permissions:
 on:
   # Not run on pushes to develop (billing spread; CONTRIBUTING "Commits & PRs").
   # Contract checks are concentrated on PRs to main (when relevant paths changed)
-  # and the weekly cron.
+  # and the weekly cron. The one exception is contract-v2, which spends nothing and so
+  # also runs on PRs to develop; the job below that spends the Zen quota stays off them.
   pull_request:
-    branches: [main]
+    branches: [develop, main]
     paths:
       - "workspace/agent/internal/agents/opencode/**"
       - "workspace/opencode-plugin/**"
@@ -59,6 +64,7 @@ concurrency:
 
 jobs:
   contract:
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -125,3 +131,66 @@ jobs:
         run: |
           version="$(printf '%s' "$EFFECTIVE" | grep -oE '[0-9]+(\.[0-9]+)+' | head -1 || true)"
           deploy/local/cli-contract-report.sh failure opencode "${version:-unknown}"
+
+  # opencode 2 against its own stub provider (loopback, scripted replies), so it needs neither
+  # credentials nor the Zen service. AF_REQUIRE_OPENCODE2 turns every "binary/tmux/node missing"
+  # skip into a failure, and the SKIP check after the run catches any skip the flag does not
+  # cover, so this job cannot go green on a run of nothing.
+  contract-v2:
+    # Read-only token: nothing here reports, and the npm package and the PR's test code both
+    # run with it. The issue-writing permission above belongs to the reporting steps of `contract`.
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OPENCODE_DISABLE_AUTOUPDATE: "true"
+      AF_REQUIRE_OPENCODE2: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      # The Dockerfile pin is the source of truth. While it is still on 1.x (before the v2
+      # cut-over, #2101) there is no 2.x number to read, so the newest @opencode/cli stands in,
+      # the same line cli-drift-check.sh reports as latest_opencode2. Once the pin moves to 2.x
+      # this job follows it with no edit.
+      - name: resolve the opencode 2 version
+        id: v2
+        run: |
+          set -euo pipefail
+          pin="$(sed -n 's/^ARG OPENCODE_VERSION=//p' workspace/Dockerfile | head -1)"
+          [ -n "$pin" ] || { echo "::error::ARG OPENCODE_VERSION is missing from workspace/Dockerfile"; exit 1; }
+          case "${pin%%.*}" in
+            [2-9]|[1-9][0-9]*) version="$pin" ;;
+            *) version="$(npm view @opencode/cli version)" ;;
+          esac
+          case "$version" in 2.*) ;; *) echo "::error::not an opencode 2 version: '$version'"; exit 1 ;; esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/setup-agent-cli
+        id: cli
+        with:
+          agent: opencode
+          version: ${{ steps.v2.outputs.version }}
+
+      # The tests build their own isolated HOME / XDG roots (envWithHome), so the runner's
+      # home is never read. Selection is by name: a new TestContractTerminalForm*, V2* or
+      # Shared* test joins automatically, and the -list check below fails when any one of the
+      # tests that exist today stops matching (a rename would otherwise drop it silently).
+      - name: opencode 2 contract tests
+        working-directory: workspace/agent
+        run: |
+          set -u
+          run='^(TestContract(ServeAPI|V2|Shared|TerminalForm)|TestOpencodePluginModules)'
+          go test -tags contract -list "$run" ./internal/agents/opencode/ > "$RUNNER_TEMP/list.txt"
+          for name in TestContractServeAPI TestContractV2Form TestContractV2State \
+                      TestContractShared TestContractTerminalForm TestOpencodePluginModules; do
+            grep -q "^$name" "$RUNNER_TEMP/list.txt" || { echo "::error::no test named $name* is selected"; exit 1; }
+          done
+          rc=0
+          go test -p 2 -tags contract -run "$run" -v -count=1 -timeout 12m ./internal/agents/opencode/ > "$RUNNER_TEMP/v2.log" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/v2.log"
+          [ "$rc" -eq 0 ] || exit "$rc"
+          if grep -q -e '--- SKIP' "$RUNNER_TEMP/v2.log"; then
+            echo "::error::a opencode 2 contract test skipped; a skip must not read as a pass"
+            exit 1
+          fi
