@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -674,5 +675,47 @@ func TestBundleImportIncompleteSearchFailsClosedOnRemote(t *testing.T) {
 	// An id match does not depend on the search having seen everything... when the search saw it.
 	if sc := bundleScopeOf(pv, e.local.ID); sc != nil && sc.Target != nil && sc.Match != "id" {
 		t.Fatalf("id scope = %+v", sc)
+	}
+}
+
+// The byte budget counts every file, not every distinct blob: a hundred names for one blob are a
+// hundred files to decode and hold. Project records are held to a budget as well.
+func TestBundleImportBudgetCountsAliasesOfOneBlob(t *testing.T) {
+	e := newBundleEnv(t)
+	one := bundleMemory("a", "alias", strings.Repeat("x", 80<<10), 1, false)
+	files := map[string]string{}
+	for i := 0; i < 100; i++ {
+		files["af/user/alias-"+strconv.Itoa(i)+".md"] = one
+	}
+	id := e.take(forgedBundle(t, files))
+	old := agentMemBundleMaxBytes
+	agentMemBundleMaxBytes = int64(len(one)) + 10
+	defer func() { agentMemBundleMaxBytes = old }()
+	pv := e.preview(id)
+	sc := bundleScopeOf(pv, "user")
+	if sc.Counts[bundleStatusNew] != 1 || sc.Counts[bundleStatusInvalid] != 99 || !pv.Truncated {
+		t.Fatalf("counts = %v truncated=%v: aliases of one blob got past the byte budget", sc.Counts, pv.Truncated)
+	}
+	for _, it := range sc.Items {
+		if it.Status == bundleStatusInvalid && it.Reason != "over_budget" {
+			t.Fatalf("item = %+v", it)
+		}
+	}
+	if len(pv.entries["user"]) != 1 {
+		t.Fatalf("%d converted entries are held", len(pv.entries["user"]))
+	}
+
+	// Project records: beyond the budget a record is not read, so only an id match could map it.
+	agentMemBundleMaxBytes = old
+	oldInfo := agentMemBundleInfoBudget
+	agentMemBundleInfoBudget = 1
+	defer func() { agentMemBundleInfoBudget = oldInfo }()
+	src := "foreign-111111111111"
+	id2 := e.take(forgedBundle(t, map[string]string{
+		"af/projects/" + src + "/project.json": bundleProjectJSON(src, "demo", bundleRemote),
+		"af/projects/" + src + "/one.md":       bundleMemory("one", "one", "one body", 1, false),
+	}))
+	if sc := bundleScopeOf(e.preview(id2), src); sc.Target != nil || sc.Remote != "" {
+		t.Fatalf("a project record past the budget was read: %+v", sc)
 	}
 }

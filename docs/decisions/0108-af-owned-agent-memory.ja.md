@@ -641,8 +641,8 @@ Agent memory に戻し、CP は `memory.entry.save` として監査する。印�
 
 - **始まり。** バンドルは既存の `POST /agents/memory/import`（`refs/imports/<id>/*`）が取り込み、その apply は今も AF のメモリを
   書かない。`GET /agents/memory/af-import/preview?importId=` がその系譜の先頭の `af/` を読み（ストリームで読む `git cat-file --batch` 1 回、履歴は
-  たどらない。要求するのは小さな project.json と、取り込む対象のプロジェクトのメモリファイルだけで、上限を超える blob は求めず、同じ blob は 1 回、
-  合計 64 MiB まで）、`POST /agents/memory/af-import` が公開する。POST は member-origin マーク（[0113](0113-member-origin-mark.ja.md)）つきの
+  たどらない。要求するのは小さな project.json と、取り込む対象のプロジェクトのメモリファイルだけで、上限を超える blob は求めず、同じ blob は git から 1 回だけ読む。64 MiB の予算はファイルごとの大きさで数えるので、
+  1 つの blob への多数の別名は予算をすり抜けられず、プロジェクトの記録は合計 4 MiB まで）、`POST /agents/memory/af-import` が公開する。POST は member-origin マーク（[0113](0113-member-origin-mark.ja.md)）つきの
   要求にだけ応え、`memory.af_import`（取り込み ID のみ）として監査され、MCP ツールはない。tar.gz は読まない：汎用の tar 取り込みは
   コミットする前に `af/` を落とす。
 - **対応づけ。** バンドルのプロジェクトは、識別子が同じ生きたローカルのプロジェクト（`~/repos` の作業コピー）に対応づける。違う場合

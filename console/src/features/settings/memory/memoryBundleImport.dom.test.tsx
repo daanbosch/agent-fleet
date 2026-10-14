@@ -19,6 +19,7 @@ vi.mock("../../../core/api/client.ts", async (importActual) => ({
 import { BundleAfPanel, BUNDLE_BATCH } from "./memoryBundleImport.tsx";
 import { ToastProvider } from "../../../ui/ToastProvider.tsx";
 import { t } from "../../../lib/i18n/index.ts";
+import { useTenantStore } from "../../../core/store/tenant.ts";
 
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
@@ -45,6 +46,7 @@ const target = { id: "demo-1", display: "demo", root: "/r/demo", vcs: "git" };
 
 beforeEach(() => {
   state.tenant = "acme";
+  useTenantStore.setState({ tenant: "acme", whoami: { user: "u1", scheduler_enabled: false } as never });
   apiJSON.mockResolvedValue({ results: [] });
 });
 afterEach(() => {
@@ -177,17 +179,56 @@ describe("an apply that outlives its panel", () => {
     expect(btn?.hasAttribute("disabled")).toBe(false);
   });
 
-  it("does not send the next batch under another tenant", async () => {
+  // What the Console does when the tenant changes: the client's tenant and the store move together.
+  const switchTenant = async (slug: string) => {
+    state.tenant = slug;
+    await act(async () => useTenantStore.setState({ tenant: slug }));
+  };
+
+  it("does not send the next batch under another tenant, and the screen recovers for the new one", async () => {
     const n = many();
     const changed = vi.fn();
     await mount(changed);
     const release = held();
     await press(n);
-    state.tenant = "globex";
+    expect(host!.textContent).toContain(t("mem.ci_progress", { done: 0, total: n }));
+    await switchTenant("globex");
     release();
     await flush();
     expect(apiJSON).toHaveBeenCalledTimes(1);
     expect(changed).not.toHaveBeenCalled();
+    // The old tenant's progress is gone and the preview was read again for the new one.
+    expect(host!.textContent).not.toContain(t("mem.ci_progress", { done: 0, total: n }));
+    const btn = Array.from(host!.querySelectorAll("button")).find((b) => b.textContent === t("mem.bi_apply", { n }));
+    expect(btn?.hasAttribute("disabled")).toBe(false);
+    expect(api.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("never shows or sends a preview that was read for the previous owner", async () => {
+    const mk = (name: string) => ({
+      importId: "20261014T093000Z",
+      hasAF: true,
+      scopes: [{ source: "src-1", display: "demo", target, match: "id", counts: { new: 1 }, items: [item(name, "new")] }],
+    });
+    let releaseOld: (v: unknown) => void = () => {};
+    api.mockImplementationOnce(() => new Promise((r) => (releaseOld = r)));
+    api.mockResolvedValue(mk("new-owner"));
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => {
+      root!.render(view("20261014T093000Z", () => {}));
+    });
+    await switchTenant("globex");
+    await flush();
+    releaseOld(mk("old-owner")); // the slow read for the first tenant lands late
+    await flush();
+    expect(host.textContent).toContain("new-owner");
+    expect(host.textContent).not.toContain("old-owner");
+    const btn = Array.from(host.querySelectorAll("button")).find((b) => b.textContent === t("mem.bi_apply", { n: 1 }));
+    await act(async () => btn!.click());
+    await flush();
+    expect(apiJSON.mock.calls[0][2].items.map((i: { name: string }) => i.name)).toEqual(["new-owner"]);
   });
 
   it("is not offered while the surrounding import is busy", async () => {

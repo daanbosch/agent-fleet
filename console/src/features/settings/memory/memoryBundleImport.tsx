@@ -41,7 +41,12 @@ export function BundleAfPanel({
 }) {
   const tr = useT();
   const toast = useToast();
-  const [preview, setPreview] = useState<BundlePreview | null>(null);
+  // Who the screen belongs to, as the Console holds it now: a change of tenant or user discards
+  // the preview, the progress and any run in flight, and is read again for the new owner.
+  const ownerKey = useTenantStore((s) => s.tenant) + "\u0000" + useTenantStore((s) => s.whoami?.user ?? "");
+  const [shown, setShown] = useState<{ owner: string; preview: BundlePreview } | null>(null);
+  // The preview counts only for the owner it was read under, whatever arrives late.
+  const preview = shown && shown.owner === ownerKey ? shown.preview : null;
   const [loadErr, setLoadErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
@@ -51,13 +56,13 @@ export function BundleAfPanel({
   // a state change or a refresh of someone else's list.
   const gen = useRef(0);
   useEffect(() => {
-    setPreview(null);
+    setShown(null);
     setProgress(null);
     setBusy(false);
     return () => {
       gen.current++;
     };
-  }, [importId]);
+  }, [importId, ownerKey]);
 
   const load = useCallback(
     async (signal: AbortSignal) => {
@@ -65,12 +70,12 @@ export function BundleAfPanel({
       if (signal.aborted) return true;
       if (isTransientErr(res)) return false;
       setLoadErr(res?.error ? errText(res.error) : "");
-      setPreview(res?.error ? null : (res as BundlePreview));
+      setShown(res?.error ? null : { owner: ownerKey, preview: res as BundlePreview });
       return true;
     },
-    [importId],
+    [importId, ownerKey],
   );
-  useRetryLoad(load, [importId, again]);
+  useRetryLoad(load, [importId, again, ownerKey]);
 
   if (loadErr) return <p className="mem-warn">{loadErr}</p>;
   if (!preview || !preview.hasAF) return null;
@@ -85,6 +90,7 @@ export function BundleAfPanel({
   );
 
   const run = async () => {
+    if (!preview) return;
     const mine = ++gen.current;
     const owner = ownerNow();
     const live = () => gen.current === mine && ownerNow() === owner;

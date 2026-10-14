@@ -44,9 +44,14 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin"
 )
 
-// agentMemBundleMaxBytes bounds the memory text one evaluation reads from a bundle, counting each
-// distinct blob once; a variable so a test can lower it.
-var agentMemBundleMaxBytes int64 = 64 << 20
+// agentMemBundleMaxBytes bounds the memory text one evaluation takes on, counting every file by
+// its size: two names for one blob are two files to decode, hold and scan, so the limit is on the
+// work and the memory kept, not on the bytes read from git. agentMemBundleInfoBudget bounds the
+// project records read in all. Variables so a test can lower them.
+var (
+	agentMemBundleMaxBytes   int64 = 64 << 20
+	agentMemBundleInfoBudget int64 = 4 << 20
+)
 
 const (
 	// agentMemBundleMaxFiles bounds what one preview evaluates; a bundle with more is cut and says so.
@@ -473,8 +478,10 @@ func agentMemBundleBuild(importID string, live map[string]*agentMemProject, comp
 
 	// Each project's record, to match it.
 	var infoShas []string
+	var infoBytes int64
 	for _, id := range ids {
-		if i, ok := infos[id]; ok && i.size <= agentMemBundleInfoMax {
+		if i, ok := infos[id]; ok && i.size <= agentMemBundleInfoMax && infoBytes+i.size <= agentMemBundleInfoBudget {
+			infoBytes += i.size
 			infoShas = append(infoShas, i.sha)
 		}
 	}
@@ -524,14 +531,16 @@ func agentMemBundleBuild(importID string, live map[string]*agentMemProject, comp
 			switch {
 			case f.size > agentMemMaxFile:
 				byScope[id][i].skip = "too_large"
-			case seen[f.sha]:
 			case budget+f.size > agentMemBundleMaxBytes:
 				byScope[id][i].skip = "over_budget"
 				pv.Truncated = true
 			default:
-				seen[f.sha] = true
+				// Counted per file, not per distinct blob: each name is decoded and held.
 				budget += f.size
-				shas = append(shas, f.sha)
+				if !seen[f.sha] {
+					seen[f.sha] = true
+					shas = append(shas, f.sha)
+				}
 			}
 		}
 	}
@@ -558,7 +567,11 @@ func agentMemBundleBuild(importID string, live map[string]*agentMemProject, comp
 		}
 		pv.byKey[id], pv.entries[id] = map[string]*agentMemBundleItem{}, map[string]*agentMemImportItem{}
 		for _, f := range byScope[id] {
-			it, conv, withheld := agentMemBundleEvaluate(blobs[f.sha], f, importID, pl.scope, pl.rel, history)
+			raw := blobs[f.sha]
+			if f.skip != "" {
+				raw = nil // not taken on, whatever another name of the same blob made us read
+			}
+			it, conv, withheld := agentMemBundleEvaluate(raw, f, importID, pl.scope, pl.rel, history)
 			if withheld {
 				sc.Withheld++
 				continue

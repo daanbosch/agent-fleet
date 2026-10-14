@@ -731,7 +731,8 @@ It does not touch the generic paths, which keep skipping `af/`.
 - **Where it starts.** The bundle is taken in by the existing `POST /agents/memory/import`
   (`refs/imports/<id>/*`), whose apply still writes no AF memory. `GET /agents/memory/af-import/preview?importId=`
   reads `af/` at the head of that lineage (one streamed `git cat-file --batch`, no history walk; only the small project.json files and the memory files
-  of projects that will be imported are requested, never a blob over the limit, each distinct blob once, 64 MiB in all) and
+  of projects that will be imported are requested, never a blob over the limit, each distinct blob once from git; the 64 MiB budget counts every file by its size, so many names for one blob
+  cannot get past it, and the project records are held to 4 MiB in all) and
   `POST /agents/memory/af-import` publishes. The POST answers only the member-origin mark
   ([0113](0113-member-origin-mark.md)), is audited as `memory.af_import` (import id only), and has no MCP tool.
   tar.gz is not read: the generic tar import drops `af/` before it is committed.
