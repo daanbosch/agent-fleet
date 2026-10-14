@@ -226,6 +226,20 @@ finish answering and cuts short any that do not, so press it when nothing is mid
 
 - **Show thinking expanded**: the session view's "Thinking" block starts expanded. Off by default (collapsed; click the heading to read it). Display only: it doesn't change how the agent works (independent of the same setting on claude / codex).
 
+### When the provider returns an error
+
+opencode keeps retrying a provider error such as a rate limit or an overloaded service. While it
+does, the session view shows a band with the attempt and the provider's message ("The provider
+returned an error and the agent is retrying (attempt N): …") instead of a plain working state. It
+goes away when the answer starts or the turn ends, and you can stop the turn at any time.
+
+Errors that no retry can fix (a region or privacy setting, an exhausted quota or billing balance,
+a bad API key) end the turn as **failed** with the provider's message, and the band then reads
+"The provider returned an error that retrying cannot fix, so the turn was stopped: …" until your
+next input. For a "requires Global regions" message, change the privacy / region setting of the
+provider account (for opencode Go, the workspace's Privacy settings on opencode.ai); for quota or
+billing, top up the account; for a key, replace it on the agent's card ([11](11-troubleshooting.md)).
+
 ## GitHub Copilot
 
 **copilot** (GitHub Copilot CLI) has no separate sign-in. **Connecting GitHub as a git
