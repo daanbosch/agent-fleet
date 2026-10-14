@@ -20,6 +20,7 @@ package opencode
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
 )
@@ -72,8 +73,10 @@ func (h *threadHandle) noteRetry(attempt int, msg string, nextMs int64) {
 	h.mu.Lock()
 	// Only a turn whose /message this handle has sent is ours: while the pump waits behind
 	// another client's turn (an attached TUI's) a retry belongs to that client. A stop in flight
-	// has already settled the turn as cancelled.
-	if !h.running || !h.turnSent || h.state == agents.TurnInterrupting {
+	// has already settled the turn as cancelled. Only a turn still running is accepted: a late
+	// event after the terminal state would raise a failure on a finished turn and abort an idle
+	// session (and could register an abort the pump has already stopped waiting for).
+	if !h.running || !h.turnSent || (h.state != agents.TurnRunning && h.state != agents.TurnQueued) {
 		h.mu.Unlock()
 		return
 	}
@@ -97,22 +100,53 @@ func (h *threadHandle) noteRetry(attempt int, msg string, nextMs int64) {
 	h.retryAbort = done
 	h.mu.Unlock()
 	go func() {
-		defer close(done)
-		abortSession(addr, ses, dir)
+		ok := confirmedAbort(addr, ses, dir)
+		h.mu.Lock()
+		h.retryAbortOK = ok
+		h.mu.Unlock()
+		close(done)
 	}()
+}
+
+// retryAbortBackoff separates the attempts to get the automatic abort acknowledged.
+var retryAbortBackoff = 500 * time.Millisecond
+
+// confirmedAbort sends the abort until the daemon answers 2xx, at most three times. A transport
+// error or a timeout proves nothing: the daemon may still execute a request it received, which
+// is why the caller treats "not confirmed" as unknown rather than as done.
+func confirmedAbort(addr, ses, dir string) bool {
+	for i := 0; i < 3; i++ {
+		if i > 0 {
+			time.Sleep(retryAbortBackoff)
+		}
+		res, err := serveClient.Post(abortURL(addr, ses, dir), "application/json", strings.NewReader("{}"))
+		if err != nil {
+			continue
+		}
+		res.Body.Close()
+		if res.StatusCode/100 == 2 {
+			return true
+		}
+	}
+	return false
 }
 
 // awaitRetryAbort blocks until the abort noteRetry sent has been answered. The pump calls it
 // before the next input goes out: an abort still in flight would land on that input's turn
-// (same session id) and cut it short with no trace. Bounded by serveClient's timeout.
-func (h *threadHandle) awaitRetryAbort() {
+// (same session id) and cut it short with no trace. It reports whether the daemon acknowledged
+// the abort (true when none was sent); false means unknown, and the pump must not send on.
+func (h *threadHandle) awaitRetryAbort() bool {
 	h.mu.Lock()
 	done := h.retryAbort
 	h.retryAbort = nil
 	h.mu.Unlock()
-	if done != nil {
-		<-done
+	if done == nil {
+		return true
 	}
+	<-done
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.retryAbortOK
 }
 
 // clearRetry drops the live retry note: the retried call produced output, or the turn ended.

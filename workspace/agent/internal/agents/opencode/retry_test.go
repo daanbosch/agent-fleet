@@ -329,3 +329,76 @@ func TestDelayedRetryAbortDoesNotReachTheNextTurn(t *testing.T) {
 	endTurn(m)
 	waitState(t, h, agents.TurnCompleted)
 }
+
+// An abort the daemon never acknowledged may still run later: nothing more is sent on that
+// session until a resume, and the queued input is kept.
+func TestUnacknowledgedRetryAbortHoldsTheQueue(t *testing.T) {
+	retryAbortBackoff = 10 * time.Millisecond
+	t.Cleanup(func() { retryAbortBackoff = 500 * time.Millisecond })
+	m, srv := newMockServe(t)
+	h := newTestHandle(t, srv)
+	registerTestHandle(t, h)
+	startBlocking(t, m, h)
+	if err := h.Send(memberInput("next", "msg_next")); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.failAborts = 3
+	m.mu.Unlock()
+	handleServeEvent(retryStatus(2, regionMsg))
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		m.mu.Lock()
+		left := m.failAborts
+		m.mu.Unlock()
+		h.mu.Lock()
+		done := h.retryAbort
+		h.mu.Unlock()
+		if left == 0 && done != nil {
+			select {
+			case <-done:
+			default:
+				continue
+			}
+			break
+		}
+	}
+	if _, err := h.Interrupt(agents.InterruptOpts{}); err != nil { // ends the blocked turn
+		t.Fatal(err)
+	}
+	waitPumpIdle(t, h)
+	time.Sleep(200 * time.Millisecond)
+	if n := len(sentTurns(m)); n != 1 {
+		t.Fatalf("turns sent = %d, want 1: the next input must wait for a resume", n)
+	}
+	if got := h.currentState(); got != agents.TurnUnknown {
+		t.Fatalf("state = %s, want unknown", got)
+	}
+	h.mu.Lock()
+	queued := len(h.tq().Items())
+	h.mu.Unlock()
+	if queued == 0 {
+		t.Fatal("the queued input was dropped")
+	}
+}
+
+// A retry event arriving after the turn settled neither raises a failure nor aborts.
+func TestRetryAfterTheTurnSettledIsIgnored(t *testing.T) {
+	for _, st := range []agents.TurnState{agents.TurnCompleted, agents.TurnFailed, agents.TurnCancelled, agents.TurnUnknown} {
+		m, srv := newMockServe(t)
+		h := newTestHandle(t, srv)
+		registerTestHandle(t, h)
+		h.mu.Lock()
+		h.running, h.turnSent, h.state = true, true, st
+		h.mu.Unlock()
+		handleServeEvent(retryStatus(2, regionMsg))
+		m.mu.Lock()
+		aborts := m.aborts
+		m.mu.Unlock()
+		if got := enriched(h); got != nil || aborts != 0 {
+			t.Fatalf("state %s: Retry=%+v aborts=%d, want nothing", st, got, aborts)
+		}
+		h.mu.Lock()
+		h.running, h.turnSent = false, false
+		h.mu.Unlock()
+	}
+}

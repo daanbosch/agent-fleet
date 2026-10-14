@@ -416,10 +416,11 @@ type threadHandle struct {
 	// every terminal turn state and by teardown. retryFailed is the retry that ended the last
 	// turn, kept for the mirror until the next input is committed; retryStop is its failure
 	// text, which runTurn consumes.
-	retry       *agents.RetryInfo
-	retryFailed *agents.RetryInfo
-	retryStop   string
-	retryAbort  chan struct{} // closed when the abort noteRetry sent has been answered
+	retry        *agents.RetryInfo
+	retryFailed  *agents.RetryInfo
+	retryStop    string
+	retryAbort   chan struct{} // closed when the abort noteRetry sent has been answered or given up on
+	retryAbortOK bool          // whether the daemon acknowledged it
 	// turnSent: this handle's own /message is out (set by runTurn, cleared when the pump
 	// finishes the input). running alone is also true while the pump waits behind another
 	// client's turn, which a retry status must never be attributed to.
@@ -640,7 +641,12 @@ func (h *threadHandle) pump() {
 		} else {
 			h.setState(agents.TurnCancelled) // stopped before it was sent: it never becomes a turn
 		}
-		h.awaitRetryAbort()
+		if !h.awaitRetryAbort() {
+			// The abort may still be executed later and would cut the next input's turn short:
+			// send nothing more until a resume re-reads the session (queued inputs stay queued).
+			log.Printf("opencode managed: retry abort not acknowledged name=%s: holding the queue", h.name)
+			h.runtimeLost()
+		}
 
 		h.mu.Lock()
 		h.tq().Settle(t)

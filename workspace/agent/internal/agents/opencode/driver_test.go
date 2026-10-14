@@ -141,6 +141,8 @@ type mockServe struct {
 	aborts        int
 	// holdFirstAbort, when set, parks the first POST /abort until it is closed (it is consumed by that call).
 	holdFirstAbort chan struct{}
+	// failAborts makes the next N POST /abort answer 500 without releasing the turn.
+	failAborts int
 	// turnBody overrides the assistant message the blocking /message call answers with.
 	// opencode reports a provider-side failure INSIDE a 200 response (errors.go), so a
 	// failing turn is simulated by the body, not by the status code.
@@ -211,6 +213,12 @@ func newMockServe(t *testing.T) (*mockServe, *httptest.Server) {
 	})
 	mux.HandleFunc("POST /session/ses_test/abort", func(w http.ResponseWriter, r *http.Request) {
 		m.mu.Lock()
+		if m.failAborts > 0 {
+			m.failAborts--
+			m.mu.Unlock()
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
 		hold := m.holdFirstAbort
 		m.holdFirstAbort = nil
 		m.mu.Unlock()
