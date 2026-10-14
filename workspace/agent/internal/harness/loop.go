@@ -246,10 +246,11 @@ func Run(ctx context.Context, client Client, reg *Registry, rt *Runtime, message
 
 		// The same-name gate (repeat.go) catches what the exact-call gate above cannot:
 		// one tool called turn after turn with arguments that change every time.
-		nameStreak := nameTracker.note(judgedCalls(reg, turn.ToolCalls))
+		judged := judgedCalls(reg, turn.ToolCalls)
+		nameStreak := nameTracker.note(judged)
 		nameAction := gate.decideName(nameStreak)
 		if nameAction == repeatAbort {
-			name := turn.ToolCalls[0].Name
+			name := judged[0].Name
 			for _, call := range turn.ToolCalls {
 				full = append(full, toolResult(call, repeatNameAbortToolMessage(name, nameStreak)))
 			}
@@ -260,7 +261,7 @@ func Run(ctx context.Context, client Client, reg *Registry, rt *Runtime, message
 		var notice string
 		if nameAction == repeatWarn {
 			repeatNameWarnings++
-			notice = repeatNameWarnNotice(turn.ToolCalls[0].Name, nameStreak)
+			notice = repeatNameWarnNotice(judged[0].Name, nameStreak)
 		}
 		results, err := runToolCalls(ctx, reg, rt, turn.ToolCalls, decisions, notice)
 		if err != nil {

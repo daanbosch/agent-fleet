@@ -10,6 +10,8 @@ package lcpp
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -61,27 +63,43 @@ func mcpDeferred(defs []harness.ToolDef) bool {
 	return size > mcpDeferMinBytes
 }
 
-// describedSet remembers which MCP tools the model has read the schema of. tool_call refuses
-// a tool not in it: a call written without its schema is a guess. Lives on the session handle,
-// so it spans turns; a restarted session starts empty and the model is told to describe again.
+// describedSet remembers, per MCP tool, a fingerprint of the definition (description and
+// schema) the model was shown by tool_describe. tool_call refuses a tool never described, and a
+// tool whose definition has changed since (server edit, reconnect, tools/list_changed): a call
+// written against a stale schema is a guess. Lives on the session handle, so it spans turns; a
+// restarted session starts empty and the model is told to describe again.
 type describedSet struct {
 	mu sync.Mutex
-	m  map[string]bool
+	m  map[string]string
 }
 
-func (s *describedSet) add(name string) {
+func defFingerprint(d harness.ToolDef) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%d:%s\n%d:%s", len(d.Description), d.Description, len(d.Parameters), d.Parameters)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (s *describedSet) add(d harness.ToolDef) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.m == nil {
-		s.m = map[string]bool{}
+		s.m = map[string]string{}
 	}
-	s.m[name] = true
+	s.m[d.Name] = defFingerprint(d)
 }
 
-func (s *describedSet) has(name string) bool {
+// state is "" (current), "never" or "stale".
+func (s *describedSet) state(d harness.ToolDef) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.m[name]
+	fp, ok := s.m[d.Name]
+	switch {
+	case !ok:
+		return "never"
+	case fp != defFingerprint(d):
+		return "stale"
+	}
+	return ""
 }
 
 // bridgeTools returns the three bridge tools over defs (this turn's MCP tool snapshot).
@@ -132,6 +150,18 @@ type bridgeCallArgs struct {
 	Arguments json.RawMessage `json:"arguments"`
 }
 
+// current is the tool's definition as the Manager holds it right now, which can be newer than
+// the turn-start snapshot in byName (tools/list_changed arrives mid-turn). ok=false when the
+// tool is gone.
+func (b *mcpBridge) current(name string) (harness.ToolDef, bool) {
+	for _, d := range b.mgr.ToolDefs() {
+		if d.Name == name {
+			return d, true
+		}
+	}
+	return harness.ToolDef{}, false
+}
+
 func (b *mcpBridge) runSearch(_ context.Context, _ *harness.Runtime, argsJSON string) (string, error) {
 	var a struct {
 		Query string `json:"query"`
@@ -176,11 +206,11 @@ func (b *mcpBridge) runDescribe(_ context.Context, _ *harness.Runtime, argsJSON 
 	if err := decodeBridgeArgs(argsJSON, &a); err != nil {
 		return "", err
 	}
-	d, ok := b.byName[a.Name]
+	d, ok := b.current(a.Name)
 	if !ok {
 		return "", fmt.Errorf("unknown tool %q: use tool_search to find the exact name", a.Name)
 	}
-	b.described.add(d.Name)
+	b.described.add(d)
 	schema := d.Parameters
 	if len(schema) == 0 {
 		schema = json.RawMessage(`{"type":"object"}`)
@@ -216,16 +246,22 @@ func (b *mcpBridge) runCall(ctx context.Context, _ *harness.Runtime, argsJSON st
 	if err := decodeBridgeArgs(argsJSON, &a); err != nil {
 		return "", err
 	}
-	def, ok := b.byName[a.Name]
+	def, ok := b.current(a.Name)
 	if !ok {
 		return "", fmt.Errorf("unknown tool %q: use tool_search to find the exact name", a.Name)
 	}
-	if !b.described.has(def.Name) {
+	switch b.described.state(def) {
+	case "never":
 		return "", fmt.Errorf("%s has not been described yet: call tool_describe with this name first, then tool_call", def.Name)
+	case "stale":
+		return "", fmt.Errorf("%s changed since you described it: call tool_describe again to read the current schema, then tool_call", def.Name)
 	}
 	args := bytes.TrimSpace(a.Arguments)
 	if len(args) == 0 || bytes.Equal(args, []byte("null")) {
 		args = []byte("{}")
+	}
+	if args[0] != '{' {
+		return "", fmt.Errorf("arguments for %s must be a JSON object", def.Name)
 	}
 	if err := validateMCPArgs(def.Parameters, args); err != nil {
 		return "", fmt.Errorf("arguments for %s do not match its schema: %w", def.Name, err)

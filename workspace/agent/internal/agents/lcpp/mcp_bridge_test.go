@@ -174,8 +174,11 @@ func TestMCPBridgeCallRefusals(t *testing.T) {
 		call("c6", "tool_call", map[string]any{"name": echo, "arguments": map[string]any{"msg": 5}}),
 		// malformed body
 		harness.ToolCall{ID: "c7", Name: "tool_call", Arguments: `{"name":`},
+		// arguments must be an object, whatever the schema says
+		call("c8", "tool_call", map[string]any{"name": echo, "arguments": []any{}}),
+		call("c9", "tool_call", map[string]any{"name": echo, "arguments": "x"}),
 	)
-	want := []string{"has not been described yet", "unknown tool", "unknown tool", `"input_schema"`, "do not match its schema", "do not match its schema", "invalid arguments"}
+	want := []string{"has not been described yet", "unknown tool", "unknown tool", `"input_schema"`, "do not match its schema", "do not match its schema", "invalid arguments", "must be a JSON object", "must be a JSON object"}
 	if len(results) != len(want) {
 		t.Fatalf("results = %q, want %d", results, len(want))
 	}
@@ -238,5 +241,29 @@ func TestMCPDeferredShrinksRequest(t *testing.T) {
 	}
 	if deferred*10 > direct {
 		t.Fatalf("bridge costs %d bytes against %d direct: expected at least a 10x saving", deferred, direct)
+	}
+}
+
+// A definition that changed after tool_describe (tools/list_changed, a reconnect) must be
+// described again; an unchanged one stays valid.
+func TestDescribedSetDetectsChangedDefinition(t *testing.T) {
+	var s describedSet
+	d := harness.ToolDef{Name: "mcp__fx__echo", Description: "echo", Parameters: json.RawMessage(`{"type":"object"}`)}
+	if got := s.state(d); got != "never" {
+		t.Fatalf("before describe = %q, want never", got)
+	}
+	s.add(d)
+	if got := s.state(d); got != "" {
+		t.Fatalf("after describe = %q, want current", got)
+	}
+	changed := d
+	changed.Parameters = json.RawMessage(`{"type":"object","required":["msg"]}`)
+	if got := s.state(changed); got != "stale" {
+		t.Fatalf("new schema = %q, want stale", got)
+	}
+	changed = d
+	changed.Description = "echo, now louder"
+	if got := s.state(changed); got != "stale" {
+		t.Fatalf("new description = %q, want stale", got)
 	}
 }

@@ -103,3 +103,16 @@ func TestSameNameStreakCountsBridgeTargets(t *testing.T) {
 		t.Fatalf("streak = %d, want 1: alternating targets are not one tool repeated", last)
 	}
 }
+
+func TestNameStreakAbortNamesTheTargetNotTheBridge(t *testing.T) {
+	var ran atomic.Bool
+	var turns []Turn
+	for i := 0; i < 5; i++ {
+		turns = append(turns, Turn{ToolCalls: []ToolCall{{ID: "x", Name: "bridge", Arguments: `{"name":"real","n":` + string(rune('0'+i)) + `}`}}})
+	}
+	rt := &Runtime{Cwd: t.TempDir(), Approve: AutoApprove, RepeatNameWarnAfter: 2, RepeatNameAbortAfter: 4}
+	_, err := Run(context.Background(), &scriptedClient{turns: turns}, bridgeRegistry(&ran), rt, nil)
+	if err == nil || !strings.Contains(err.Error(), "real") || strings.Contains(err.Error(), "bridge") {
+		t.Fatalf("err = %v, want the abort to name the real tool", err)
+	}
+}
