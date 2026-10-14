@@ -32,6 +32,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/fstore"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/status"
 )
 
 // HookSubcommand is the workspace-agent subcommand the hooks.json entry runs.
@@ -191,6 +192,12 @@ func hookLiveState(m session.Meta, p liveProbes, r lastStepRow, haveStep bool) s
 		return ""
 	}
 	if rec.State == "idle" {
+		// A new input recorded after the Stop is evidence of a new turn that needs no DB write
+		// and no grace: the status record holds the "working" the input route stamped, and
+		// reading idle here would let the turn-end poll consume that turn as completed.
+		if newInputSince(slotSid, at) {
+			return ""
+		}
 		// A Stop is only as current as the next PreInvocation. When that hook went missing
 		// (timeout, edited hooks.json), a working step past the one the Stop saw is a new turn.
 		// Until idleGrace has passed the DB may still be landing the turn's own last steps, so
@@ -215,6 +222,17 @@ func hookLiveState(m session.Meta, p liveProbes, r lastStepRow, haveStep bool) s
 		return "idle"
 	}
 	return "working"
+}
+
+// newInputSince reports whether the slot's status record says "working" from a write after t.
+// Strictly after: a turn that started in the same second as its Stop cannot be told apart.
+func newInputSince(slotSid string, t time.Time) bool {
+	st, ok := status.Read(slotSid)
+	if !ok || st.State != "working" {
+		return false
+	}
+	ts, err := time.Parse(time.RFC3339, st.TS)
+	return err == nil && ts.After(t)
 }
 
 // clearHook forgets the slot's record: a hook state of an earlier launch says nothing about

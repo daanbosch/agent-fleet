@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/status"
 )
 
 func hookFixture(t *testing.T, name string) (session.Meta, string) {
@@ -420,3 +421,35 @@ func TestEnsureHooksConcurrentWritersLeaveValidJSON(t *testing.T) {
 		t.Fatal("entry missing")
 	}
 }
+
+// An input after the Stop is a new turn whatever the DB has (or has not yet) written.
+func TestNewInputAfterStopBeatsIdle(t *testing.T) {
+	const conv = "conv-ni"
+	for _, tc := range []struct {
+		name   string
+		idx    *int
+		ago    time.Duration
+		status string
+		want   string
+	}{
+		{"input inside the grace, step idx known", ptrInt(0), 2 * time.Second, "working", "working"},
+		{"Stop's step idx unreadable, read at 30 s", nil, 30 * time.Second, "working", "working"},
+		{"no new input: the Stop stands inside the grace", ptrInt(0), 2 * time.Second, "", "idle"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, sid := hookFixture(t, "slot-ni")
+			sids.Write(sid, conv)
+			mkConvDB(t, conv, [][3]any{{14, stepStatusRunning, []byte("x")}, {14, stepStatusRunning, []byte("x")}})
+			launchGens.Write(sid, "g1")
+			hookRecords.Write(sid, hookRecord{ConvID: conv, State: "idle", Gen: "g1", StepIdx: tc.idx, At: time.Now().Add(-tc.ago).Format(time.RFC3339)})
+			if tc.status != "" {
+				status.Persist(sid, tc.status)
+			}
+			if got := liveState(m, probesAt(time.Now())); got != tc.want {
+				t.Fatalf("state = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func ptrInt(i int) *int { return &i }
