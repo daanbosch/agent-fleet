@@ -1278,6 +1278,9 @@ numbers**.
 
 The opencode status plugin kept writing `opencode-sid/<sid>` under `AgentConfigDir` after
 this move, so the Agent never read ids captured after the boot-time copy (#2122). The plugin now
-writes `AgentStateDir`, and the opencode sid store adopts a record left in the old directory
-when it is newer than the state-directory one (or that one is missing), moving it across. The
-other kinds' `*-sid` stores are written only by the Agent itself and are unaffected.
+writes only `AgentStateDir` (staged and renamed). The Agent's opencode sid store compares the
+modification times of the state-directory and old-directory records and reads the newer one,
+the state directory winning a tie. Reading never copies, moves or deletes, and a write goes to
+the state directory only, so a stale old record loses to any later write. This costs one extra
+stat of the old directory per read. The other kinds' `*-sid` stores are written only by the Agent
+and are unaffected.
