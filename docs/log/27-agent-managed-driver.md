@@ -924,3 +924,41 @@ default). Measured on 2.0.28 against a loopback stub provider (fixtures: `testda
   (forms; reply is unsupported on v2, #2102), so a v2 turn waiting on a question reads as working.
 - The Terminal route has no daemon address yet: `v2TargetFor` answers false for it (#2105 plugs in
   there), which leaves it on the SQLite reader.
+
+## 2026-10-14 note: the question tool is a form on opencode 2 (#2115, part of #2101)
+
+Measured on 2.0.28 (isolated HOME, loopback stub provider that makes the model call the question
+tool; fixtures: `testdata/v2/form-*`, contract: `contract_v2form_test.go`). The wire contract is
+written up at the top of `workspace/agent/internal/agents/opencode/v2form.go`; the decisions:
+
+- **Pending state comes from the form list**, `GET /api/session/{id}/form`, and only while the daemon
+  lists the session as running. A waiting turn is still `running` in `/api/session/active`, and
+  the question tool part stays `running` in the messages, including for good after a SIGKILL of the
+  daemon (forms are in memory; a restart or SIGKILL loses a pending one), so the message list
+  cannot be the source. `liveStateV2` answers `question` (the state v1's running question part gives),
+  `readTranscriptV2` fills `Pending`, and `PendingModal` follows.
+- **Events are `form.created {form}`, `form.replied {id,sessionID,answer}`, `form.cancelled
+  {id,sessionID}`** (not `session.form.*`). They feed `h.inter` exactly as `question.asked/replied/
+  rejected` do on v1; `reconcile` reads the form list for a form that was already waiting.
+- **Mapping**: one form per tool call, one field per question (`q0`, `q1`, …; title = header,
+  description = question text, `string` with options = single choice, `multiselect` = multiple choice,
+  `custom:true` = a typed answer is allowed). Answers go as `{answer:{q0:"B", q1:["Cheese","typed"]}}`;
+  a typed answer to a single choice and a multiselect's picks plus typed text both round-trip. Option
+  `value` equals the label.
+- **Dismiss** is `DELETE …/form/{id}?message=`. The question tool then fails with that message and the
+  turn goes on (the model reads the failure). An interrupt cancels the pending form itself and the
+  execution ends `interrupted`.
+- **Double answers are harmless**: replying to or cancelling a settled form is 409
+  `FormAlreadySettledError` (a form the daemon forgot is 404). `Respond` reads the form again before
+  it answers and refuses a settled one.
+- **Terminal slots on the shared serve** show the pending form (question chip, card) but the card
+  carries no form id, so the Console keeps driving the TUI modal with keys and af never posts a form
+  reply for a Terminal session. The TUI follows an answer made through the API (its modal closes), and
+  an answer or Esc typed in the TUI shows up as `form.replied` / `form.cancelled`. Measured TUI
+  keys: a single question answers with Down×i + Enter; several questions are tabbed (`Color
+  Toppings Submit`), Enter confirms a single choice and advances, Enter *toggles* a multiple-choice
+  option, and the last step is the Submit tab (Tab, then Enter). The Console's `buildMenuSeq` does not
+  produce that for a multi-question form or a multiple-choice question (follow-up: #2127).
+- **Todos**: the 2.0.28 tool list (read off the provider request: edit glob grep question read shell
+  skill subagent webfetch websearch write execute) has no todo tool, and the OpenAPI spec has no todo or
+  task route. `@opencode/cli` `latest` is 2.0.28 (the newest 2.x on npm), so `Tasks` stays empty on v2.

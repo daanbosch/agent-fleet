@@ -325,9 +325,6 @@ func TestV2RoutesAndShapes(t *testing.T) {
 	if serveListQuestions(addr, dir) != nil {
 		t.Fatal("v2 has no /question")
 	}
-	if err := serveQuestionReply(addr, "q", dir, nil); !errors.Is(err, errQuestionsV2) {
-		t.Fatalf("question reply on v2 = %v", err)
-	}
 	for _, k := range f.reqs {
 		if strings.Contains(k, "/question") || strings.HasPrefix(k, "GET /session") || strings.Contains(k, "directory=") {
 			t.Errorf("a v1 route reached the v2 daemon: %s", k)

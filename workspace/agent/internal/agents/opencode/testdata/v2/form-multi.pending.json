@@ -1,0 +1,61 @@
+{
+ "data": [
+  {
+   "id": "frm_138492dae001aaB3ZE1kkv5PKc",
+   "sessionID": "ses_ec7b6d6f6ffeOAkd693DkFfMkF",
+   "title": "Questions",
+   "metadata": {
+    "kind": "question",
+    "tool": {
+     "messageID": "msg_138492d7d001GJXMkJ6N8Q8aVQ",
+     "id": "call_q"
+    }
+   },
+   "fields": [
+    {
+     "key": "q0",
+     "title": "Color",
+     "description": "Which color?",
+     "type": "string",
+     "options": [
+      {
+       "value": "Red",
+       "label": "Red",
+       "description": "r"
+      },
+      {
+       "value": "Blue",
+       "label": "Blue",
+       "description": "b"
+      }
+     ],
+     "custom": true
+    },
+    {
+     "key": "q1",
+     "title": "Toppings",
+     "description": "Which toppings?",
+     "type": "multiselect",
+     "options": [
+      {
+       "value": "Cheese",
+       "label": "Cheese",
+       "description": "c"
+      },
+      {
+       "value": "Ham",
+       "label": "Ham",
+       "description": "h"
+      },
+      {
+       "value": "Egg",
+       "label": "Egg",
+       "description": "e"
+      }
+     ],
+     "custom": true
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,75 @@
+{
+ "data": [
+  {
+   "id": "msg_1384c730f001CdWw702fzoVmnm",
+   "time": {
+    "created": 1791945896719
+   },
+   "type": "model-switched",
+   "model": {
+    "id": "m",
+    "providerID": "stub"
+   }
+  },
+  {
+   "id": "msg_1384c7325001QxIgRTkBTXV6ab",
+   "time": {
+    "created": 1791945896763
+   },
+   "text": "ZZZ waiting",
+   "type": "user"
+  },
+  {
+   "id": "msg_1384c7343001CNriQ6LMOh5lJu",
+   "time": {
+    "created": 1791945896791,
+    "streamed": 1791945896813
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "m",
+    "providerID": "stub",
+    "variant": "default"
+   },
+   "content": [
+    {
+     "type": "tool",
+     "id": "call_q",
+     "name": "question",
+     "executed": false,
+     "state": {
+      "status": "running",
+      "input": {
+       "questions": [
+        {
+         "question": "Pick one",
+         "header": "Pick",
+         "options": [
+          {
+           "label": "A",
+           "description": "a"
+          },
+          {
+           "label": "B",
+           "description": "b"
+          }
+         ]
+        }
+       ]
+      },
+      "metadata": {}
+     },
+     "time": {
+      "created": 1791945896801,
+      "ran": 1791945896809
+     }
+    }
+   ]
+  }
+ ],
+ "cursor": {
+  "previous": "eyJpZCI6Im1zZ18xMzg0YzczMGYwMDFDZFd3NzAyZnpvVm1ubSIsIm9yZGVyIjoiYXNjIiwiZGlyZWN0aW9uIjoicHJldmlvdXMifQ",
+  "next": "eyJpZCI6Im1zZ18xMzg0YzczNDMwMDFDTnJpUTZMTU9oNWxKdSIsIm9yZGVyIjoiYXNjIiwiZGlyZWN0aW9uIjoibmV4dCJ9"
+ }
+}

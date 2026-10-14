@@ -1,0 +1,152 @@
+{
+ "data": [
+  {
+   "id": "msg_138497ba5001f83BW3NW7QjByy",
+   "time": {
+    "created": 1791945702309
+   },
+   "type": "model-switched",
+   "model": {
+    "id": "m",
+    "providerID": "stub"
+   }
+  },
+  {
+   "id": "msg_138498015001Ms3SSsqGT49mBU",
+   "time": {
+    "created": 1791945703513
+   },
+   "text": "MULTI please",
+   "type": "user"
+  },
+  {
+   "id": "msg_138498064001MmSYGJLR0PCR6g",
+   "time": {
+    "created": 1791945703550,
+    "streamed": 1791945703707,
+    "completed": 1791945707897
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "m",
+    "providerID": "stub",
+    "variant": "default"
+   },
+   "content": [
+    {
+     "type": "tool",
+     "id": "call_q",
+     "name": "question",
+     "executed": false,
+     "state": {
+      "status": "error",
+      "input": {
+       "questions": [
+        {
+         "question": "Which color?",
+         "header": "Color",
+         "options": [
+          {
+           "label": "Red",
+           "description": "r"
+          },
+          {
+           "label": "Blue",
+           "description": "b"
+          }
+         ]
+        },
+        {
+         "question": "Which toppings?",
+         "header": "Toppings",
+         "multiple": true,
+         "options": [
+          {
+           "label": "Cheese",
+           "description": "c"
+          },
+          {
+           "label": "Ham",
+           "description": "h"
+          },
+          {
+           "label": "Egg",
+           "description": "e"
+          }
+         ]
+        }
+       ]
+      },
+      "error": {
+       "type": "tool.execution",
+       "message": "not now"
+      }
+     },
+     "time": {
+      "created": 1791945703676,
+      "ran": 1791945703699,
+      "completed": 1791945707892
+     }
+    }
+   ],
+   "finish": "tool-calls",
+   "rawFinish": "tool_calls",
+   "cost": 0,
+   "tokens": {
+    "input": 10,
+    "output": 5,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_1384991a0001Xq60ZN7qiGY0mR",
+   "time": {
+    "created": 1791945707985,
+    "streamed": 1791945708109,
+    "completed": 1791945708113
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "m",
+    "providerID": "stub",
+    "variant": "default"
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "after: ['{\"error\":{\"type\":\"tool.execution\",\"message\":\"not now\"},\"content\":[]}']"
+    }
+   ],
+   "finish": "stop",
+   "rawFinish": "stop",
+   "cost": 0,
+   "tokens": {
+    "input": 10,
+    "output": 5,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_13849925e001P03YuSmkRUCXKg",
+   "time": {
+    "created": 1791945708127
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  }
+ ],
+ "cursor": {
+  "previous": "eyJpZCI6Im1zZ18xMzg0OTdiYTUwMDFmODNCVzNOVzdRakJ5eSIsIm9yZGVyIjoiYXNjIiwiZGlyZWN0aW9uIjoicHJldmlvdXMifQ",
+  "next": "eyJpZCI6Im1zZ18xMzg0OTkyNWUwMDFQMDNZdVNta1JVQ1hLZyIsIm9yZGVyIjoiYXNjIiwiZGlyZWN0aW9uIjoibmV4dCJ9"
+ }
+}
