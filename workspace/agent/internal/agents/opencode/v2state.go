@@ -367,7 +367,7 @@ func liveStateV2(t apiTarget, m session.Meta) string {
 	if act[info.ID] {
 		// A turn waiting on a form is active as far as /active is concerned (measured), so the
 		// form list is what tells a question from work. Asked only for a running session.
-		if len(pendingQuestionsV2(t, info.ID, false)) > 0 {
+		if len(pendingFormsV2(t, m, info.ID)) > 0 {
 			return "question"
 		}
 		return "working"
@@ -440,22 +440,9 @@ func readTranscriptV2(t apiTarget, m session.Meta) agents.TranscriptData {
 		// Tasks stays empty: opencode 2.0.28 has no todo route, event or tool (its tool list is
 		// edit glob grep question read shell skill subagent webfetch websearch write execute).
 	}
-	td.Pending = pendingV2(t, m, info.ID)
+	td.Pending = questionsV2(pendingFormsV2(t, m, info.ID), m.DriverKind() == session.DriverManaged)
 	managedEnrich(m, &td)
 	return td
-}
-
-// pendingV2 is the question a running session waits on. It is asked only while the daemon lists
-// the session as running (a form cannot outlive its turn, and a SIGKILLed daemon leaves a stale
-// "running" question tool in the messages that is not a question). A Managed slot's card carries the
-// form id, which /respond answers; a Terminal slot's does not, since its TUI answers the form itself
-// and af never posts a reply for it.
-func pendingV2(t apiTarget, m session.Meta, ses string) []transcript.Question {
-	act, err := t.active()
-	if err != nil || !act[ses] {
-		return nil
-	}
-	return pendingQuestionsV2(t, ses, m.DriverKind() == session.DriverManaged)
 }
 
 // v2Mode is the conversation's current agent normalized to "plan" | "normal", from the newest

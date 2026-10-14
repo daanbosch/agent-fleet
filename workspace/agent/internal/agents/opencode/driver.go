@@ -365,6 +365,9 @@ type threadHandle struct {
 	q        *agents.TurnQueue
 	settings agents.ThreadSettings
 	inter    *agents.Interaction // pending question (the payload of waiting_interaction)
+	// forms: every form a v2 session waits on, oldest first; inter is forms[0] (v2form.go). v1 asks
+	// one question at a time and leaves it nil.
+	forms []*agents.Interaction
 	// compacting: serve said a compaction summary is being written for this session (an
 	// in-flight compaction message.updated). Only half of the "compacting" state — the store
 	// has to agree (sessionCompacting) — and cleared by every terminal turn state, a stop, the
@@ -451,6 +454,9 @@ func (h *threadHandle) reconcile() {
 		if forms, err := (apiTarget{Addr: addr, Client: serveClient}).pendingForms(ses); err == nil && len(forms) > 0 {
 			inter = forms[0].interaction()
 			st = agents.TurnWaitingInteraction
+			h.mu.Lock()
+			h.setForms(forms)
+			h.mu.Unlock()
 		}
 	}
 	for _, q := range serveListQuestions(addr, dir) {
@@ -818,15 +824,21 @@ func (h *threadHandle) Respond(reply agents.InteractionReply) error {
 	h.mu.Lock()
 	inter := h.inter
 	addr := h.addr
+	if isV2() {
+		inter = h.formByID(reply.ID)
+	}
 	h.mu.Unlock()
 	if inter == nil || inter.ID != reply.ID {
 		return fmt.Errorf("interaction %s は待機中ではありません", reply.ID)
 	}
 	if isV2() {
 		// A form, not a question: it is answered by field key and read again first (v2form.go).
-		if err := respondForm(addr, h.sessionID(), reply); err != nil {
-			return err
+		err := respondForm(addr, h.sessionID(), reply)
+		if err == nil || errors.Is(err, errFormSettled) {
+			// Only this form goes: a later one may have arrived while the request was out.
+			h.settleForm(reply.ID)
 		}
+		return err
 	} else {
 		switch reply.Decision {
 		case agents.DecisionCancel, agents.DecisionDeny:
@@ -1255,12 +1267,7 @@ func handleServeEvent(data []byte) {
 			return
 		}
 		if h := handleBySes(p.Form.SessionID); h != nil {
-			inter := p.Form.interaction()
-			h.mu.Lock()
-			h.inter = inter
-			h.state = agents.TurnWaitingInteraction
-			h.mu.Unlock()
-			h.emit(agents.Event{Kind: "interaction", TurnState: agents.TurnWaitingInteraction, Interaction: inter})
+			h.askForm(p.Form.interaction())
 		}
 	case "form.replied", "form.cancelled":
 		var p struct {
@@ -1271,21 +1278,8 @@ func handleServeEvent(data []byte) {
 			return
 		}
 		if h := handleBySes(p.SessionID); h != nil {
-			// Cleared whoever settled it: the Console, an attached TUI, or an interrupt (which
-			// cancels the form while the state is already interrupting, so it is left alone).
-			h.mu.Lock()
-			resumed := false
-			if h.inter != nil && h.inter.ID == p.ID {
-				h.inter = nil
-				if h.state == agents.TurnWaitingInteraction && h.running {
-					h.state = agents.TurnRunning
-					resumed = true
-				}
-			}
-			h.mu.Unlock()
-			if resumed {
-				h.emit(agents.Event{Kind: "turn_state", TurnState: agents.TurnRunning})
-			}
+			// Whoever settled it: the Console, an attached TUI, or an interrupt.
+			h.settleForm(p.ID)
 		}
 	case "message.updated":
 		// Compaction (measured 1.18.34): the v1 loop announces neither

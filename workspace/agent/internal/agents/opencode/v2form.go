@@ -32,6 +32,7 @@ package opencode
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -39,6 +40,7 @@ import (
 	"strings"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/transcript"
 )
 
@@ -199,17 +201,34 @@ func (t apiTarget) pendingForms(ses string) ([]v2Form, error) {
 	return w.Data, nil
 }
 
-// pendingQuestionsV2 is the questions of a session's pending forms, for the mirror and the live
-// state. id stamps each with the form id (the address the Console's /respond takes) for a Managed
-// session; a Terminal slot leaves it empty, so its card keeps driving the TUI, which answers forms
-// itself.
-func pendingQuestionsV2(t apiTarget, ses string, withID bool) []transcript.Question {
-	forms, err := t.pendingForms(ses)
+// pendingFormsV2 is what a session waits on, read from the daemon, and only while it lists the
+// session as running: a form cannot outlive its turn. A Managed slot's handle is brought in line
+// with the answer, so the driver's copy (the address /respond checks) can neither keep a form the
+// daemon settled while an event was missed nor lack one it created.
+func pendingFormsV2(t apiTarget, m session.Meta, ses string) []v2Form {
+	act, err := t.active()
 	if err != nil {
 		return nil
 	}
+	var forms []v2Form
+	if act[ses] {
+		if forms, err = t.pendingForms(ses); err != nil {
+			return nil
+		}
+	}
+	if h := handleFor(m.Name); h != nil {
+		h.syncForms(forms)
+	}
+	return forms
+}
+
+// questionsV2 is the card of the oldest pending form, one at a time like v1's newest running
+// question. withID stamps it with the form id (the address the Console's /respond takes) for a
+// Managed session; a Terminal slot leaves it empty, so its card keeps driving the TUI, which answers
+// forms itself.
+func questionsV2(forms []v2Form, withID bool) []transcript.Question {
 	if len(forms) == 0 {
-		return nil // one card at a time, like v1's newest running question: the first form
+		return nil
 	}
 	qs := forms[0].questions()
 	if !withID {
@@ -238,10 +257,13 @@ func respondForm(addr, ses string, reply agents.InteractionReply) error {
 			Data v2Form `json:"data"`
 		}
 		if err := t.getTurn(path, &w); err != nil {
+			if errors.Is(err, statusError(http.StatusNotFound)) {
+				return errFormSettled // the daemon forgot it (restart) or it never was
+			}
 			return fmt.Errorf("質問を読めません: %w", err)
 		}
 		if w.Data.State.Status != "pending" {
-			return fmt.Errorf("質問は既に %s です", w.Data.State.Status)
+			return fmt.Errorf("%w (%s)", errFormSettled, w.Data.State.Status)
 		}
 		ans, err := w.Data.answer(reply.Answers)
 		if err != nil {
@@ -264,8 +286,109 @@ func doForm(req *http.Request, what string) error {
 		return err
 	}
 	defer res.Body.Close()
+	if res.StatusCode == http.StatusConflict || res.StatusCode == http.StatusNotFound {
+		return errFormSettled // already settled (409) or forgotten (404): somebody else got there first
+	}
 	if res.StatusCode >= 400 {
 		return fmt.Errorf("%sが拒否されました (HTTP %d)", what, res.StatusCode)
 	}
 	return nil
+}
+
+// errFormSettled: the form is not pending any more (answered or cancelled by somebody else, or
+// forgotten by the daemon), so there is nothing left to answer.
+var errFormSettled = errors.New("質問は既に確定しています")
+
+// formByID finds a waiting form. Caller holds h.mu.
+func (h *threadHandle) formByID(id string) *agents.Interaction {
+	for _, f := range h.forms {
+		if f.ID == id {
+			return f
+		}
+	}
+	return nil
+}
+
+// setForms makes the daemon's pending list the handle's: the oldest is the question shown, which is
+// also what the mirror and the live state take from the same list. Caller holds h.mu.
+func (h *threadHandle) setForms(list []v2Form) {
+	h.forms = h.forms[:0:0]
+	for _, f := range list {
+		h.forms = append(h.forms, f.interaction())
+	}
+	h.inter = nil
+	if len(h.forms) > 0 {
+		h.inter = h.forms[0]
+	}
+}
+
+// askForm adds a form that was created. A second one waits behind the first, which stays the
+// question shown (it is first in the daemon's list too).
+func (h *threadHandle) askForm(in *agents.Interaction) {
+	h.mu.Lock()
+	if h.formByID(in.ID) == nil {
+		h.forms = append(h.forms, in)
+	}
+	h.inter = h.forms[0]
+	h.state = agents.TurnWaitingInteraction
+	shown := h.inter
+	h.mu.Unlock()
+	h.emit(agents.Event{Kind: "interaction", TurnState: agents.TurnWaitingInteraction, Interaction: shown})
+}
+
+// settleForm drops one form, whoever settled it, and hands the question over to the next one that
+// still waits. The turn runs again only when none is left, and an interrupting or finished state is
+// left alone.
+func (h *threadHandle) settleForm(id string) {
+	h.mu.Lock()
+	kept := h.forms[:0:0]
+	for _, f := range h.forms {
+		if f.ID != id {
+			kept = append(kept, f)
+		}
+	}
+	changed := len(kept) != len(h.forms)
+	h.forms = kept
+	h.inter = nil
+	if len(kept) > 0 {
+		h.inter = kept[0]
+	}
+	resumed := changed && h.inter == nil && h.state == agents.TurnWaitingInteraction && h.running
+	if resumed {
+		h.state = agents.TurnRunning
+	}
+	next := h.inter
+	h.mu.Unlock()
+	switch {
+	case resumed:
+		h.emit(agents.Event{Kind: "turn_state", TurnState: agents.TurnRunning})
+	case changed && next != nil:
+		h.emit(agents.Event{Kind: "interaction", TurnState: agents.TurnWaitingInteraction, Interaction: next})
+	}
+}
+
+// syncForms reconciles the handle with a pending list the mirror just read from the daemon, so an
+// event that was missed (a dropped stream) cannot leave a settled form on the card or a new one off it.
+func (h *threadHandle) syncForms(list []v2Form) {
+	h.mu.Lock()
+	same := len(list) == len(h.forms)
+	for i := 0; same && i < len(list); i++ {
+		same = list[i].ID == h.forms[i].ID
+	}
+	if same {
+		h.mu.Unlock()
+		return
+	}
+	h.setForms(list)
+	next := h.inter
+	resumed := next == nil && h.state == agents.TurnWaitingInteraction && h.running
+	if resumed {
+		h.state = agents.TurnRunning
+	} else if next != nil && h.state == agents.TurnRunning {
+		h.state = agents.TurnWaitingInteraction
+	}
+	h.mu.Unlock()
+	if resumed {
+		h.emit(agents.Event{Kind: "turn_state", TurnState: agents.TurnRunning})
+	}
 }

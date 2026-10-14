@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"reflect"
@@ -72,11 +73,13 @@ func eventOfType(t *testing.T, lines []string, typ string) string {
 // formDaemon is a v2 daemon that also answers the form routes from fixtures.
 type formDaemon struct {
 	*v2Daemon
-	fmu     sync.Mutex
-	list    map[string]string // session → GET …/form body
-	detail  map[string]string // form id → GET …/form/{id} body
-	replies []string          // "POST path body"
-	deletes []string          // "DELETE uri"
+	fmu         sync.Mutex
+	list        map[string]string // session → GET …/form body
+	detail      map[string]string // form id → GET …/form/{id} body
+	replyHook   func()            // runs inside a reply, before it is answered
+	replyStatus int               // answered instead of 204 when set
+	replies     []string          // "POST path body"
+	deletes     []string          // "DELETE uri"
 }
 
 func newFormDaemon(t *testing.T) *formDaemon {
@@ -111,6 +114,13 @@ func newFormDaemon(t *testing.T) *formDaemon {
 		case r.Method == "POST" && strings.HasSuffix(id, "/reply"):
 			b, _ := io.ReadAll(r.Body)
 			fd.replies = append(fd.replies, p+" "+string(b))
+			if fd.replyHook != nil {
+				fd.replyHook()
+			}
+			if fd.replyStatus != 0 {
+				w.WriteHeader(fd.replyStatus)
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == "DELETE":
 			fd.deletes = append(fd.deletes, r.URL.RequestURI())
@@ -287,6 +297,26 @@ func formHandle(t *testing.T, fd *formDaemon) *threadHandle {
 	return h
 }
 
+// waitOn puts the handle where the events would have: running a turn that waits on these forms.
+func waitOn(h *threadHandle, forms ...v2Form) {
+	h.mu.Lock()
+	h.state, h.running = agents.TurnWaitingInteraction, true
+	h.setForms(forms)
+	h.mu.Unlock()
+}
+
+func createdEvent(t *testing.T, f v2Form) []byte {
+	b, err := json.Marshal(map[string]any{"type": "form.created", "data": map[string]any{"form": f}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func settledEvent(typ, ses, id string) []byte {
+	return []byte(`{"type":"` + typ + `","data":{"id":"` + id + `","sessionID":"` + ses + `"}}`)
+}
+
 func TestV2FormEventsMoveTheHandle(t *testing.T) {
 	fd := newFormDaemon(t)
 	h := formHandle(t, fd)
@@ -356,9 +386,7 @@ func TestV2RespondAnswersTheForm(t *testing.T) {
 	h := formHandle(t, fd)
 	f := fixtureForms(t, "form-single.pending.json")[0]
 	fd.detail[f.ID] = string(v2Fixture(t, "form-detail.pending.json"))
-	h.mu.Lock()
-	h.state, h.running, h.inter = agents.TurnWaitingInteraction, true, f.interaction()
-	h.mu.Unlock()
+	waitOn(h, f)
 
 	if err := h.Respond(agents.InteractionReply{ID: "frm_stale", Decision: agents.DecisionAnswer}); err == nil {
 		t.Fatal("a reply to an id that is not waiting was accepted")
@@ -384,9 +412,7 @@ func TestV2RespondCancelDismissesTheForm(t *testing.T) {
 	fd := newFormDaemon(t)
 	h := formHandle(t, fd)
 	f := fixtureForms(t, "form-single.pending.json")[0]
-	h.mu.Lock()
-	h.state, h.running, h.inter = agents.TurnWaitingInteraction, true, f.interaction()
-	h.mu.Unlock()
+	waitOn(h, f)
 	if err := h.Respond(agents.InteractionReply{ID: f.ID, Decision: agents.DecisionCancel}); err != nil {
 		t.Fatal(err)
 	}
@@ -406,9 +432,7 @@ func TestV2RespondDoesNotDoubleAnswer(t *testing.T) {
 	h := formHandle(t, fd)
 	f := fixtureForms(t, "form-single.pending.json")[0]
 	fd.detail[f.ID] = string(v2Fixture(t, "form-detail.answered.json"))
-	h.mu.Lock()
-	h.state, h.running, h.inter = agents.TurnWaitingInteraction, true, f.interaction()
-	h.mu.Unlock()
+	waitOn(h, f)
 	err := h.Respond(agents.InteractionReply{ID: f.ID, Decision: agents.DecisionAnswer, Answers: []agents.InteractionAnswer{{Options: []int{0}}}})
 	if err == nil || !strings.Contains(err.Error(), "answered") {
 		t.Fatalf("Respond on a settled form = %v", err)
@@ -417,5 +441,125 @@ func TestV2RespondDoesNotDoubleAnswer(t *testing.T) {
 	defer fd.fmu.Unlock()
 	if len(fd.replies) != 0 {
 		t.Errorf("a settled form was answered again: %q", fd.replies)
+	}
+}
+
+// secondForm is the form-single fixture under another id, the same session's next question.
+func secondForm(t *testing.T, h *threadHandle) (a, b v2Form) {
+	a = fixtureForms(t, "form-single.pending.json")[0]
+	a.SessionID = h.ses
+	b = a
+	b.ID = "frm_second"
+	return a, b
+}
+
+// Two questions waiting at once: the first stays the card, and settling it (or the second, from
+// outside) hands over to whatever still waits instead of leaving a card nobody can answer.
+func TestV2TwoPendingFormsAreAnsweredInTurn(t *testing.T) {
+	fd := newFormDaemon(t)
+	h := formHandle(t, fd)
+	a, b := secondForm(t, h)
+	fd.detail[a.ID] = string(v2Fixture(t, "form-detail.pending.json"))
+	bd := strings.ReplaceAll(string(v2Fixture(t, "form-detail.pending.json")), a.ID, b.ID)
+	fd.detail[b.ID] = bd
+	h.mu.Lock()
+	h.state, h.running = agents.TurnRunning, true
+	h.mu.Unlock()
+	handleServeEvent(createdEvent(t, a))
+	handleServeEvent(createdEvent(t, b))
+	if snap, _ := h.Snapshot(); snap.Interaction == nil || snap.Interaction.ID != a.ID {
+		t.Fatalf("the second form replaced the first: %+v", snap.Interaction)
+	}
+	reply := func(id string) error {
+		return h.Respond(agents.InteractionReply{ID: id, Decision: agents.DecisionAnswer, Answers: []agents.InteractionAnswer{{Options: []int{0}}}})
+	}
+	// B is settled from outside (the TUI): A stays.
+	handleServeEvent(settledEvent("form.replied", h.ses, b.ID))
+	if snap, _ := h.Snapshot(); snap.Interaction == nil || snap.Interaction.ID != a.ID || snap.TurnState != agents.TurnWaitingInteraction {
+		t.Fatalf("after B was settled: %+v", snap)
+	}
+	handleServeEvent(createdEvent(t, b))
+	if err := reply(b.ID); err != nil { // either one may be answered
+		t.Fatal(err)
+	}
+	snap, _ := h.Snapshot()
+	if snap.Interaction == nil || snap.Interaction.ID != a.ID || snap.TurnState != agents.TurnWaitingInteraction {
+		t.Fatalf("after answering B, A must still be the question: %+v", snap)
+	}
+	if err := reply(a.ID); err != nil {
+		t.Fatalf("A could not be answered: %v", err)
+	}
+	if snap, _ = h.Snapshot(); snap.Interaction != nil || snap.TurnState != agents.TurnRunning {
+		t.Fatalf("after both: %+v", snap)
+	}
+}
+
+// The next question can arrive on the event stream while the reply to the last one is still in
+// flight (two connections): finishing the reply must not take the new one away.
+func TestV2ReplyDoesNotEraseTheNextForm(t *testing.T) {
+	fd := newFormDaemon(t)
+	h := formHandle(t, fd)
+	a, b := secondForm(t, h)
+	fd.detail[a.ID] = string(v2Fixture(t, "form-detail.pending.json"))
+	waitOn(h, a)
+	fd.replyHook = func() {
+		handleServeEvent(settledEvent("form.replied", h.ses, a.ID))
+		handleServeEvent(createdEvent(t, b))
+	}
+	if err := h.Respond(agents.InteractionReply{ID: a.ID, Decision: agents.DecisionAnswer, Answers: []agents.InteractionAnswer{{Options: []int{0}}}}); err != nil {
+		t.Fatal(err)
+	}
+	snap, _ := h.Snapshot()
+	if snap.Interaction == nil || snap.Interaction.ID != b.ID || snap.TurnState != agents.TurnWaitingInteraction {
+		t.Fatalf("the reply to A erased B: %+v", snap)
+	}
+}
+
+// A settlement the stream dropped: the daemon says the form is answered (or 409s the POST), and
+// the list is empty. The handle must let go of it (accept's question_pending guard reads the same
+// field) and the mirror must not bring the card back.
+func TestV2SettledFormWhoseEventWasMissed(t *testing.T) {
+	for name, setup := range map[string]func(*formDaemon, v2Form){
+		"detail says answered": func(fd *formDaemon, f v2Form) {
+			fd.detail[f.ID] = string(v2Fixture(t, "form-detail.answered.json"))
+		},
+		"daemon forgot it": func(fd *formDaemon, f v2Form) {},
+		"reply races to 409": func(fd *formDaemon, f v2Form) {
+			fd.detail[f.ID] = string(v2Fixture(t, "form-detail.pending.json"))
+			fd.replyStatus = http.StatusConflict
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fd := newFormDaemon(t)
+			fd.addSession(t, "ses_a", "", "1791931000000", "form-waiting.messages.json")
+			m := v2Meta(t, "ses_a")
+			h := formHandle(t, fd)
+			h.name, h.ses = m.Name, "ses_a"
+			registerTestHandle(t, h) // again, under the slot's name: that is what the mirror looks up
+			f := fixtureForms(t, "form-single.pending.json")[0]
+			fd.active = []string{"ses_a"} // the list stays empty: the form is gone
+			setup(fd, f)
+			waitOn(h, f)
+			if td, _ := readTranscript(m); len(td.Pending) != 0 {
+				// the read itself reconciles: a card for a form the daemon does not list is stale
+				t.Fatalf("a settled form is still on the card: %+v", td.Pending)
+			}
+			if snap, _ := h.Snapshot(); snap.Interaction != nil || snap.TurnState != agents.TurnRunning {
+				t.Fatalf("the read left the handle waiting: %+v", snap)
+			}
+		})
+	}
+	// Respond reaches the same end without any mirror read in between.
+	fd := newFormDaemon(t)
+	h := formHandle(t, fd)
+	f := fixtureForms(t, "form-single.pending.json")[0]
+	fd.detail[f.ID] = string(v2Fixture(t, "form-detail.answered.json"))
+	waitOn(h, f)
+	err := h.Respond(agents.InteractionReply{ID: f.ID, Decision: agents.DecisionAnswer, Answers: []agents.InteractionAnswer{{Options: []int{0}}}})
+	if !errors.Is(err, errFormSettled) {
+		t.Fatalf("Respond = %v, want errFormSettled", err)
+	}
+	if snap, _ := h.Snapshot(); snap.Interaction != nil || snap.TurnState != agents.TurnRunning {
+		t.Fatalf("Respond left the handle waiting: %+v", snap)
 	}
 }
