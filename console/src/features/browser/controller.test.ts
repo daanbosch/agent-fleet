@@ -76,6 +76,30 @@ describe("BrowserController with fake REST/WS/CDP-facing transport", () => {
     expect(socket.json()).toContainEqual({ type: "visibility", visible: true });
   });
 
+  it("carries the unreachable reason next to the state and drops it with the state", async () => {
+    const fake = fakeDeps();
+    const controller = new BrowserController("p8", { port: 5173, path: "/" }, fake.deps);
+    controller.mount({ width: 0, height: 0 });
+    controller.setViewport(900, 600);
+    controller.setVisible(true);
+    await settle();
+    const socket = fake.sockets[0];
+    socket.open();
+    socket.message(JSON.stringify({ type: "state", state: "target-unreachable" }));
+    expect(controller.snapshot).toMatchObject({ state: "target-unreachable", reason: "" });
+    socket.message(JSON.stringify({ type: "state", state: "target-unreachable", reason: "preview_tls" }));
+    expect(controller.snapshot).toMatchObject({ state: "target-unreachable", reason: "preview_tls" });
+    // An unknown code from a newer Agent reads as no reason, not as a string to render.
+    socket.message(JSON.stringify({ type: "state", state: "target-unreachable", reason: "preview_whatever" }));
+    expect(controller.snapshot.reason).toBe("");
+    socket.message(JSON.stringify({ type: "state", state: "target-unreachable", reason: "preview_not_http" }));
+    socket.message(JSON.stringify({ type: "state", state: "loading" }));
+    expect(controller.snapshot).toMatchObject({ state: "loading", reason: "" });
+    // A reason on any other state is ignored.
+    socket.message(JSON.stringify({ type: "state", state: "ready", reason: "preview_tls" }));
+    expect(controller.snapshot).toMatchObject({ state: "ready", reason: "" });
+  });
+
   it("keeps only the newest queued frame while drawing is backpressured", async () => {
     let releaseFirst!: () => void;
     const firstDraw = new Promise<void>((resolve) => { releaseFirst = resolve; });

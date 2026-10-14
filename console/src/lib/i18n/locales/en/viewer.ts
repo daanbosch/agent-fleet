@@ -20,6 +20,8 @@ export const viewer: Record<keyof typeof jaViewer, string> = {
   "browser.keyboard_toggle": "Show or hide the keyboard",
   "browser.loading": "Loading page…",
   "browser.target_unreachable": "The target port is unreachable. Start the service, then reconnect.",
+  "browser.target_not_http": "The target port is listening but does not speak HTTP. The browser pane shows HTTP only.",
+  "browser.target_tls": "The target port is serving HTTPS. Turn off the dev server's HTTPS, then reconnect.",
   "browser.crashed": "The browser inside the container crashed.",
   "browser.installing": "Preparing the browser (first use only, ~200MB download)…",
   "browser.disconnected": "The browser pane disconnected.",

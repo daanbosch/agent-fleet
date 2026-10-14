@@ -1,33 +1,26 @@
 package main
 
 import (
-	"errors"
 	"io"
 	"mime"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/portprobe"
 )
 
-// Preview relay failure kinds. The codes are wire-visible: the Control Plane keys its
-// localized page on them (control-plane/preview_relay_error.go), so rename none.
+// Preview relay failure kinds; the definitions live in portprobe, which the browser pane
+// shares. The codes are wire-visible: the Control Plane keys its localized page on them
+// (control-plane/preview_relay_error.go), so rename none.
 const (
-	// previewUnreachable: the dial itself failed — nothing is listening.
-	previewUnreachable = "preview_unreachable"
-	// previewNotHTTP: the port accepted the connection but did not answer with HTTP
-	// (a database, SSH, h2c gRPC, a server that hangs up right after connect).
-	previewNotHTTP = "preview_not_http"
-	// previewTLS: the port is serving TLS and the relay speaks plain HTTP to it.
-	previewTLS = "preview_tls"
-	// previewFailed: any other relay failure (the catch-all keeps "nothing is listening"
-	// from being said when it is not known to be true).
-	previewFailed = "preview_failed"
+	previewUnreachable = portprobe.Unreachable
+	previewNotHTTP     = portprobe.NotHTTP
+	previewTLS         = portprobe.TLS
+	previewFailed      = portprobe.Failed
 )
 
 // previewErrorHeader marks a response as the Agent's own relay error rather than the
@@ -38,42 +31,10 @@ const previewErrorHeader = "X-AF-Preview-Error"
 
 // errPlainHTTPToTLS is returned by sniffPlainHTTPToTLS when a 400 says "you sent HTTP to
 // an HTTPS port".
-var errPlainHTTPToTLS = errors.New("upstream is a TLS server")
+var errPlainHTTPToTLS = portprobe.ErrPlainHTTPToTLS
 
 // classifyPreviewError maps an error from the reverse proxy to a failure kind.
-//
-// Typed checks come first. net/http has no exported type for "the reply was not HTTP":
-// the status-line parser returns a plain fmt error ("malformed HTTP response …"), so
-// that one case (and only it) is matched on text — the last resort.
-func classifyPreviewError(err error) string {
-	switch {
-	case errors.Is(err, errPlainHTTPToTLS):
-		return previewTLS
-	case errors.Is(err, syscall.ECONNREFUSED):
-		return previewUnreachable
-	}
-	var op *net.OpError
-	if errors.As(err, &op) && op.Op == "dial" {
-		// Connected to nothing: unroutable, timed out, … — still "not listening".
-		return previewUnreachable
-	}
-	msg := err.Error()
-	if strings.Contains(msg, "malformed HTTP") {
-		// Go quotes the offending bytes into the message. A TLS record header
-		// (alert 0x15 / handshake 0x16, version 0x03xx) is what a TLS server answers a
-		// plain request with.
-		if strings.Contains(msg, `\x15\x03`) || strings.Contains(msg, `\x16\x03`) {
-			return previewTLS
-		}
-		return previewNotHTTP
-	}
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
-		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
-		// Accepted, then hung up (or reset) without a response.
-		return previewNotHTTP
-	}
-	return previewFailed
-}
+func classifyPreviewError(err error) string { return portprobe.Classify(err) }
 
 // previewErrorMessage is the English text carried in the JSON body. It names the port and
 // nothing else: a public preview's visitors see it.
