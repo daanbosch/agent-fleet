@@ -32,6 +32,7 @@ type sharedDaemon struct {
 	pid        int
 	version    string
 	failGet    map[string]bool // GET of these session ids answers 503
+	deleteGate func(id string) // runs on a DELETE before it is applied (the lock is released)
 	failSwitch bool            // model/agent switches answer 500
 	failEnv    int             // fail this many environment PUTs with 503 before accepting
 }
@@ -107,6 +108,11 @@ func (d *sharedDaemon) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		switch {
 		case len(parts) == 3 && r.Method == "DELETE":
+			if g := d.deleteGate; g != nil {
+				d.mu.Unlock()
+				g(id)
+				d.mu.Lock()
+			}
 			delete(d.sessions, id)
 			w.WriteHeader(http.StatusNoContent)
 		case len(parts) == 3 && r.Method == "GET":
@@ -999,5 +1005,76 @@ func TestFailedForkNeverLeavesAnUnrecordedCopy(t *testing.T) {
 	}
 	if got := len(d.callsMatching("POST /api/session/ses_src/fork")); got != before {
 		t.Errorf("the retry forked again instead of resuming the recorded copy")
+	}
+}
+
+// The cleanup of a copy that could not be claimed must not delete a conversation another pane
+// claimed in the meantime: the source's pane sees the copy under the inherited tag and may take it
+// between this slot's failed claim (record released) and the DELETE.
+func TestFailedForkCleanupPreservesACopyAnotherPaneClaimed(t *testing.T) {
+	d := newSharedDaemon(t)
+	src := terminalMeta(t, "srcpane")
+	session.WriteMeta(src)
+	sidA := session.UUID(src.Dir, src.Name)
+	d.sessions["ses_src"] = sharedMetadata(sidA, "srcpane")
+	oldEnv := paneEnv
+	paneEnv = func(name string) (map[string]string, bool) { return map[string]string{"N": name}, true }
+	t.Cleanup(func() { paneEnv = oldEnv })
+	b := terminalMeta(t, "forker2")
+	b.ForkFrom = "ses_src"
+	sidB := session.UUID(b.Dir, b.Name)
+	t.Cleanup(func() { sids.Remove(sidB); slotModes.Remove(sidB) })
+
+	d.failGet = map[string]bool{"ses_fork1": true} // B's claim fails on the API; its record is given back
+	var aErr error
+	claimed := false
+	// The race, deterministic: the source pane's claim lands between B's release and B's cleanup.
+	afterFork = func(addr, ses string) {}
+	t.Cleanup(func() { afterFork = func(string, string) {} })
+	oldDiscard := beforeDiscard
+	beforeDiscard = func(addr, ses string) {
+		d.mu.Lock()
+		d.failGet = nil
+		d.mu.Unlock()
+		aErr = claimSession(addr, "srcpane", ses, claimOpts{putEnv: true})
+		claimed = true
+	}
+	t.Cleanup(func() { beforeDiscard = oldDiscard })
+
+	_, _ = (agentImpl{}).BuildLaunch(b, agents.LaunchOpts{})
+	if !claimed {
+		t.Fatal("the race was not set up")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if aErr != nil {
+		t.Fatalf("the source pane's claim: %v", aErr)
+	}
+	if got := d.sessions["ses_fork1"]; got == nil || got[metaSID] != sidA {
+		t.Errorf("the cleanup deleted or altered a copy the source pane had claimed: %v", got)
+	}
+}
+
+// And while the cleanup holds the record, a pane that tries to claim the copy is refused rather than
+// racing the DELETE.
+func TestFailedForkCleanupHoldsTheClaimUntilTheCopyIsGone(t *testing.T) {
+	d := newSharedDaemon(t)
+	src := terminalMeta(t, "srcpane2")
+	session.WriteMeta(src)
+	d.sessions["ses_src"] = sharedMetadata(session.UUID(src.Dir, src.Name), "srcpane2")
+	b := terminalMeta(t, "forker3")
+	b.ForkFrom = "ses_src"
+	t.Cleanup(func() { sids.Remove(session.UUID(b.Dir, b.Name)); slotModes.Remove(session.UUID(b.Dir, b.Name)) })
+	d.failGet = map[string]bool{"ses_fork1": true}
+	var during error
+	d.deleteGate = func(id string) {
+		d.mu.Lock()
+		d.failGet = nil
+		d.mu.Unlock()
+		during = claimSession(d.srv.URL, "srcpane2", id, claimOpts{})
+	}
+	_, _ = (agentImpl{}).BuildLaunch(b, agents.LaunchOpts{})
+	if !errors.Is(during, errClaimTaken) {
+		t.Errorf("a claim during the cleanup's DELETE must be refused, got %v", during)
 	}
 }

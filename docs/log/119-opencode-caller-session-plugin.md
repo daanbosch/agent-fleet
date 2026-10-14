@@ -306,3 +306,8 @@ is written whole and linked into place (never created-but-empty), and a record i
 older than 30 s and the session's tag never followed it (an abandoned claim); a completed claim
 stands however old. A fork's copy that cannot be claimed because of an API error is deleted, and a
 claimed one is recorded as the slot's session before the model switch, so a retry resumes it.
+
+Review round 5 (#2123): deleting a fork copy that failed to be claimed took no account of a pane
+that claimed it in between (the source's pane sees the copy under the inherited tag). The cleanup now
+takes the session's exclusive claim record again first: if another pane holds it the copy is theirs
+and stays, and while the cleanup holds it nobody can claim the copy before the DELETE is done.

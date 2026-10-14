@@ -223,6 +223,27 @@ func forkSharedSession(addr, src, before string) (string, error) {
 	return w.Data.ID, nil
 }
 
+// discardUnclaimedCopy removes a fork copy this slot failed to claim — but only while it holds the
+// session's claim itself. The failed attempt gave its record back, and in the meantime another pane
+// (the source's, which sees the copy under the inherited tag) may have claimed it legitimately and be
+// running a conversation in it. So the exclusive record is taken again for the cleanup: if somebody
+// else holds it the copy is theirs and stays; if this call holds it, nobody can claim the copy until
+// it is gone.
+func discardUnclaimedCopy(addr string, m session.Meta, ses string) {
+	beforeDiscard(addr, ses)
+	dir := filepath.Join(paths.AgentStateDir(), "opencode-claim")
+	path := filepath.Join(dir, url.PathEscape(ses))
+	acquired, err := acquireClaim(dir, path, session.UUID(m.Dir, m.Name))
+	if err != nil || !acquired {
+		return
+	}
+	deleteSharedSession(addr, ses)
+	_ = os.Remove(path)
+}
+
+// beforeDiscard is a test seam: it runs between the failed claim and the cleanup.
+var beforeDiscard = func(addr, ses string) {}
+
 // deleteSharedSession removes a session af made and cannot attribute; best effort.
 func deleteSharedSession(addr, ses string) {
 	if err := apiJSON("DELETE", sessionPathURL(addr, ses), nil, nil); err != nil {
@@ -352,7 +373,7 @@ func buildSharedLaunch(m session.Meta, sid string) (plan sharedPlan, ok bool, er
 			if !errors.Is(err, errClaimTaken) {
 				// Nobody holds this copy and this slot could not take it: nothing would ever trace it
 				// back, so it goes (a copy another pane did claim is theirs and stays).
-				deleteSharedSession(addr, ses)
+				discardUnclaimedCopy(addr, m, ses)
 			}
 			if !errors.Is(err, errClaimTaken) || attempt >= 2 {
 				return sharedPlan{}, false, fmt.Errorf("opencode: claim the fork: %w", err)
