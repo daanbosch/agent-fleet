@@ -107,6 +107,10 @@ func auditActionTarget(r *http.Request) (action, target string, ok bool) {
 			// ADR 0108 decision 6: the one-time import of claude's memory writes the store. The
 			// Console repeats the project id in the query; only an id-shaped value is recorded.
 			return "memory.claude_import", auditProjectHint(q.Get("project")), true
+		case p == "/api/agents/memory/af-import":
+			// #1983: the member imports AF memory out of a bundle into this workspace's store. The
+			// Console repeats the import id in the query; only an id-shaped value is recorded.
+			return "memory.af_import", auditImportHint(q.Get("importId")), true
 		case p == "/api/agents/memory/auto-sync":
 			// #1972: the Agent memory switch imports / writes back by itself, so nothing else
 			// passes through here for those runs (the Agent has no channel to this ledger; each
@@ -581,6 +585,16 @@ var agentMemProjectIDRe = regexp.MustCompile(`^[a-z0-9._-]{1,40}-[0-9a-f]{12}$`)
 // auditProjectHint keeps a project-id-shaped audit hint and drops anything else.
 func auditProjectHint(s string) string {
 	if agentMemProjectIDRe.MatchString(s) {
+		return s
+	}
+	return ""
+}
+
+var auditImportIDRe = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z(-[0-9]+)?$`)
+
+// auditImportHint keeps an import-id-shaped audit hint and drops anything else.
+func auditImportHint(s string) string {
+	if auditImportIDRe.MatchString(s) {
 		return s
 	}
 	return ""

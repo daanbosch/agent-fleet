@@ -424,6 +424,21 @@ Version control over the memory an agent accumulates by itself (claude's auto-me
   kind is running.
 - **Export / import**: bundle (full history) or tar.gz (latest only). If what you are about to export looks
   like it contains secrets, you are warned and asked to confirm first.
+  - **Agent Fleet memory from a bundle**: restoring or importing a bundle never writes Agent Fleet memory (the
+    restore has no secret scan). After you pick a **bundle** (not a tar.gz) a panel under it, **Agent Fleet
+    memory in this bundle**, previews it and imports it on its own. Each project in the bundle is matched to a
+    project here by its identity, or, when that differs (another path), by the one project here with the same
+    repository address; a project with no match, or two, is listed and not imported. The user-wide memories
+    are always offered. Every memory is shown as **new**, **already here**, **different here, kept** (a
+    memory of that name exists here: it is never replaced), **forgotten here, not brought back** (also when
+    only the history remembers it), **possible secret, skipped** (every part of the file is scanned, with no
+    override) or **cannot be imported**. Only the latest text comes across, with the agent limits it had; the
+    bundle's history does not. What is **reset**: the revision (each memory starts at the next number here),
+    the author (unknown, as for the Claude import), the dates (the time of the import) and the pin; the origin
+    is recorded in the memory's source (`bundle:<import id>:<project>/<name>@<bundle revision>`) and in the
+    commit (`AF-Bundle-Import`, `AF-Bundle-Source`), so each import shows in the change list and can be
+    reverted there. It works with the switch on or off, answers only your own request, and is recorded in the
+    audit log.
 
 ---
 

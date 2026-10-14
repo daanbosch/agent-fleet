@@ -516,6 +516,10 @@ func buildMux() *http.ServeMux {
 	mux.HandleFunc("GET /agents/memory/claude-import", memoryx.HandleAgentMemoryClaudeSources)
 	mux.HandleFunc("GET /agents/memory/claude-import/preview", memoryx.HandleAgentMemoryClaudePreview)
 	mux.HandleFunc("POST /agents/memory/claude-import", memoryx.HandleAgentMemoryClaudeApply)
+	// AF memory out of a memory bundle taken in through POST /agents/memory/import (#1983): a
+	// read-only preview, and the import behind the member-origin mark. No MCP tool reaches it.
+	mux.HandleFunc("GET /agents/memory/af-import/preview", memoryx.HandleAgentMemoryBundlePreview)
+	mux.Handle("POST /agents/memory/af-import", memberorigin.Require(memoryx.MemberWriteMaxRequest, http.HandlerFunc(memoryx.HandleAgentMemoryBundleApply)))
 	mux.HandleFunc("GET /agents/memory/muse-import", memoryx.HandleAgentMemoryMuseSources)
 	mux.HandleFunc("GET /agents/memory/muse-import/preview", memoryx.HandleAgentMemoryMusePreview)
 	mux.HandleFunc("POST /agents/memory/muse-import", memoryx.HandleAgentMemoryMuseApply)

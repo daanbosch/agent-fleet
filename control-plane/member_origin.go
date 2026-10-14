@@ -58,6 +58,8 @@ var memberOriginRoutes = map[string]bool{
 	"POST /api/agents/memory/entries/member-save":  true,
 	"POST /api/agents/memory/entries/purge":        true,
 	"POST /api/agents/memory/entries/project-move": true,
+	// Importing AF memory out of a bundle (#1983).
+	"POST /api/agents/memory/af-import": true,
 	// The member's part in what the Agent memory switch does by itself with claude's native
 	// memory (#1972): waking the run after the confirmation, retrying, giving up.
 	"POST /api/agents/memory/auto-sync": true,

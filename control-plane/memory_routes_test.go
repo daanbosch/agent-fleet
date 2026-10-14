@@ -47,6 +47,8 @@ func TestMemoryRoutesProxiedByCP(t *testing.T) {
 		{"GET", "/api/agents/memory/claude-export", "GET /api/agents/memory/claude-export"},
 		{"GET", "/api/agents/memory/claude-export/preview", "GET /api/agents/memory/claude-export/preview"},
 		{"POST", "/api/agents/memory/claude-export", "POST /api/agents/memory/claude-export"},
+		{"GET", "/api/agents/memory/af-import/preview", "GET /api/agents/memory/af-import/preview"},
+		{"POST", "/api/agents/memory/af-import", "POST /api/agents/memory/af-import"},
 		{"GET", "/api/agents/memory/auto-sync", "GET /api/agents/memory/auto-sync"},
 		{"GET", "/api/agents/memory/auto-sync/preview", "GET /api/agents/memory/auto-sync/preview"},
 		{"POST", "/api/agents/memory/auto-sync", "POST /api/agents/memory/auto-sync"},
@@ -175,6 +177,17 @@ func TestMemorySnapshotIsAudited(t *testing.T) {
 	if !ok || action != "memory.claude_export" || target != "" {
 		t.Fatalf("auditActionTarget = (%q, %q, ok=%v), want memory.claude_export with an empty target", action, target, ok)
 	}
+	// Importing AF memory out of a bundle (#1983) is audited by import id only.
+	for q, want := range map[string]string{
+		"importId=20261014T093000Z": "20261014T093000Z", "importId=20261014T093000Z-2": "20261014T093000Z-2",
+		"importId=%2Fhome%2Fdev": "", "importId=ghp_secretlooking": "",
+	} {
+		req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/af-import?"+q, nil)
+		action, target, ok = auditActionTarget(req)
+		if !ok || action != "memory.af_import" || target != want {
+			t.Fatalf("auditActionTarget(af-import?%s) = (%q, %q, ok=%v), want memory.af_import/%q", q, action, target, ok, want)
+		}
+	}
 	// The member's part in the switch's automatic run (#1972) is audited by action word only.
 	for q, want := range map[string]string{
 		"action=retry": "retry", "action=abandon": "abandon", "action=wake&to=on": "wake:on",
@@ -187,7 +200,7 @@ func TestMemorySnapshotIsAudited(t *testing.T) {
 		}
 	}
 	// The other read-only routes are not audited.
-	for _, p := range []string{"/api/agents/memory/snapshots", "/api/agents/memory/tree", "/api/agents/memory/diff", "/api/agents/memory/claude-import", "/api/agents/memory/claude-import/preview", "/api/agents/memory/muse-import", "/api/agents/memory/muse-import/preview", "/api/agents/memory/claude-export", "/api/agents/memory/claude-export/preview", "/api/agents/memory/auto-sync", "/api/agents/memory/auto-sync/preview"} {
+	for _, p := range []string{"/api/agents/memory/snapshots", "/api/agents/memory/tree", "/api/agents/memory/diff", "/api/agents/memory/claude-import", "/api/agents/memory/claude-import/preview", "/api/agents/memory/muse-import", "/api/agents/memory/muse-import/preview", "/api/agents/memory/claude-export", "/api/agents/memory/claude-export/preview", "/api/agents/memory/auto-sync", "/api/agents/memory/auto-sync/preview", "/api/agents/memory/af-import/preview"} {
 		if _, _, ok := auditActionTarget(httptest.NewRequest(http.MethodGet, p, nil)); ok {
 			t.Errorf("GET %s should not be audited", p)
 		}

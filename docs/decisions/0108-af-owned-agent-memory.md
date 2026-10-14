@@ -786,3 +786,43 @@ unless the member opens the usual preview and confirms it.
   repository) give no suggestion: a guess between them is wrong half the time, and the member can still
   pick either in the move panel. The Console shows the suggestion above the pickers; its button fills them
   and loads the preview.
+
+## Note (2026-10-14): importing AF memory from a bundle (#1983)
+
+A memory bundle (0022) carries `af/`, but the generic restore and import skip it on purpose: they write
+without the secret scan decision 9 requires. A member who moves to a new workspace therefore left the AF
+memory behind. This is the other door: a one-shot, member-driven import, previewed, scanned and recorded.
+It does not touch the generic paths, which keep skipping `af/`.
+
+- **Where it starts.** The bundle is taken in by the existing `POST /agents/memory/import`
+  (`refs/imports/<id>/*`), whose apply still writes no AF memory. `GET /agents/memory/af-import/preview?importId=`
+  reads `af/` at the head of that lineage (one streamed `git cat-file --batch`, no history walk; only the small project.json files and the memory files
+  of projects that will be imported are requested, never a blob over the limit, each distinct blob once from git; the 64 MiB budget counts every file by its size, so many names for one blob
+  cannot get past it, and the project records are held to 4 MiB in all) and
+  `POST /agents/memory/af-import` publishes. The POST answers only the member-origin mark
+  ([0113](0113-member-origin-mark.md)), is audited as `memory.af_import` (import id only), and has no MCP tool.
+  tar.gz is not read: the generic tar import drops `af/` before it is committed.
+- **Mapping.** A source project maps to a live local project (a working copy under `~/repos`) by id; when the id
+  differs, which is the usual case because it derives from the clone's path, by the one live project with the same
+  normalised remote (#2110). None or two: listed as `no_local_project` / `ambiguous`, nothing of it read or shown,
+  nothing imported. A search for working copies that did not complete proves nothing about "the one project
+  with this remote", so then only an id match maps and the rest is `search_incomplete` (checked again at the
+  apply). A source project directory whose name fails the secret scan is counted (`withheld`), never named or read. The user scope maps to itself. There is no manual mapping.
+- **Evaluation.** The claude import's scan and publish path, on a file already in memory: the raw file, every
+  decoded field, the description, body, type and kinds, and the rendered file are scanned (no override; findings
+  are masked, a name that fails the scan is withheld), then the limits. The statuses are `new`, `unchanged` (same
+  description, type, body and kinds), `exists` (a live memory of that name with other text: **never replaced**: to
+  take the bundle's text the member edits the memory here by hand, since forgetting it would make it
+  `forgotten` for good; the same name from two source projects that map to one target is imported once, from
+  the first in id order, and the other is `exists` with reason `duplicate_in_bundle`; the publish itself refuses
+  a live copy, whatever was evaluated before), `forgotten` (a tombstone, or the name is anywhere in this scope's
+  history: never brought back, which includes one forgotten long ago; a memory forgotten on the bundle's side has no
+  live file in the bundle and is simply not there), `secret` and `invalid`. The apply repeats the evaluation under both store locks per request of up to
+  50 items and refuses an item whose hash or target changed since the preview; the write is
+  `agentMemImportWriteTo`, which scans the rendered file again and checks the tombstone.
+- **What is preserved, what is reset.** Preserved: name, description, type, body, the agent kinds a memory is
+  limited to. Reset: the revision (the next number in this store, or 1), the author (unknown, as for the claude
+  import), created / updated (the import time), the pin and the use counts. The origin is kept in `source`
+  (`bundle:<import id>:<scope dir>/<name>@<source revision>`) and `source_hash`, and in two commit trailers
+  (`AF-Bundle-Import`, `AF-Bundle-Source`), so each import is an `import` change by the member in the changes
+  list and can be reverted there. The bundle's history is not imported; it stays under `refs/imports` until pruned.
