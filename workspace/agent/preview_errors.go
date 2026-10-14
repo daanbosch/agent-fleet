@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"syscall"
 	"time"
 
@@ -115,35 +115,104 @@ func sniffPlainHTTPToTLS(resp *http.Response) error {
 		resp.ContentLength > 512 || !plainNoticeContentType(resp.Header.Get("Content-Type")) {
 		return nil
 	}
-	orig := resp.Body // captured: the goroutine must never see the field we replace below
-	res := make(chan sniffResult, 1)
-	var abandoned atomic.Bool
-	go func() {
-		var got []byte
-		tmp := make([]byte, sniffLimit)
-		for {
-			n, err := orig.Read(tmp[:sniffLimit-len(got)])
-			got = append(got, tmp[:n]...)
-			if err != nil || len(got) >= sniffLimit || abandoned.Load() || looksLikeHTTPToHTTPSNotice(got) {
-				res <- sniffResult{got, err}
-				return
-			}
-		}
-	}()
-	pb := &peekBody{orig: orig, res: res}
+	sn := &sniffer{orig: resp.Body, finished: make(chan struct{}), lateDone: make(chan struct{})}
+	go sn.collect()
 	select {
-	case r := <-res:
-		if looksLikeHTTPToHTTPSNotice(r.data) {
-			_ = orig.Close()
-			return errPlainHTTPToTLS
-		}
-		res <- r // replay it to the reader
+	case <-sn.finished:
 	case <-time.After(sniffWait):
-		abandoned.Store(true)
+		sn.mu.Lock()
+		select {
+		case <-sn.finished: // finished in the meantime
+		default:
+			// Out of time: hand over what has been read so far. The Read in flight is not
+			// waited for and its result is not tied to forwarding the prefix; it is
+			// delivered after the prefix when it completes.
+			sn.abandoned = true
+		}
+		sn.mu.Unlock()
 	}
-	resp.Body = pb
+	sn.mu.Lock()
+	defer sn.mu.Unlock()
+	if sn.abandoned {
+		resp.Body = &peekBody{sn: sn, prefix: append([]byte(nil), sn.got...)}
+		return nil
+	}
+	if looksLikeHTTPToHTTPSNotice(sn.got) {
+		_ = sn.orig.Close()
+		return errPlainHTTPToTLS
+	}
+	resp.Body = &peekBody{sn: sn, prefix: sn.got, err: sn.err, ready: true}
 	return nil
 }
+
+// sniffer reads the head of a body on its own goroutine so the caller can stop waiting.
+// The goroutine is the only reader of orig until it finishes or is abandoned.
+type sniffer struct {
+	orig io.ReadCloser
+
+	mu        sync.Mutex
+	got       []byte // bytes read so far
+	err       error  // read error that ended the sniff
+	abandoned bool
+	finished  chan struct{} // closed when the sniff ended on its own (match, limit, error)
+	lateDone  chan struct{} // closed when the Read in flight at abandonment returned
+	late      []byte
+	lateErr   error
+}
+
+func (sn *sniffer) collect() {
+	tmp := make([]byte, sniffLimit)
+	have := 0 // only this goroutine appends to got, so it can size the read without the lock
+	for {
+		n, err := sn.orig.Read(tmp[:sniffLimit-have])
+		sn.mu.Lock()
+		if sn.abandoned {
+			sn.late, sn.lateErr = append([]byte(nil), tmp[:n]...), err
+			sn.mu.Unlock()
+			close(sn.lateDone)
+			return
+		}
+		sn.got = append(sn.got, tmp[:n]...)
+		have = len(sn.got)
+		if err != nil || len(sn.got) >= sniffLimit || looksLikeHTTPToHTTPSNotice(sn.got) {
+			sn.err = err
+			sn.mu.Unlock()
+			close(sn.finished)
+			return
+		}
+		sn.mu.Unlock()
+	}
+}
+
+// peekBody replays the head collected by sniffPlainHTTPToTLS, then whatever the abandoned
+// Read returns, then continues with the original body.
+type peekBody struct {
+	sn     *sniffer
+	prefix []byte
+	err    error // error to return once prefix is drained (finished sniff)
+	ready  bool  // the sniff finished: no Read in flight
+}
+
+func (p *peekBody) Read(b []byte) (int, error) {
+	if len(p.prefix) > 0 {
+		n := copy(b, p.prefix)
+		p.prefix = p.prefix[n:]
+		return n, nil
+	}
+	if p.ready {
+		if p.err != nil {
+			return 0, p.err
+		}
+		return p.sn.orig.Read(b)
+	}
+	// Abandoned: the next bytes are whatever the in-flight Read gets, as soon as it does.
+	<-p.sn.lateDone
+	p.ready = true
+	p.prefix, p.err = p.sn.late, p.sn.lateErr
+	return p.Read(b)
+}
+
+func (p *peekBody) Close() error { return p.sn.orig.Close() }
 
 func plainNoticeContentType(ct string) bool {
 	if ct == "" {
@@ -152,39 +221,6 @@ func plainNoticeContentType(ct string) bool {
 	mt, _, err := mime.ParseMediaType(ct)
 	return err == nil && (mt == "text/plain" || mt == "text/html")
 }
-
-type sniffResult struct {
-	data []byte
-	err  error
-}
-
-// peekBody replays the one read taken by sniffPlainHTTPToTLS, then continues with the
-// original body.
-type peekBody struct {
-	orig io.ReadCloser
-	res  chan sniffResult
-	buf  []byte
-	err  error
-	done bool
-}
-
-func (p *peekBody) Read(b []byte) (int, error) {
-	if !p.done {
-		r := <-p.res
-		p.buf, p.err, p.done = r.data, r.err, true
-	}
-	if len(p.buf) > 0 {
-		n := copy(b, p.buf)
-		p.buf = p.buf[n:]
-		return n, nil
-	}
-	if p.err != nil {
-		return 0, p.err
-	}
-	return p.orig.Read(b)
-}
-
-func (p *peekBody) Close() error { return p.orig.Close() }
 
 func looksLikeHTTPToHTTPSNotice(b []byte) bool {
 	s := strings.ToLower(string(b))

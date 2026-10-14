@@ -328,3 +328,19 @@ func TestPreviewLate400BodyIsDeliveredWhole(t *testing.T) {
 		t.Fatalf("got %d %q CL=%q", rr.Code, rr.Body, rr.Header().Get("Content-Length"))
 	}
 }
+
+// A first body chunk that arrives and is then followed by silence reaches the client
+// while the upstream is still open: the sniff's wait must not park bytes already read.
+func TestPreviewFirstBodyChunkOf400StreamIsNotParked(t *testing.T) {
+	hold := make(chan struct{})
+	t.Cleanup(func() { close(hold) })
+	p := rawListener(t, func(c net.Conn) {
+		_, _ = c.Write([]byte("HTTP/1.0 400 Bad Request\r\n\r\nstreaming..."))
+		<-hold
+	})
+	resp := getThroughFront(t, p)
+	got := make([]byte, len("streaming..."))
+	if _, err := io.ReadFull(resp.Body, got); err != nil || string(got) != "streaming..." {
+		t.Fatalf("first chunk = %q, err %v (upstream still open)", got, err)
+	}
+}
