@@ -137,6 +137,10 @@ jobs:
   # skip into a failure, and the SKIP check after the run catches any skip the flag does not
   # cover, so this job cannot go green on a run of nothing.
   contract-v2:
+    # Read-only token: nothing here reports, and the npm package and the PR's test code both
+    # run with it. The issue-writing permission above belongs to the reporting steps of `contract`.
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -170,17 +174,17 @@ jobs:
 
       # The tests build their own isolated HOME / XDG roots (envWithHome), so the runner's
       # home is never read. Selection is by name: a new TestContractTerminalForm*, V2* or
-      # Shared* test joins automatically, and the -list check fails when a family matches
-      # nothing (a rename would otherwise drop it silently); TerminalForm is not listed there because
-      # it may not exist on every branch.
+      # Shared* test joins automatically, and the -list check below fails when any one of the
+      # tests that exist today stops matching (a rename would otherwise drop it silently).
       - name: opencode 2 contract tests
         working-directory: workspace/agent
         run: |
           set -u
           run='^(TestContract(ServeAPI|V2|Shared|TerminalForm)|TestOpencodePluginModules)'
           go test -tags contract -list "$run" ./internal/agents/opencode/ > "$RUNNER_TEMP/list.txt"
-          for family in ServeAPI V2 Shared PluginModules; do
-            grep -q "$family" "$RUNNER_TEMP/list.txt" || { echo "::error::no test matches the $family family"; exit 1; }
+          for name in TestContractServeAPI TestContractV2Form TestContractV2State \
+                      TestContractShared TestContractTerminalForm TestOpencodePluginModules; do
+            grep -q "^$name" "$RUNNER_TEMP/list.txt" || { echo "::error::no test named $name* is selected"; exit 1; }
           done
           rc=0
           go test -p 2 -tags contract -run "$run" -v -count=1 -timeout 12m ./internal/agents/opencode/ > "$RUNNER_TEMP/v2.log" 2>&1 || rc=$?
