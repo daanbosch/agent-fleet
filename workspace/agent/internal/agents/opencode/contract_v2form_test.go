@@ -74,7 +74,7 @@ func TestContractV2FormQuestionRoundTrip(t *testing.T) {
 	if err != nil || len(forms) != 1 {
 		t.Fatalf("forms = %v, %v", forms, err)
 	}
-	h.inter = forms[0].interaction()
+	h.setForms(forms)
 	if err := h.Respond(agents.InteractionReply{ID: forms[0].ID, Decision: agents.DecisionAnswer,
 		Answers: []agents.InteractionAnswer{{Text: "my own answer"}, {Options: []int{1}, Text: "Pineapple"}}}); err != nil {
 		t.Fatal(err)
@@ -109,7 +109,7 @@ func TestContractV2FormQuestionRoundTrip(t *testing.T) {
 	// Dismiss: the form is cancelled and the turn goes on to its end.
 	m, ses, h, done = ask("v2formdismiss", "ASK me")
 	forms, _ = api.pendingForms(ses)
-	h.inter = forms[0].interaction()
+	h.setForms(forms)
 	if err := h.Respond(agents.InteractionReply{ID: forms[0].ID, Decision: agents.DecisionCancel}); err != nil {
 		t.Fatal(err)
 	}
