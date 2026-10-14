@@ -8,7 +8,7 @@ import "encoding/json"
 // rendered from. A different fingerprint only says the bundle is behind the host;
 // whether these types can still speak to it is schemagen.Compare's question, asked of
 // the installed binary by fingerprint_test.go.
-const SchemaFingerprint = "sha256:6de32db08bbbe0deb478d2bfcaba001e9fb490986bc80db3aceb4d996abf7df9"
+const SchemaFingerprint = "sha256:4e3200c3c9dc0cd7919d11022630d43f9bc1c5cdda375381e90b0183b5665069"
 
 // SchemaVersion is MSP's own version, carried in `initialize`.
 const SchemaVersion = 1
@@ -118,6 +118,7 @@ const (
 	NotificationSkillChanged                  = "skill/changed"
 	NotificationTurnCompleted                 = "turn/completed"
 	NotificationTurnForegroundCompleted       = "turn/foregroundCompleted"
+	NotificationTurnModelRetryScheduled       = "turn/modelRetryScheduled"
 	NotificationTurnRetracted                 = "turn/retracted"
 	NotificationTurnRetryScheduled            = "turn/retryScheduled"
 	NotificationTurnStarted                   = "turn/started"
@@ -216,6 +217,7 @@ var notificationParams = map[string]string{
 	"skill/changed":                  "SkillChangedParams",
 	"turn/completed":                 "TurnCompletedParams",
 	"turn/foregroundCompleted":       "TurnForegroundCompletedParams",
+	"turn/modelRetryScheduled":       "TurnModelRetryScheduledParams",
 	"turn/retracted":                 "TurnRetractedParams",
 	"turn/retryScheduled":            "TurnRetryScheduledParams",
 	"turn/started":                   "TurnStartedParams",
@@ -646,6 +648,7 @@ const (
 	CapabilityNameFeedback             CapabilityName = "feedback"
 	CapabilityNameComputerUseSetup     CapabilityName = "computerUseSetup"
 	CapabilityNameComputerUseHostSetup CapabilityName = "computerUseHostSetup"
+	CapabilityNameSessionRename        CapabilityName = "sessionRename"
 )
 
 // CapabilityNameValues are every CapabilityName the bundle declares, in schema order.
@@ -656,6 +659,7 @@ var CapabilityNameValues = []CapabilityName{
 	CapabilityNameFeedback,
 	CapabilityNameComputerUseSetup,
 	CapabilityNameComputerUseHostSetup,
+	CapabilityNameSessionRename,
 }
 
 // ClientCapabilities The client's requested capability posture (SS1.4.1). Every member defaults; an absent
@@ -838,6 +842,63 @@ var CompactionTriggerValues = []CompactionTrigger{
 	CompactionTriggerAuto,
 }
 
+// ComputerUseApp One row of the Settings apps list.
+type ComputerUseApp struct {
+	// The app's bundle ID: the stored key.
+	BundleID string `json:"bundleId"`
+	// The choice as it applies: a block wins over a grant.
+	Choice ComputerUseAppChoice `json:"choice"`
+	// When Computer Use last showed an approval card for the app, RFC3339 UTC; absent when it
+	// never has.
+	LastAskedAt *string `json:"lastAskedAt,omitempty"`
+	// Settings can't change this row; its choice is `blocked`. Omitted means false.
+	Locked *bool `json:"locked,omitempty"`
+	// Why the row is locked, when it is.
+	LockedBy *ComputerUseAppLock `json:"lockedBy,omitempty"`
+	// The name the approval card shows for it, else the name stored with its grant or its last
+	// card; absent when there is none.
+	Name *string `json:"name,omitempty"`
+}
+
+// ComputerUseAppChoice A per-app choice. **Open**, like `ComputerUseChoice`.
+type ComputerUseAppChoice string
+
+const (
+	ComputerUseAppChoiceAsk         ComputerUseAppChoice = "ask"
+	ComputerUseAppChoiceAlwaysAllow ComputerUseAppChoice = "alwaysAllow"
+	ComputerUseAppChoiceBlocked     ComputerUseAppChoice = "blocked"
+)
+
+// ComputerUseAppChoiceValues are every ComputerUseAppChoice the bundle declares, in schema order.
+var ComputerUseAppChoiceValues = []ComputerUseAppChoice{
+	ComputerUseAppChoiceAsk,
+	ComputerUseAppChoiceAlwaysAllow,
+	ComputerUseAppChoiceBlocked,
+}
+
+// ComputerUseAppLock Why Settings can't change a row. **Open**.
+type ComputerUseAppLock string
+
+const (
+	ComputerUseAppLockBuiltIn ComputerUseAppLock = "builtIn"
+	ComputerUseAppLockFile    ComputerUseAppLock = "file"
+)
+
+// ComputerUseAppLockValues are every ComputerUseAppLock the bundle declares, in schema order.
+var ComputerUseAppLockValues = []ComputerUseAppLock{
+	ComputerUseAppLockBuiltIn,
+	ComputerUseAppLockFile,
+}
+
+// ComputerUseAppPatch One per-app choice to set in `computerUseSettings/update`.
+type ComputerUseAppPatch struct {
+	// The app's bundle ID.
+	BundleID string `json:"bundleId"`
+	// `ask` removes the app's grant and the user's block; `alwaysAllow` saves a grant and
+	// removes the user's block; `blocked` adds the user's block and removes the grant.
+	Choice ComputerUseAppChoice `json:"choice"`
+}
+
 // ComputerUseBlockedApp One row of the Settings blocked-apps list.
 type ComputerUseBlockedApp struct {
 	// The app's bundle ID, or the family prefix when `prefix` is true.
@@ -864,6 +925,14 @@ var ComputerUseChoiceValues = []ComputerUseChoice{
 	ComputerUseChoiceAlwaysAllow,
 }
 
+// ComputerUseInstalledApp One installed or running app, for Settings' app picker.
+type ComputerUseInstalledApp struct {
+	// The app's bundle ID.
+	BundleID string `json:"bundleId"`
+	// The name the approval card shows for it.
+	Name string `json:"name"`
+}
+
 // ComputerUsePermission One macOS permission as setup last saw it. **Open**, like the phase.
 type ComputerUsePermission string
 
@@ -882,18 +951,26 @@ var ComputerUsePermissionValues = []ComputerUsePermission{
 
 // ComputerUseSettings `computerUseSettings/read` result, also answered by `computerUseSettings/update`.
 type ComputerUseSettings struct {
+	// The apps list: apps Computer Use has asked about, most recent first; then the other
+	// saved grants, then the user's other blocks; then the locked rows. Each app once. A host
+	// that serves the list always answers it, so its absence means an older host.
+	Apps []ComputerUseApp `json:"apps,omitempty"`
 	// The user's blocks in the order they were added, then the built-in blocks when
 	// `showBuiltIns` asked for them.
 	BlockedApps []ComputerUseBlockedApp `json:"blockedApps"`
 	// The computer-control dropdown, as it applies: `ask` while the stored blocked-apps list
 	// can't be read (ADR 630 D18.4).
 	ComputerControl ComputerUseChoice `json:"computerControl"`
+	// The installed and running apps, sorted by name, when the read asked for `installed`.
+	InstalledApps []ComputerUseInstalledApp `json:"installedApps,omitempty"`
 	// The screenshots dropdown, under the same rule.
 	Screenshots ComputerUseChoice `json:"screenshots"`
 }
 
 // ComputerUseSettingsReadParams `computerUseSettings/read` params.
 type ComputerUseSettingsReadParams struct {
+	// Also answer `installedApps`, for an app picker. Omitted means false.
+	Installed *bool `json:"installed,omitempty"`
 	// Also list the built-in blocks as locked rows (the D18.8 toggle). Omitted means false.
 	ShowBuiltIns *bool `json:"showBuiltIns,omitempty"`
 }
@@ -901,6 +978,9 @@ type ComputerUseSettingsReadParams struct {
 // ComputerUseSettingsUpdateParams `computerUseSettings/update` params: a patch. Omitted members are left alone; the whole
 // patch applies or none of it does.
 type ComputerUseSettingsUpdateParams struct {
+	// Per-app choices to set. A locked app is refused; so is a bundle ID named twice, or also
+	// in `blockApps` or `unblockApps`.
+	Apps []ComputerUseAppPatch `json:"apps,omitempty"`
 	// Bundle IDs to add to the user's blocked apps. A built-in block is refused: it is already
 	// blocked.
 	BlockApps []string `json:"blockApps,omitempty"`
@@ -1854,9 +1934,18 @@ type Item struct {
 	Label *string `json:"label,omitempty"`
 	// `workflow`: the reconciled terminal message, set on completion.
 	Message *string `json:"message,omitempty"`
+	// `agentMessage`: the phase the model declared on the commit; see [`MessagePhase`].
+	MessagePhase *MessagePhase `json:"messagePhase,omitempty"`
 	// `toolCall`: rich content the model saw beyond text; base64 is not inlined on the view
 	// (tdd SS4.5.5).
 	ModelVisibleContent []ModelVisibleContent `json:"modelVisibleContent,omitempty"`
+	// `monitorFeed`: the monitor's arm-time description with the durable `"Monitor event: "`
+	// summary prefix stripped; model- controlled tool input under the 64 KiB per-surface
+	// budget — sanitize before render (ADR 50058-monitor-feed-wire D1/D3).
+	MonitorDescription *string `json:"monitorDescription,omitempty"`
+	// `monitorFeed`: the monitor task id — the same value as that monitor's `toolCall`
+	// `itemId` (ADR 50058-monitor-feed-wire D1).
+	MonitorID *string `json:"monitorId,omitempty"`
 	// `subagent`: objective as spawned, bounded on the wire at the 64 KiB retained-text budget
 	// (tdd SS4.5.4, ADR 35691 D9); a cut sets `truncated`. The durable record stays verbatim.
 	Objective *string `json:"objective,omitempty"`
@@ -1981,14 +2070,16 @@ type Item struct {
 	TriggerSource *string `json:"triggerSource,omitempty"`
 	// `true` when the server's per-surface text budget saturated a streamed surface
 	// (`agentMessage.text`, `reasoning.summary[*]`, `toolCall.visibleOutput`,
-	// `userShell.visibleOutput`), or cut a `subagent` surface (`objective`, `fallbackText`,
-	// `result.summary`, `result.text`). On a `subagent` item the flag is item-level and never
-	// cleared: once any of those four is cut, every later update keeps it, even when
-	// `result.text` arrives whole (ADR 35691 D9). The durable full text remains in the log
-	// (tdd SS4.5.4).
+	// `userShell.visibleOutput`), cut a `subagent` surface (`objective`, `fallbackText`,
+	// `result.summary`, `result.text`), or cut a `monitorFeed` surface (`text`,
+	// `fallbackText`, `monitorDescription`) (ADR 50058-monitor-feed-wire D3). On a `subagent`
+	// item the flag is item-level and never cleared: once any of those four is cut, every
+	// later update keeps it, even when `result.text` arrives whole (ADR 35691 D9). The durable
+	// full text remains in the log (tdd SS4.5.4).
 	Truncated *bool `json:"truncated,omitempty"`
-	// The owning turn (== the submitting `commandId` for fresh turns, tdd SS3.1.4). `null`
-	// only for `userShell` — the one kind outside a turn (tdd SS4.5.6).
+	// The owning turn (== the submitting `commandId` for fresh turns, tdd SS3.1.4). `null` for
+	// the kinds outside a turn: `userShell` always (tdd SS4.5.6), `hookRun` for
+	// session-boundary runs, `monitorFeed` always (ADR 50058-monitor-feed-wire D1).
 	TurnID *string `json:"turnId,omitempty"`
 	// `subagent`: **transitive** observed usage — the child and its own descendants; updated
 	// in place, absent until first observation; never folded into
@@ -2054,6 +2145,7 @@ const (
 	ItemKindHookRun       ItemKind = "hookRun"
 	ItemKindSideChat      ItemKind = "sideChat"
 	ItemKindWebSearch     ItemKind = "webSearch"
+	ItemKindMonitorFeed   ItemKind = "monitorFeed"
 )
 
 // ItemKindValues are every ItemKind the bundle declares, in schema order.
@@ -2070,6 +2162,7 @@ var ItemKindValues = []ItemKind{
 	ItemKindHookRun,
 	ItemKindSideChat,
 	ItemKindWebSearch,
+	ItemKindMonitorFeed,
 }
 
 // ItemReadOutputEncoding The `item/readOutput` content encoding (tdd SS4.7.4). Closed: text media is ALWAYS
@@ -2266,6 +2359,24 @@ type MessageAttachment struct {
 	Type string `json:"type"`
 	// Pixel width, when known.
 	Width *int64 `json:"width,omitempty"`
+}
+
+// MessagePhase `agentMessage.messagePhase` (tdd SS4.5.3, #50254): the phase the model declared on the
+// commit, never inferred from position. Set on the completed item only; absent on
+// `item/started`, which opens before the phase is recorded. Open: a client reads an absent
+// or unknown value on a completed item as `"finalAnswer"` and still decodes the item. Not
+// a turn-done signal; `turn/completed` is.
+type MessagePhase string
+
+const (
+	MessagePhaseCommentary  MessagePhase = "commentary"
+	MessagePhaseFinalAnswer MessagePhase = "finalAnswer"
+)
+
+// MessagePhaseValues are every MessagePhase the bundle declares, in schema order.
+var MessagePhaseValues = []MessagePhase{
+	MessagePhaseCommentary,
+	MessagePhaseFinalAnswer,
 }
 
 // ModelCatalogEntry One visible catalog row (tdd SS3.10). Catalog rows marked hidden never reach the wire,
@@ -3141,6 +3252,12 @@ type Session struct {
 	FirstUserPrompt *string `json:"firstUserPrompt,omitempty"`
 	// `null` for root sessions; fork provenance otherwise (tdd SS2.4).
 	ForkedFrom *ForkProvenance `json:"forkedFrom,omitempty"`
+	// The served generated short title (tdd SS2.4/SS2.14.1, #50048; ADR 50048-generated-name
+	// D1). **Additive-optional**, **fold-only**: the snapshot fold derives the latest retained
+	// generated pair's short title from the log; `session/list` rows never carry it. Omitted
+	// when no pair was ever published — absent reads as unpublished, never fabricated, never
+	// inferred from the name text. `name` stays the canonical name it always was.
+	GeneratedName *string `json:"generatedName,omitempty"`
 	// What kind of session this is (spec 42713 FR-001, ADR 42713 D1/D4). **Open enum**, v1
 	// values `"root"` and `"subagent"`; a client treats an unknown value as an
 	// unknown-but-present kind and renders it, never rejecting the row. **Additive-optional**:
@@ -3634,6 +3751,11 @@ type SessionModelRouteUnservedParams struct {
 // record — the FIRST-NAMING automatic allocate as well as an accepted `session/rename`
 // (or the same in-process runtime command). Replace-wholesale like every SS4.6 sibling.
 type SessionNameChangedParams struct {
+	// The latest retained generated short title (tdd SS2.4/SS4.6.7, #50048; ADR
+	// 50048-generated-name D1). **Additive-optional**: carried at generated-pair publication
+	// and at settlement when a pair is already published; omitted when no pair was ever
+	// published — absent reads as unpublished, never fabricated. `name` stays canonical.
+	GeneratedName *string `json:"generatedName,omitempty"`
 	// The new canonical name now in effect.
 	Name string `json:"name"`
 	// How the new name was set (tdd SS2.4/SS4.6.7, #50048; ADR 50048 D1/D2).
@@ -3755,6 +3877,14 @@ type SessionResumeParams struct {
 	// `history.mode` reports what was actually served (tdd SS2.5.2). Ignored when `cursor` or
 	// `excludeItems` makes it moot.
 	History *HistoryPreference `json:"history,omitempty"`
+	// The launch permission-profile pick (amendment 42624 FR-42624-1, #50054): a profile id
+	// the host catalog already admits. Select, never create. Omitted means today's behavior:
+	// restore retained authority only, no override. The host restores first, then applies the
+	// pick in the same pre-marker step; a pick that fails admission refuses the resume
+	// `commandRejected` (-32030; `permission_profile_unknown` /
+	// `permission_profile_unavailable`) before any durable byte. Explicit `null` is invalid
+	// params (the same closed null-tolerant set as at start).
+	PermissionProfile *string `json:"permissionProfile,omitempty"`
 	// The session to load.
 	SessionID string `json:"sessionId"`
 }
@@ -3896,9 +4026,10 @@ type SessionStartParams struct {
 	// carry, or one it serves unavailable, refuses the start `commandRejected` (-32030;
 	// `permission_profile_unknown` / `permission_profile_unavailable`) before any durable
 	// byte, and an ephemeral host refuses any id (`permission_profile_ephemeral_fixed`).
-	// `session/resume` and `session/fork` do not admit the member. Explicit `null` is invalid
-	// params: the set of members that tolerate `null` is closed and excludes this one, exactly
-	// as it excludes `workspaceRoots`.
+	// `session/fork` does not admit the member; `session/resume` admits it as the launch pick
+	// (FR-42624-1, #50054). Explicit `null` is invalid params: the set of members that
+	// tolerate `null` is closed and excludes this one, exactly as it excludes
+	// `workspaceRoots`.
 	PermissionProfile *string `json:"permissionProfile,omitempty"`
 	// Initial provider routing; server default when omitted or explicit `null` — both
 	// spellings select the default (#23468).
@@ -4158,6 +4289,10 @@ type SkillCatalogEntry struct {
 	Selector string `json:"selector"`
 	// Where the skill comes from.
 	Source SkillSource `json:"source"`
+	// The skill's declared human-readable name (`SKILL.md` `metadata.display-name`), for
+	// clients to show where people read the skill's name; absent when the skill declares none
+	// (ADR 56597 D2). The palette keeps showing `displayName`.
+	Title *string `json:"title,omitempty"`
 }
 
 // SkillChangedParams `skill/changed` params (tdd SS3.22.2): the session's user-invocable set changed; clients
@@ -5084,6 +5219,48 @@ type TurnInterruptResult struct {
 	Status CommandStatus `json:"status"`
 	// The interrupted turn.
 	TurnID string `json:"turnId"`
+}
+
+// TurnModelRetryScheduledParams `turn/modelRetryScheduled` params (tdd SS4.5.1; ADR
+// `50047-model-retry-scheduled-members` D1): a durable model-stream retry-scheduled fact
+// folded — the provider backoff behind one model attempt is observable BEFORE the turn
+// terminates, so a streaming client can render "system words · retrying in Ss · attempt
+// N/M" instead of dead air. Non-terminal: it never resolves a turn-wait. The sibling
+// `turn/retryScheduled` shape at the model layer: same member names and semantics
+// (attempt/nextAttempt/maxAttempts/ retryDelayMs/system/errorKind/httpStatus), minus
+// `reason` — the row's words derive from `errorKind` through the shared gate-off
+// mapping, and the recorded machine message is not user text. The delay is the recorded
+// scheduled backoff, never an absolute fire time — clients derive any countdown locally.
+// `sourceRange` cites the session stream's mirror of the task-lifecycle record (tdd
+// SS4.2).
+type TurnModelRetryScheduledParams struct {
+	// The failed model attempt (producer-normalized, >= 1).
+	Attempt int64 `json:"attempt"`
+	// The failing model attempt's durable kind, verbatim (ADR 50047 D2) — a plain string:
+	// the durable vocabulary is open-ended.
+	ErrorKind *string `json:"errorKind,omitempty"`
+	// The failing model attempt's HTTP status (ADR 50047 D2).
+	HTTPStatus *int64 `json:"httpStatus,omitempty"`
+	// The model-retry chain bound.
+	MaxAttempts int64 `json:"maxAttempts"`
+	// The scheduled model attempt (producer contract: attempt < nextAttempt <= maxAttempts;
+	// not a schema constraint).
+	NextAttempt int64 `json:"nextAttempt"`
+	// The scheduled backoff delay in milliseconds, verbatim from the durable fact.
+	RetryDelayMs int64 `json:"retryDelayMs"`
+	// The owning session.
+	SessionID string `json:"sessionId"`
+	// The durable record this event folded from (the session stream's mirror of the scheduled
+	// model task status; `first == last`).
+	SourceRange SourceRange `json:"sourceRange"`
+	// The failing model attempt's provider system, verbatim (ADR 50047 D2) — e.g. `"meta"`.
+	// Always present from this producer (the durable `system` is a required `String`);
+	// optional on the wire so a future omission folds absent instead of failing the frame.
+	System *string `json:"system,omitempty"`
+	// The running turn whose model attempt is being retried.
+	TurnID string `json:"turnId"`
+	// Opaque, strictly monotonic view cursor (tdd SS4.1).
+	ViewCursor string `json:"viewCursor"`
 }
 
 // TurnRef A turn named by the snapshot's active/queued lists (tdd SS4.9.1).

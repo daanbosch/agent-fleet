@@ -3136,3 +3136,26 @@ commentary phase on `Item`. Both workarounds (#1699, #1696) stay.
 
 The same cost applies again: the 1.4.7 bundle is red against a 1.4.4 binary until `MUSE_VERSION`
 moves; measured: 1.4.7 green, 1.4.4 red. The pin bump is cli-pin-bump's.
+
+### Note 2026-10-15: bundle re-exported for 1.4.8-R6256.1 (#2164)
+
+1.4.8-R6256.1 adds one value to a closed enum the client decodes, `ItemKind` `monitorFeed` (a
+monitor task's events, keyed by `monitorId`). The compatibility check reads it as a break. It
+does not change Go behaviour: a `monitorFeed` item renders through the transcript's generic part,
+like `webSearch`. Everything else is an addition: new optional members (among them
+`Item.messagePhase`, `Item.monitorId`, `Session.generatedName`,
+`SessionResumeParams.permissionProfile`), the computer-use app types, the grantable capability
+`sessionRename` (a membership enum), and one notification, `turn/modelRetryScheduled`, which the
+handle drops like any it does not handle. Per P2-24 the answer is a re-export:
+`internal/msp/schema` and `types_gen.go` now carry the 1.4.8 export (fingerprint
+`sha256:4e3200c3…`, equal to the release manifest's `msp_schema_fingerprint`). The checker is
+unchanged. No existing field in `types_gen.go` changed type.
+
+Of the two host-side issues reported upstream (#1695), `userInput/cancel` without a `reason` is
+still refused with `-32602` on 1.4.8 (`TestLiveUserInputCancelNeedsAReason`, throwaway HOME, no
+turn). The other now has a schema answer: `Item.messagePhase` marks a completed `agentMessage` as
+`commentary` or `finalAnswer`. Whether the host now puts pre-tool-call commentary on the wire
+needs a real turn; until that is measured the session.jsonl reader (#1696) stays (#2168).
+
+The same cost applies again: the 1.4.8 bundle is red against a 1.4.7 binary until `MUSE_VERSION`
+moves; measured: 1.4.8 green, 1.4.7 red. The pin bump is cli-pin-bump's.
