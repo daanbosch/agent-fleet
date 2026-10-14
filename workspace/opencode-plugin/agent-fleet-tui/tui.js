@@ -13,6 +13,8 @@
 //   - a root session shown here that carries no af.sid is tagged with this pane's sid, after the
 //     pane's environment has been PUT for it (the server's shell-tool gate waits for the tag, so
 //     the environment is in place before the first command runs);
+//   - the environment is PUT the first time this pane shows a session, tagged already or not (a fork
+//     carries the tag, not the environment);
 //   - a session tagged with another af sid is never touched, whatever the route says;
 //   - the slot file (opencode-sid/<sid>) follows the root session on screen, as the status plugin
 //     does for a standalone pane;
@@ -69,9 +71,11 @@ export default {
       if (info.parentID) return "child";
       const md = info.metadata || {};
       if (md["af.managed"] || (md["af.sid"] && md["af.sid"] !== sid)) return "other";
+      // Always, even for a session already tagged with this sid: a fork copies the tag but not the
+      // environment, and so does a session this pane visits for the first time after a restart.
+      // Environment first: the tag is what lets a held shell command through.
+      await putEnvironment(sessionID);
       if (!md["af.sid"]) {
-        // Environment first: the tag is what lets a held shell command run.
-        await putEnvironment(sessionID);
         await ctx.client.session.update({ sessionID, metadata: { ...md, "af.sid": sid, ...(name ? { "af.name": name } : {}) } });
       }
       mine.add(sessionID);

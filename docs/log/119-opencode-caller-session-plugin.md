@@ -260,19 +260,22 @@ the server receives every `session.created`**, so the first version, which claim
 on the event, tagged a `/new` made in one pane with another pane's sid (found by the end-to-end
 run). A pane now claims a session only while its own route shows it.
 
-**Restart gap.** The environment is in memory, so a new serve generation has none. On every new
-generation the Agent PUTs the environment of each live Terminal pane (read back from the pane's
-process tree, `/proc/<pid>/environ` — no copy on disk) before it counts the daemon as up, then
-writes the daemon pid to `~/.config/agent-fleet/opencode-env-ready`. The server plugin holds the
-shell tool until that marker names its own pid (bounded at 10 s, then runs). A session created by
-`/new` inside a TUI has the same hole between creation and the TUI plugin's PUT + tag; the shell
-tool waits for the tag of a new untagged session (5 s bound, never for Managed — tagged
-`af.managed` — subagent or old sessions). Measured on a restart with four panes: the new daemon
-answered, and the environments + marker were in place 170–350 ms later; the TUIs reconnected and
-their next command saw their own environment. **Residual window:** anything that runs a command
-without the shell tool, a server whose Agent is gone (the gate gives up after its bound), and a
-plugin that fails to load. The password is kept across generations (a `--server` TUI reconnects
-only with the password it started with).
+**Restart gap and the shell gate (revised after review).** The environment is in memory, so a new
+serve generation has none, and neither does a subagent's session (it inherits metadata and
+permissions, not the environment), a fork (copies the tag only) or a `/new` before its tag. On every
+new generation the Agent PUTs the live shared panes' environments (read from the pane's process
+tree, `/proc/<pid>/environ`, nothing on disk; retried) as a warm-up. The guarantee is per session:
+the server plugin makes the shell tool ask the Agent (`workspace-agent opencode-put-env <slot>
+<session>`) once per session and server generation — the plugin's memory is exactly one generation —
+and REFUSES the command when the Agent cannot confirm (a throw in `execute.before` blocks the tool;
+measured). The Agent PUTs only onto a session whose af.sid/af.name are the slot's. A new untagged
+session is waited for (5 s); an old untagged one, a Managed one (`af.managed`) and a new one nobody
+claims have no pane to take an environment from and run as before. Measured with four panes: the
+environments are back 170–350 ms after the new daemon answers, the TUIs reconnect. **Residual:**
+commands that do not go through the shell tool, and a plugin that fails to load. The password is kept
+across generations. A pane remembers how it was launched (`opencode-mode`): an automatic fall back to
+`--standalone` is not read, drained or interrupted as a shared pane. `opencode-attach` checks the
+session is the pane's own and refuses connection-changing flags.
 
 **Memory** (idle, bare TUIs, no plugins, RSS/PSS MB): 3 × `--standalone` 1230 / 842; one serve + 3 ×
 `--server` 732 / 543. Per extra pane about +160 / +112 (TUI) against +410 / +280 (standalone).

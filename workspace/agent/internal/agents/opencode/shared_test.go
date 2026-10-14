@@ -336,12 +336,12 @@ func TestSharedLaunchIsV2Only(t *testing.T) {
 // then starts the TUI; a server that will not take it stops the launch.
 func TestAttachPutsTheEnvironmentBeforeTheTUI(t *testing.T) {
 	d := newSharedDaemon(t)
-	d.sessions["ses_a"] = map[string]string{}
+	d.sessions["ses_a"] = map[string]string{metaSID: "sid-1", metaName: "slot"}
 	d.failEnv = 2
 	oldRetries := attachRetries
 	attachRetries = 5
 	t.Cleanup(func() { attachRetries = oldRetries })
-	environ := []string{"AF_SESSION_SID=sid-1", "PATH=/x", "OPENCODE_SERVER_PASSWORD=pw-shared", "OPENCODE_SERVER_USERNAME=opencode", "junk"}
+	environ := []string{"AF_SESSION_SID=sid-1", "AF_SESSION_NAME=slot", "PATH=/x", "OPENCODE_SERVER_PASSWORD=pw-shared", "OPENCODE_SERVER_USERNAME=opencode", "junk"}
 	var started []string
 	err := runAttach([]string{"--server", d.srv.URL, "--session", "ses_a", "--", "--auto"}, environ, func(argv, _ []string) error {
 		if len(d.envs["ses_a"]) == 0 {
@@ -363,6 +363,33 @@ func TestAttachPutsTheEnvironmentBeforeTheTUI(t *testing.T) {
 	for k := range got {
 		if strings.HasPrefix(k, "OPENCODE_SERVER") || k == "junk" {
 			t.Errorf("%s must not reach the shell", k)
+		}
+	}
+
+	// Another slot's (or no slot's) session is not attached to: its environment would be this
+	// pane's while its metadata, bill and status stayed someone else's.
+	d.sessions["ses_foreign"] = map[string]string{metaSID: "foreign-sid", metaName: "other"}
+	d.sessions["ses_untagged"] = map[string]string{}
+	for _, ses := range []string{"ses_foreign", "ses_untagged", "ses_missing"} {
+		err = runAttach([]string{"--server", d.srv.URL, "--session", ses, "--"}, environ, func(_, _ []string) error {
+			t.Errorf("the TUI must not start on %s", ses)
+			return nil
+		})
+		if err == nil {
+			t.Errorf("%s must be refused", ses)
+		}
+		if _, has := d.envs[ses]; has {
+			t.Errorf("%s got this pane's environment", ses)
+		}
+	}
+	// Flags cannot re-point the TUI at a session or server the environment was not put on.
+	for _, flag := range []string{"--session", "--session=ses_foreign", "-s", "--server", "--continue", "--standalone", "--fork"} {
+		err = runAttach([]string{"--server", d.srv.URL, "--session", "ses_a", "--", "--auto", flag}, environ, func(_, _ []string) error {
+			t.Errorf("flag %s reached the TUI", flag)
+			return nil
+		})
+		if err == nil {
+			t.Errorf("flag %s must be refused", flag)
 		}
 	}
 
@@ -406,12 +433,14 @@ func TestPaneEnvironmentFromTheProcessTree(t *testing.T) {
 	}
 }
 
-// After a restart every live Terminal slot gets its pane's environment back, and the daemon is
-// marked ready only afterwards.
-func TestRestoreTerminalEnvsPutsEveryLiveSlotThenMarksReady(t *testing.T) {
+// After a restart every live shared Terminal slot gets its pane's environment back (retrying a
+// server that is still settling); a slot with no pane is skipped. This is the warm-up: the guarantee
+// is putEnvironmentFor, asked by the server plugin before a command.
+func TestRestoreTerminalEnvsPutsEveryLiveSlot(t *testing.T) {
 	d := newSharedDaemon(t)
 	a, b := terminalMeta(t, "a"), terminalMeta(t, "b")
 	d.sessions["ses_a"], d.sessions["ses_b"] = map[string]string{}, map[string]string{}
+	d.failEnv = 2
 	sids.Write(session.UUID(a.Dir, a.Name), "ses_a")
 	sids.Write(session.UUID(b.Dir, b.Name), "ses_b")
 	t.Cleanup(func() { sids.Remove(session.UUID(a.Dir, a.Name)); sids.Remove(session.UUID(b.Dir, b.Name)) })
@@ -425,18 +454,97 @@ func TestRestoreTerminalEnvsPutsEveryLiveSlotThenMarksReady(t *testing.T) {
 	}
 	t.Cleanup(func() { terminalSlots, paneEnv = oldSlots, oldEnv })
 
-	if readReadyMarker() != 0 {
-		t.Fatal("a marker from nowhere")
-	}
 	restoreTerminalEnvs(d.srv.URL)
 	if d.envs["ses_a"]["AF_SESSION_NAME"] != "a" {
-		t.Errorf("slot a's environment not restored: %v", d.envs)
+		t.Errorf("slot a's environment not restored after the retries: %v", d.envs)
 	}
 	if _, has := d.envs["ses_b"]; has {
 		t.Errorf("slot b has no pane environment to restore: %v", d.envs)
 	}
-	if readReadyMarker() != d.pid {
-		t.Errorf("ready marker = %d, want the daemon's pid %d", readReadyMarker(), d.pid)
+}
+
+// The command the server plugin runs before a shell: it puts the slot's environment on a session of
+// that slot (a subagent's or a fork's carries the slot's tags) and on no other, and a failure is an
+// error so the plugin can refuse the command.
+func TestPutEnvironmentForChecksTheSessionIsTheSlots(t *testing.T) {
+	d := newSharedDaemon(t)
+	m := terminalMeta(t, "owner")
+	session.WriteMeta(m)
+	sid := session.UUID(m.Dir, m.Name)
+	d.sessions["ses_child"] = sharedMetadata(sid, "owner")
+	d.sessions["ses_foreign"] = sharedMetadata("other-sid", "other")
+	d.sessions["ses_untagged"] = map[string]string{}
+	oldEnv := paneEnv
+	paneEnv = func(string) (map[string]string, bool) { return map[string]string{"AF_SESSION_SID": sid}, true }
+	t.Cleanup(func() { paneEnv = oldEnv })
+
+	if err := putEnvironmentFor(d.srv.URL, "owner", "ses_child"); err != nil || d.envs["ses_child"]["AF_SESSION_SID"] != sid {
+		t.Fatalf("own session: %v %v", err, d.envs)
+	}
+	for _, ses := range []string{"ses_foreign", "ses_untagged", "ses_missing"} {
+		if err := putEnvironmentFor(d.srv.URL, "owner", ses); err == nil {
+			t.Errorf("%s must be refused", ses)
+		}
+		if _, has := d.envs[ses]; has {
+			t.Errorf("%s got an environment", ses)
+		}
+	}
+	if err := putEnvironmentFor(d.srv.URL, "nobody", "ses_child"); err == nil {
+		t.Error("an unknown slot must be refused")
+	}
+	d.failEnv = 1
+	if err := putEnvironmentFor(d.srv.URL, "owner", "ses_child"); err == nil {
+		t.Error("a PUT the server refused must be an error")
+	}
+	paneEnv = func(string) (map[string]string, bool) { return nil, false }
+	if err := putEnvironmentFor(d.srv.URL, "owner", "ses_child"); err == nil {
+		t.Error("no pane environment must be an error, not an empty PUT")
+	}
+}
+
+// A pane that fell back to --standalone is not attached to the serve, whatever the workspace
+// switch says: its state, dependents, restore, drain and stop must not look there.
+func TestAFallbackPaneStaysStandaloneWhileTheServeRecovers(t *testing.T) {
+	d := newSharedDaemon(t)
+	m := terminalMeta(t, "fell")
+	session.WriteMeta(m)
+	sid := session.UUID(m.Dir, m.Name)
+	t.Cleanup(func() { slotModes.Remove(sid); sids.Remove(sid) })
+	sids.Write(sid, "ses_p")
+	d.sessions["ses_p"] = map[string]string{}
+
+	ensureServe = func() (string, int, error) { return "", 0, ErrNotConnected }
+	if plan, err := (agentImpl{}).BuildLaunch(m, agents.LaunchOpts{}); err != nil || !strings.HasPrefix(plan.Program, "opencode --standalone --auto") {
+		t.Fatalf("fallback launch: %q %v", plan.Program, err)
+	}
+	// The serve is back, the switch still says shared: this pane is still a private server.
+	ensureServe = func() (string, int, error) { return d.srv.URL, 1, nil }
+	if sharedSlot(m) {
+		t.Error("a fallen-back pane is not a shared slot")
+	}
+	if _, ok := v2TargetFor(m); ok {
+		t.Error("its state is not on the shared serve")
+	}
+	supervisor.mu.Lock()
+	supervisor.up = true
+	supervisor.mu.Unlock()
+	t.Cleanup(func() { supervisor.mu.Lock(); supervisor.up = false; supervisor.mu.Unlock() })
+	interruptTerminal(m)
+	if got := d.callsMatching("POST /api/session/ses_p/interrupt"); len(got) != 0 {
+		t.Errorf("a standalone pane was interrupted on the shared serve: %v", got)
+	}
+
+	// The next launch attaches, and from then on the slot is shared.
+	if _, err := (agentImpl{}).BuildLaunch(m, agents.LaunchOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if !sharedSlot(m) {
+		t.Error("a shared launch must mark the slot")
+	}
+	// A slot launched before any record existed ran --standalone.
+	slotModes.Remove(sid)
+	if sharedSlot(m) {
+		t.Error("no record means a pre-existing standalone pane")
 	}
 }
 
@@ -486,7 +594,8 @@ func TestStopInterruptsTheTerminalTurn(t *testing.T) {
 	d.sessions["ses_x"] = map[string]string{}
 	m := terminalMeta(t, "stopme")
 	sids.Write(session.UUID(m.Dir, m.Name), "ses_x")
-	t.Cleanup(func() { sids.Remove(session.UUID(m.Dir, m.Name)) })
+	markSlotMode(session.UUID(m.Dir, m.Name), modeShared)
+	t.Cleanup(func() { sids.Remove(session.UUID(m.Dir, m.Name)); slotModes.Remove(session.UUID(m.Dir, m.Name)) })
 	// Running() needs a daemon this supervisor believes in.
 	supervisor.mu.Lock()
 	supervisor.up = true
@@ -512,6 +621,8 @@ func TestStopInterruptsTheTerminalTurn(t *testing.T) {
 func TestV2TargetForTerminalOnlyWhenShared(t *testing.T) {
 	newSharedDaemon(t)
 	m := terminalMeta(t, "reader")
+	markSlotMode(session.UUID(m.Dir, m.Name), modeShared)
+	t.Cleanup(func() { slotModes.Remove(session.UUID(m.Dir, m.Name)) })
 	if _, ok := v2TargetFor(m); !ok {
 		t.Error("a shared Terminal slot must be read through the API")
 	}

@@ -14,6 +14,7 @@ package opencode
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -362,54 +363,6 @@ func TestContractSharedServeTerminalSessions(t *testing.T) {
 		return ids
 	}
 
-	// The shell-tool gate (agent-fleet-shared.js): a session nobody has tagged yet is held until it
-	// is, so the environment put before the tag is what its first command sees.
-	{
-		warm := t.TempDir()
-		var created struct {
-			Data struct {
-				ID string `json:"id"`
-			} `json:"data"`
-		}
-		// The first Terminal launch below starts the daemon; start it now through the same path.
-		if _, _, err := Serve().Ensure(); err != nil {
-			t.Fatal(err)
-		}
-		if err := api("POST", "/api/session", map[string]any{"location": map[string]string{"directory": warm},
-			"model": map[string]string{"providerID": "stub", "id": "m"}, "permissions": allowAll}, &created); err != nil {
-			t.Fatal(err)
-		}
-		ses := created.Data.ID
-		if err := api("POST", "/api/session/"+ses+"/prompt", map[string]string{"text": "ENVQ gate"}, nil); err != nil {
-			t.Fatal(err)
-		}
-		time.Sleep(1500 * time.Millisecond)
-		if o := shellOutputs(ses); len(o) != 0 {
-			t.Fatalf("the shell ran for an untagged new session before it was claimed: %v", o)
-		}
-		if err := putEnvironment(addr, ses, map[string]string{"AF_SESSION_SID": "gate-sid", "AF_SESSION_NAME": "gate", "PANE_MARK": "gate"}); err != nil {
-			t.Fatal(err)
-		}
-		if err := api("PATCH", "/api/session/"+ses, map[string]any{"metadata": sharedMetadata("gate-sid", "gate")}, nil); err != nil {
-			t.Fatal(err)
-		}
-		tagged := time.Now()
-		o := waitShell(ses, 1)
-		// Released by the tag, not by the gate's own timeouts (5 s for a tag, 10 s for the marker):
-		// the marker pid has to equal the pid the plugin sees as its own.
-		if d := time.Since(tagged); d > 3*time.Second {
-			t.Errorf("the held command took %v after the tag", d)
-		}
-		if o[0]["AF_SESSION_SID"] != "gate-sid" || o[0]["PANE_MARK"] != "gate" {
-			t.Errorf("the held command ran without its environment: %v", o[0])
-		}
-		for k := range o[0] {
-			if strings.HasPrefix(k, "OPENCODE_SERVER") {
-				t.Errorf("the held command saw the server credential %s", k)
-			}
-		}
-	}
-
 	// --- three Terminal panes on one serve ---
 	names := []string{"t1", "t2", "t3"}
 	start := time.Now()
@@ -550,32 +503,102 @@ func TestContractSharedServeTerminalSessions(t *testing.T) {
 		rss("tui "+n, descendants(paneTUIPID(n)))
 	}
 
-	// --- a server restart: environments come back before the daemon counts as up, TUIs recover ---
-	type stamp struct{ healthy, ready time.Time }
-	var win stamp
-	oldPID := serverPID
-	stop := make(chan struct{})
-	watched := make(chan struct{})
-	go func() {
-		defer close(watched)
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			if pid := daemonPID(addr); pid > 0 && pid != oldPID && win.healthy.IsZero() {
-				win.healthy = time.Now()
-			}
-			if !win.healthy.IsZero() && readReadyMarker() != oldPID && readReadyMarker() > 0 && win.ready.IsZero() {
-				win.ready = time.Now()
-			}
-			time.Sleep(5 * time.Millisecond)
+	// --- a new session nobody has tagged yet is held, then confirmed by the Agent once tagged ---
+	{
+		var created struct {
+			Data struct {
+				ID string `json:"id"`
+			} `json:"data"`
 		}
-	}()
+		if err := api("POST", "/api/session", map[string]any{"location": map[string]string{"directory": work},
+			"model": map[string]string{"providerID": "stub", "id": "m"}, "permissions": allowAll}, &created); err != nil {
+			t.Fatal(err)
+		}
+		ses := created.Data.ID
+		if err := api("POST", "/api/session/"+ses+"/prompt", map[string]string{"text": "ENVQ gate"}, nil); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(1500 * time.Millisecond)
+		if o := shellOutputs(ses); len(o) != 0 {
+			t.Fatalf("the shell ran for an untagged new session before it was claimed: %v", o)
+		}
+		if err := api("PATCH", "/api/session/"+ses, map[string]any{"metadata": sharedMetadata(session.UUID(work, "t3"), "t3")}, nil); err != nil {
+			t.Fatal(err)
+		}
+		tagged := time.Now()
+		o := waitShell(ses, 1)
+		if d := time.Since(tagged); d > 4*time.Second {
+			t.Errorf("the held command took %v after the tag", d)
+		}
+		wantEnv("t3 claimed", o[0], "t3")
+	}
+
+	// --- a child, a fork and a session af cannot place: the gate asks the Agent per session ---
+	{
+		// A subagent's session inherits the tags and permissions, not the environment.
+		var kid struct {
+			Data struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := api("POST", "/api/session", map[string]any{"parentID": first["t2"], "location": map[string]string{"directory": work},
+			"model": map[string]string{"providerID": "stub", "id": "m"}}, &kid); err != nil {
+			t.Fatal(err)
+		}
+		if err := api("POST", "/api/session/"+kid.Data.ID+"/prompt", map[string]string{"text": "ENVQ child"}, nil); err != nil {
+			t.Fatal(err)
+		}
+		ko := waitShell(kid.Data.ID, 1)
+		wantEnv("t2 child", ko[0], "t2")
+
+		// A fork made inside a TUI (or any client) copies the tag, not the environment.
+		var cp struct {
+			Data struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := api("POST", "/api/session/"+first["t2"]+"/fork", map[string]string{}, &cp); err != nil {
+			t.Fatal(err)
+		}
+		if err := api("POST", "/api/session/"+cp.Data.ID+"/prompt", map[string]string{"text": "ENVQ tuifork"}, nil); err != nil {
+			t.Fatal(err)
+		}
+		co := waitShell(cp.Data.ID, 2)
+		wantEnv("t2 fork", co[len(co)-1], "t2")
+
+		// Tagged for a slot with no pane: the Agent cannot confirm, so the command is refused and
+		// the server's environment is never printed.
+		var ghost struct {
+			Data struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := api("POST", "/api/session", map[string]any{"location": map[string]string{"directory": work},
+			"model": map[string]string{"providerID": "stub", "id": "m"}, "metadata": sharedMetadata("ghost-sid", "ghost")}, &ghost); err != nil {
+			t.Fatal(err)
+		}
+		if err := api("POST", "/api/session/"+ghost.Data.ID+"/prompt", map[string]string{"text": "ENVQ ghost"}, nil); err != nil {
+			t.Fatal(err)
+		}
+		var raw string
+		for d := time.Now().Add(40 * time.Second); time.Now().Before(d); time.Sleep(500 * time.Millisecond) {
+			req, _ := http.NewRequest("GET", addr+"/api/session/"+ghost.Data.ID+"/message?order=asc&limit=50", nil)
+			if res, err := serveClient.Do(req); err == nil {
+				b, _ := io.ReadAll(res.Body)
+				res.Body.Close()
+				raw = string(b)
+			}
+			if strings.Contains(raw, "could not set this session") {
+				break
+			}
+		}
+		if !strings.Contains(raw, "could not set this session") || strings.Contains(raw, "OPENCODE_SERVER_PASSWORD") || strings.Contains(raw, "AF_ENGINE_TOKEN=") {
+			t.Errorf("the command of an unplaceable session was not refused cleanly: %.600s", raw)
+		}
+	}
+
+	// --- a server restart: environments come back, TUIs recover, sessions are confirmed again ---
 	genBefore := Serve().Generation()
-	act, aerr := activeSessions(addr, "")
-	t.Logf("active before restart: %v (%v), busy terminals %v", act, aerr, busyTerminals(addr))
 	if !Serve().Restart("contract") {
 		t.Fatal("the daemon was not replaced")
 	}
@@ -583,14 +606,9 @@ func TestContractSharedServeTerminalSessions(t *testing.T) {
 	// replacement up. Wait for it the way the Console would: by asking.
 	for d := time.Now().Add(60 * time.Second); Serve().Generation() == genBefore && time.Now().Before(d); time.Sleep(200 * time.Millisecond) {
 	}
-	for d := time.Now().Add(30 * time.Second); win.ready.IsZero() && time.Now().Before(d); time.Sleep(50 * time.Millisecond) {
+	if Serve().Generation() == genBefore {
+		t.Fatal("no replacement daemon came up")
 	}
-	close(stop)
-	<-watched
-	if win.ready.IsZero() {
-		t.Fatal("the replacement daemon was never marked ready")
-	}
-	t.Logf("restart: new daemon answered at +0, environments back and marker written +%v", win.ready.Sub(win.healthy))
 	if servePassword() != pw {
 		t.Error("the server password changed across generations: attached TUIs could not reconnect")
 	}

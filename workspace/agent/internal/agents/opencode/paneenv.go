@@ -12,26 +12,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/tmuxx"
 )
-
-// readyMarkerPath holds the pid of the newest daemon generation whose environments are in place.
-func readyMarkerPath() string { return filepath.Join(paths.AgentConfigDir(), "opencode-env-ready") }
-
-func writeReadyMarker(pid int) {
-	_ = writeAtomic(readyMarkerPath(), []byte(strconv.Itoa(pid)+"\n"), 0o600)
-}
-
-func readReadyMarker() int {
-	b, err := os.ReadFile(readyMarkerPath())
-	if err != nil {
-		return 0
-	}
-	n, _ := strconv.Atoi(strings.TrimSpace(string(b)))
-	return n
-}
 
 // serverOnlyEnv are the variables that belong to the TUI's connection to the server and must not
 // reach a shell.

@@ -12,24 +12,25 @@
 //    The token is never stored on the session: opencode.db is plaintext and a fork copies
 //    metadata. Anything else (another provider, a request without the token) is left alone.
 //
-// 2. A shell command waits for its environment. A session's shell environment is held in the
-//    server's memory only, and until it is put there the shell sees the SERVER's environment
-//    (provider keys, the server password). Two moments leave a session without one: a server
-//    that has just restarted (the Agent puts every live Terminal session's environment back and
-//    then writes its pid to a marker file), and a session created from inside a TUI with /new
-//    (the TUI plugin puts the pane's environment and only then tags the session with af.sid).
-//    The shell tool waits for both, up to a bound, and then runs regardless: a missing Agent
-//    must not wedge every command. Sessions Managed by af (af.managed), subagent sessions and
-//    sessions that are not new are never held for a tag.
+// 2. A shell command runs only in a session whose environment is in place. A session's shell
+//    environment is held in the server's memory only, and until it is put there the shell sees the
+//    SERVER's environment (provider keys, the server password). Several ways lead to a session
+//    without one, and none of them is the Agent's restart alone: a server that has just restarted,
+//    a session created from inside a TUI with /new, a fork or an older session picked in the TUI
+//    (a fork copies metadata but not the environment), and a subagent's session (it inherits
+//    metadata and permissions, not the environment). So the shell tool asks the Agent
+//    (`workspace-agent opencode-put-env <slot> <session>`) once per session and server generation
+//    — this plugin lives in the server process, so its memory is exactly one generation — and the
+//    command is REFUSED when the Agent cannot confirm it. The Agent PUTs the pane's environment
+//    only onto a session carrying that slot's af.sid and af.name.
+//    A new session nobody has tagged yet is waited for (the TUI plugin PUTs and tags it); one that
+//    stays untagged for the bound, an old untagged session, and a Managed one (af.managed) have no
+//    pane to take an environment from and run as they always did.
 //
 // opencode 1 has no shared server; the module only keeps the file loadable there.
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 
 const AGENT_BIN = process.env.AF_WORKSPACE_AGENT_BIN || "/usr/local/bin/workspace-agent";
-const READY_FILE = process.env.AF_OPENCODE_READY_FILE || (process.env.HOME ? join(process.env.HOME, ".config/agent-fleet/opencode-env-ready") : "");
-const READY_WAIT_MS = Number(process.env.AF_OPENCODE_READY_WAIT_MS) || 10000;
 const TAG_WAIT_MS = Number(process.env.AF_OPENCODE_TAG_WAIT_MS) || 5000;
 const NEW_SESSION_MS = 60000; // a session older than this is not waiting for a first tag
 const TOKEN_TTL_MS = 10 * 60 * 1000;
@@ -40,13 +41,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const shared = () => process.env.AF_OPENCODE_SHARED_SERVE === "1" && !process.env.AF_SESSION_SID;
 
-const readyPid = () => {
-  try {
-    return Number(readFileSync(READY_FILE, "utf8").trim());
-  } catch {
-    return 0;
-  }
-};
+const putEnvironment = (name, sessionID) =>
+  new Promise((resolve) => {
+    try {
+      execFile(AGENT_BIN, ["opencode-put-env", name, sessionID], { timeout: 20000 }, (err) => resolve(!err));
+    } catch {
+      resolve(false);
+    }
+  });
 
 const mintToken = (name) =>
   new Promise((resolve) => {
@@ -93,39 +95,39 @@ export default {
     });
 
     // --- shell waits for its environment ---
-    let ready = false; // this server generation has its environments (or the wait ran out)
-    const waitReady = async () => {
-      const until = Date.now() + READY_WAIT_MS;
-      while (!ready && Date.now() < until) {
-        if (readyPid() === process.pid) break;
-        await sleep(100);
-      }
-      ready = true;
-    };
-    const placed = new Set(); // sessions that need no more waiting
-    const waitTagged = async (sessionID) => {
-      if (placed.has(sessionID)) return;
+    const confirmed = new Set(); // sessions whose environment this server generation holds
+    const settle = async (sessionID) => {
       const until = Date.now() + TAG_WAIT_MS;
-      while (Date.now() < until) {
+      for (;;) {
         let info;
         try {
           info = await get(sessionID);
         } catch {
-          break;
+          throw new Error("agent-fleet: the session could not be read, so its environment is unknown; the command was not run");
         }
         const md = (info && info.metadata) || {};
+        if (md["af.managed"]) return;
+        if (md["af.sid"] && md["af.name"]) return md["af.name"];
         const created = info && info.time && info.time.created;
-        if (info && info.parentID) break;
-        if (md["af.sid"] || md["af.managed"]) break;
-        if (typeof created === "number" && Date.now() - created > NEW_SESSION_MS) break;
+        const old = typeof created === "number" && Date.now() - created > NEW_SESSION_MS;
+        if (old || info.parentID || Date.now() >= until) return; // no pane to take an environment from
         await sleep(100);
       }
-      placed.add(sessionID);
     };
     await ctx.tool.hook("execute.before", async (event) => {
-      if (!SHELL_TOOLS.has(String(event && event.tool))) return;
-      if (!ready) await waitReady();
-      if (event.sessionID) await waitTagged(event.sessionID);
+      if (!SHELL_TOOLS.has(String(event && event.tool)) || !event.sessionID || confirmed.has(event.sessionID)) return;
+      const name = await settle(event.sessionID);
+      if (name) {
+        let ok = false;
+        for (let i = 0; i < 3 && !ok; i++) {
+          ok = await putEnvironment(name, event.sessionID);
+          if (!ok) await sleep(300);
+        }
+        if (!ok) {
+          throw new Error("agent-fleet: could not set this session's environment; the command was not run with the server's environment");
+        }
+      }
+      confirmed.add(event.sessionID);
     });
   },
   // opencode 1 has no shared server.

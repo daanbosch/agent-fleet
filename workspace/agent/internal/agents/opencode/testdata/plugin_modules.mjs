@@ -3,7 +3,7 @@
 //
 //   node --experimental-strip-types plugin_modules.mjs <plugin dir> <fake rtk dir> <fake agent log>
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -211,7 +211,7 @@ assert.equal(ids.size, 3, "plugin ids must be distinct");
 }
 // --- the shared opencode 2 server (issue #2120) -------------------------------------------------
 
-const readyFile = process.env.AF_OPENCODE_READY_FILE;
+const failPutEnv = process.env.AF_TEST_PUT_ENV_FAIL_FILE;
 const sidDirOf = () => join(process.env.HOME, ".local/state/agent-fleet/opencode-sid");
 const statusLines = () => (existsSync(agentLog) ? readFileSync(agentLog, "utf8").trim().split("\n").filter((l) => l.startsWith("session-status")) : []);
 const shortWait = async () => sleep(150);
@@ -295,45 +295,69 @@ const now = Date.now();
       assert.deepEqual(asked, ["opencode-engine-token one"], "the token is minted once per session name, and only for named sessions");
     }
 
-    // the shell waits for the environment marker, then for the session's tag; everything else does not.
+    // the shell runs only once the Agent has confirmed the session's environment on this server
+    // generation: tagged sessions (roots, forks, subagents) and new ones alike; failure refuses.
     {
       const sessions = {
         ses_new: { time: { created: Date.now() }, metadata: {} },
         ses_old: { time: { created: now - 3600_000 }, metadata: {} },
         ses_managed: { time: { created: Date.now() }, metadata: { "af.managed": "1" } },
-        ses_kid: { time: { created: Date.now() }, parentID: "ses_new", metadata: {} },
+        ses_root: { time: { created: now - 3600_000 }, metadata: { "af.sid": "sidR", "af.name": "slotR" } },
+        // a subagent session inherits the tag, not the environment; a fork copies the tag too
+        ses_kid: { time: { created: Date.now() }, parentID: "ses_root", metadata: { "af.sid": "sidR", "af.name": "slotR" } },
+        ses_fork: { time: { created: now - 3600_000 }, metadata: { "af.sid": "sidR", "af.name": "slotR" } },
+        ses_oldkid: { time: { created: now - 3600_000 }, parentID: "ses_old", metadata: {} },
       };
       const h = v2Host(sessions);
       await shared.setup(h.ctx);
       const run = (tool, sessionID) => h.hooks["execute.before"]({ tool, sessionID, input: {} });
-      if (existsSync(readyFile)) writeFileSync(readyFile, "0\n");
+      const asked = () => readFileSync(agentLog, "utf8").split("\n").filter((l) => l.startsWith("opencode-put-env"));
+      const before = asked().length;
 
-      assert.equal(await pending(run("read", "ses_new")), false, "only shell commands are held");
-      const held = run("shell", "ses_old");
-      assert.equal(await pending(held), true, "the server generation has no marker yet: the shell waits for its environments");
-      mkdirSync(join(readyFile, ".."), { recursive: true });
-      writeFileSync(readyFile, String(process.pid) + "\n");
-      await held;
-      assert.equal(await pending(run("bash", "ses_old")), false, "an old session needs no tag");
-      assert.equal(await pending(run("shell", "ses_managed")), false, "Managed sessions need no tag");
-      assert.equal(await pending(run("shell", "ses_kid")), false, "a subagent session is never held");
+      assert.equal(await pending(run("read", "ses_root")), false, "only shell commands are held");
+      assert.equal(asked().length, before, "and only they ask the Agent");
+      await run("shell", "ses_root");
+      await run("bash", "ses_kid");
+      await run("shell", "ses_fork");
+      assert.deepEqual(asked().slice(before), ["opencode-put-env slotR ses_root", "opencode-put-env slotR ses_kid", "opencode-put-env slotR ses_fork"], "every tagged session — root, subagent, fork — is confirmed by the Agent");
+      await run("shell", "ses_root");
+      assert.equal(asked().length, before + 3, "confirmed once per session and generation");
+      await run("shell", "ses_old");
+      await run("shell", "ses_oldkid");
+      await run("shell", "ses_managed");
+      assert.equal(asked().length, before + 3, "old untagged and Managed sessions have no pane to ask for");
 
       const waiting = run("shell", "ses_new");
       assert.equal(await pending(waiting), true, "a new untagged session is held until it is claimed");
-      sessions.ses_new.metadata = { "af.sid": "sidN" };
+      sessions.ses_new.metadata = { "af.sid": "sidN", "af.name": "slotN" };
       await waiting;
-      assert.equal(await pending(run("shell", "ses_new")), false, "claimed once, not asked again");
+      assert.equal(asked().pop(), "opencode-put-env slotN ses_new");
     }
 
-    // a server nobody marks must not wedge: the wait is bounded, then the command runs.
+    // a session the Agent cannot confirm is refused, not run with the server's environment.
     {
-      writeFileSync(readyFile, "1\n");
+      const sessions = { ses_x: { time: { created: now - 3600_000 }, metadata: { "af.sid": "sidX", "af.name": "slotX" } } };
+      const h = v2Host(sessions);
+      await shared.setup(h.ctx);
+      writeFileSync(failPutEnv, "1");
+      try {
+        await assert.rejects(h.hooks["execute.before"]({ tool: "shell", sessionID: "ses_x", input: {} }), /could not set this session's environment/);
+        await assert.rejects(h.hooks["execute.before"]({ tool: "shell", sessionID: "ses_x", input: {} }), /could not set/, "a refusal is not remembered as success");
+      } finally {
+        rmSync(failPutEnv, { force: true });
+      }
+      await h.hooks["execute.before"]({ tool: "shell", sessionID: "ses_x", input: {} });
+      await assert.rejects(h.hooks["execute.before"]({ tool: "shell", sessionID: "ses_missing", input: {} }), /could not be read/);
+    }
+
+    // a new session nobody claims runs after the bound: there is no pane to take an environment from.
+    {
       const h = v2Host({ ses_new: { time: { created: Date.now() }, metadata: {} } });
       await shared.setup(h.ctx);
       const t0 = Date.now();
       await h.hooks["execute.before"]({ tool: "shell", sessionID: "ses_new", input: {} });
       const waited = Date.now() - t0;
-      assert.ok(waited >= 600 && waited < 3000, "bounded waits (marker 700 ms + tag 700 ms), got " + waited);
+      assert.ok(waited >= 600 && waited < 3000, "bounded tag wait (700 ms), got " + waited);
     }
   } finally {
     for (const [k, v] of [["AF_SESSION_SID", saved.sid], ["AF_OPENCODE_SHARED_SERVE", saved.shared], ["AF_ENGINE_TOKEN", saved.token]]) {
@@ -421,11 +445,12 @@ const now = Date.now();
     assert.deepEqual(w.calls[1][2], { keep: "me", "af.sid": "sidP", "af.name": "paneP" }, "other metadata survives the tag");
     assert.equal(readFileSync(join(sidDirOf(), "sidP"), "utf8"), "ses_free");
 
-    // the pane's own earlier session: no second environment, the slot follows the screen.
+    // a session already carrying this pane's tag (a fork copies it, a restart forgets the
+    // environment): its environment goes in the first time the pane shows it, and the tag stays.
     w.calls.length = 0;
     w.route = { type: "session", sessionID: "ses_mine" };
     await until(() => readFileSync(join(sidDirOf(), "sidP"), "utf8") === "ses_mine", "slot follows the shown session");
-    assert.deepEqual(w.calls, []);
+    assert.deepEqual(w.calls.map((c) => c[0] + " " + c[1]), ["environment ses_mine"]);
 
     // a new server process lost every environment: this pane's sessions get theirs again.
     w.pid = 200;

@@ -62,13 +62,26 @@ func runAttach(args, environ []string, start func(argv, environ []string) error)
 	if server == "" || ses == "" {
 		return fmt.Errorf("usage: opencode-attach --server <url> --session <id> -- <flags>")
 	}
-	password := ""
-	for _, kv := range environ {
-		if v, ok := strings.CutPrefix(kv, "OPENCODE_SERVER_PASSWORD="); ok {
-			password = v
-		}
+	password := envValue(environ, "OPENCODE_SERVER_PASSWORD")
+	if bad := connectionFlag(flags); bad != "" {
+		return fmt.Errorf("%s would attach the TUI somewhere other than the session whose environment is put", bad)
 	}
 	client := &http.Client{Timeout: 10 * time.Second, Transport: basicAuth{password: password}}
+	// The session must be this pane's own: the environment goes onto it, and the model bill, the
+	// status and the MCP caller follow its metadata, so a session of another slot (or an untagged
+	// one) would be half this pane's and half someone else's.
+	sid, name := envValue(environ, "AF_SESSION_SID"), envValue(environ, "AF_SESSION_NAME")
+	var info sharedSession
+	var w struct {
+		Data sharedSession `json:"data"`
+	}
+	if err := apiJSONWith(client, "GET", sessionPathURL(server, ses), nil, &w); err != nil {
+		return fmt.Errorf("could not read the session: %w", err)
+	}
+	info = w.Data
+	if sid == "" || info.Metadata[metaSID] != sid || (name != "" && info.Metadata[metaName] != name) {
+		return fmt.Errorf("session %s is not this pane's", ses)
+	}
 	vars := shellEnvironment(environ)
 	var err error
 	for try := 0; try < attachRetries; try++ {
@@ -93,4 +106,14 @@ func (b basicAuth) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
 	req.SetBasicAuth(serveUser, b.password)
 	return http.DefaultTransport.RoundTrip(req)
+}
+
+func envValue(environ []string, key string) string {
+	v := ""
+	for _, kv := range environ {
+		if x, ok := strings.CutPrefix(kv, key+"="); ok {
+			v = x
+		}
+	}
+	return v
 }

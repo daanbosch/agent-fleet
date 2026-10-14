@@ -73,7 +73,7 @@ var v2TargetFor = func(m session.Meta) (apiTarget, bool) {
 	if !isV2() {
 		return apiTarget{}, false
 	}
-	if m.DriverKind() == session.DriverManaged || (m.DriverKind() == session.DriverTUI && sharedTUI()) {
+	if m.DriverKind() == session.DriverManaged || sharedSlot(m) {
 		return apiTarget{Addr: serveAddr(), Client: serveClient}, true
 	}
 	return apiTarget{}, false

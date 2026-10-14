@@ -32,7 +32,9 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/tmuxx"
 )
@@ -55,12 +57,30 @@ func sharedTUI() bool {
 	return installedMajor() >= 2 && os.Getenv(standaloneEnv) != "1" && !Serve().Disabled()
 }
 
-// terminalSlots lists the live opencode Terminal slots; a var so tests need no tmux.
+// slotModes records how each Terminal slot's pane was last launched. The workspace-wide switch
+// says what the NEXT launch does; the pane that is running keeps the mode it started with (an
+// automatic fall back to --standalone, a switch flipped later), and its state, dependents,
+// restore, drain and stop must follow that, not the switch.
+var slotModes = agents.NewSidStore("opencode-mode")
+
+const modeShared, modeStandalone = "shared", "standalone"
+
+func markSlotMode(sid, mode string) { slotModes.Write(sid, mode) }
+
+// sharedSlot reports whether slot m's pane is attached to af's serve. A slot with no record was
+// launched before this existed, i.e. --standalone.
+func sharedSlot(m session.Meta) bool {
+	return sharedTUI() && m.Kind == session.KindOpencode && m.DriverKind() == session.DriverTUI &&
+		slotModes.Read(session.UUID(m.Dir, m.Name)) == modeShared
+}
+
+// terminalSlots lists the live opencode Terminal slots attached to the shared serve; a var so
+// tests need no tmux.
 var terminalSlots = func() []session.Meta {
 	live := tmuxx.LiveSessionNames()
 	var out []session.Meta
 	for _, m := range session.ListMetas() {
-		if m.Kind == session.KindOpencode && m.DriverKind() == session.DriverTUI && !m.Archived && live[m.Name] {
+		if sharedSlot(m) && !m.Archived && live[m.Name] {
 			out = append(out, m)
 		}
 	}
@@ -263,6 +283,7 @@ func buildSharedLaunch(m session.Meta, sid string) (plan sharedPlan, ok bool, er
 	addr, _, eerr := ensureServe()
 	if eerr != nil {
 		log.Printf("opencode: %s: shared serve unavailable, launching --standalone: %v", m.Name, eerr)
+		markSlotMode(sid, modeStandalone)
 		return sharedPlan{}, false, nil
 	}
 	// A TUI of one version against a server of another is the protocol skew nobody can debug from
@@ -273,6 +294,7 @@ func buildSharedLaunch(m session.Meta, sid string) (plan sharedPlan, ok bool, er
 		if restartServe("opencode " + have + " → " + want) {
 			if addr, _, eerr = ensureServe(); eerr != nil {
 				log.Printf("opencode: %s: shared serve unavailable after the restart, launching --standalone: %v", m.Name, eerr)
+				markSlotMode(sid, modeStandalone)
 				return sharedPlan{}, false, nil
 			}
 		}
@@ -313,8 +335,12 @@ func buildSharedLaunch(m session.Meta, sid string) (plan sharedPlan, ok bool, er
 		}
 	}
 	sids.Write(sid, ses)
+	markSlotMode(sid, modeShared)
 
 	flags := strings.Fields(envOr("AGENT_OPENCODE_FLAGS", "--auto"))
+	if bad := connectionFlag(flags); bad != "" {
+		return sharedPlan{}, false, fmt.Errorf("opencode: AGENT_OPENCODE_FLAGS may not carry %s: the session and server are af's to choose", bad)
+	}
 	parts := []string{"workspace-agent", "opencode-attach", "--server", session.ShellQuote(addr), "--session", session.ShellQuote(ses), "--"}
 	for _, f := range flags {
 		parts = append(parts, session.ShellQuote(f))
@@ -338,7 +364,7 @@ const sharedPaneEnv = "AF_OPENCODE_SHARED"
 // interruptTerminal stops the turn a Terminal slot has running on the shared serve. Closing the
 // pane does not: the server runs the turn, not the TUI.
 func interruptTerminal(m session.Meta) {
-	if !sharedTUI() || m.Kind != session.KindOpencode || m.DriverKind() != session.DriverTUI || !Serve().Running() {
+	if !sharedSlot(m) || !Serve().Running() {
 		return
 	}
 	ses := sids.Read(session.UUID(m.Dir, m.Name))
@@ -359,11 +385,11 @@ func (agentImpl) GracefulStop(m session.Meta) bool {
 
 // --- restart gap ------------------------------------------------------------------
 
-// restoreTerminalEnvs re-sends the environment of every live Terminal slot to a daemon that has
-// just started (the environment is lost with the process) and then marks that daemon ready.
-// The marker is what the env-gate plugin waits for before it lets a shell command run, so the
-// window in which a shell could see the server's environment is the time between the daemon
-// listening and this call finishing, not the time until the next TUI plugin poll.
+// restoreTerminalEnvs re-sends the environment of every live shared Terminal slot to a daemon
+// that has just started (the environment is lost with the process). It is a warm-up, not the
+// guarantee: the server plugin makes every shell command ask the Agent to confirm its session's
+// environment first (putEnvironmentFor, once per session and server generation), so a PUT that
+// fails here leaves the command refused rather than run with the server's environment.
 func restoreTerminalEnvs(addr string) {
 	if !sharedTUI() {
 		return
@@ -378,13 +404,52 @@ func restoreTerminalEnvs(addr string) {
 			log.Printf("opencode: %s: no pane environment to restore", m.Name)
 			continue
 		}
-		if err := putEnvironment(addr, ses, vars); err != nil {
+		var err error
+		for try := 0; try < 3; try++ {
+			if err = putEnvironment(addr, ses, vars); err == nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if err != nil {
 			log.Printf("opencode: %s: restore environment: %v", m.Name, err)
 		}
 	}
-	if pid := daemonPID(addr); pid > 0 {
-		writeReadyMarker(pid)
+}
+
+// RunPutEnv is `workspace-agent opencode-put-env <slot name> <opencode session id>`, called by
+// the server plugin before a shell command of a session whose environment this server generation
+// has not been confirmed to hold (a child of a Terminal session, a fork or an older session
+// picked in the TUI, anything after a restart). It PUTs the slot's pane environment on that
+// session, but only if the session is the slot's: its af.name must be the slot's name, which a
+// subagent session inherits from its parent. Exit status 0 means the environment is in place.
+func RunPutEnv(args []string) {
+	if len(args) != 2 {
+		os.Exit(2)
 	}
+	if err := putEnvironmentFor(serveAddr(), args[0], args[1]); err != nil {
+		fmt.Fprintf(os.Stderr, "opencode-put-env: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func putEnvironmentFor(addr, name, ses string) error {
+	m, ok := session.ReadMeta(name)
+	if !ok || m.Kind != session.KindOpencode || m.DriverKind() != session.DriverTUI {
+		return fmt.Errorf("%q is not an opencode Terminal slot", name)
+	}
+	info, err := getSharedSession(addr, ses)
+	if err != nil {
+		return err
+	}
+	if info.Metadata[metaName] != name || info.Metadata[metaSID] != session.UUID(m.Dir, m.Name) {
+		return fmt.Errorf("session %s does not belong to %s", ses, name)
+	}
+	vars, found := paneEnv(name)
+	if !found {
+		return fmt.Errorf("no pane environment for %s", name)
+	}
+	return putEnvironment(addr, ses, vars)
 }
 
 type daemonInfo struct {
@@ -416,3 +481,16 @@ func readDaemonInfo(addr string) daemonInfo {
 func daemonPID(addr string) int { return readDaemonInfo(addr).PID }
 
 func daemonVersion(addr string) string { return readDaemonInfo(addr).Version }
+
+// connectionFlag names the first flag that would point the TUI at another server or session than
+// the one the environment was put on, or "".
+func connectionFlag(flags []string) string {
+	for _, f := range flags {
+		name, _, _ := strings.Cut(f, "=")
+		switch name {
+		case "--server", "--session", "-s", "--continue", "-c", "--standalone", "--fork", "--url", "--attach":
+			return f
+		}
+	}
+	return ""
+}

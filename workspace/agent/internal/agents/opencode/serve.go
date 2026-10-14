@@ -300,11 +300,6 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 		go s.monitorEvents(addr, s.gen)
 		log.Printf("opencode serve: adopted running daemon at %s (gen %d)", addr, s.gen)
 		recordLifecycle("adopted", s.gen, addr)
-		// A daemon the previous Agent left is ready only if that Agent finished putting the
-		// environments back; when the marker does not name it, do it now.
-		if pid := daemonPID(addr); sharedTUI() && pid > 0 && readReadyMarker() != pid {
-			restoreTerminalEnvs(addr)
-		}
 		return addr, s.gen, nil
 	}
 	// Past this point a new process starts, i.e. new memory is paid for. Do not pay

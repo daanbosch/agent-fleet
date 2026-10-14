@@ -217,6 +217,14 @@ var subcommands = []subcommand{
 		run:     opencode.RunAttach,
 	},
 	{
+		// Called by the opencode shared-serve plugin before a shell command whose session has no
+		// confirmed environment on this server generation.
+		name:    "opencode-put-env",
+		summary: "put an opencode Terminal slot's pane environment on one of its sessions",
+		hidden:  true,
+		run:     opencode.RunPutEnv,
+	},
+	{
 		// Called by the opencode shared-serve plugin: the engine token scoped to one session,
 		// which the server's own (workspace-scoped) environment cannot carry.
 		name:    "opencode-engine-token",

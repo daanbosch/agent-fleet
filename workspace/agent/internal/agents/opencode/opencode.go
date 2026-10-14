@@ -202,6 +202,8 @@ func (agentImpl) BuildLaunch(m session.Meta, _ agents.LaunchOpts) (agents.Launch
 		if ok {
 			return agents.LaunchPlan{Program: plan.Program, Cwd: m.CWD(), Env: mergeCommandEnv(envs, plan.Env)}, nil
 		}
+	} else if installedMajor() >= 2 {
+		markSlotMode(ocSid, modeStandalone)
 	}
 	// Resume the slot's OWN opencode conversation (activeSession: the plugin-captured
 	// per-slot id, else a store-derived conversation this slot itself opened — never an
