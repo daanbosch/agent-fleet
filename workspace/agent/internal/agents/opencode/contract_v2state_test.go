@@ -80,6 +80,18 @@ func (s *stubProvider) handler(w http.ResponseWriter, r *http.Request) {
 	case strings.Contains(text, "You MUST summarize"):
 		send(map[string]any{"role": "assistant", "content": stubSummary}, nil)
 		send(map[string]any{}, "stop")
+	case strings.Contains(text, "ASK") && !afterTool:
+		// The question tool: ASKMULTI makes two questions, the second one multiple-choice.
+		qs := []any{map[string]any{"question": "Pick one", "header": "Pick", "options": []any{
+			map[string]any{"label": "A", "description": "a"}, map[string]any{"label": "B", "description": "b"}}}}
+		if strings.Contains(text, "ASKMULTI") {
+			qs = append(qs, map[string]any{"question": "Which toppings?", "header": "Toppings", "multiple": true, "options": []any{
+				map[string]any{"label": "Cheese", "description": "c"}, map[string]any{"label": "Ham", "description": "h"}}})
+		}
+		args, _ := json.Marshal(map[string]any{"questions": qs})
+		send(map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"index": 0, "id": "call_q", "type": "function",
+			"function": map[string]any{"name": "question", "arguments": string(args)}}}}, nil)
+		send(map[string]any{}, "tool_calls")
 	case strings.Contains(text, "TOOL") && !afterTool:
 		send(map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"index": 0, "id": "call_1", "type": "function",
 			"function": map[string]any{"name": "shell", "arguments": `{"command":"echo hi","description":"say hi"}`}}}}, nil)
@@ -98,12 +110,16 @@ func (s *stubProvider) handler(w http.ResponseWriter, r *http.Request) {
 	usage()
 }
 
-func TestContractV2StateReadsTurnsThroughTheAPI(t *testing.T) {
+// startStubbedV2 runs a real opencode 2 serve on a free loopback port in an isolated HOME whose only
+// provider is the stub, and returns its address and a warmed-up project directory. It skips the test
+// on a v1 binary.
+func startStubbedV2(t *testing.T) (stub *stubProvider, addr, dir string) {
+	t.Helper()
 	requireOpencode(t)
 	if !strings.HasPrefix(strings.TrimPrefix(opencodeVersion(t), "opencode v"), "2.") {
 		t.Skip("needs opencode 2")
 	}
-	stub := &stubProvider{}
+	stub = &stubProvider{}
 	llm := httptest.NewServer(http.HandlerFunc(stub.handler))
 	t.Cleanup(func() { llm.CloseClientConnections(); llm.Close() })
 
@@ -123,7 +139,7 @@ func TestContractV2StateReadsTurnsThroughTheAPI(t *testing.T) {
 	}
 
 	port := freePort(t)
-	addr := "http://127.0.0.1:" + port
+	addr = "http://127.0.0.1:" + port
 	t.Setenv(serveAddrEnv, addr)
 	t.Setenv("HOME", home)
 	password, err := newServePassword()
@@ -148,10 +164,15 @@ func TestContractV2StateReadsTurnsThroughTheAPI(t *testing.T) {
 		t.Fatal("probe did not detect v2")
 	}
 	// Warm the instance up: the first request for a directory boots plugins, which outlasts serveClient.
-	dir := t.TempDir()
+	dir = t.TempDir()
 	if res, err := (&http.Client{Timeout: 60 * time.Second, Transport: authTransport{}}).Get(addr + "/api/session?directory=" + dir); err == nil {
 		res.Body.Close()
 	}
+	return stub, addr, dir
+}
+
+func TestContractV2StateReadsTurnsThroughTheAPI(t *testing.T) {
+	stub, addr, dir := startStubbedV2(t)
 
 	ses, err := serveCreateSession(addr, dir, "contract")
 	if err != nil {

@@ -1,0 +1,143 @@
+{
+ "data": [
+  {
+   "id": "msg_1384c730f001CdWw702fzoVmnm",
+   "time": {
+    "created": 1791945896719
+   },
+   "type": "model-switched",
+   "model": {
+    "id": "m",
+    "providerID": "stub"
+   }
+  },
+  {
+   "id": "msg_1384c7325001QxIgRTkBTXV6ab",
+   "time": {
+    "created": 1791945896763
+   },
+   "text": "ZZZ waiting",
+   "type": "user"
+  },
+  {
+   "id": "msg_1384c7343001CNriQ6LMOh5lJu",
+   "time": {
+    "created": 1791945896791,
+    "streamed": 1791945896813,
+    "completed": 1791945900913
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "m",
+    "providerID": "stub",
+    "variant": "default"
+   },
+   "content": [
+    {
+     "type": "tool",
+     "id": "call_q",
+     "name": "question",
+     "executed": false,
+     "state": {
+      "status": "completed",
+      "input": {
+       "questions": [
+        {
+         "question": "Pick one",
+         "header": "Pick",
+         "options": [
+          {
+           "label": "A",
+           "description": "a"
+          },
+          {
+           "label": "B",
+           "description": "b"
+          }
+         ]
+        }
+       ]
+      },
+      "content": [
+       {
+        "type": "text",
+        "text": "User has answered your questions: \"Pick one\"=\"A\". You can now continue with the user's answers in mind."
+       }
+      ],
+      "metadata": {
+       "answers": [
+        [
+         "A"
+        ]
+       ],
+       "truncated": false
+      }
+     },
+     "time": {
+      "created": 1791945896801,
+      "ran": 1791945896809,
+      "completed": 1791945900907
+     }
+    }
+   ],
+   "finish": "tool-calls",
+   "rawFinish": "tool_calls",
+   "cost": 0,
+   "tokens": {
+    "input": 10,
+    "output": 5,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_1384c83930013pf4hOIT70h7Vy",
+   "time": {
+    "created": 1791945900977,
+    "streamed": 1791945901000,
+    "completed": 1791945901003
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "m",
+    "providerID": "stub",
+    "variant": "default"
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "after: ['User has answered your questions: \"Pick one\"=\"A\". You can now continue with the user\\'s answers in mind.']"
+    }
+   ],
+   "finish": "stop",
+   "rawFinish": "stop",
+   "cost": 0,
+   "tokens": {
+    "input": 10,
+    "output": 5,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_1384c83d1001u18UE4hklCDRfX",
+   "time": {
+    "created": 1791945901009
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  }
+ ],
+ "cursor": {
+  "previous": "eyJpZCI6Im1zZ18xMzg0YzczMGYwMDFDZFd3NzAyZnpvVm1ubSIsIm9yZGVyIjoiYXNjIiwiZGlyZWN0aW9uIjoicHJldmlvdXMifQ",
+  "next": "eyJpZCI6Im1zZ18xMzg0YzgzZDEwMDF1MThVRTRoa2xDRFJmWCIsIm9yZGVyIjoiYXNjIiwiZGlyZWN0aW9uIjoibmV4dCJ9"
+ }
+}

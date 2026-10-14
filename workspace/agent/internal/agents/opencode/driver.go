@@ -447,6 +447,12 @@ func (h *threadHandle) reconcile() {
 		st = agents.TurnRunning
 	}
 	var inter *agents.Interaction
+	if isV2() {
+		if forms, err := (apiTarget{Addr: addr, Client: serveClient}).pendingForms(ses); err == nil && len(forms) > 0 {
+			inter = forms[0].interaction()
+			st = agents.TurnWaitingInteraction
+		}
+	}
 	for _, q := range serveListQuestions(addr, dir) {
 		if q.SessionID == ses {
 			inter = q.toInteraction()
@@ -816,21 +822,28 @@ func (h *threadHandle) Respond(reply agents.InteractionReply) error {
 	if inter == nil || inter.ID != reply.ID {
 		return fmt.Errorf("interaction %s は待機中ではありません", reply.ID)
 	}
-	switch reply.Decision {
-	case agents.DecisionCancel, agents.DecisionDeny:
-		if err := serveQuestionReject(addr, reply.ID, h.dir); err != nil {
+	if isV2() {
+		// A form, not a question: it is answered by field key and read again first (v2form.go).
+		if err := respondForm(addr, h.sessionID(), reply); err != nil {
 			return err
 		}
-	case agents.DecisionAnswer, agents.DecisionAllow:
-		answers, err := answersToLabels(inter.Questions, reply.Answers)
-		if err != nil {
-			return err
+	} else {
+		switch reply.Decision {
+		case agents.DecisionCancel, agents.DecisionDeny:
+			if err := serveQuestionReject(addr, reply.ID, h.dir); err != nil {
+				return err
+			}
+		case agents.DecisionAnswer, agents.DecisionAllow:
+			answers, err := answersToLabels(inter.Questions, reply.Answers)
+			if err != nil {
+				return err
+			}
+			if err := serveQuestionReply(addr, reply.ID, h.dir, answers); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unsupported decision: %s", reply.Decision)
 		}
-		if err := serveQuestionReply(addr, reply.ID, h.dir, answers); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("unsupported decision: %s", reply.Decision)
 	}
 	h.mu.Lock()
 	h.inter = nil
@@ -1035,12 +1048,9 @@ func (q *serveQuestion) toInteraction() *agents.Interaction {
 	return inter
 }
 
-// errQuestionsV2: the question endpoints do not exist on v2 (measured 2.0.28).
-var errQuestionsV2 = errors.New("opencode 2 の質問 API (form) にはまだ対応していません")
-
 func serveListQuestions(addr, dir string) []*serveQuestion {
 	if isV2() {
-		return nil // v2 has no /question: they became forms, which this driver does not map yet
+		return nil // v2 has no /question: they became forms (v2form.go)
 	}
 	res, err := serveClient.Get(dirQ(addr+"/question", dir))
 	if err != nil {
@@ -1055,9 +1065,6 @@ func serveListQuestions(addr, dir string) []*serveQuestion {
 }
 
 func serveQuestionReply(addr, id, dir string, answers [][]string) error {
-	if isV2() {
-		return errQuestionsV2
-	}
 	body, _ := json.Marshal(map[string]any{"answers": answers})
 	res, err := serveClient.Post(dirQ(addr+"/question/"+url.PathEscape(id)+"/reply", dir), "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -1071,9 +1078,6 @@ func serveQuestionReply(addr, id, dir string, answers [][]string) error {
 }
 
 func serveQuestionReject(addr, id, dir string) error {
-	if isV2() {
-		return errQuestionsV2
-	}
 	res, err := serveClient.Post(dirQ(addr+"/question/"+url.PathEscape(id)+"/reject", dir), "application/json", strings.NewReader("{}"))
 	if err != nil {
 		return err
@@ -1241,6 +1245,47 @@ func handleServeEvent(data []byte) {
 			}
 			h.mu.Unlock()
 			h.emit(agents.Event{Kind: "turn_state", TurnState: agents.TurnRunning})
+		}
+	case "form.created":
+		// v2: the question tool asks through a form (v2form.go); it is the question.asked of v1.
+		var p struct {
+			Form v2Form `json:"form"`
+		}
+		if json.Unmarshal(ev.Properties, &p) != nil || p.Form.ID == "" {
+			return
+		}
+		if h := handleBySes(p.Form.SessionID); h != nil {
+			inter := p.Form.interaction()
+			h.mu.Lock()
+			h.inter = inter
+			h.state = agents.TurnWaitingInteraction
+			h.mu.Unlock()
+			h.emit(agents.Event{Kind: "interaction", TurnState: agents.TurnWaitingInteraction, Interaction: inter})
+		}
+	case "form.replied", "form.cancelled":
+		var p struct {
+			ID        string `json:"id"`
+			SessionID string `json:"sessionID"`
+		}
+		if json.Unmarshal(ev.Properties, &p) != nil {
+			return
+		}
+		if h := handleBySes(p.SessionID); h != nil {
+			// Cleared whoever settled it: the Console, an attached TUI, or an interrupt (which
+			// cancels the form while the state is already interrupting, so it is left alone).
+			h.mu.Lock()
+			resumed := false
+			if h.inter != nil && h.inter.ID == p.ID {
+				h.inter = nil
+				if h.state == agents.TurnWaitingInteraction && h.running {
+					h.state = agents.TurnRunning
+					resumed = true
+				}
+			}
+			h.mu.Unlock()
+			if resumed {
+				h.emit(agents.Event{Kind: "turn_state", TurnState: agents.TurnRunning})
+			}
 		}
 	case "message.updated":
 		// Compaction (measured 1.18.34): the v1 loop announces neither
