@@ -431,7 +431,8 @@ if [ "$LEAN_CLIS" = 1 ]; then
   else
     echo "[entrypoint] boot-install: npm CLIs already present in ~/.local (skip)"
   fi
-  # rtk: the pinned GitHub Releases build, checksum-verified (same path as the Dockerfile bake).
+  # rtk: the pinned GitHub Releases build of the Apache-2.0 edition (rtk-oss), checksum-verified
+  # (same path and assets as the Dockerfile bake, which says why oss).
   RTK_NEED=0
   if [ -n "$(vj_pin rtk)" ]; then
     if ! cli_present rtk; then
@@ -447,8 +448,8 @@ if [ "$LEAN_CLIS" = 1 ]; then
       rver="$(vj_pin rtk)"
       arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
       case "$arch" in
-        amd64 | x86_64) asset="rtk-x86_64-unknown-linux-musl.tar.gz" ;;
-        arm64 | aarch64) asset="rtk-aarch64-unknown-linux-gnu.tar.gz" ;;
+        amd64 | x86_64) asset="rtk-oss-x86_64-unknown-linux-musl.tar.gz" ;;
+        arm64 | aarch64) asset="rtk-oss-aarch64-unknown-linux-gnu.tar.gz" ;;
         *) echo "unsupported arch: $arch" >&2; exit 1 ;;
       esac
       base="https://github.com/rtk-ai/rtk/releases/download/v${rver}"
@@ -721,8 +722,8 @@ elif [ "${AF_AGENT_SELF_UPDATE_ALLOWED:-0}" = "1" ] && [ "${AF_AGENT_SELF_UPDATE
     set -e
     arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
     case "$arch" in
-      amd64 | x86_64) asset="rtk-x86_64-unknown-linux-musl.tar.gz" ;;
-      arm64 | aarch64) asset="rtk-aarch64-unknown-linux-gnu.tar.gz" ;;
+      amd64 | x86_64) asset="rtk-oss-x86_64-unknown-linux-musl.tar.gz" ;;
+      arm64 | aarch64) asset="rtk-oss-aarch64-unknown-linux-gnu.tar.gz" ;;
       *) echo "unsupported arch: $arch" >&2; exit 1 ;;
     esac
     base="https://github.com/rtk-ai/rtk/releases/latest/download"

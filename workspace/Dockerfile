@@ -280,9 +280,14 @@ RUN set -eux; \
 # instead (docs/log/35 §35.4.1). BAKE_RTK=0 is the escape hatch for airgapped builds
 # (no build-time GitHub fetch); the entrypoint seeds the hook only when `rtk` is on PATH.
 # rtk-ai/rtk is public, so the asset + checksums download without auth.
+# The asset is the Apache-2.0 edition (`rtk-oss-*`): from 1.0.0 the default `rtk-*` asset
+# links a BUSL-1.1 engine, which breaks the NOTICE entry and the redistribution premise of
+# docs/log/35 §35.4.1. The oss edition drops only that engine (pipelines, PostToolUse
+# compression); the PreToolUse hook, `rtk rewrite` and `rtk gain` we use are identical.
+# entrypoint.sh downloads the same assets (boot-install and self-update) — keep them in step.
 #
 # ⚠️ amd64 gets a STATIC musl binary. arm64 has no musl asset: upstream publishes only
-# `rtk-aarch64-unknown-linux-gnu`, which requires **GLIBC_2.39** (exactly two symbols,
+# `rtk-oss-aarch64-unknown-linux-gnu` (gnu, like the default edition's), which requires **GLIBC_2.39** (exactly two symbols,
 # `pidfd_getpid` / `pidfd_spawnp` — verified with readelf on v0.47.0). On the old
 # Debian 12 base (**glibc 2.36**) the download and the sha256 both passed and the binary
 # then could not start (measured on Graviton4, 2026-08-22, docs/log/70 §70.9.2). The base
@@ -300,12 +305,12 @@ RUN set -eux; \
 # Bump RTK_VERSION to upgrade (ARG change busts the cache; same idiom as GH_VERSION).
 # The AF_AGENT_SELF_UPDATE opt-in also updates rtk in place at start (entrypoint).
 ARG BAKE_RTK=1
-ARG RTK_VERSION=0.52.0
+ARG RTK_VERSION=1.0.0
 RUN if [ "${BAKE_RTK}" = "1" ] && [ "${BAKE_AGENT_CLIS}" = "1" ]; then set -eux; \
       arch="$(dpkg --print-architecture)"; \
       case "$arch" in \
-        amd64) asset="rtk-x86_64-unknown-linux-musl.tar.gz" ;; \
-        arm64) asset="rtk-aarch64-unknown-linux-gnu.tar.gz" ;; \
+        amd64) asset="rtk-oss-x86_64-unknown-linux-musl.tar.gz" ;; \
+        arm64) asset="rtk-oss-aarch64-unknown-linux-gnu.tar.gz" ;; \
         *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
       esac; \
       base="https://github.com/rtk-ai/rtk/releases/download/v${RTK_VERSION}"; \
