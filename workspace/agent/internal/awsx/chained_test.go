@@ -335,6 +335,9 @@ func TestProfileLoginStateOfAChainFollowsItsSource(t *testing.T) {
 	if err := saveSettingsCache([]Profile{chainSrc(), chainProf()}, nil); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := Apply(ConfigPath(), []Profile{chainSrc(), chainProf()}); err != nil {
+		t.Fatal(err)
+	}
 	states := func() map[string]string {
 		rec := httptest.NewRecorder()
 		HandleProfileLoginStates(rec, httptest.NewRequest(http.MethodGet, "/aws-login/profiles", nil))
@@ -428,5 +431,52 @@ func TestAChainWithoutOptionalParametersRejectsOnesFromDEFAULT(t *testing.T) {
 	o.Settings = map[string]Profile{"src": chainSrc(), "deploy": plain}
 	if _, _, _, err := PlanExec(bin, workloadEnv, o); err == nil || !strings.Contains(err.Error(), "duration_seconds") {
 		t.Fatalf("err = %v, want a refusal naming duration_seconds", err)
+	}
+}
+
+// A chain whose source is missing, itself chained, or not exported has no login to follow:
+// the row says so instead of "signed in" or "not signed in", and names the source.
+func TestProfileLoginStateOfAChainWithoutAUsableSource(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AF_AWS_PROFILES_TOKEN", "test-token")
+	// A live login for src must not leak into a chain that cannot use it.
+	path := ssoCachePath("af-src")
+	os.MkdirAll(filepath.Dir(path), 0o700)
+	doc, _ := json.Marshal(map[string]string{"accessToken": "t", "expiresAt": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
+	os.WriteFile(path, doc, 0o600)
+	read := func(profiles []Profile, exported []Profile) map[string]profileLoginStateWire {
+		if err := saveSettingsCache(profiles, nil); err != nil {
+			t.Fatal(err)
+		}
+		os.Remove(ConfigPath())
+		if _, err := Apply(ConfigPath(), exported); err != nil {
+			t.Fatal(err)
+		}
+		rec := httptest.NewRecorder()
+		HandleProfileLoginStates(rec, httptest.NewRequest(http.MethodGet, "/aws-login/profiles", nil))
+		var out profileLoginStatesWire
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		m := map[string]profileLoginStateWire{}
+		for _, p := range out.Profiles {
+			m[p.Name] = p
+		}
+		return m
+	}
+	// The source is not a Settings profile.
+	m := read([]Profile{chainProf()}, []Profile{chainProf()})
+	if m["deploy"].State != loginStateSourceUnavailable || m["deploy"].Source != "src" {
+		t.Fatalf("missing source: %+v", m["deploy"])
+	}
+	// The source exists but is held back from the managed block.
+	m = read([]Profile{chainSrc(), chainProf()}, []Profile{})
+	if m["deploy"].State != loginStateSourceUnavailable || m["src"].State != loginStateSignedIn {
+		t.Fatalf("unexported source: %+v", m)
+	}
+	// A usable source: the chain follows it, expiry included, and names it.
+	m = read([]Profile{chainSrc(), chainProf()}, []Profile{chainSrc(), chainProf()})
+	if m["deploy"].State != loginStateSignedIn || m["deploy"].Source != "src" || m["deploy"].Expiring {
+		t.Fatalf("usable source: %+v", m["deploy"])
 	}
 }

@@ -37,8 +37,14 @@ export interface AwsProfileState {
   label: string;
   accountId: string;
   roleName: string;
-  /** "signed_in" | "renew" | "none" — the Agent's reading of the profile's token cache. */
+  /**
+   * "signed_in" | "renew" | "none" — the Agent's reading of the profile's token cache; a
+   * role-chaining profile carries its source's. "source_unavailable": a chain whose source is
+   * missing or not exported, so there is no login to follow.
+   */
   state: string;
+  /** The Settings profile a role-chaining profile follows; "" for an SSO profile. */
+  source: string;
   /** The login's end when it cannot renew, RFC 3339 UTC; "" when no end is known. */
   expiresAt: string;
   expiring: boolean;
@@ -154,6 +160,7 @@ export const useAwsLoginStore = create<AwsLoginState>((set, get) => ({
         accountId: String(p.accountId ?? ""),
         roleName: String(p.roleName ?? ""),
         state: String(p.state ?? ""),
+        source: typeof p.source === "string" ? p.source : "",
         expiresAt: typeof p.expiresAt === "string" ? p.expiresAt : "",
         expiring: p.expiring === true,
       });
