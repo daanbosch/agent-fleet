@@ -290,9 +290,12 @@ func createSessionRequest(addr, dir, title string) (string, []byte) {
 	if isV2() {
 		// The allow-all ruleset is the --auto of the TUI: the container is the sandbox and
 		// nobody can answer a prompt from chat.
+		// metadata marks the session as af's Managed one: the env-gate plugin lets a session
+		// with no af tag wait for a Terminal pane's environment, and this one has none to wait for.
 		b, _ := json.Marshal(map[string]any{
 			"title": title, "location": map[string]string{"directory": dir},
 			"permissions": []map[string]string{{"action": "*", "resource": "*", "effect": "allow"}},
+			"metadata":    map[string]string{metaManaged: "1"},
 		})
 		return addr + "/api/session", b
 	}

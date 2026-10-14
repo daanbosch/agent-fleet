@@ -220,3 +220,94 @@ rule and held (`Blocked by configuration policy`) with the same agent allow in p
 name as the resource matched nothing. Chat and one-shot runs on v2 now carry `shell:*`, `edit:*`,
 `write:*` and `subagent:*` denies inline. Code Mode's `execute` did not reach the built-in shell
 even without a policy (control run), so it has no entry of its own.
+
+## 2026-10-14 — Terminal sessions on one shared serve (#2120)
+
+On opencode 2 a Terminal session now attaches to af's own supervised `opencode serve`
+(`opencode --server`) instead of a private `--standalone` server. The v1 launch and the
+standalone launch are untouched; `AF_OPENCODE_TUI_STANDALONE=1` puts the standalone one back
+without a release, and a launch that cannot get the serve (not connected, disabled) falls back
+to it by itself. Code: `workspace/agent/internal/agents/opencode/shared.go`, `attach.go`,
+`paneenv.go`; plugins `agent-fleet-shared.js`, `agent-fleet-tui/`, and the metadata path of
+`agent-fleet-status.js`.
+
+**How sessions stay apart** (all measured on 2.0.28, isolated `HOME`, loopback stub provider):
+
+- Identity is session metadata. The Agent creates (or forks) the opencode session itself with
+  `{"af.sid", "af.name"}`, records slot → session id at once, and the plugins resolve
+  `sessionID → ctx.session.get(...).metadata["af.sid"]`. `PATCH /api/session/{id}` **replaces**
+  the whole metadata object (not a merge), so every tag is read-merge-write. A fork copies
+  metadata (and permissions), so the copy is re-tagged.
+- The shell environment is `PUT /api/session/{id}/environment` (`{"variables": {…}}`, 204; 404 for
+  an unknown id). Without it the shell prints the **server's** environment, including the server
+  password and the provider keys. With it, it prints exactly the PUT variables.
+  `workspace-agent opencode-attach` is the pane program: it PUTs its own environment (toolchain
+  exports included, server credentials removed) and only then `exec`s the TUI.
+- The password rides the pane environment, never the command line.
+- The engine token per session is a server plugin `session.hook("http.request")`: the event
+  carries `request` (a `Request`), `sessionID`, `model`; setting `authorization` on it reaches the
+  provider (the stub saw `Bearer tok-<slot>` on every request). The token is minted by the Agent
+  (`workspace-agent opencode-engine-token <name>`), never stored in metadata.
+- Provider keys cannot leave the server environment: `POST /api/credential` stores the key in
+  `opencode.db` in plaintext (found with `strings` in the WAL), which af's no-plaintext-credential
+  rule excludes.
+
+**TUI plugin.** `~/.config/opencode/plugins/<dir>/` with a `package.json` whose `./tui` export
+is the entry loads on 2.0.28; its context has `client` (the generated client: `session.get`,
+`session.update({sessionID, metadata})`, `session.environment({sessionID, variables})`,
+`server.info()` with the server `pid`), `ui.router.current()` and `data.listen`. **Every TUI on
+the server receives every `session.created`**, so the first version, which claimed a new session
+on the event, tagged a `/new` made in one pane with another pane's sid (found by the end-to-end
+run). A pane now claims a session only while its own route shows it.
+
+**Restart gap and the shell gate (revised after review).** The environment is in memory, so a new
+serve generation has none, and neither does a subagent's session (it inherits metadata and
+permissions, not the environment), a fork (copies the tag only) or a `/new` before its tag. On every
+new generation the Agent PUTs the live shared panes' environments (read from the pane's process
+tree, `/proc/<pid>/environ`, nothing on disk; retried) as a warm-up. The guarantee is per session:
+the server plugin makes the shell tool ask the Agent (`workspace-agent opencode-put-env <slot>
+<session>`) once per session and server generation — the plugin's memory is exactly one generation —
+and REFUSES the command when the Agent cannot confirm (a throw in `execute.before` blocks the tool;
+measured). The Agent PUTs only onto a session whose af.sid/af.name are the slot's. A new untagged
+session is waited for (5 s); an old untagged one, a Managed one (`af.managed`) and a new one nobody
+claims have no pane to take an environment from and run as before. Measured with four panes: the
+environments are back 170–350 ms after the new daemon answers, the TUIs reconnect. **Residual:**
+commands that do not go through the shell tool, and a plugin that fails to load. The password is kept
+across generations. A pane remembers how it was launched (`opencode-mode`): an automatic fall back to
+`--standalone` is not read, drained or interrupted as a shared pane. `opencode-attach` checks the
+session is the pane's own and refuses connection-changing flags.
+
+**Memory** (idle, bare TUIs, no plugins, RSS/PSS MB): 3 × `--standalone` 1230 / 842; one serve + 3 ×
+`--server` 732 / 543. Per extra pane about +160 / +112 (TUI) against +410 / +280 (standalone).
+
+**Left alone.** Provider, MCP and config settings stay per server. The stale slot directory:
+the status plugin of a standalone/opencode 1 pane still writes
+`~/.config/agent-fleet/opencode-sid`, which the Agent has not read since ADR 0087 moved the store
+to `~/.local/state` (#2122); the shared-server plugins write where the Agent reads.
+
+Review round 2 (#2123): the workspace switch (`AF_OPENCODE_TUI_STANDALONE`) decides the next launch
+only. A pane keeps the mode it was launched with (`opencode-mode`), and a daemon that still has a
+shared pane keeps its stable password and shared plugin mode after the switch is flipped; measured
+with a restart after flipping it. Two panes showing the same untagged session used to both tag it
+(PATCH has no compare-and-set): taking a session is now `workspace-agent opencode-claim`, an
+exclusive file create keyed by the session id taken before anything is read or written (one winner,
+the loser changes nothing, a claim that fails before the tag is released).
+
+Review round 3 (#2123): the Go fork/resume re-tag was an unconditional PATCH, outside the claim
+exclusivity: a fork carries the source's tag from the moment it exists, so the source's pane could
+claim it first and then have its tag overwritten. The Go launch now uses the same exclusive claim
+(`claimSessionFor`); a copy somebody else got first is left to them and a new one is forked, and the
+tag inherited from the source is accepted only for the claimant that won the file. The TUI plugin
+re-sends environments through `opencode-put-env`, which checks the tag.
+
+Review round 4 (#2123): a resume now takes its claim BEFORE changing anything on the session (a
+refused foreign resume made no mutation; it also gives back the record it took). The claim record
+is written whole and linked into place (never created-but-empty), and a record is replaced when it is
+older than 30 s and the session's tag never followed it (an abandoned claim); a completed claim
+stands however old. A fork's copy that cannot be claimed because of an API error is deleted, and a
+claimed one is recorded as the slot's session before the model switch, so a retry resumes it.
+
+Review round 5 (#2123): deleting a fork copy that failed to be claimed took no account of a pane
+that claimed it in between (the source's pane sees the copy under the inherited tag). The cleanup now
+takes the session's exclusive claim record again first: if another pane holds it the copy is theirs
+and stays, and while the cleanup holds it nobody can claim the copy before the DELETE is done.

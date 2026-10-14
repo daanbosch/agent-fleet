@@ -9,6 +9,7 @@ import (
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/afmemory"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/claude"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/opencode"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/browserx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/mcpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/sessionx"
@@ -206,6 +207,37 @@ var subcommands = []subcommand{
 		summary: "claude hook: forward a PushNotification to the notification center",
 		hidden:  true,
 		run:     sessionx.RunPushNotificationHook,
+	},
+	{
+		// The pane program of an opencode 2 Terminal session on af's shared serve: PUTs the
+		// pane's environment as the session's shell environment, then becomes the TUI.
+		name:    "opencode-attach",
+		summary: "put this pane's environment on an opencode session, then start the TUI",
+		hidden:  true,
+		run:     opencode.RunAttach,
+	},
+	{
+		// Called by the opencode TUI plugin for a session its pane shows: one winner per session.
+		name:    "opencode-claim",
+		summary: "claim an opencode session for a Terminal slot (environment, then tag)",
+		hidden:  true,
+		run:     opencode.RunClaim,
+	},
+	{
+		// Called by the opencode shared-serve plugin before a shell command whose session has no
+		// confirmed environment on this server generation.
+		name:    "opencode-put-env",
+		summary: "put an opencode Terminal slot's pane environment on one of its sessions",
+		hidden:  true,
+		run:     opencode.RunPutEnv,
+	},
+	{
+		// Called by the opencode shared-serve plugin: the engine token scoped to one session,
+		// which the server's own (workspace-scoped) environment cannot carry.
+		name:    "opencode-engine-token",
+		summary: "print the engine token scoped to an opencode Terminal session",
+		hidden:  true,
+		run:     runOpencodeEngineToken,
 	},
 	{
 		// Appended after the agent CLI by startSessionTmux, so a crash / OOM is recorded.

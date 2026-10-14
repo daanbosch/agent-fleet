@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -666,6 +667,26 @@ func engineSessionEnv(name string) []string {
 		return nil
 	}
 	return []string{opencode.EngineProviderKeyEnv + "=" + tok}
+}
+
+// runOpencodeEngineToken prints the engine token scoped to one opencode session, for the
+// shared-serve plugin (workspace/opencode-plugin/agent-fleet-shared.js). A session name that is
+// not an opencode Terminal session of this workspace gets nothing, so the command is not a way to
+// mint a token for an arbitrary scope. Nothing is printed, and the exit status is 1, when there
+// is no token (no engines, no Control Plane): the plugin then leaves the request alone.
+func runOpencodeEngineToken(args []string) {
+	if len(args) != 1 {
+		os.Exit(2)
+	}
+	m, ok := session.ReadMeta(args[0])
+	if !ok || m.Kind != session.KindOpencode {
+		os.Exit(1)
+	}
+	tok := engineToken(context.Background(), "llm", m.Name)
+	if tok == "" {
+		os.Exit(1)
+	}
+	fmt.Println(tok)
 }
 
 // engineToken mints (or reuses) a token for one engine and one scope. "" when the deployment

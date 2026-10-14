@@ -847,6 +847,18 @@ if [ -d "$OC_PLUG_SRC" ]; then
   cp -f "$OC_PLUG_SRC"/*.js "$OC_PLUG_DST"/ 2>/dev/null \
     && echo "[entrypoint] seeded opencode status plugin" \
     || echo "[entrypoint] WARN: failed to seed opencode plugin"
+  # opencode 2's TUI plugin (agent-fleet-tui/): a directory with a package.json whose ./tui
+  # export is loaded from ~/.config/opencode/plugins/<dir>/ (measured on 2.0.28). It keeps the
+  # sessions a shared-server Terminal pane creates apart from the other panes' (#2120); opencode 1
+  # never reads this directory. Replaced as a whole so a removed file does not outlive the image.
+  if [ -d "$OC_PLUG_SRC/agent-fleet-tui" ]; then
+    OC_TUI_DST="$HOME/.config/opencode/plugins/agent-fleet-tui"
+    mkdir -p "$HOME/.config/opencode/plugins" \
+      && rm -rf "$OC_TUI_DST" \
+      && cp -r "$OC_PLUG_SRC/agent-fleet-tui" "$OC_TUI_DST" \
+      && echo "[entrypoint] seeded opencode TUI plugin" \
+      || echo "[entrypoint] WARN: failed to seed opencode TUI plugin"
+  fi
 fi
 
 # opencode permission config: run fully unattended like claude/codex (the container IS

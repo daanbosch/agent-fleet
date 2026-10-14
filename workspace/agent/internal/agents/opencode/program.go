@@ -68,7 +68,9 @@ func buildProgram(model, mode string, ocid string, fork bool) string {
 	return strings.Join(parts, " ")
 }
 
-// buildProgramV2 is the launch line for opencode 2. Measured on 2.0.28: the TUI takes only
+// buildProgramV2 is the --standalone launch line for opencode 2: the fallback when af's own serve
+// cannot be had and the AF_OPENCODE_TUI_STANDALONE=1 switch (shared.go is the default, one serve
+// for every Terminal session). Measured on 2.0.28: the TUI takes only
 // --standalone, --server, --auto, --continue, --session and --prompt, so --model, --agent and
 // --fork (v1 TUI flags, `opencode run` only on v2) are replaced by what v2 does support.
 //

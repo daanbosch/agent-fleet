@@ -58,6 +58,16 @@ func installedMajor() int {
 	return 1
 }
 
+// installedVersion is the full version of the opencode that would be launched ("" when unknown).
+func installedVersion() string {
+	if bin := opencodeBinary(); bin != "" {
+		if real, err := filepath.EvalSymlinks(bin); err == nil {
+			return readPackageVersion(filepath.Join(filepath.Dir(real), "..", "package.json"))
+		}
+	}
+	return ""
+}
+
 func readPackageVersion(path string) string {
 	b, err := os.ReadFile(path)
 	if err != nil {
