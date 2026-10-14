@@ -58,6 +58,8 @@ var memberOriginRoutes = map[string]bool{
 	"POST /api/agents/memory/entries/member-save":  true,
 	"POST /api/agents/memory/entries/purge":        true,
 	"POST /api/agents/memory/entries/project-move": true,
+	// Importing AF memory out of a bundle (#1983).
+	"POST /api/agents/memory/af-import": true,
 	// The 0022 history routes only the Console calls (ADR 0113, 2026-10-13 note): a manual
 	// snapshot and the apply step of a bundle import.
 	"POST /api/agents/memory/snapshots":    true,

@@ -79,6 +79,8 @@ var memoryTestRoutes = map[string]http.HandlerFunc{
 	"GET /agents/memory/claude-export":         HandleAgentMemoryClaudeExportSources,
 	"GET /agents/memory/claude-export/preview": HandleAgentMemoryClaudeExportPreview,
 	"POST /agents/memory/claude-export":        HandleAgentMemoryClaudeExportApply,
+	"GET /agents/memory/af-import/preview":     HandleAgentMemoryBundlePreview,
+	"POST /agents/memory/af-import":            HandleAgentMemoryBundleApply,
 }
 
 // memberOnlyTestRoutes are wrapped in memberorigin.Require, as routes.go wraps them.
@@ -86,6 +88,7 @@ var memberOnlyTestRoutes = map[string]bool{
 	"POST /agents/memory/entries/pin":          true,
 	"POST /agents/memory/entries/revert":       true,
 	"POST /agents/memory/entries/member-save":  true,
+	"POST /agents/memory/af-import":            true,
 	"POST /agents/memory/entries/purge":        true,
 	"POST /agents/memory/snapshots":            true,
 	"POST /agents/memory/import/apply":         true,

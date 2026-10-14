@@ -948,6 +948,9 @@ func registerAgentEnvRoutes(mux *http.ServeMux, cfg config) {
 	mux.HandleFunc("GET /api/agents/memory/claude-import", rest)
 	mux.HandleFunc("GET /api/agents/memory/claude-import/preview", rest)
 	mux.HandleFunc("POST /api/agents/memory/claude-import", rest)
+	// AF memory out of an imported memory bundle (#1983): a read-only preview, and the signed import.
+	mux.HandleFunc("GET /api/agents/memory/af-import/preview", rest)
+	mux.HandleFunc("POST /api/agents/memory/af-import", rest)
 	mux.HandleFunc("GET /api/agents/memory/muse-import", rest)
 	mux.HandleFunc("GET /api/agents/memory/muse-import/preview", rest)
 	mux.HandleFunc("POST /api/agents/memory/muse-import", rest)

@@ -100,6 +100,8 @@ type agentMemImportItem struct {
 
 	entry agentMemEntry // the converted memory, for apply
 	live  *agentMemEntry
+	// trailers are extra commit trailers the publish adds (the bundle import's provenance).
+	trailers []string
 }
 
 type agentMemImportPreview struct {
@@ -772,5 +774,5 @@ func agentMemImportWriteTo(p *agentMemProject, rel string, it *agentMemImportIte
 		}
 		changes = append(changes, extra...)
 	}
-	return agentMemApplyLocked(changes, "import", repoRel, agentMemMember, now)
+	return agentMemApplyLocked(changes, "import", repoRel, agentMemMember, now, it.trailers...)
 }

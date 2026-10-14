@@ -6,6 +6,7 @@ import { useT } from "../../../lib/i18n/index.ts";
 import { fmtDateTime, DATETIME_FULL } from "../../../lib/intl.ts";
 import { humanSize } from "../../../lib/filemeta.ts";
 import type { SecretFinding, ImportPreview } from "./memoryTypes.ts";
+import { BundleAfPanel } from "./memoryBundleImport.tsx";
 
 // TransferSection — export / import between environments (docs/log/39 item 5, P3).
 //
@@ -339,6 +340,8 @@ export function TransferSection({
               {tr("common.cancel")}
             </button>
           </div>
+          {/* The restore above never writes AF memory (no secret scan); this is where it comes in. */}
+          {preview.format === "bundle" && <BundleAfPanel importId={preview.importId} onChanged={onApplied} />}
         </div>
       )}
     </section>

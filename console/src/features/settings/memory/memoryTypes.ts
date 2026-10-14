@@ -322,3 +322,45 @@ export interface MoveResultItem {
   reason?: string;
   commit?: string;
 }
+
+/** One memory of a memory bundle's AF store (`af-import/preview`, #1983). */
+export type BundleStatus = "new" | "unchanged" | "exists" | "forgotten" | "secret" | "invalid";
+export interface BundleItem {
+  name: string;
+  status: BundleStatus;
+  reason?: string;
+  description?: string;
+  type?: string;
+  /** The bundle's own revision, for display only: the import resets it. */
+  revision?: number;
+  sourceHash?: string;
+  findings?: SecretFinding[];
+}
+/** A source project of the bundle, or the user scope (`source` "user"). */
+export interface BundleScope {
+  source: string;
+  display?: string;
+  remote?: string;
+  /** The local project it maps to; absent when `reason` says why not. */
+  target?: MemoryChangeProject;
+  match?: "id" | "remote" | "user";
+  reason?: "no_local_project" | "ambiguous";
+  items: BundleItem[];
+  counts: Record<string, number>;
+  withheld?: number;
+}
+export interface BundlePreview {
+  importId: string;
+  hasAF: boolean;
+  scopes: BundleScope[];
+  truncated?: boolean;
+  /** The search for local working copies was cut short, so an unmatched project may only be one not found. */
+  incomplete?: boolean;
+}
+export interface BundleResult {
+  scope: string;
+  name: string;
+  result: "imported" | "skipped";
+  reason?: string;
+  commit?: string;
+}
