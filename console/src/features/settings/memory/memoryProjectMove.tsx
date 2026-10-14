@@ -72,6 +72,9 @@ export function ProjectMovePanel({ reload, onChanged }: { reload: number; onChan
   };
 
   const orphans = (rows ?? []).filter((r) => r.orphaned);
+  // Orphans whose repository is also checked out as exactly one live project (#2110). A hint
+  // that fills the two pickers and the preview; it moves nothing.
+  const suggested = orphans.filter((r) => r.mergeInto);
   const targets = (rows ?? []).filter((r) => !r.orphaned && r.project.id !== from);
   const label = (r: ProjectRow) => `${r.project.display} (${r.count})`;
   const todo: MoveItem[] = (preview?.items ?? []).filter(
@@ -175,6 +178,20 @@ export function ProjectMovePanel({ reload, onChanged }: { reload: number; onChan
         !loadErr && <p className="muted">{tr("mem.pm_none")}</p>
       ) : (
         <>
+          {suggested.length > 0 && (
+            <ul className="mem-pm-suggest">
+              {suggested.map((r) => (
+                <li key={r.project.id}>
+                  <span className="muted">
+                    {tr("mem.pm_suggest", { from: r.project.display, to: r.mergeInto!.display })}
+                  </span>{" "}
+                  <Button disabled={busy} onClick={() => choose(r.project.id, r.mergeInto!.id, "")}>
+                    {tr("mem.pm_suggest_review")}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
           <label className="mem-scope">
             <span className="muted">{tr("mem.pm_from")}</span>
             <select value={from} disabled={busy} onChange={(e) => choose(e.target.value, to === e.target.value ? "" : to, "")}>

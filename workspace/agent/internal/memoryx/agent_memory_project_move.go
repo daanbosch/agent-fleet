@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -227,6 +228,12 @@ type agentMemProjectRow struct {
 	// Live says a working copy under ~/repos belongs to the project: a move can target it even
 	// before it holds a memory.
 	Live bool `json:"live"`
+	// MergeInto is the one live project whose normalised remote equals this orphan's: the move
+	// the Console suggests (#2110). Never set when two live projects share the remote (two clones
+	// of one repository: a guess between them would be wrong half the time), when the orphan has
+	// no recorded remote, or for a project that is not orphaned. A suggestion only; nothing moves
+	// unless the member confirms the usual preview.
+	MergeInto *agentMemProject `json:"mergeInto,omitempty"`
 }
 
 type agentMemProjectsWire struct {
@@ -237,6 +244,69 @@ type agentMemProjectsWire struct {
 func agentMemOrphaned(p *agentMemProject, live map[string]*agentMemProject, complete bool) bool {
 	return complete && live[p.ID] == nil && agentMemRootGone(p.Root)
 }
+
+// agentMemRemoteMatch is the live project an orphan's memories are suggested to move into: the
+// only live project (other than the orphan) with the same non-empty normalised remote.
+func agentMemRemoteMatch(orphan *agentMemProject, live map[string]*agentMemProject) *agentMemProject {
+	if orphan.Remote == "" {
+		return nil
+	}
+	var match *agentMemProject
+	for id, p := range live {
+		if id == orphan.ID || p.Remote != orphan.Remote {
+			continue
+		}
+		if match != nil {
+			return nil
+		}
+		match = p
+	}
+	return match
+}
+
+// agentMemBackfillRemotes adds the remote to the project.json of every project that has a working
+// copy now and was recorded without one, in one commit (#2110). Best effort: an orphan whose root
+// is gone never gets one, and any failure is logged and left for the next start. It runs after
+// the working copies are found, so it also covers a project nobody has written to since the
+// upgrade.
+func agentMemBackfillRemotes(now time.Time) {
+	live, _ := agentMemLiveProjects()
+	agentMemMu.Lock()
+	defer agentMemMu.Unlock()
+	memorySnapshotMu.Lock()
+	defer memorySnapshotMu.Unlock()
+	ids := make([]string, 0, len(live))
+	for id, p := range live {
+		if p.Remote != "" {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	var changes []agentMemChange
+	for _, id := range ids {
+		if !agentMemValidProjectID(id) {
+			continue
+		}
+		if _, err := agentMemCheckDir("projects/"+id, false); err != nil {
+			continue
+		}
+		ch, err := agentMemProjectInfoChange(*live[id])
+		if err != nil {
+			continue
+		}
+		changes = append(changes, ch...)
+	}
+	if len(changes) == 0 {
+		return
+	}
+	unknown := agentMemCaller{Session: agentMemUnknown, Kind: agentMemUnknown}
+	if _, err := agentMemApplyLocked(changes, "project-info", "projects", unknown, now); err != nil {
+		log.Printf("agent memory: record project remotes: %s", agentMemErrKind(err))
+	}
+}
+
+// BackfillAgentMemoryRemotes is agentMemBackfillRemotes for the Agent's start.
+func BackfillAgentMemoryRemotes() { agentMemBackfillRemotes(time.Now()) }
 
 // agentMemMemberProjects lists every project that holds memory or has a working copy, orphaned
 // ones flagged.
@@ -274,6 +344,9 @@ func agentMemMemberProjects() (agentMemProjectsWire, error) {
 		r := &out.Projects[i]
 		// A project with nothing to move is not offered as an orphan.
 		r.Orphaned = (r.Count > 0 || r.Withheld > 0) && agentMemOrphaned(r.Project, live, complete)
+		if r.Orphaned {
+			r.MergeInto = agentMemRemoteMatch(r.Project, live)
+		}
 	}
 	sort.Slice(out.Projects, func(i, j int) bool {
 		a, b := out.Projects[i], out.Projects[j]

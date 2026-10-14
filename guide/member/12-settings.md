@@ -389,7 +389,12 @@ Version control over the memory an agent accumulates by itself (claude's auto-me
     changed since the preview, or whose file looks like it contains a secret, stays in the old project. Each memory
     becomes two entries in the recent changes list, one in each project, so you can revert either there. If the
     move is interrupted, run it again: nothing is lost and it finishes where it stopped. This works with the
-    sessions' switch on or off and is only available from the Console.
+    sessions' switch on or off and is only available from the Console. When exactly one project that has a
+    working copy uses the same git remote as the old one (the same repository cloned again), the panel suggests
+    it with a **Review the move** button, which only fills in the two choices and shows the preview. Nothing moves
+    until you confirm. With two such working copies of the repository there is no suggestion; pick the target
+    yourself. Agent Fleet remembers the remote of each project, without any password or token from the URL;
+    a project whose working copy was already gone has none and is never suggested.
   - **From a terminal**: `af-memory export-sources`, `af-memory export --project <id|name> --dry-run` (preview) and
     `af-memory export --project <id|name> [--overwrite <name>]...` (write back).
 
