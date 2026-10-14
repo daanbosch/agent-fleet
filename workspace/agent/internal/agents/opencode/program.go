@@ -25,8 +25,13 @@ func envOr(key, def string) string {
 // there's no token to inject. Caveat: multiple opencode slots in the SAME dir share
 // --continue's "most recent" target.
 func buildProgram(model, mode string, ocid string, fork bool) string {
-	if installedMajor() >= 2 {
-		return buildProgramV2(model, mode, ocid, fork)
+	return buildProgramFor(CurrentLaunch(), model, mode, ocid, fork)
+}
+
+// buildProgramFor is buildProgram against one reading of the opt-in switch.
+func buildProgramFor(spec LaunchSpec, model, mode string, ocid string, fork bool) string {
+	if spec.Major() >= 2 {
+		return buildProgramV2(spec, model, mode, ocid, fork)
 	}
 	// Env (AF_SESSION_SID + provider API keys) is carried on LaunchPlan.Env and
 	// injected by tmux `new-session -e`: prefixing NAME='value' onto the command
@@ -88,7 +93,7 @@ func buildProgram(model, mode string, ocid string, fork bool) string {
 // The API calls use `opencode api --standalone`, a one-shot private server (~1 s each). Any
 // failure stops the launch, prints the reason in the pane and leaves a non-zero status; the
 // line's final status is the TUI's, because the caller appends the exit recorder after it.
-func buildProgramV2(model, mode, ocid string, fork bool) string {
+func buildProgramV2(spec LaunchSpec, model, mode, ocid string, fork bool) string {
 	agent := ""
 	switch mode {
 	case "plan":
@@ -96,7 +101,7 @@ func buildProgramV2(model, mode, ocid string, fork bool) string {
 	case "normal":
 		agent = "build"
 	}
-	tui := []string{"opencode", "--standalone", envOr("AGENT_OPENCODE_FLAGS", "--auto")}
+	tui := []string{spec.shellBin(), "--standalone", envOr("AGENT_OPENCODE_FLAGS", "--auto")}
 	if ocid == "" {
 		if cfg := freshSessionConfig(model, agent); cfg != "" {
 			tui = append([]string{"OPENCODE_CONFIG_CONTENT=" + session.ShellQuote(cfg)}, tui...)
@@ -110,7 +115,7 @@ func buildProgramV2(model, mode, ocid string, fork bool) string {
 	// shown only when it fails: a plan agent that silently stayed on build would let the
 	// session edit when the member chose plan.
 	api := func(sub, body string) string {
-		return `AF_OC_OUT=$(opencode api --standalone POST /api/session/` + target + "/" + sub + " -d " + session.ShellQuote(body) + " 2>&1)"
+		return `AF_OC_OUT=$(` + spec.shellBin() + ` api --standalone POST /api/session/` + target + "/" + sub + " -d " + session.ShellQuote(body) + " 2>&1)"
 	}
 	var switches []string
 	if prov, id, ok := splitModel(model); ok {
@@ -139,7 +144,7 @@ func buildProgramV2(model, mode, ocid string, fork bool) string {
 	if !fork {
 		return "AF_OC_SES=" + ses + "; if " + cond + "; then " + run + "; else " + fail("could not apply the model or agent") + "; fi"
 	}
-	return `AF_OC_OUT=$(opencode api --standalone POST /api/session/` + ses + `/fork -d '{}' 2>&1); ` +
+	return `AF_OC_OUT=$(` + spec.shellBin() + ` api --standalone POST /api/session/` + ses + `/fork -d '{}' 2>&1); ` +
 		`AF_OC_SES=$(printf '%s' "$AF_OC_OUT" | grep -o '"id":"ses_[A-Za-z0-9]*"' | head -n 1 | cut -d'"' -f4); ` +
 		`if [ -z "$AF_OC_SES" ]; then ` + fail("fork failed") + `; elif ` + cond + `; then ` + run +
 		`; else ` + fail("could not apply the model or agent") + `; fi`

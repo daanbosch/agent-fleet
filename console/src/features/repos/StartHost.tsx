@@ -67,6 +67,7 @@ export function StartHost() {
       {show && (
         <StartModal
           kinds={agentKinds}
+          claudeExpired={ctx.claudeExpired}
           onClose={() => {
             setShow(false);
             clearSeed();

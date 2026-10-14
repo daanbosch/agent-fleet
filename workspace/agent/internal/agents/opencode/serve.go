@@ -87,6 +87,8 @@ type Supervisor struct {
 	askedStop *exec.Cmd
 	// watching: one zero-demand watcher (agents.WatchIdle, idlestop.go) is running.
 	watching bool
+	// key is launchKey() as of the daemon's start (or adoption): which opencode it is.
+	key string
 }
 
 var supervisor = &Supervisor{}
@@ -282,6 +284,12 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 	if s.Disabled() {
 		return "", 0, errors.New("opencode serve is disabled (AF_OPENCODE_SERVE_DISABLE=1)")
 	}
+	// One reading of the switch for this start: the replacement check, the binary, the
+	// database and the recorded key all come from it.
+	spec := CurrentLaunch()
+	if err := s.retireStaleFor(spec.Key); err != nil {
+		return "", 0, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	addr := serveAddr()
@@ -296,6 +304,7 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 		s.cmd = nil
 		s.up = true
 		s.stopping = false
+		s.key = adoptedKey()
 		s.armIdleWatchLocked()
 		go s.monitorEvents(addr, s.gen)
 		log.Printf("opencode serve: adopted running daemon at %s (gen %d)", addr, s.gen)
@@ -320,7 +329,10 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 	// unless the new daemon proves it holds this one, so a failed start (or an Ensure that
 	// raced a slow-but-alive daemon) cannot lock the Agent out of it.
 	prevPassword := servePassword()
-	password, err := nextServePassword(prevPassword, sharedDaemonWanted())
+	// Decided once, from this start's reading: the password policy and the environment flag must
+	// agree, and a second read could see the switch after it flipped.
+	sharedWanted := sharedTUIFor(spec) || sharedTerminals() > 0
+	password, err := nextServePassword(prevPassword, sharedWanted)
 	if err != nil {
 		return "", 0, fmt.Errorf("opencode serve のパスワードを用意できません: %w", err)
 	}
@@ -331,13 +343,13 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 			useServePassword(prevPassword)
 		}
 	}()
-	cmd := exec.Command("opencode", "serve", "--hostname", host, "--port", port)
+	cmd := exec.Command(spec.Bin, "serve", "--hostname", host, "--port", port)
 	// Provider keys are env-injected (auth.go) — the same set a TUI launch gets, so
 	// managed turns authenticate identically. Re-keying requires a Restart (§7). The
 	// auth variables come last: a duplicate key keeps its final value.
-	cmd.Env = append(append(withoutEnv(os.Environ(), "AF_SESSION_SID", "AF_SESSION_NAME"), env()...),
+	cmd.Env = append(append(withoutEnv(os.Environ(), "AF_SESSION_SID", "AF_SESSION_NAME"), spec.Env()...),
 		"OPENCODE_SERVER_USERNAME="+serveUser, "OPENCODE_SERVER_PASSWORD="+password)
-	if sharedDaemonWanted() {
+	if sharedWanted {
 		// Tells the plugins this is af's shared server: no AF_SESSION_SID here, sessions are told
 		// apart by metadata, and shell commands wait for their environment (agent-fleet-shared.js).
 		cmd.Env = append(cmd.Env, sharedServeEnv+"=1")
@@ -363,6 +375,8 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 			s.cmd = cmd
 			s.up = true
 			s.stopping = false
+			s.key = spec.Key
+			noteServeStart(cmd.Process.Pid, s.key)
 			gen := s.gen
 			s.armIdleWatchLocked()
 			go s.waitDaemon(cmd, tail, gen)

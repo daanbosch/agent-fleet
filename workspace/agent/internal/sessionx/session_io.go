@@ -941,6 +941,13 @@ func deliverInitialPrompt(name, prompt string) {
 // InitialPromptState: failed when nothing could be typed, delivered when a turn was seen to
 // start, unknown when it was typed and no evidence came either way.
 func typeInitialPrompt(name, prompt string) string {
+	// An expired claude login makes the TUI accept the characters and start no turn, so the
+	// task would be eaten and the member would learn why only from their next, refused send.
+	// Settling failed instead keeps the loss visible (the same refusal promptBlocker gives).
+	if m, ok := session.ReadMeta(name); (!ok || NormalizeKind(m.Kind) == session.KindClaude) && claude.AuthExpired() {
+		log.Printf("initial prompt NOT typed for %s: the claude login has expired", name)
+		return session.InitialPromptFailed
+	}
 	tn := session.TmuxName(name)
 	// Wait for tmux + a resolvable pane id (the agent process is up). Cap ~30s to match
 	// the Console's give-up budget, polling on the same cadence.
@@ -1227,7 +1234,7 @@ func blockedErrMessage(state string) string {
 	case "model_switch":
 		return "codex is offering to switch to a smaller model near the usage limit; answer it in the terminal (typed text would be taken by the menu and the Enter would switch the model)"
 	case agents.StateAuth:
-		return "the claude login for this workspace has expired; re-authenticate from 設定 > エージェント (a prompt sent now would be accepted by the TUI but never start a turn)"
+		return "the claude login for this workspace has expired; re-authenticate in the Console (account menu > Settings > Connections > Agents, Claude card) (a prompt sent now would be accepted by the TUI but never start a turn)"
 	}
 	return "the session is showing an interactive prompt (" + state + "); answer it from the Console, not free text"
 }

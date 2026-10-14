@@ -32,7 +32,8 @@ func Models() []string {
 	// encrypted connection store and are normally injected only into launched
 	// sessions. Give the catalog command the same environment, otherwise an
 	// OpenCode Go user sees only the zero-auth FREE models in the launch picker.
-	providerEnv := env()
+	spec := CurrentLaunch()
+	providerEnv := spec.Env()
 	envKey := sha256.Sum256([]byte(strings.Join(providerEnv, "\x00")))
 	if modelsList != nil && modelsEnvKey == envKey && time.Since(modelsAt) < time.Minute {
 		return modelsList
@@ -51,7 +52,7 @@ func Models() []string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "opencode", "models")
+	cmd := exec.CommandContext(ctx, spec.Bin, "models")
 	cmd.Env = withoutAWSCredentialChain(mergeCommandEnv(os.Environ(), providerEnv))
 	// Keep stderr. `cmd.Output()` throws it away, and this call fails silently in every other
 	// respect too — the error path returns a nil list, which the picker renders exactly like
@@ -134,7 +135,7 @@ func isFreeModel(id string) bool {
 // modelsFromDaemon reads the catalog from a serve that is ALREADY running (starting one
 // for a picker refresh would be a surprise). Returns nil when there is no daemon, so the
 // caller falls back to the CLI. Called with modelsMu held (it refreshes freeIDs).
-func modelsFromDaemon() []string {
+var modelsFromDaemon = func() []string {
 	addr, up := oauthProbe()
 	if !up {
 		return nil

@@ -172,13 +172,18 @@ const (
 	loginStateSignedIn = "signed_in" // an access token that has not expired
 	loginStateRenew    = "renew"     // expired, but a refresh token may renew it on next use
 	loginStateNone     = "none"      // no cache, or nothing that can be renewed
+	// A chained profile whose source is missing, itself chained, or not exported: there is no
+	// login to follow, and signing in somewhere cannot fix it.
+	loginStateSourceUnavailable = "source_unavailable"
 )
 
 // profileLoginStateWire carries Settings' account, role and label so the Console can open
 // the login modal from an expiry warning without a second list. No token is ever here.
 type profileLoginStateWire struct {
-	Name      string `json:"name"`
-	State     string `json:"state"`
+	Name  string `json:"name"`
+	State string `json:"state"`
+	// Source is the Settings profile a chained profile follows ("" for an SSO profile).
+	Source    string `json:"source,omitempty"`
 	Label     string `json:"label,omitempty"`
 	AccountID string `json:"accountId,omitempty"`
 	RoleName  string `json:"roleName,omitempty"`
@@ -210,12 +215,24 @@ func HandleProfileLoginStates(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	out := []profileLoginStateWire{}
 	exported := ExportedIn(ConfigPath())
-	for name, sp := range loginSettings() {
+	settings := loginSettings()
+	for name, sp := range settings {
 		if sp.Chained() {
 			// No login of its own: it follows its source, so a row never shows "not signed in"
-			// for a chain whose source is signed in.
-			p := profileLoginStateWire{Name: name, State: profileLoginState("af-"+sp.SourceProfile, now),
-				Label: sp.Label, AccountID: sp.AccountID, RoleName: roleNameOf(sp.RoleARN)}
+			// for a chain whose source is signed in. A source that is not an exported SSO
+			// Settings profile leaves nothing to follow (af-aws-exec refuses the run too), and
+			// that is never "signed in".
+			p := profileLoginStateWire{Name: name, Source: sp.SourceProfile, Label: sp.Label, AccountID: sp.AccountID,
+				RoleName: roleNameOf(sp.RoleARN)}
+			if src, ok := settings[sp.SourceProfile]; !ok || src.Chained() || !slices.Contains(exported, sp.SourceProfile) || !slices.Contains(exported, name) {
+				p.State = loginStateSourceUnavailable
+			} else {
+				p.State = profileLoginState("af-"+sp.SourceProfile, now)
+				// Shown, never warned about: the source's own row carries the expiry warning.
+				if end, ok := readSSOExpiry("af-"+sp.SourceProfile, now); ok {
+					p.ExpiresAt = end.Format(time.RFC3339)
+				}
+			}
 			out = append(out, p)
 			continue
 		}

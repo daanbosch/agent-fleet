@@ -24,6 +24,9 @@ export interface RepoRailContext {
    *  not "nothing available", so pickers can say so instead of showing a bare box. */
   connsSettling: boolean;
   running: boolean;
+  /** Claude is connected but its login has expired: it stays launchable (/login in the pane
+   *  recovers), so this is a notice, not a gate. */
+  claudeExpired: boolean;
   /** The attached session's working copy → highlighted row (null = none). */
   activeRepo: string | null | undefined;
   /** The active SCM/changes/commit pane's repo → highlighted row. */
@@ -134,5 +137,6 @@ export function useRepoRailContext(): RepoRailContext {
   const ac = activePane(layout)?.content;
   const scmRepo = ac && (ac.kind === "scm" || ac.kind === "changes" || ac.kind === "commit") ? ac.scmRepo : null;
 
-  return { launchKinds, connsSettling, running, activeRepo, scmRepo, rPanes, sPanes, multiPane, activeSession: activeSessionName };
+  const claudeExpired = connsDone && !!conns?.claude?.expired;
+  return { launchKinds, connsSettling, running, claudeExpired, activeRepo, scmRepo, rPanes, sPanes, multiPane, activeSession: activeSessionName };
 }

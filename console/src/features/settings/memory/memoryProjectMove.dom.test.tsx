@@ -119,6 +119,35 @@ describe("ProjectMovePanel", () => {
     expect(to).toEqual(["", "new-0123456789ab"]);
   });
 
+  it("suggests the live project with the same remote and only fills the pickers", async () => {
+    api.mockImplementation((path: string) =>
+      Promise.resolve(
+        path.startsWith("api/agents/memory/entries/project-move-preview")
+          ? plain
+          : { projects: [{ ...rows[0], mergeInto: rows[2].project }, rows[1], rows[2]] },
+      ),
+    );
+    await mount();
+    const text = host!.querySelector(".mem-pm-suggest")!.textContent ?? "";
+    expect(text).toContain("old has memories but no working copy");
+    expect(text).toContain("new is a checkout of the same repository");
+    expect(host!.querySelector(".mem-pm-suggest li")).not.toBeNull();
+    expect(host!.querySelectorAll(".mem-pm-suggest li")).toHaveLength(1);
+    expect(apiJSON).not.toHaveBeenCalled();
+    await act(async () => host!.querySelector<HTMLButtonElement>(".mem-pm-suggest button")!.click());
+    await flush();
+    expect(selects()[0].value).toBe("old-0123456789ab");
+    expect(selects()[1].value).toBe("new-0123456789ab");
+    // Still a preview: nothing is written until the member applies it.
+    expect(apiJSON).not.toHaveBeenCalled();
+    expect(applyButton().textContent).toContain("120");
+  });
+
+  it("shows no suggestion when the Agent names none", async () => {
+    await mount();
+    expect(host!.querySelector(".mem-pm-suggest")).toBeNull();
+  });
+
   it("says so when nothing is orphaned", async () => {
     api.mockResolvedValue({ projects: [rows[2]] });
     await mount();

@@ -49,6 +49,8 @@ export const mirror: Record<keyof typeof jaMirror, string> = {
     "codex is waiting on an update prompt. Choosing “1. Update now” exits the process and drops the session, so skipping is recommended (updates land via an image rebuild).",
   "mirror.skip_continue": "Skip and continue",
   "mirror.compacting": "Compacting context…",
+  "mirror.retrying": "The provider returned an error and the agent is retrying (attempt {n}): {msg}",
+  "mirror.retry_failed": "The provider returned an error that retrying cannot fix, so the turn was stopped: {msg}",
   "mirror.title_suggestion": "Suggested title: <0>{title}</0>",
   "mirror.adopt": "Adopt",
   "mirror.dismiss_suggestion": "Don't show this suggestion again",

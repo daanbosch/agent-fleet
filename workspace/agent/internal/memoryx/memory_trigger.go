@@ -195,13 +195,17 @@ func memoryKindsBusy() bool { return len(memoryBusyKinds()) > 0 }
 func StartMemorySnapshotLoop() {
 	if memoryAutoLocked() {
 		log.Printf("memory-snapshot: auto snapshot disabled (AF_MEMORY_SNAPSHOT)")
-		go ResumeMemoryPurge() // an interrupted purge is finished whether or not snapshots run
+		go func() {
+			ResumeMemoryPurge() // an interrupted purge is finished whether or not snapshots run
+			BackfillAgentMemoryRemotes()
+		}()
 		return
 	}
 	interval, debounce, maxDefer := memorySnapshotInterval(), memorySnapshotDebounce(), memorySnapshotMaxDefer()
 	go func() {
 		time.Sleep(45 * time.Second) // stay out of the boot-time rush (reconcile / cred seeding)
 		ResumeMemoryPurge()
+		BackfillAgentMemoryRemotes()
 		for {
 			if memoryAutoEnabled() {
 				memorySnapshotTick(time.Now(), debounce, maxDefer)

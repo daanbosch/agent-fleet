@@ -181,24 +181,35 @@ func (agentImpl) BuildLaunch(m session.Meta, _ agents.LaunchOpts) (agents.Launch
 	// verified on tmux 3.3a) so the keys never appear in the command string /
 	// /proc/*/cmdline / pane_start_command.
 	ocSid := session.UUID(m.Dir, m.Name)
+	// One reading of the opt-in switch for the whole launch: binary, database and program agree.
+	spec := CurrentLaunch()
 	// The fleet's own inference engines (ADR 0071): env() already carries a workspace-scoped
 	// engine token (it has to, for the managed route's shared daemon), and this route can do
 	// better — a tmux session is its own process, so it gets a token scoped to THIS session,
 	// which is what makes the usage row say who spent it. Merged rather than appended: two
 	// entries of the same name in `tmux new-session -e` is not something to leave to luck.
-	envs := mergeCommandEnv(append([]string{"AF_SESSION_SID=" + ocSid}, env()...), EngineEnv(m.Name))
+	envs := mergeCommandEnv(append([]string{"AF_SESSION_SID=" + ocSid}, spec.Env()...), EngineEnv(m.Name))
 	// opencode 2: the TUI attaches to af's own serve. The session is created (or resumed, or
 	// forked) through its API here, so none of the v1 store reads below apply to it.
-	if sharedTUI() {
-		plan, ok, err := buildSharedLaunch(m, ocSid)
+	if sharedTUIFor(spec) {
+		plan, ok, err := buildSharedLaunch(spec, m, ocSid)
 		if err != nil {
 			return agents.LaunchPlan{}, err
 		}
 		if ok {
+			if spec.V2 {
+				// The pane's attach step runs the binary this launch was built for.
+				plan.Env = append(plan.Env, attachBinEnv+"="+spec.Bin)
+			}
 			return agents.LaunchPlan{Program: plan.Program, Cwd: m.CWD(), Env: mergeCommandEnv(envs, plan.Env)}, nil
 		}
-	} else if installedMajor() >= 2 {
+	} else if spec.Major() >= 2 {
 		markSlotMode(ocSid, modeStandalone)
+	} else {
+		// A pane launched on 1.x is never attached to the serve. Without this a record left by an
+		// earlier opencode 2 launch of the slot (the opt-in was on then) would make a later switch
+		// back to 2 count this 1.x pane as a dependent of the 2.x serve.
+		slotModes.Remove(ocSid)
 	}
 	// Resume the slot's OWN opencode conversation (activeSession: the plugin-captured
 	// per-slot id, else a store-derived conversation this slot itself opened — never an
@@ -231,7 +242,7 @@ func (agentImpl) BuildLaunch(m session.Meta, _ agents.LaunchOpts) (agents.Launch
 		}
 		resume, fork = m.ForkFrom, true
 	}
-	return agents.LaunchPlan{Program: buildProgram(m.Model, m.Mode, resume, fork), Cwd: m.CWD(), Env: envs}, nil
+	return agents.LaunchPlan{Program: buildProgramFor(spec, m.Model, m.Mode, resume, fork), Cwd: m.CWD(), Env: envs}, nil
 }
 
 func (agentImpl) WireLive(m session.Meta, alive bool) agents.LiveInfo {

@@ -759,12 +759,12 @@ export async function sessionCarriedAnswer(
     answers?: CarriedAnswerInput[];
     feedback?: string;
   },
-): Promise<{ ok: boolean; message?: string }> {
+): Promise<{ ok: boolean; message?: string; code?: string }> {
   const r = await apiJSON(`api/sessions/${encodeURIComponent(session)}/carried-answer`, "POST", body).catch(
     () => ({ error: { message: t("err.network") } }),
   );
   const err = r?.error as ApiError | undefined;
-  if (err) return { ok: false, message: errText(err) || t("err.send_failed") };
+  if (err) return { ok: false, message: errText(err) || t("err.send_failed"), ...(err.code ? { code: err.code } : {}) };
   return { ok: true };
 }
 

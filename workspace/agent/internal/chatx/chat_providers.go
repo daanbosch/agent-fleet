@@ -823,9 +823,10 @@ func (opencodeChat) Send(ctx context.Context, c *ChatConversation, prompt string
 		args = append(args, "--model", pinned)
 	}
 	args = append(args, headlessPrompt(c.personaOf(), c.knowledgeDirs(), prompt))
-	cmd := exec.CommandContext(ctx, "opencode", args...)
+	spec := opencode.CurrentLaunch()
+	cmd := exec.CommandContext(ctx, spec.Bin, args...)
 	cmd.Dir = dir
-	env := opencode.Env()
+	env := spec.Env()
 	env = append(env, opencodeConfigEnv(opencodeChatConfig(c))...)
 	cmd.Env = envWith(env...)
 	out, err := cmd.Output()
@@ -2110,7 +2111,8 @@ func OneShotHeadlessRun(ctx context.Context, feature string, tier OneShotTier, p
 	case session.KindOpencode:
 		call.Kind = session.KindOpencode
 		args := []string{"run", "--format", "json", "--dir", chatWorkdir()}
-		env := opencode.Env()
+		spec := opencode.CurrentLaunch()
+		env := spec.Env()
 		// read-only posture (docs/log/44 §1.3): unlike a chat, a one-shot runs in the bare
 		// chatWorkdir with no project config (opencode.json), so OPENCODE_CONFIG's deny is the
 		// one that takes effect (merge precedence measured on 1.18.7: project >
@@ -2132,7 +2134,7 @@ func OneShotHeadlessRun(ctx context.Context, feature string, tier OneShotTier, p
 			call.ModelReq = m
 		}
 		args = append(args, headlessPrompt(persona, nil, prompt))
-		cmd := exec.CommandContext(ctx, "opencode", args...)
+		cmd := exec.CommandContext(ctx, spec.Bin, args...)
 		cmd.Dir = chatWorkdir()
 		cmd.Env = envWith(env...)
 		out, err := cmd.Output()
@@ -2152,9 +2154,9 @@ func OneShotHeadlessRun(ctx context.Context, feature string, tier OneShotTier, p
 		// from ctx (the reply is already in hand; cleanup shouldn't be cancelled).
 		if sesID != "" {
 			go func() {
-				cl := exec.Command("opencode", "session", "delete", sesID)
+				cl := exec.Command(spec.Bin, "session", "delete", sesID)
 				cl.Dir = chatWorkdir()
-				cl.Env = envWith(opencode.Env()...)
+				cl.Env = envWith(spec.Env()...)
 				_ = cl.Run()
 			}()
 		}

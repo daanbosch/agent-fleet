@@ -973,6 +973,10 @@ button.ws-aws-btn.ws-gcp-btn .codicon:not(.codicon-chevron-down) {
   color: var(--ok);
   border-color: currentColor;
 }
+.ws-aws-state.source_unavailable {
+  color: var(--warn);
+  border-color: currentColor;
+}
 /* The command is one token to copy; a break inside "--profile" reads as two flags. */
 .ws-aws-cmd {
   display: inline-block;

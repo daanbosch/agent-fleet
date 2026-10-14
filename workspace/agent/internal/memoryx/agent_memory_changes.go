@@ -114,6 +114,9 @@ func agentMemProjectInfo(id string) *agentMemProject {
 		return p
 	}
 	p.Display, p.Root, p.VCS = v.Display, v.Root, v.VCS
+	if agentMemRemoteOK(v.Remote) {
+		p.Remote = v.Remote
+	}
 	return p
 }
 

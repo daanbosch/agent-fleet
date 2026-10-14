@@ -135,6 +135,8 @@ export interface MemoryChangeProject {
   root: string;
   vcs: string;
   display: string;
+  /** Normalised origin ("host/owner/repo", no credentials); absent when unknown. */
+  remote?: string;
 }
 
 /** One claude project with memory files that could be imported into AF memory (ADR 0108). */
@@ -287,6 +289,8 @@ export interface ProjectRow {
   orphaned: boolean;
   /** A working copy under ~/repos belongs to the project, so it can receive a move before it holds a memory. */
   live: boolean;
+  /** The one live project with the same remote as this orphan: a suggested target, never applied on its own. */
+  mergeInto?: MemoryChangeProject;
 }
 
 export type MoveStatus = "move" | "same" | "collision" | "rename" | "skip";

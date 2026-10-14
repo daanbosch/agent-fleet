@@ -225,6 +225,15 @@ and launches via an assistant). Remove the exclusion on that agent's card
 To use a specific Claude release (a full id such as `claude-opus-4-8`), register it under
 **"Extra Claude models"** on the same screen and it joins the choices.
 
+### An opencode session says "working" but nothing arrives
+
+Look for the band above the conversation: **"The provider returned an error and the agent is
+retrying (attempt N): …"**. opencode is retrying a provider error; the message says which. Rate
+limits and overloads usually pass, so wait or stop the turn. Errors that cannot pass (region or
+privacy setting, quota or billing, a bad key) end the turn as failed by themselves and the band
+says so: fix the cause on the provider account (for "requires Global regions", its privacy /
+region setting) and send again ([06](06-agents.md)).
+
 ### The launch dialog offers only "Default"
 
 The agents with a live catalog (codex / opencode / copilot / cursor / kiro / agy / lcpp / muse) fetch their
