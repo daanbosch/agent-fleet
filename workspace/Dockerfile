@@ -422,9 +422,9 @@ ENV AGY_CLI_DISABLE_AUTO_UPDATE=true
 # setTimeout(...).unref() で走るが `disableAutoUpdate || channel==="static"` でスキップ）。
 # 焼き込みでは AF が起動フラグ `--disable-auto-update`（全経路）＋ entrypoint の
 # cli-config.json `channel:"static"` 再固定の二重で封じる（詳細 docs/log/40 Track B）。
-ARG CURSOR_VERSION=2026.10.01-e373342
-ARG CURSOR_SHA256_X64=a79726c6e644520e993970be4c45775a6889802b67abe461a677a53219ae28e8
-ARG CURSOR_SHA256_ARM64=785c5f6bf2a60eb1121e27ed8c14f5ee07ed1b5b6692324f2d9a997238245eb5
+ARG CURSOR_VERSION=2026.10.12-d47ca18
+ARG CURSOR_SHA256_X64=ba41befe41e7d99ecec22eb0aa01720c9cd475d66035f4d90d2acfd74bcd8fdb
+ARG CURSOR_SHA256_ARM64=2cbb98b79e821b3b08e76a2eb4de4c9333544af3bc81aba8c8d581256af71e7a
 RUN if [ "${BAKE_AGENT_CLIS}" = "1" ]; then set -eux; \
       arch="$(dpkg --print-architecture)"; \
       case "$arch" in \
