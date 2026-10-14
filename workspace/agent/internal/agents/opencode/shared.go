@@ -31,10 +31,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/tmuxx"
 )
@@ -68,9 +70,11 @@ const modeShared, modeStandalone = "shared", "standalone"
 func markSlotMode(sid, mode string) { slotModes.Write(sid, mode) }
 
 // sharedSlot reports whether slot m's pane is attached to af's serve. A slot with no record was
-// launched before this existed, i.e. --standalone.
+// launched before this existed, i.e. --standalone. The switch (sharedTUI) is deliberately not
+// part of it: flipping it changes the NEXT launch, and a pane still attached to the serve keeps
+// being a dependent, restored, drained and interrupted.
 func sharedSlot(m session.Meta) bool {
-	return sharedTUI() && m.Kind == session.KindOpencode && m.DriverKind() == session.DriverTUI &&
+	return installedMajor() >= 2 && m.Kind == session.KindOpencode && m.DriverKind() == session.DriverTUI &&
 		slotModes.Read(session.UUID(m.Dir, m.Name)) == modeShared
 }
 
@@ -90,12 +94,11 @@ var terminalSlots = func() []session.Meta {
 // sharedTerminals is how many Terminal panes depend on the shared daemon right now. Derived from
 // the metas and tmux rather than a registry, so an Agent restart does not forget attached TUIs
 // and let the idle stop pull the server out from under them.
-func sharedTerminals() int {
-	if !sharedTUI() {
-		return 0
-	}
-	return len(terminalSlots())
-}
+func sharedTerminals() int { return len(terminalSlots()) }
+
+// sharedDaemonWanted is whether the daemon has to be started the shared way (a stable password,
+// the plugins' shared mode): a launch that will attach to it, or a pane that already is.
+func sharedDaemonWanted() bool { return sharedTUI() || sharedTerminals() > 0 }
 
 // --- API calls ---------------------------------------------------------------------
 
@@ -391,9 +394,6 @@ func (agentImpl) GracefulStop(m session.Meta) bool {
 // environment first (putEnvironmentFor, once per session and server generation), so a PUT that
 // fails here leaves the command refused rather than run with the server's environment.
 func restoreTerminalEnvs(addr string) {
-	if !sharedTUI() {
-		return
-	}
 	for _, m := range terminalSlots() {
 		ses := sids.Read(session.UUID(m.Dir, m.Name))
 		if ses == "" {
@@ -431,6 +431,83 @@ func RunPutEnv(args []string) {
 		fmt.Fprintf(os.Stderr, "opencode-put-env: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// Exit status of `opencode-claim` for a session that is another slot's.
+const claimTaken = 3
+
+// RunClaim is `workspace-agent opencode-claim <slot name> <opencode session id>`, the TUI plugin's
+// way to take a session its pane shows. Exit 0: the session is the slot's (environment put, tag
+// set); 3: it belongs to another slot; anything else: not decided, try again.
+func RunClaim(args []string) {
+	if len(args) != 2 {
+		os.Exit(2)
+	}
+	switch err := claimSession(serveAddr(), args[0], args[1]); {
+	case err == nil:
+	case errors.Is(err, errClaimTaken):
+		os.Exit(claimTaken)
+	default:
+		fmt.Fprintf(os.Stderr, "opencode-claim: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+var errClaimTaken = errors.New("the session belongs to another slot")
+
+// claimSession makes ses the slot's: one winner per session, however many panes show it. The
+// decision is an exclusive file create keyed by the session id, taken BEFORE anything is read or
+// written, so two panes that both saw the session untagged cannot both put an environment and a
+// tag (the tag has no compare-and-set upstream: PATCH replaces the metadata). The losing pane
+// changes nothing. A claim that fails before the tag is set is released for the next try.
+func claimSession(addr, name, ses string) error {
+	m, ok := session.ReadMeta(name)
+	if !ok || m.Kind != session.KindOpencode || m.DriverKind() != session.DriverTUI {
+		return fmt.Errorf("%q is not an opencode Terminal slot", name)
+	}
+	sid := session.UUID(m.Dir, m.Name)
+	dir := filepath.Join(paths.AgentStateDir(), "opencode-claim")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, url.PathEscape(ses))
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	switch {
+	case err == nil:
+		_, _ = f.WriteString(sid)
+		f.Close()
+	case errors.Is(err, os.ErrExist):
+		if owner, _ := os.ReadFile(path); strings.TrimSpace(string(owner)) != sid {
+			return errClaimTaken
+		}
+	default:
+		return err
+	}
+	info, gerr := getSharedSession(addr, ses)
+	if gerr != nil {
+		_ = os.Remove(path)
+		return gerr
+	}
+	if other := info.Metadata[metaSID]; other != "" && other != sid {
+		return errClaimTaken // the tag is the authority; the file is left as it is
+	}
+	if info.Metadata[metaManaged] != "" {
+		return errClaimTaken
+	}
+	vars, found := paneEnv(name)
+	if !found {
+		_ = os.Remove(path)
+		return fmt.Errorf("no pane environment for %s", name)
+	}
+	if perr := putEnvironment(addr, ses, vars); perr != nil {
+		_ = os.Remove(path)
+		return perr
+	}
+	if terr := tagSharedSession(addr, ses, sid, name); terr != nil {
+		_ = os.Remove(path)
+		return terr
+	}
+	return nil
 }
 
 func putEnvironmentFor(addr, name, ses string) error {

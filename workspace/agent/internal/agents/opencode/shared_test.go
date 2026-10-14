@@ -557,15 +557,18 @@ func TestTerminalSlotsAreDependentsAndDrained(t *testing.T) {
 	t.Cleanup(func() { sids.Remove(session.UUID(a.Dir, a.Name)) })
 	oldSlots := terminalSlots
 	terminalSlots = func() []session.Meta { return []session.Meta{a} }
-	t.Cleanup(func() { terminalSlots = oldSlots })
+	markSlotMode(session.UUID(a.Dir, a.Name), modeShared)
+	t.Cleanup(func() { terminalSlots = oldSlots; slotModes.Remove(session.UUID(a.Dir, a.Name)) })
 
 	base := dependents()
 	if base < 1 {
 		t.Fatalf("dependents() = %d with a live Terminal slot", base)
 	}
+	// The switch changes the NEXT launch only: a pane still attached to the serve stays a dependent
+	// (the idle stop must not pull the server from under its TUI).
 	t.Setenv(standaloneEnv, "1")
-	if got := dependents(); got != base-1 {
-		t.Errorf("a standalone-mode workspace has no shared Terminal dependents: %d vs %d", got, base)
+	if got := dependents(); got != base {
+		t.Errorf("flipping the switch dropped a running shared pane from the dependents: %d vs %d", got, base)
 	}
 	t.Setenv(standaloneEnv, "")
 
@@ -618,7 +621,7 @@ func TestStopInterruptsTheTerminalTurn(t *testing.T) {
 
 // State reads for a shared Terminal slot go through the API (its store is the server's), while a
 // standalone launch keeps the file reader.
-func TestV2TargetForTerminalOnlyWhenShared(t *testing.T) {
+func TestV2TargetForTerminalFollowsTheLaunchMode(t *testing.T) {
 	newSharedDaemon(t)
 	m := terminalMeta(t, "reader")
 	markSlotMode(session.UUID(m.Dir, m.Name), modeShared)
@@ -626,9 +629,29 @@ func TestV2TargetForTerminalOnlyWhenShared(t *testing.T) {
 	if _, ok := v2TargetFor(m); !ok {
 		t.Error("a shared Terminal slot must be read through the API")
 	}
+	// The switch is for the next launch: this pane is still on the serve, so its state still comes
+	// from there, and the daemon keeps its shared password and plugin mode while it has such panes.
 	t.Setenv(standaloneEnv, "1")
+	if _, ok := v2TargetFor(m); !ok {
+		t.Error("flipping the switch must not move a running shared pane's reads to SQLite")
+	}
+	if !sharedSlot(m) {
+		t.Error("a pane keeps its launch mode")
+	}
+	oldSlots := terminalSlots
+	terminalSlots = func() []session.Meta { return []session.Meta{m} }
+	t.Cleanup(func() { terminalSlots = oldSlots })
+	if !sharedDaemonWanted() {
+		t.Error("a daemon with a shared pane must keep starting the shared way after the switch is flipped")
+	}
+	terminalSlots = func() []session.Meta { return nil }
+	if sharedDaemonWanted() {
+		t.Error("with the switch flipped and no shared pane left, the daemon needs no shared mode")
+	}
+	// An unrecorded (pre-existing standalone) slot is read from SQLite.
+	slotModes.Remove(session.UUID(m.Dir, m.Name))
 	if _, ok := v2TargetFor(m); ok {
-		t.Error("standalone mode keeps the SQLite reader")
+		t.Error("standalone slot keeps the SQLite reader")
 	}
 }
 
@@ -651,5 +674,103 @@ func TestSharedErrorsAreTypedStatus(t *testing.T) {
 	d := newSharedDaemon(t)
 	if _, err := getSharedSession(d.srv.URL, "ses_nope"); !errors.Is(err, statusError(http.StatusNotFound)) {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// Two panes that both show the same untagged session: one wins, the other changes nothing. The
+// tag cannot be compare-and-set (PATCH replaces), so the decision is an exclusive claim taken
+// before anything is read or written.
+func TestClaimSessionHasOneWinnerWhenPanesRace(t *testing.T) {
+	d := newSharedDaemon(t)
+	a, b := terminalMeta(t, "paneA"), terminalMeta(t, "paneB")
+	session.WriteMeta(a)
+	session.WriteMeta(b)
+	sidA, sidB := session.UUID(a.Dir, a.Name), session.UUID(b.Dir, b.Name)
+	oldEnv := paneEnv
+	paneEnv = func(name string) (map[string]string, bool) { return map[string]string{"AF_SESSION_NAME": name}, true }
+	t.Cleanup(func() { paneEnv = oldEnv })
+
+	for round := 0; round < 25; round++ {
+		ses := fmt.Sprintf("ses_race%d", round)
+		d.mu.Lock()
+		d.sessions[ses] = map[string]string{}
+		d.mu.Unlock()
+		var wg sync.WaitGroup
+		results := make([]error, 2)
+		start := make(chan struct{})
+		for i, name := range []string{"paneA", "paneB"} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				results[i] = claimSession(d.srv.URL, name, ses)
+			}()
+		}
+		close(start)
+		wg.Wait()
+		wins := 0
+		var winner string
+		for i, err := range results {
+			switch {
+			case err == nil:
+				wins++
+				winner = []string{"paneA", "paneB"}[i]
+			case !errors.Is(err, errClaimTaken):
+				t.Fatalf("round %d: %v", round, err)
+			}
+		}
+		if wins != 1 {
+			t.Fatalf("round %d: %d winners (%v)", round, wins, results)
+		}
+		d.mu.Lock()
+		wantSID := map[string]string{"paneA": sidA, "paneB": sidB}[winner]
+		if got := d.sessions[ses][metaSID]; got != wantSID {
+			t.Errorf("round %d: tag %q, winner %s", round, got, winner)
+		}
+		if env := d.envs[ses]; env["AF_SESSION_NAME"] != winner {
+			t.Errorf("round %d: environment %v, winner %s", round, env, winner)
+		}
+		d.mu.Unlock()
+		loser := map[string]string{"paneA": "paneB", "paneB": "paneA"}[winner]
+		if err := claimSession(d.srv.URL, winner, ses); err != nil {
+			t.Errorf("the winner's retry must be idempotent: %v", err)
+		}
+		if err := claimSession(d.srv.URL, loser, ses); !errors.Is(err, errClaimTaken) {
+			t.Errorf("the loser later: %v", err)
+		}
+	}
+	// Exactly one environment PUT and one PATCH per winning round, plus the winner's retry's PUT.
+	if n := len(d.callsMatching("PATCH /api/session/ses_race3")); n != 1 {
+		t.Errorf("session ses_race3 was tagged %d times", n)
+	}
+}
+
+// A claim that fails before the tag is set is released, so the pane (or another) can try again;
+// managed and foreign-tagged sessions are never claimed.
+func TestClaimSessionReleasesAFailedClaimAndRefusesOthers(t *testing.T) {
+	d := newSharedDaemon(t)
+	a, b := terminalMeta(t, "ca"), terminalMeta(t, "cb")
+	session.WriteMeta(a)
+	session.WriteMeta(b)
+	oldEnv := paneEnv
+	paneEnv = func(name string) (map[string]string, bool) { return map[string]string{"N": name}, true }
+	t.Cleanup(func() { paneEnv = oldEnv })
+	d.sessions["ses_f"] = map[string]string{}
+	d.failEnv = 1
+	if err := claimSession(d.srv.URL, "ca", "ses_f"); err == nil || errors.Is(err, errClaimTaken) {
+		t.Fatalf("a refused PUT is a failure, not a loss: %v", err)
+	}
+	if err := claimSession(d.srv.URL, "cb", "ses_f"); err != nil {
+		t.Errorf("the failed claim must have been released: %v", err)
+	}
+	d.sessions["ses_m"] = map[string]string{metaManaged: "1"}
+	d.sessions["ses_o"] = map[string]string{metaSID: "someone-else"}
+	for _, ses := range []string{"ses_m", "ses_o"} {
+		if err := claimSession(d.srv.URL, "ca", ses); !errors.Is(err, errClaimTaken) {
+			t.Errorf("%s: %v", ses, err)
+		}
+		if _, has := d.envs[ses]; has {
+			t.Errorf("%s got an environment", ses)
+		}
 	}
 }

@@ -284,3 +284,11 @@ session is the pane's own and refuses connection-changing flags.
 the status plugin of a standalone/opencode 1 pane still writes
 `~/.config/agent-fleet/opencode-sid`, which the Agent has not read since ADR 0087 moved the store
 to `~/.local/state` (#2122); the shared-server plugins write where the Agent reads.
+
+Review round 2 (#2123): the workspace switch (`AF_OPENCODE_TUI_STANDALONE`) decides the next launch
+only. A pane keeps the mode it was launched with (`opencode-mode`), and a daemon that still has a
+shared pane keeps its stable password and shared plugin mode after the switch is flipped; measured
+with a restart after flipping it. Two panes showing the same untagged session used to both tag it
+(PATCH has no compare-and-set): taking a session is now `workspace-agent opencode-claim`, an
+exclusive file create keyed by the session id taken before anything is read or written (one winner,
+the loser changes nothing, a claim that fails before the tag is released).

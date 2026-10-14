@@ -96,6 +96,9 @@ var Entries = []string{
 	// How each opencode Terminal slot was launched (opencode.slotModes). Introduced directly under
 	// AgentStateDir.
 	"opencode-mode",
+	// One file per opencode session a pane has claimed, holding the slot sid (opencode.claimSession).
+	// Introduced directly under AgentStateDir.
+	"opencode-claim",
 	"copilot-sid",
 	"cursor-sid",
 	"kiro-sid",

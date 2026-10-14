@@ -11,10 +11,11 @@
 // belong to this pane:
 //
 //   - a root session shown here that carries no af.sid is tagged with this pane's sid, after the
-//     pane's environment has been PUT for it (the server's shell-tool gate waits for the tag, so
-//     the environment is in place before the first command runs);
-//   - the environment is PUT the first time this pane shows a session, tagged already or not (a fork
-//     carries the tag, not the environment);
+//     pane's environment has been PUT for it;
+//   - taking a session is the Agent's decision (`workspace-agent opencode-claim`): it puts the
+//     pane's environment the first time the pane shows a session, tagged already or not (a fork
+//     carries the tag, not the environment), and lets one pane win when several show the same
+//     untagged session; a pane that loses puts nothing, records nothing and claims nothing;
 //   - a session tagged with another af sid is never touched, whatever the route says;
 //   - the slot file (opencode-sid/<sid>) follows the root session on screen, as the status plugin
 //     does for a standalone pane;
@@ -24,8 +25,20 @@
 // This runs inside the TUI process, whose environment is the pane's: the same values the shell
 // of a v1 pane sees, minus the server credentials. Without AF_OPENCODE_SHARED=1 (a --standalone
 // pane, a TUI started by hand) the plugin does nothing.
+import { execFile } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+
+const AGENT_BIN = process.env.AF_WORKSPACE_AGENT_BIN || "/usr/local/bin/workspace-agent";
+const CLAIM_TAKEN = 3; // opencode-claim: the session is another slot's
+const run = (args) =>
+  new Promise((resolve) => {
+    try {
+      execFile(AGENT_BIN, args, { timeout: 20000 }, (err) => resolve(err ? (typeof err.code === "number" ? err.code : 1) : 0));
+    } catch {
+      resolve(1);
+    }
+  });
 
 const ROUTE_POLL_MS = Number(process.env.AF_OPENCODE_TUI_POLL_MS) || 250;
 const SERVER_POLL_MS = Number(process.env.AF_OPENCODE_TUI_SERVER_POLL_MS) || 2000;
@@ -66,18 +79,19 @@ export default {
       }
     };
 
+    // The decision is the Agent's (`opencode-claim`): one winner per session however many panes
+    // show it, because the tag cannot be compare-and-set here. It puts the pane's environment first
+    // and sets the tag second, for a session already tagged with this sid as well (a fork copies
+    // the tag, not the environment). A pane that loses changes nothing.
     const claim = async (sessionID) => {
       const info = await ctx.client.session.get({ sessionID });
       if (info.parentID) return "child";
       const md = info.metadata || {};
       if (md["af.managed"] || (md["af.sid"] && md["af.sid"] !== sid)) return "other";
-      // Always, even for a session already tagged with this sid: a fork copies the tag but not the
-      // environment, and so does a session this pane visits for the first time after a restart.
-      // Environment first: the tag is what lets a held shell command through.
-      await putEnvironment(sessionID);
-      if (!md["af.sid"]) {
-        await ctx.client.session.update({ sessionID, metadata: { ...md, "af.sid": sid, ...(name ? { "af.name": name } : {}) } });
-      }
+      if (!name) throw new Error("no slot name");
+      const code = await run(["opencode-claim", name, sessionID]);
+      if (code === CLAIM_TAKEN) return "other";
+      if (code !== 0) throw new Error("opencode-claim exited " + code);
       mine.add(sessionID);
       return "mine";
     };

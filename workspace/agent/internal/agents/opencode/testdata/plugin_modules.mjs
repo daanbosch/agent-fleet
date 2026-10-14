@@ -436,26 +436,33 @@ const now = Date.now();
       assert.deepEqual(w.calls, [], id + " must be left alone");
     }
 
+    const claims = () => readFileSync(agentLog, "utf8").split("\n").filter((l) => l.startsWith("opencode-claim"));
+    const claimsBefore = claims().length;
     w.route = { type: "session", sessionID: "ses_free" };
-    await until(() => w.calls.some((c) => c[0] === "update"), "the shown untagged session is claimed");
-    assert.deepEqual(w.calls.map((c) => c[0]), ["environment", "update"], "the environment goes in before the tag");
-    const [, , vars] = w.calls[0];
-    assert.equal(vars.AF_SESSION_SID, "sidP");
-    assert.equal("OPENCODE_SERVER_PASSWORD" in vars, false, "the server password must not reach the shell");
-    assert.deepEqual(w.calls[1][2], { keep: "me", "af.sid": "sidP", "af.name": "paneP" }, "other metadata survives the tag");
+    await until(() => claims().length > claimsBefore, "the shown untagged session is claimed through the Agent");
+    await sleep(100);
+    assert.deepEqual(claims().slice(claimsBefore), ["opencode-claim paneP ses_free"], "the Agent decides, once");
+    assert.deepEqual(w.calls, [], "the plugin itself puts nothing and tags nothing: the Agent does both, in order, for one winner");
     assert.equal(readFileSync(join(sidDirOf(), "sidP"), "utf8"), "ses_free");
 
-    // a session already carrying this pane's tag (a fork copies it, a restart forgets the
-    // environment): its environment goes in the first time the pane shows it, and the tag stays.
-    w.calls.length = 0;
+    // a session another pane won while this one was looking: nothing recorded, nothing claimed.
+    w.sessions.ses_lose = { metadata: {} };
+    w.route = { type: "session", sessionID: "ses_lose" };
+    await until(() => claims().includes("opencode-claim paneP ses_lose"), "the losing claim is attempted");
+    await sleep(150);
+    assert.equal(readFileSync(join(sidDirOf(), "sidP"), "utf8"), "ses_free", "a lost claim must not move the slot");
+
+    // a session already carrying this pane's tag: still goes through the Agent (a fork copies the
+    // tag, not the environment).
     w.route = { type: "session", sessionID: "ses_mine" };
     await until(() => readFileSync(join(sidDirOf(), "sidP"), "utf8") === "ses_mine", "slot follows the shown session");
-    assert.deepEqual(w.calls.map((c) => c[0] + " " + c[1]), ["environment ses_mine"]);
+    assert.ok(claims().includes("opencode-claim paneP ses_mine"));
+    assert.deepEqual(w.calls, []);
 
     // a new server process lost every environment: this pane's sessions get theirs again.
     w.pid = 200;
     await until(() => w.calls.filter((c) => c[0] === "environment").length >= 2, "environments re-sent after a pid change");
-    assert.deepEqual(new Set(w.calls.filter((c) => c[0] === "environment").map((c) => c[1])), new Set(["ses_free", "ses_mine"]));
+    assert.deepEqual(new Set(w.calls.filter((c) => c[0] === "environment").map((c) => c[1])), new Set(["ses_free", "ses_mine"]), "only sessions this pane won are re-sent");
     stop();
   } finally {
     for (const [k, v] of [["AF_OPENCODE_SHARED", saved.shared], ["AF_SESSION_SID", saved.sid], ["AF_SESSION_NAME", saved.name], ["OPENCODE_SERVER_PASSWORD", saved.pw]]) {

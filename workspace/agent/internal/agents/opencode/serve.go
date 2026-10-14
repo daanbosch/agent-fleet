@@ -320,7 +320,7 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 	// unless the new daemon proves it holds this one, so a failed start (or an Ensure that
 	// raced a slow-but-alive daemon) cannot lock the Agent out of it.
 	prevPassword := servePassword()
-	password, err := nextServePassword(prevPassword, sharedTUI())
+	password, err := nextServePassword(prevPassword, sharedDaemonWanted())
 	if err != nil {
 		return "", 0, fmt.Errorf("opencode serve のパスワードを用意できません: %w", err)
 	}
@@ -337,7 +337,7 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 	// auth variables come last: a duplicate key keeps its final value.
 	cmd.Env = append(append(withoutEnv(os.Environ(), "AF_SESSION_SID", "AF_SESSION_NAME"), env()...),
 		"OPENCODE_SERVER_USERNAME="+serveUser, "OPENCODE_SERVER_PASSWORD="+password)
-	if sharedTUI() {
+	if sharedDaemonWanted() {
 		// Tells the plugins this is af's shared server: no AF_SESSION_SID here, sessions are told
 		// apart by metadata, and shell commands wait for their environment (agent-fleet-shared.js).
 		cmd.Env = append(cmd.Env, sharedServeEnv+"=1")
@@ -634,7 +634,7 @@ func (s *Supervisor) drain(addr string) {
 // turn. The v2 active list is global, so one read covers every slot.
 func busyTerminals(addr string) []string {
 	slots := terminalSlots()
-	if !sharedTUI() || len(slots) == 0 {
+	if len(slots) == 0 {
 		return nil
 	}
 	m, err := activeSessions(addr, "")

@@ -598,6 +598,9 @@ func TestContractSharedServeTerminalSessions(t *testing.T) {
 	}
 
 	// --- a server restart: environments come back, TUIs recover, sessions are confirmed again ---
+	// The switch only decides the next launch: flipping it must not strand the panes already on the
+	// serve (password, plugin mode, restore).
+	t.Setenv(standaloneEnv, "1")
 	genBefore := Serve().Generation()
 	if !Serve().Restart("contract") {
 		t.Fatal("the daemon was not replaced")

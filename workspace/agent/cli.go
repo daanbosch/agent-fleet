@@ -217,6 +217,13 @@ var subcommands = []subcommand{
 		run:     opencode.RunAttach,
 	},
 	{
+		// Called by the opencode TUI plugin for a session its pane shows: one winner per session.
+		name:    "opencode-claim",
+		summary: "claim an opencode session for a Terminal slot (environment, then tag)",
+		hidden:  true,
+		run:     opencode.RunClaim,
+	},
+	{
 		// Called by the opencode shared-serve plugin before a shell command whose session has no
 		// confirmed environment on this server generation.
 		name:    "opencode-put-env",
