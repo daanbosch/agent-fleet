@@ -18,10 +18,10 @@ import (
 var buildPinsPath = "/usr/local/share/agent-fleet/versions.json"
 
 // opencodeBinary resolves the opencode on PATH; a var so tests can point it at a fake tree.
+//
+// It never consults the opt-in switch: the switch is read once per start (CurrentLaunch), and a
+// resolver that read it again could answer for the other setting than the reading it serves.
 var opencodeBinary = func() string {
-	if UseV2() {
-		return V2Binary()
-	}
 	p, err := exec.LookPath("opencode")
 	if err != nil {
 		return ""
@@ -41,6 +41,26 @@ func InstalledMajor() int { return installedMajor() }
 // so the version comes from the resolved binary's package.json. A binary whose manifest
 // cannot be found (a copied or wrapped executable) falls back to the image pin.
 func installedMajor() int {
+	if UseV2() {
+		return majorOfBinary(V2Binary())
+	}
+	return pathMajor()
+}
+
+// majorOfBinary is the major of the package that bin belongs to; 2 when its manifest cannot be
+// read (the opt-in binary is @opencode/cli by construction).
+func majorOfBinary(bin string) int {
+	if real, err := filepath.EvalSymlinks(bin); err == nil {
+		if m := majorOf(readPackageVersion(filepath.Join(filepath.Dir(real), "..", "package.json"))); m != 0 {
+			return m
+		}
+	}
+	return 2
+}
+
+// pathMajor is the major of the opencode found on PATH, then the image pin, then 1. It does not
+// look at the opt-in switch.
+func pathMajor() int {
 	if bin := opencodeBinary(); bin != "" {
 		if real, err := filepath.EvalSymlinks(bin); err == nil {
 			if m := majorOf(readPackageVersion(filepath.Join(filepath.Dir(real), "..", "package.json"))); m != 0 {
@@ -63,6 +83,14 @@ func installedMajor() int {
 
 // installedVersion is the full version of the opencode that would be launched ("" when unknown).
 func installedVersion() string {
+	if UseV2() {
+		return readPackageVersion(filepath.Join(filepath.Dir(V2Binary()), "..", "package.json"))
+	}
+	return pathVersion()
+}
+
+// pathVersion is the version of the opencode found on PATH, without the opt-in switch.
+func pathVersion() string {
 	if bin := opencodeBinary(); bin != "" {
 		if real, err := filepath.EvalSymlinks(bin); err == nil {
 			return readPackageVersion(filepath.Join(filepath.Dir(real), "..", "package.json"))

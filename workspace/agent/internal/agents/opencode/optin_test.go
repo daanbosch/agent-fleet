@@ -588,3 +588,31 @@ func TestRetiringAnAdoptedDaemonDrainsItsBusyTerminals(t *testing.T) {
 		t.Fatalf("the busy Terminal turn was neither waited for nor aborted before the daemon was stopped (abort %q)", aborted)
 	}
 }
+
+// The resolver that decides an off reading's major is the default one, and it must not read the
+// switch: a flip landing at its call boundary may not produce {off, major 2}. (useMajor would hide
+// this by replacing the resolver, so the real one is kept and only wrapped.)
+func TestOffReadingMajorDoesNotReadTheSwitchAgain(t *testing.T) {
+	optInHome(t)
+	installFakeV2(t)
+	stubUsagePref(t, UsageOwn)
+	t.Setenv(standaloneEnv, "1")
+	orig := opencodeBinary
+	opencodeBinary = func() string { _ = SetWantsV2(true); return orig() }
+	t.Cleanup(func() { opencodeBinary = orig })
+
+	spec := CurrentLaunch()
+	if spec.V2 || spec.Maj == 2 || spec.Bin != "opencode" {
+		t.Fatalf("mixed reading: %+v", spec)
+	}
+	_ = SetWantsV2(false)
+	m := session.Meta{Name: "oc-boundary", Dir: t.TempDir(), Kind: session.KindOpencode}
+	opencodeBinary = func() string { _ = SetWantsV2(true); return orig() }
+	plan, err := (agentImpl{}).BuildLaunch(m, agents.LaunchOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plan.Program, "--standalone") || strings.Contains(strings.Join(plan.Env, " "), "OPENCODE_DB") {
+		t.Fatalf("a 1.x launch got 2.x flags or database: %q %v", plan.Program, plan.Env)
+	}
+}

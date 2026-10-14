@@ -96,10 +96,14 @@ type LaunchSpec struct {
 
 // CurrentLaunch reads the switch once.
 func CurrentLaunch() LaunchSpec {
+	// The switch and the binary are read exactly once, here. Everything else in the spec follows
+	// from them: the opt-in is major 2 by construction, and the off branch resolves its major from
+	// the PATH binary and the image pin only (pathMajor does not look at the switch), so no
+	// combination of {off, major 2} or {on, major 1} can be built.
 	if bin := V2Binary(); bin != "" && WantsV2() {
 		return LaunchSpec{V2: true, Maj: 2, Bin: bin, Key: "v2:" + bin}
 	}
-	return LaunchSpec{Maj: installedMajor(), Bin: "opencode"}
+	return LaunchSpec{Maj: pathMajor(), Bin: "opencode"}
 }
 
 // Env is the provider keys plus, for the opt-in, its own database: the whole environment an
@@ -123,7 +127,7 @@ func (l LaunchSpec) version() string {
 	if l.V2 {
 		return readPackageVersion(filepath.Join(filepath.Dir(l.Bin), "..", "package.json"))
 	}
-	return installedVersion()
+	return pathVersion()
 }
 
 func (l LaunchSpec) shellBin() string {
