@@ -172,10 +172,20 @@ export function useMirrorScroll() {
   // work-progress disclosure while parked at the bottom must keep their position, not snap them
   // past what they just opened. That is decided by cause, not by timing: interactUntilRef
   // is armed by an interaction inside the transcript (see the handlers on .mirror-scroll).
+  //
+  // Off follow, a change in the body's OWN height (a band above it such as the title suggestion
+  // appearing or going) keeps the viewport's bottom edge where it was. Left alone, scrollTop stays
+  // put while the box loses height from the top, so the lines the reader was looking at at the
+  // bottom slide out of view — and the title band lands right after a reply completes, exactly when
+  // the completion anchor has turned follow off.
   useEffect(() => {
     const el = bodyRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
+    let lastHeight = el.clientHeight;
     const ro = new ResizeObserver(() => {
+      // A hidden pane reports 0: coming back from that is not a band above the body.
+      const shrunk = lastHeight && el.clientHeight ? lastHeight - el.clientHeight : 0;
+      lastHeight = el.clientHeight;
       scheduleReplyTopSync();
       // A prepended page is still laying out: put the turn being read back where it was. Same
       // reason as the two holds below (height arrives late), and it outranks nothing — a restore
@@ -192,7 +202,14 @@ export function useMirrorScroll() {
         }
         endRestore();
       }
-      if (!atBottomRef.current) return; // scrolled up, or parked at a completion anchor
+      if (!atBottomRef.current) {
+        // Scrolled up, or parked at a completion anchor: hold the bottom edge, never chase the end.
+        if (shrunk !== 0) {
+          el.scrollTop += shrunk;
+          selfTopRef.current = el.scrollTop;
+        }
+        return;
+      }
       if (Date.now() < interactUntilRef.current) return; // the reader's own click grew it
       if (el.scrollHeight - el.scrollTop - el.clientHeight < 1) return;
       el.scrollTop = el.scrollHeight;
