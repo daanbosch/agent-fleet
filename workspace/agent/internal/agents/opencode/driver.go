@@ -380,6 +380,7 @@ type threadHandle struct {
 	retry       *agents.RetryInfo
 	retryFailed *agents.RetryInfo
 	retryStop   string
+	retryAbort  chan struct{} // closed when the abort noteRetry sent has been answered
 	// turnSent: this handle's own /message is out (set by runTurn, cleared when the pump
 	// finishes the input). running alone is also true while the pump waits behind another
 	// client's turn, which a retry status must never be attributed to.
@@ -600,6 +601,7 @@ func (h *threadHandle) pump() {
 		} else {
 			h.setState(agents.TurnCancelled) // stopped before it was sent: it never becomes a turn
 		}
+		h.awaitRetryAbort()
 
 		h.mu.Lock()
 		h.tq().Settle(t)

@@ -289,3 +289,43 @@ func stopLeavesNoRetryNote(t *testing.T, stopFirst bool) {
 		}
 	}
 }
+
+// The abort noteRetry sends can still be in flight when the turn it was aimed at ends (the
+// member's stop lands first). It must be answered before the next input goes out, or it cuts
+// that input's turn short.
+func TestDelayedRetryAbortDoesNotReachTheNextTurn(t *testing.T) {
+	m, srv := newMockServe(t)
+	h := newTestHandle(t, srv)
+	registerTestHandle(t, h)
+	startBlocking(t, m, h)
+	if err := h.Send(memberInput("next", "msg_next")); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	m.mu.Lock()
+	m.holdFirstAbort = release
+	m.mu.Unlock()
+	handleServeEvent(retryStatus(2, regionMsg)) // the automatic abort parks in the mock
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		m.mu.Lock()
+		parked := m.holdFirstAbort == nil // consumed: the request is inside the handler
+		m.mu.Unlock()
+		if parked {
+			break
+		}
+	}
+	if _, err := h.Interrupt(agents.InterruptOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	m.mu.Lock()
+	turns := len(m.turns)
+	m.mu.Unlock()
+	if turns != 1 {
+		t.Fatalf("turns sent = %d while the automatic abort is unanswered, want 1", turns)
+	}
+	close(release)
+	waitTurns(t, m, 2)
+	endTurn(m)
+	waitState(t, h, agents.TurnCompleted)
+}

@@ -93,8 +93,26 @@ func (h *threadHandle) noteRetry(attempt int, msg string, nextMs int64) {
 	h.retryStop = retryFailure(msg)
 	h.abortAsked = true
 	addr, ses, dir := h.addr, h.ses, h.dir
+	done := make(chan struct{})
+	h.retryAbort = done
 	h.mu.Unlock()
-	go abortSession(addr, ses, dir)
+	go func() {
+		defer close(done)
+		abortSession(addr, ses, dir)
+	}()
+}
+
+// awaitRetryAbort blocks until the abort noteRetry sent has been answered. The pump calls it
+// before the next input goes out: an abort still in flight would land on that input's turn
+// (same session id) and cut it short with no trace. Bounded by serveClient's timeout.
+func (h *threadHandle) awaitRetryAbort() {
+	h.mu.Lock()
+	done := h.retryAbort
+	h.retryAbort = nil
+	h.mu.Unlock()
+	if done != nil {
+		<-done
+	}
 }
 
 // clearRetry drops the live retry note: the retried call produced output, or the turn ended.
