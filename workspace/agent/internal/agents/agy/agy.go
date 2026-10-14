@@ -96,7 +96,7 @@ func (agentImpl) BuildLaunch(m session.Meta, _ agents.LaunchOpts) (agents.Launch
 	return agents.LaunchPlan{
 		Program: buildProgram(m.Model, m.Mode, resumeID, agents.BypassPermissions(m)),
 		Cwd:     m.CWD(),
-		Env:     MaskEnv(),
+		Env:     append(append([]string(nil), MaskEnv()...), newLaunchGen(slotSid)),
 	}, nil
 }
 
@@ -249,6 +249,7 @@ func diffStrings(cur []string, prev map[string]bool) []string {
 func (agentImpl) ClearResume(sid string) {
 	sids.Remove(sid)
 	clearHook(sid)
+	launchGens.Remove(sid)
 	prelaunch.Remove(sid)
 	brainPrelaunch.Remove(sid)
 }

@@ -801,6 +801,15 @@ agy 1.3.5 の `~/.gemini/config/hooks.json`（#1079 の実測で判明）を、T
 - fallback の順序: 会話 ID は hook → cwd マップ → brain 差分。state は DB の question / permission →
   hook（idle は信じる。working は 1 時間未満かつ pane の idle フッタが無いときだけ）→ 従来の DB 判定。
   別会話の hook 記録（採用済み UUID と不一致）は無視する。起動時（`BuildLaunch`）に記録を消す。
+- 会話 ID の所有: 起動ごとに世代（`AF_AGY_LAUNCH`、pane の env 経由で hook に届く）を発行し、一致しない hook は無視する。
+  最初の SessionStart で会話を固定し、別の会話 ID（pane 内の `run_command` が起動した子 agy 等）や採用済み/resume の
+  UUID と異なるものは記録を上書きさせない。不正な stdin・会話 ID 無しは記録しない。
+- Stop の idle にも鮮度を付ける: Stop より新しい DB 更新で DB が working なら idle を撤回して DB 判定に戻す
+  （次の PreInvocation が欠落した場合）。
+- hooks.json の書き込みはプロセス間 flock（agent の state 側のロック）＋専用 tmp ＋ rename 直前の内容再確認。
+  他名の entry は `json.RawMessage` のまま残す（数値が丸められない）。既存ファイルの mode を引き継ぎ、
+  実体の無い symlink は触らない。AF entry は af セッションの外では何もしない（`AF_SESSION_NAME` 無し）ので、
+  無効化経路は設けていない。
 - スコープ外: 権限・質問への応答、RPC。Managed 化は #2155。
 
 ### ミラーの ContextBar（context 充填率）MVP — `/context` スクレイプ（2026-07-20）

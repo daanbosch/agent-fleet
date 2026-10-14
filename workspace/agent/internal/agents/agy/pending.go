@@ -174,7 +174,7 @@ func protoVarintField(b []byte, num uint64) (v uint64, found, ok bool) {
 // "working" mid-turn, "idle" once the turn has ended (turnEnd), "" when the DB has
 // no opinion yet. working / idle prefer agy's lifecycle hook (hookLiveState) and fall back to
 // the DB where no usable hook record exists; question / permission are DB-only, and win over the
-// hook because a PreToolUse fires while the tool still waits for approval. Without the hook
+// hook because a PreToolUse may fire while the tool still waits for approval (unmeasured). Without the hook
 // the DB is the only turn-end signal — /input persists an optimistic "working" that nothing
 // else clears, which left the operator's completion-report arm unconsumed forever
 // (docs/log/30 item 2).
@@ -189,7 +189,7 @@ func liveState(m session.Meta, p liveProbes) string {
 			return st
 		}
 	}
-	if st := hookLiveState(m, p); st != "" {
+	if st := hookLiveState(m, p, r, ok); st != "" {
 		return st
 	}
 	if !ok {

@@ -19,9 +19,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"sync"
 	"time"
 
@@ -50,6 +52,20 @@ type hookRecord struct {
 	At    string `json:"at"` // RFC3339
 }
 
+// launchEnvVar names the launch generation in the pane's environment. agy passes it on to its
+// hook children, and the hook is ignored unless it matches the slot's current generation, so a
+// late hook of a process from before a restart cannot write into this launch.
+const launchEnvVar = "AF_AGY_LAUNCH"
+
+var launchGens = agents.NewSidStore("agy-launch")
+
+// newLaunchGen records a fresh generation for the slot and returns the env entry for the pane.
+func newLaunchGen(slotSid string) string {
+	gen := strconv.FormatUint(rand.Uint64(), 36)
+	launchGens.Write(slotSid, gen)
+	return launchEnvVar + "=" + gen
+}
+
 var hookRecords = fstore.JSON[hookRecord](paths.AgentStateDir, "agy-hook", ".json")
 
 // hookInput is the subset of the hook's stdin the agent reads.
@@ -74,40 +90,58 @@ func hookStateFor(event string, in hookInput) string {
 }
 
 // RunHook is `workspace-agent agy-hook <Event>`. It always prints "{}" and returns normally:
-// a failing hook must not disturb the agy turn it observes.
+// a failing hook must not disturb the agy turn it observes. Input that does not decode, or that
+// names no conversation, records nothing.
 func RunHook(args []string) {
 	defer fmt.Fprintln(os.Stdout, "{}")
 	if len(args) == 0 {
 		return
 	}
 	var in hookInput
-	_ = json.NewDecoder(io.LimitReader(os.Stdin, 1<<20)).Decode(&in)
-	recordHook(os.Getenv(agents.SessionNameEnvVar), args[0], in, time.Now())
+	if json.NewDecoder(io.LimitReader(os.Stdin, 1<<20)).Decode(&in) != nil {
+		return
+	}
+	recordHook(os.Getenv(agents.SessionNameEnvVar), os.Getenv(launchEnvVar), args[0], in, time.Now())
 }
 
-func recordHook(name, event string, in hookInput, now time.Time) {
-	if name == "" {
-		return // an agy the user runs by hand: not ours
+// recordHook stores the event for the slot named by the launch env. The conversation of a
+// launch is owned by its first SessionStart: an agy started from the pane's own run_command
+// inherits both env vars, so any later event naming another conversation (or one other than the
+// adopted / resumed UUID) is dropped rather than allowed to replace the record.
+func recordHook(name, gen, event string, in hookInput, now time.Time) {
+	if name == "" || in.ConversationID == "" {
+		return // an agy the user runs by hand, or a payload that cannot be attributed
 	}
 	m, ok := session.ReadMeta(name)
 	if !ok || m.Kind != session.KindAgy {
+		return
+	}
+	slotSid := session.UUID(m.Dir, m.Name)
+	if want := launchGens.Read(slotSid); want == "" || gen != want {
+		return
+	}
+	if conv := sids.Read(slotSid); conv != "" && conv != in.ConversationID {
 		return
 	}
 	state := hookStateFor(event, in)
 	if state == "" && event != "SessionStart" {
 		return
 	}
-	slotSid := session.UUID(m.Dir, m.Name)
+	prev, hadPrev := hookRecords.Read(slotSid)
+	if hadPrev && prev.ConvID != "" && prev.ConvID != in.ConversationID {
+		return
+	}
 	rec := hookRecord{ConvID: in.ConversationID, State: state, At: now.Format(time.RFC3339)}
-	if state == "" {
-		// SessionStart names the conversation but says nothing about the turn: keep what a
-		// concurrent writer has already recorded for this one.
-		if prev, ok := hookRecords.Read(slotSid); ok && prev.ConvID == rec.ConvID {
-			rec.State = prev.State
-		}
+	if state == "" && hadPrev {
+		// SessionStart names the conversation but says nothing about the turn.
+		rec.State = prev.State
 	}
 	_ = hookRecords.Write(slotSid, rec)
 }
+
+// idleGrace is how far past a Stop the conversation DB may still be written (the turn's last
+// steps land around it) before that write counts as a new turn.
+const idleGrace = 10 * time.Second
 
 // hookConversation is the conversation UUID the slot's hook reported, "" when none did.
 func hookConversation(slotSid string) string {
@@ -122,7 +156,7 @@ func hookConversation(slotSid string) string {
 // another conversation's, or a "working" too old to believe) — the caller then uses the DB path.
 // "idle" is a turn boundary agy itself announced. "working" is only as good as the pane:
 // a cancelled turn leaves it behind, so an idle composer footer overrides it.
-func hookLiveState(m session.Meta, p liveProbes) string {
+func hookLiveState(m session.Meta, p liveProbes, r lastStepRow, haveStep bool) string {
 	slotSid := session.UUID(m.Dir, m.Name)
 	rec, ok := hookRecords.Read(slotSid)
 	if !ok || rec.State == "" {
@@ -131,11 +165,21 @@ func hookLiveState(m session.Meta, p liveProbes) string {
 	if conv := sids.Read(slotSid); conv != "" && rec.ConvID != "" && conv != rec.ConvID {
 		return ""
 	}
+	at, err := time.Parse(time.RFC3339, rec.At)
+	if err != nil {
+		return ""
+	}
 	if rec.State == "idle" {
+		// A Stop is only as current as the next PreInvocation. When that hook went missing
+		// (timeout, edited hooks.json), conversation activity newer than the Stop withdraws it.
+		if haveStep && dbState(r) == "working" {
+			if mt, ok := p.dbModTime(r.conv); ok && mt.After(at.Add(idleGrace)) {
+				return ""
+			}
+		}
 		return "idle"
 	}
-	at, err := time.Parse(time.RFC3339, rec.At)
-	if err != nil || p.now().Sub(at) >= staleAfter {
+	if p.now().Sub(at) >= staleAfter {
 		return ""
 	}
 	if p.paneIdleSettled(m.Name) {
@@ -149,8 +193,6 @@ func hookLiveState(m session.Meta, p liveProbes) string {
 func clearHook(slotSid string) { hookRecords.Remove(slotSid) }
 
 func hooksPath() string { return filepath.Join(paths.GeminiHome(), "config", "hooks.json") }
-
-var hooksMu sync.Mutex
 
 // hookEntry is af's hooks.json entry. SessionStart / PreInvocation / Stop take handlers
 // directly; the tool events take {matcher, hooks} groups (a grouped SessionStart never fired —
@@ -172,63 +214,133 @@ func hookEntry(exe string) map[string]any {
 }
 
 // EnsureHooks installs af's named entry into the global hooks.json, leaving every other name
-// as the user wrote it. Idempotent: nothing is written when the entry is already current. Run
-// at every launch because the command embeds this binary's path, which a rebuilt or relocated
-// agent invalidates. A file that is not plain JSON is left alone (the error says why) and the
-// slot runs on the DB path.
+// byte-for-byte as the user wrote it. Idempotent: nothing is written when the entry is already
+// current. Run at every launch because the command embeds this binary's path, which a rebuilt
+// or relocated agent invalidates. A file that is not plain JSON, or a symlink that resolves to
+// nothing, is left alone (the error says why) and the slot runs on the DB path. The caller logs.
 func EnsureHooks() error { return ensureHooksAt(hooksPath(), paths.ExePath()) }
 
+// ensureHooksMaxTries bounds the re-read loop when the user saves the file between our read
+// and our rename.
+const ensureHooksMaxTries = 3
+
 func ensureHooksAt(path, exe string) error {
-	hooksMu.Lock()
-	defer hooksMu.Unlock()
-	root := map[string]any{}
-	b, err := os.ReadFile(path)
-	switch {
-	case err == nil:
-		if err := json.Unmarshal(b, &root); err != nil || root == nil {
-			return fmt.Errorf("%s is not a plain JSON object, leaving it alone", path)
-		}
-	case !os.IsNotExist(err):
+	// Resolve the real target first so a rename never replaces a symlink, whether the link is the
+	// file or the config directory. A link whose target is missing is not ours to create through.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	// Round-trip so the comparison is between decoded values on both sides.
-	want, err := jsonNorm(hookEntry(exe))
+	dir, err := filepath.EvalSymlinks(filepath.Dir(path))
 	if err != nil {
 		return err
 	}
-	if reflect.DeepEqual(root[hookName], want) {
-		return nil
+	target := filepath.Join(dir, filepath.Base(path))
+	if fi, err := os.Lstat(target); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		if target, err = filepath.EvalSymlinks(target); err != nil {
+			return fmt.Errorf("%s is a dangling symlink, leaving it alone: %w", path, err)
+		}
+	}
+	unlock, err := lockHooks(target)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	for range ensureHooksMaxTries {
+		done, err := ensureHooksOnce(target, exe)
+		if err != nil || done {
+			return err
+		}
+	}
+	return fmt.Errorf("%s kept changing while it was being updated, leaving it alone", path)
+}
+
+// ensureHooksOnce merges once. done=false means the file changed under us before the rename and
+// the caller should read it again.
+func ensureHooksOnce(target, exe string) (done bool, err error) {
+	orig, err := os.ReadFile(target)
+	var mode os.FileMode = 0o600
+	root := map[string]json.RawMessage{}
+	switch {
+	case err == nil:
+		if err := json.Unmarshal(orig, &root); err != nil || root == nil {
+			return false, fmt.Errorf("%s is not a plain JSON object, leaving it alone", target)
+		}
+		if fi, err := os.Stat(target); err == nil {
+			mode = fi.Mode().Perm()
+		}
+	case !os.IsNotExist(err):
+		return false, err
+	default:
+		orig = nil
+	}
+	want, err := json.Marshal(hookEntry(exe))
+	if err != nil {
+		return false, err
+	}
+	if cur, ok := root[hookName]; ok && jsonEqual(cur, want) {
+		return true, nil
 	}
 	root[hookName] = want
 	out, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
-		return err
+		return false, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+	tmp, err := os.CreateTemp(filepath.Dir(target), ".hooks.json.af-*")
+	if err != nil {
+		return false, err
 	}
-	// Write through a symlink rather than replacing it: the dotfiles may be links onto
-	// persistent storage that must stay links.
-	if real, err := filepath.EvalSymlinks(path); err == nil {
-		path = real
+	defer os.Remove(tmp.Name()) // no-op once renamed
+	if _, err := tmp.Write(append(out, '\n')); err != nil {
+		_ = tmp.Close()
+		return false, err
 	}
-	tmp := path + ".af-tmp"
-	if err := os.WriteFile(tmp, append(out, '\n'), 0o600); err != nil {
-		return err
+	if err := tmp.Chmod(mode); err != nil { // keep the user's mode; a new file is 0600
+		_ = tmp.Close()
+		return false, err
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
+	if err := tmp.Close(); err != nil {
+		return false, err
 	}
-	return nil
+	// An editor may have saved since our read: do not publish a merge of the old content.
+	if now, err := os.ReadFile(target); !(err == nil && string(now) == string(orig)) && !(orig == nil && os.IsNotExist(err)) {
+		return false, nil
+	}
+	return true, os.Rename(tmp.Name(), target)
 }
 
-func jsonNorm(v any) (any, error) {
-	b, err := json.Marshal(v)
-	if err != nil {
+func jsonEqual(a, b []byte) bool {
+	var x, y any
+	return json.Unmarshal(a, &x) == nil && json.Unmarshal(b, &y) == nil && reflect.DeepEqual(x, y)
+}
+
+// hooksLockPath is the cross-process lock for hooks.json, kept in the agent's own state so
+// nothing is added to the user's config directory. Several workspace-agent processes can
+// launch slots at once; hooksMu alone covers only one.
+func hooksLockPath() string { return filepath.Join(paths.AgentStateDir(), "agy-hooks.lock") }
+
+var hooksMu sync.Mutex
+
+// lockHooks serialises writers of hooks.json across processes. The wait is bounded: a launch
+// must not hang on a stuck holder, and giving up only costs the hook signal.
+func lockHooks(string) (func(), error) {
+	hooksMu.Lock()
+	if err := os.MkdirAll(filepath.Dir(hooksLockPath()), 0o700); err != nil {
+		hooksMu.Unlock()
 		return nil, err
 	}
-	var out any
-	err = json.Unmarshal(b, &out)
-	return out, err
+	f, err := os.OpenFile(hooksLockPath(), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		hooksMu.Unlock()
+		return nil, err
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for !tryFlock(f) {
+		if time.Now().After(deadline) {
+			_ = f.Close()
+			hooksMu.Unlock()
+			return nil, fmt.Errorf("timed out waiting for the hooks.json lock")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return func() { _ = f.Close(); hooksMu.Unlock() }, nil
 }

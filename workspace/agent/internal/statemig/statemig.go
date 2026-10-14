@@ -110,6 +110,8 @@ var Entries = []string{
 	"agy-prelaunch",
 	"agy-brain-prelaunch",
 	"agy-hook",
+	"agy-launch",
+	"agy-hooks.lock",
 	"codex-msgledger",
 	"opencode-msgledger",
 	"copilot-msgledger",
