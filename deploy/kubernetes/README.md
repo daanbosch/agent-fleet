@@ -247,19 +247,31 @@ both. The variant below is **not verified as written**; only the interactive pod
 run.
 
 ```bash
-read -rs -p 'postgres password: ' PGPW; echo      # or read it from your vault; never put it in argv
-kubectl -n default create secret generic psql-grant-pw --from-literal=PGPASSWORD="$PGPW"
-unset PGPW
+PWDIR="$(mktemp -d)"; chmod 700 "$PWDIR"
+cleanup() {
+  kubectl -n default delete pod psql-grant --ignore-not-found
+  kubectl -n default delete secret psql-grant-pw --ignore-not-found
+  rm -rf "$PWDIR"
+}
+trap cleanup EXIT                                   # runs under `set -e` too
+read -rs -p 'postgres password: ' PGPW; echo        # or read it from your vault
+printf '%s' "$PGPW" > "$PWDIR/PGPASSWORD"; unset PGPW   # printf is a builtin: not in any argv
+kubectl -n default create secret generic psql-grant-pw --from-file=PGPASSWORD="$PWDIR/PGPASSWORD"
 kubectl -n default run psql-grant --restart=Never --image=postgres:17-alpine \
   --override-type=strategic \
   --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":70,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"psql-grant","securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},"env":[{"name":"PGPASSWORD","valueFrom":{"secretKeyRef":{"name":"psql-grant-pw","key":"PGPASSWORD"}}}]}]}}' \
   -- psql -v ON_ERROR_STOP=1 "host=$DBHOST user=postgres dbname=agentfleet sslmode=require" \
   -c "GRANT \"$DBUSER\" TO postgres; ALTER DATABASE agentfleet OWNER TO \"$DBUSER\"; ALTER SCHEMA public OWNER TO \"$DBUSER\";"
-kubectl -n default wait --for=jsonpath='{.status.phase}'=Succeeded pod/psql-grant --timeout=120s
+kubectl -n default wait --for=jsonpath='{.status.phase}'=Succeeded pod/psql-grant --timeout=120s \
+  || echo "grant pod did not succeed"
 kubectl -n default logs psql-grant        # expect GRANT ROLE, ALTER DATABASE, ALTER SCHEMA
-kubectl -n default delete pod psql-grant
-kubectl -n default delete secret psql-grant-pw
 ```
+
+The `EXIT` trap removes the pod, the Secret and the password file even when `wait` times out
+or a command fails under `set -e`; the `|| echo` keeps `logs` reachable so the `ERROR` can be
+read before the trap fires. (The password file is a mode-700 directory's file on your machine
+for the length of the run; use a FIFO or your vault's own file mechanism if that is not
+acceptable.)
 
 If the pod ends `Failed`, `logs` shows the `ERROR` and the grant is not done. Afterwards set a
 new `postgres` password (`gcloud sql users set-password … --prompt-for-password`, or a random
