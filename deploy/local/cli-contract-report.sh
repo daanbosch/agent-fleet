@@ -54,6 +54,10 @@ SYNC="${SYNC:-$HERE/cli-update-issues.sh}"
 
 issue_number() { "$ISSUES" number "$1"; }
 
+# The kind's issue number as mutate last saw or created it. `sync` gets it through
+# KNOWN_ISSUE: its own list lookup lags just after a creation and would open a second issue.
+MUTATED_NUM=""
+
 kind_of_workflow() { case "$1" in claude-tui-contract) echo claude ;; *) echo "${1%-contract}" ;; esac; }
 
 # The rows (list lines) of the section in a body, one per line.
@@ -80,9 +84,10 @@ render() { # render <body-file> <rows-file>  -> stdout
 # loop re-reads and re-applies. Comparing against our own output would pass in exactly the
 # case that loses a row.
 mutate() {
-  local kind="$1" fn="$2" title="${3:-$1 CLI: contract failed}" num attempt
+  local kind="$1" fn="$2" title="${3:-$1 CLI: contract failed}" num url attempt
   for attempt in 1 2 3 4; do
     num="$(issue_number "$kind")"
+    MUTATED_NUM="$num"
     if [ -n "$num" ]; then
       gh issue view "$num" --json body --jq .body > "$tmp"
     else
@@ -100,11 +105,15 @@ mutate() {
       # opening a second issue for the kind.
       if [ -n "$(issue_number "$kind")" ]; then continue; fi
       gh label create cli-drift --color FBCA04 --description "upstream CLI version drift" 2>/dev/null || true
-      gh issue create --title "$title" --body-file "$tmp.new" --label cli-drift >/dev/null
+      # The number comes from the URL create prints: the list lookup is a search index and
+      # lags right after creation, and an empty number fails the read-back below.
+      url="$(gh issue create --title "$title" --body-file "$tmp.new" --label cli-drift)"
+      num="${url##*/}"
+      [[ "$num" =~ ^[0-9]+$ ]] || { echo "could not read the new issue's number from: $url" >&2; return 1; }
+      MUTATED_NUM="$num"
     else
       gh issue edit "$num" --body-file "$tmp.new" >/dev/null
     fi
-    num="$(issue_number "$kind")"
     gh issue view "$num" --json body --jq .body | rows_of > "$tmp.check"
     "$fn" "$tmp.check" | sort > "$tmp.check.applied"
     sort "$tmp.check" > "$tmp.check.sorted"
@@ -145,7 +154,7 @@ case "$cmd" in
     if [ "$version" != unknown ] && case " $RED_KINDS " in *" $kind "*) true ;; *) false ;; esac; then
       "$HERE/cli-release-state.sh" set red "$kind" "$version"
     fi
-    "$SYNC" sync "$kind" || echo "::warning::could not update the $kind issue's next step"
+    KNOWN_ISSUE="$MUTATED_NUM" "$SYNC" sync "$kind" || echo "::warning::could not update the $kind issue's next step"
     ;;
   success)
     kind="${2:?kind}"
