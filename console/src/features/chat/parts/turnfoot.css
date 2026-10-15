@@ -38,3 +38,21 @@
 .chat-error {
   color: var(--err);
 }
+.chat-auth-error .cae-msg {
+  margin: 0 0 6px;
+}
+.chat-auth-error .cae-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.chat-auth-error .cae-details {
+  margin-top: 6px;
+  color: var(--muted);
+}
+.chat-auth-error .cae-raw {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 4px 0 0;
+  font-size: 12px;
+}

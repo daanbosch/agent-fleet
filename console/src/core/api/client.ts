@@ -1014,13 +1014,16 @@ export async function chatStream(
   // source: set when the Console sends on the member's behalf ("handoff"); stored on the user
   // message so the composer's ↑ history skips it. Omitted for composer input.
   source?: string,
+  // retry: re-run of a turn whose user message the server already stored (it keeps the message
+  // instead of appending the same one again).
+  retry?: boolean,
 ): Promise<void> {
   let res: Response;
   try {
     res = await fetch(rel(`api/chat/conversations/${encodeURIComponent(id)}/stream`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(source ? { content, source } : { content }),
+      body: JSON.stringify({ content, ...(source ? { source } : {}), ...(retry ? { retry: true } : {}) }),
       signal,
     });
   } catch {
