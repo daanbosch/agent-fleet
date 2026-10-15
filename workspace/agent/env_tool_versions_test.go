@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // extractVer pulls the version number out of the real --version output of each tool
@@ -160,4 +162,98 @@ func binStr(b *toolBin) string {
 		return "-"
 	}
 	return b.Version
+}
+
+// bkt is wrapped like gh, so its row points Baked at the libexec binary and the pin must
+// reach versions.json: without the Dockerfile half the row has nothing to compare against.
+func TestBktRowAndPin(t *testing.T) {
+	var spec *toolSpec
+	for i := range toolSpecs {
+		if toolSpecs[i].Name == "bkt" {
+			spec = &toolSpecs[i]
+		}
+	}
+	if spec == nil {
+		t.Fatal("toolSpecs has no bkt row")
+	}
+	if spec.Cmd != "bkt" || spec.Baked != "/usr/local/libexec/bkt" || spec.Pin != "bkt" {
+		t.Errorf("bkt row = %+v, want Cmd=bkt Baked=/usr/local/libexec/bkt Pin=bkt", *spec)
+	}
+	df, err := os.ReadFile("../Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(df)
+	if !strings.Contains(s, `"bkt":"%s"`) || !strings.Contains(s, `"$BKT_VERSION"`) {
+		t.Error("Dockerfile versions.json printf must carry the bkt key and the BKT_VERSION argument")
+	}
+	// The printf is positional: the bkt value must sit right after GH_VERSION, as the key
+	// does after "gh".
+	if !strings.Contains(s, `"gh":"%s","bkt":"%s"`) || !strings.Contains(s, `"$GH_VERSION" "$BKT_VERSION"`) {
+		t.Error("bkt key and argument must directly follow gh in the versions.json printf")
+	}
+}
+
+// `bkt --version` prints "bkt version 0.33.1"; the extracted value has to equal the pin
+// (ARG BKT_VERSION) or the row reads as drifted on a correct image.
+func TestExtractVerBkt(t *testing.T) {
+	if got := extractVer("bkt version 0.33.1"); got != "0.33.1" {
+		t.Errorf("extractVer(bkt) = %q, want 0.33.1", got)
+	}
+}
+
+// The probe goes through the transparent-auth wrapper (/usr/local/bin/bkt). `--version`
+// must not reach the credential helper at all: with a connection that helper takes the store
+// lock and may refresh an OAuth token over the network, which can outlast probeTimeout and
+// turn the effective column into "(timeout)". The stub git here records every call, sleeps
+// and would hand out a token; the wrapper must neither call it nor print anything but the
+// version line.
+func TestBktWrapperVersionSkipsCredentialHelper(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real-bkt")
+	if err := os.WriteFile(real, []byte("#!/bin/sh\necho 'bkt version 0.33.1'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	calls := filepath.Join(dir, "git-calls")
+	gitStub := "#!/bin/sh\necho called >> " + calls + "\nsleep 3\n" +
+		"printf 'username=x-token-auth\\npassword=fake-oauth-tok\\n'\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(gitStub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "cfg"))
+	t.Setenv("BKT_CONFIG_DIR", filepath.Join(dir, "bktcfg"))
+	t.Setenv("BKT_TOKEN", "")
+	t.Setenv("BKT_HOST", "")
+	t.Setenv("AF_BKT_REAL", real)
+
+	var stdout, stderr strings.Builder
+	cmd := exec.Command("../bkt-auth-wrapper.sh", "--version")
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	start := time.Now()
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("wrapper --version took %v, want no credential round trip", d)
+	}
+	if _, err := os.Stat(calls); err == nil {
+		t.Error("wrapper --version called git (the credential helper)")
+	}
+	if stdout.String() != "bkt version 0.33.1\n" || stderr.String() != "" {
+		t.Errorf("stdout=%q stderr=%q, want only the version line", stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "fake-oauth-tok") {
+		t.Error("token leaked into the output")
+	}
+
+	// And the probe itself reads the version through the wrapper.
+	if got := probeVersion(context.Background(), "../bkt-auth-wrapper.sh", nil, nil); got == nil || got.Version != "0.33.1" {
+		t.Errorf("probe through wrapper = %+v, want 0.33.1", got)
+	}
 }
