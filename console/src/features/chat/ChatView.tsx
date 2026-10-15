@@ -41,6 +41,9 @@ import { getCachedConns, subscribeConns } from "../repos/connsCache.ts";
 import { assistantName, assistantDesc } from "./assistantI18n.ts";
 import { ChatMarkdown, StreamingMarkdown } from "./parts/ChatMarkdown.tsx";
 import { ChatSteps } from "./parts/ChatSteps.tsx";
+import { ChatAuthError } from "./parts/ChatAuthError.tsx";
+import { isClaudeAuthExpired } from "../../lib/claudeAuthError.ts";
+import { useSettingsUI } from "../settings/store.ts";
 import { ChatMessageRow } from "./parts/ChatMessageRow.tsx";
 import { ChatHead } from "./parts/ChatHead.tsx";
 import { ChatAttachStrip } from "./parts/ChatAttachStrip.tsx";
@@ -185,6 +188,8 @@ function ChatViewBody({ conversationId, draftAssistantId, paneId, active, header
   const clearKaraokeFor = (key: string) => setKaraoke((k) => (k && k.key !== key ? k : null));
   const error = err && err.key === paneKey ? err.text : "";
   const setErrorFor = (key: string | null, text: string) => setErr(text && key ? { key, text } : null);
+  // The prompt of the turn that last failed, so the expired-login notice can offer a re-send.
+  const failedTextRef = useRef("");
   const [loadError, setLoadError] = useState("");
   const [loadingConv, setLoadingConv] = useState(false); // fetching the conversation (with retry while the WS agent boots)
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -784,7 +789,10 @@ function ChatViewBody({ conversationId, draftAssistantId, paneId, active, header
             workTts.push(step.text);
           }
         },
-        onError: (m) => setErrorFor(convId, m),
+        onError: (m) => {
+          failedTextRef.current = text;
+          setErrorFor(convId, m);
+        },
         onDone: (updated) => {
           streamDone = true;
           if (updated) {
@@ -1172,11 +1180,18 @@ function ChatViewBody({ conversationId, draftAssistantId, paneId, active, header
           </div>
         )}
       </div>
-      {error && (
-        <div className="chat-error" role="alert">
-          {error}
-        </div>
-      )}
+      {error &&
+        (isClaudeAuthExpired(error) ? (
+          <ChatAuthError
+            text={error}
+            onReauth={() => useSettingsUI.getState().openSettings("agents", { target: "claude" })}
+            onRetry={failedTextRef.current ? () => void send(failedTextRef.current) : undefined}
+          />
+        ) : (
+          <div className="chat-error" role="alert">
+            {error}
+          </div>
+        ))}
       <div className="chat-composer">
         {(attachments.length > 0 || pasting) && (
           <ChatAttachStrip attachments={attachments} pasting={pasting} onRemove={removeAttachment} onOpen={setLightbox} />

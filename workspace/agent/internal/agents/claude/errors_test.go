@@ -44,6 +44,8 @@ func TestAPIErrorAuthEntries(t *testing.T) {
 		{"status only", apiError{msg: "something went wrong", status: 401}, true},
 		{"text only", apiError{msg: authErrText}, true},
 		{"invalid api key", apiError{msg: "API Error: Invalid API key · Please run /login"}, true},
+		{"oauth session expired", apiError{msg: "Failed to authenticate: OAuth session expired and could not be refreshed"}, true},
+		{"failed to authenticate alone is not enough", apiError{msg: "Failed to authenticate: network unreachable"}, false},
 		{"stuck login refresh", apiError{msg: refreshStuckText, kind: "server_error"}, true},
 		// No re-authentication route for a failure it does not fix - the same real harm as
 		// making someone wait for a reset that never comes.

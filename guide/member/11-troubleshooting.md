@@ -282,6 +282,11 @@ resume on; the mirror shows the continuation carrying an auto-resume badge). The
 itself stays red: it did happen, so it is not erased. If nothing continues after a while, send
 "continue" in that conversation and it resumes from the same point.
 
+In the **Assistant** chat the same failure ("OAuth session expired and could not be refreshed")
+shows a short "Your Claude login has expired" notice with **Re-authenticate** (opens the Claude
+card) and **Retry** (sends the failed message again once you are signed in). The original error
+is under "Details".
+
 ### A Claude session shows "Login expired — sign in again", or sending starts nothing
 
 **This workspace's Claude login has expired.** The credentials are still on disk, so the
