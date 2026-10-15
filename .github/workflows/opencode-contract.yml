@@ -47,6 +47,7 @@ on:
     branches: [develop, main]
     paths:
       - "workspace/agent/internal/agents/opencode/**"
+      - "workspace/agent/internal/chatx/**"
       - "workspace/opencode-plugin/**"
       - "workspace/agent/session_io.go"
       - "workspace/agent/opencode_contract_test.go"
@@ -149,10 +150,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # The Dockerfile pin is the source of truth. While it is still on 1.x (before the v2
-      # cut-over, #2101) there is no 2.x number to read, so the newest @opencode/cli stands in,
-      # the same line cli-drift-check.sh reports as latest_opencode2. Once the pin moves to 2.x
-      # this job follows it with no edit.
+      # The Dockerfile pin is the source of truth. If it is ever rolled back to 1.x there is no
+      # 2.x number to read, so the newest @opencode/cli stands in (the line cli-drift-check.sh
+      # reports as latest_opencode2) and the 2.x contracts keep running next to the 1.x pin.
       - name: resolve the opencode 2 version
         id: v2
         run: |
@@ -192,5 +192,22 @@ jobs:
           [ "$rc" -eq 0 ] || exit "$rc"
           if grep -q -e '--- SKIP' "$RUNNER_TEMP/v2.log"; then
             echo "::error::a opencode 2 contract test skipped; a skip must not read as a pass"
+            exit 1
+          fi
+
+      # The assistant chat and one-shot paths on a real 2.x: `run` flags, the inline config
+      # (read-only posture, af MCP server and its precedence). Its own package, so its own step.
+      - name: opencode 2 chat contract test
+        working-directory: workspace/agent
+        run: |
+          set -u
+          go test -tags contract -list '^TestContractV2Chat' ./internal/chatx/ | grep -q '^TestContractV2ChatPostureAndMCP' \
+            || { echo "::error::TestContractV2Chat* is not selected"; exit 1; }
+          rc=0
+          go test -tags contract -run '^TestContractV2Chat' -v -count=1 -timeout 8m ./internal/chatx/ > "$RUNNER_TEMP/v2chat.log" 2>&1 || rc=$?
+          grep -v '^        {' "$RUNNER_TEMP/v2chat.log" || true
+          [ "$rc" -eq 0 ] || exit "$rc"
+          if grep -q -e '--- SKIP' "$RUNNER_TEMP/v2chat.log"; then
+            echo "::error::the opencode 2 chat contract test skipped; a skip must not read as a pass"
             exit 1
           fi

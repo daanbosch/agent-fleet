@@ -334,6 +334,52 @@ cli_present() { [ -x "/usr/local/bin/$1" ] || [ -e "$HOME/.local/bin/$1" ]; }
 oc_pkg() { case "${1%%.*}" in ''|*[!0-9]*|0|1) echo opencode-ai ;; *) echo @opencode/cli ;; esac; }
 OC_PKG="$(oc_pkg "$(vj_pin opencode)")"
 OC_OTHER=@opencode/cli; [ "$OC_PKG" = opencode-ai ] || OC_OTHER=opencode-ai
+# oc_install_swap <prefix> <npm specs...> — `npm install -g` into <prefix>, with the other opencode
+# package (OC_OTHER) out of the way. Both packages claim the `opencode` bin, so npm exits EEXIST
+# while the other one is linked (a home that self-updated on the old pin; measured opencode-ai
+# 1.19.0 -> @opencode/cli 2.0.29), and the stale shadow then keeps winning on PATH. The other
+# package is moved aside rather than uninstalled: when the install fails (a registry error, another
+# CLI in the same command) it is moved back, so a lean home never ends up with no opencode at all.
+oc_swap_restore() { # oc_swap_restore <prefix>: put back whatever an interrupted or failed swap left aside
+  # Driven by what is in $bak, not by which package is "other" now: the image may have been
+  # re-pinned to the other major since the copy was moved aside. Packages and bins are restored
+  # independently (a stop between the two moves leaves only the bin), and $bak is removed only
+  # once every move succeeded.
+  local pfx="$1" bak="$1/.af-oc-swap" p b ok=1
+  [ -d "$bak" ] || return 0
+  for p in opencode-ai @opencode/cli; do
+    if [ -d "$bak/pkg/$p" ]; then
+      rm -rf "$pfx/lib/node_modules/$p"
+      mkdir -p "$pfx/lib/node_modules/$(dirname "$p")"
+      mv "$bak/pkg/$p" "$pfx/lib/node_modules/$p" || ok=0
+    fi
+  done
+  for b in opencode opencode2; do
+    if [ -L "$bak/bin/$b" ]; then
+      rm -f "$pfx/bin/$b"
+      mv "$bak/bin/$b" "$pfx/bin/$b" || ok=0
+    fi
+  done
+  [ "$ok" = 1 ] && rm -rf "$bak"
+  return 0
+}
+oc_install_swap() {
+  local pfx="$1" bak="$1/.af-oc-swap" b l; shift
+  # A start that stopped between moving the copy aside and finishing leaves it in $bak, and it is
+  # the only copy: put it back before anything else, never delete it.
+  oc_swap_restore "$pfx"
+  if [ -d "$pfx/lib/node_modules/$OC_OTHER" ]; then
+    mkdir -p "$bak/pkg/$(dirname "$OC_OTHER")" "$bak/bin"
+    mv "$pfx/lib/node_modules/$OC_OTHER" "$bak/pkg/$OC_OTHER"
+    for b in opencode opencode2; do
+      l="$pfx/bin/$b"
+      if [ -L "$l" ]; then case "$(readlink "$l")" in *"/$OC_OTHER/"*) mv "$l" "$bak/bin/$b" ;; esac; fi
+    done
+  fi
+  if npm install -g --prefix "$pfx" "$@" >/dev/null 2>&1; then rm -rf "$bak"; return 0; fi
+  oc_swap_restore "$pfx"
+  return 1
+}
 # agy_effective_version — the version of the agy that is actually installed now.
 #
 # The marker (.agy.version) is the version AF last installed, not the one present now. agy
@@ -401,7 +447,6 @@ if [ "$LEAN_CLIS" = 1 ]; then
     NPM_LS="$NPM_LS" node -e 'try{const d=JSON.parse(process.env.NPM_LS).dependencies||{};process.stdout.write(((d[process.argv[1]]||{}).version)||"")}catch{}' "$1" 2>/dev/null
   }
   NPM_BOOT=""
-  NPM_DROP=""
   for pair in "claude=@anthropic-ai/claude-code" "opencode=$OC_PKG" \
               "codex=@openai/codex" "copilot=@github/copilot"; do
     cli="${pair%%=*}"; pkg="${pair#*=}"; ver="$(vj_pin "$cli")"
@@ -411,8 +456,7 @@ if [ "$LEAN_CLIS" = 1 ]; then
     elif [ "$cli" = opencode ] && [ "$REPIN" = 1 ] && [ -e "$HOME/.local/bin/opencode" ] \
          && [ -z "$(npm_cur "$pkg")" ] && [ -n "$(npm_cur "$OC_OTHER")" ]; then
       # The copy in ~/.local is the other major's package (the pin crossed 1 <-> 2). It owns
-      # the `opencode` bin, so npm would refuse to link the new one: drop it first.
-      NPM_DROP="$NPM_DROP $OC_OTHER"
+      # the `opencode` bin, so npm would refuse to link the new one: oc_install_swap moves it aside.
       NPM_BOOT="$NPM_BOOT ${pkg}@${ver}"
     elif [ "$REPIN" = 1 ] && [ -e "$HOME/.local/bin/$cli" ]; then
       # Move a drifted copy back to the pin. Installs npm does not manage (no version) are left alone.
@@ -423,9 +467,7 @@ if [ "$LEAN_CLIS" = 1 ]; then
   if [ -n "$NPM_BOOT" ]; then
     echo "[entrypoint] boot-install (pinned):$NPM_BOOT ..."
     # shellcheck disable=SC2086
-    [ -z "$NPM_DROP" ] || npm uninstall -g --prefix "$HOME/.local" $NPM_DROP >/dev/null 2>&1 || true
-    # shellcheck disable=SC2086
-    npm install -g --prefix "$HOME/.local" $NPM_BOOT >/dev/null 2>&1 \
+    oc_install_swap "$HOME/.local" $NPM_BOOT \
       && echo "[entrypoint] boot-install ok" \
       || echo "[entrypoint] WARN: npm boot-install failed (retrying next start)"
   else
@@ -670,10 +712,14 @@ elif [ "${AF_AGENT_SELF_UPDATE_ALLOWED:-0}" = "1" ] && [ "${AF_AGENT_SELF_UPDATE
   ' 2>/dev/null || echo 1)
   if [ "$NPM_NEED" = "0" ]; then
     echo "[entrypoint] agent CLIs already latest; skip"
-  elif npm install -g $NPM_PREFIX_ARG @anthropic-ai/claude-code@latest "$OC_PKG@latest" @openai/codex@latest @github/copilot@latest >/dev/null 2>&1; then
+  elif oc_install_swap "$NPM_PREFIX_DIR" @anthropic-ai/claude-code@latest "$OC_PKG@latest" @openai/codex@latest @github/copilot@latest; then
     echo "[entrypoint] agent CLIs updated${NPM_PREFIX_DIR:+ (~/.local)}: claude $(claude --version 2>/dev/null | head -1) | opencode $(opencode --version 2>/dev/null | head -1) | codex $(codex --version 2>/dev/null | head -1) | copilot $(copilot --version 2>/dev/null | head -1)"
   else
-    echo "[entrypoint] WARN: agent CLI update failed (using baked versions)"
+    if [ -x /usr/local/bin/opencode ]; then
+      echo "[entrypoint] WARN: agent CLI update failed (using baked versions)"
+    else
+      echo "[entrypoint] WARN: agent CLI update failed (kept the installed versions; a swapped opencode package was put back)"
+    fi
   fi
   # agy (Antigravity) follows the same opt-in to latest. It ships via Google's install.sh
   # rather than npm, and a baked copy (BAKE_AGENT_CLIS=1) is in root-owned /usr/local/bin,

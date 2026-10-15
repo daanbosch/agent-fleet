@@ -372,6 +372,8 @@ jobs:
       # major, and they only disagree on the day the pin crosses.
       - name: opencode package follows the major (every place that names it)
         run: ./deploy/local/opencode-pkg-test.sh
+      - name: self-update puts the other opencode package back when the install fails
+        run: ./deploy/local/opencode-swap-test.sh
       # The daily apt-pins job in cli-drift.yml reads live Debian indexes; its verdicts
       # (missing for one architecture, unreadable index) are pinned here on fixtures.
       - name: Debian package pin check (real script, fixture indexes)

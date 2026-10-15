@@ -35,6 +35,7 @@ func requireLive(t *testing.T) {
 // would fall back to the plugin status without anyone noticing.
 func TestContractLiveTurnPayloads(t *testing.T) {
 	requireLive(t)
+	skipOnOpencode2(t, "reads the v1 message/part payloads and the v1 /event stream")
 	addr, home := startServe(t)
 	t.Setenv("HOME", home)
 	dir := t.TempDir()
@@ -162,6 +163,7 @@ func liveTurn(t *testing.T, h *threadHandle, ses, prompt, id string, wantMsgs in
 //	OPENCODE_CONTRACT_LIVE=1 go test -tags contract -run TestContractLiveForkAtMessage ./internal/agents/opencode/
 func TestContractLiveForkAtMessage(t *testing.T) {
 	requireLive(t)
+	skipOnOpencode2(t, "forks through the v1 /session API")
 	addr, home := startServe(t)
 	t.Setenv("HOME", home)
 	dir := t.TempDir()
@@ -314,6 +316,7 @@ func TestContractLiveForkAtMessage(t *testing.T) {
 //	OPENCODE_CONTRACT_LIVE=1 go test -tags contract -run TestContractLiveOAuthReadyWindow ./internal/agents/opencode/
 func TestContractLiveOAuthReadyWindow(t *testing.T) {
 	requireLive(t)
+	skipOnOpencode2(t, "probes the v1 serve paths")
 	const addr = "http://127.0.0.1:7803"
 	cmd := exec.Command("opencode", "serve", "--hostname", "127.0.0.1", "--port", "7803")
 	cmd.Env = os.Environ()

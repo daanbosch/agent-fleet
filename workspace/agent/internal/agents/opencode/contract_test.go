@@ -48,6 +48,19 @@ func requireOpencode(t *testing.T) {
 	}
 }
 
+// skipOnOpencode2 skips a test of the opencode 1.x contract when the binary on PATH is 2.x. Those
+// surfaces (the SQLite message tables, the /global and /session paths, v1 plugin files,
+// OPENCODE_CONFIG) are not what af reads on 2.x, so a failure there would say nothing about drift;
+// the reason names the test that pins the 2.x counterpart. They run again if the image is re-pinned
+// to 1.x.
+func skipOnOpencode2(t *testing.T, why string) {
+	t.Helper()
+	requireOpencode(t)
+	if v := opencodeVersion(t); strings.HasPrefix(strings.TrimPrefix(v, "opencode v"), "2.") {
+		t.Skipf("opencode 1.x contract, not applicable to %s: %s", v, why)
+	}
+}
+
 func opencodeVersion(t *testing.T) string {
 	t.Helper()
 	out, err := exec.Command("opencode", "--version").Output()
@@ -135,6 +148,7 @@ func startServeIn(t *testing.T, home string) (addr, _ string) {
 // v2 session_message store exists beside the v1 message/part one we read) fails here
 // FIRST — before the fleet silently degrades.
 func TestContractStoreSchema(t *testing.T) {
+	skipOnOpencode2(t, "the v1 SQLite message/part tables are gone in 2.x; TestContractV2StateReadsTurnsThroughTheAPI pins the API reads that replaced them")
 	addr, home := startServe(t)
 	t.Setenv("HOME", home) // dbPath()/openRO() resolve under the isolated HOME
 	dir := t.TempDir()
@@ -210,6 +224,7 @@ func TestContractStoreSchema(t *testing.T) {
 // against 1.17.18; the fleet now runs whatever @latest is). These fail loudly at runtime
 // rather than silently, but managed is the strategic path, so pin them anyway.
 func TestContractAppServer(t *testing.T) {
+	skipOnOpencode2(t, "it drives the v1 /global, /session and /event paths; TestContractServeAPIBothMajors and TestContractV2StateReadsTurnsThroughTheAPI cover /api on 2.x")
 	addr, _ := startServe(t)
 	dir := t.TempDir()
 	ver := opencodeVersion(t)

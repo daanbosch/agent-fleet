@@ -50,6 +50,10 @@ func Models() []string {
 		modelsEnvKey = envKey
 		return modelsList
 	}
+	if err := EnsureMigrated(spec); err != nil {
+		log.Printf("opencode models: %v", err)
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, spec.Bin, "models")

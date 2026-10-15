@@ -240,6 +240,45 @@ next input. For a "requires Global regions" message, change the privacy / region
 provider account (for opencode Go, the workspace's Privacy settings on opencode.ai); for quota or
 billing, top up the account; for a key, replace it on the agent's card ([11](11-troubleshooting.md)).
 
+### How opencode 2 differs
+
+opencode in Agent Fleet is **opencode 2**. What follows is what is different from opencode 1,
+which earlier releases ran; the rest of this section is unchanged. If your administrator has
+re-pinned the image to opencode 1, none of the points below applies.
+
+- **Your earlier conversations carry over.** The first time opencode 2 starts on a workspace
+  that used opencode 1, it converts opencode's database in place and imports the existing
+  sessions once, with the same session ids, so a conversation you started before the upgrade
+  resumes in Managed and Terminal (CLI) sessions alike. Conversations you start under opencode 2
+  are not visible to opencode 1, so going back later loses them (your administrator has the
+  details in [operate/03](../operate/03-run.md#going-back-to-opencode-1)).
+- **Only `AGENTS.md` is read.** opencode 2 does not fall back to `CLAUDE.md`, so a repository
+  that has only a `CLAUDE.md` gives opencode nothing. Put what opencode should follow in the
+  repository's `AGENTS.md`. Your own **Agent instructions** still reach opencode: Agent Fleet
+  writes them into a marked block of opencode's global `AGENTS.md`, and the row in
+  **⚙Settings → "Agent instructions"** shows that this is where they went and whether they are
+  in effect. Leave that block alone; it is rewritten when you save.
+- **Terminal (CLI) sessions share one server.** Each Terminal (CLI) session attaches to the
+  opencode server Agent Fleet runs (it starts it when needed), instead of starting a private
+  one, which saves about 150-250 MB of memory per additional Terminal session (measured with
+  idle sessions). Every session stays separate: its own conversation, its own environment and
+  its own status. If that server cannot be had (it fails to start, or opencode is switched off
+  for the Workspace), the session starts with a private server instead, on its own. An
+  administrator can also force a private server per session
+  ([operate/03](../operate/03-run.md#opencode-2-terminal-sessions-and-the-shared-server)).
+  A session keeps the mode it was launched in.
+- **Questions are forms.** When opencode asks you something, the chat view shows it as a
+  question card, one field per question, and you answer it there: pick an option or type your
+  own. **Cancel — back to chat** dismisses the form and the agent carries on. This works the
+  same in Managed sessions and in Terminal (CLI) sessions on the shared server, including a form
+  with several questions or multiple-choice fields. If you answer in the terminal while the card
+  is open, the card just reports the form as already answered. A Terminal (CLI) session on a
+  private server shows the card too, but a form with several questions or multiple-choice fields
+  has to be answered in the terminal view (for a single question the card's buttons press the
+  keys). A form that is waiting is lost if the opencode server restarts.
+- **No ToDo list.** opencode 2 has no todo tool, so the session never shows a ToDo list.
+  This is how opencode 2 works, not a lost connection.
+
 ## GitHub Copilot
 
 **copilot** (GitHub Copilot CLI) has no separate sign-in. **Connecting GitHub as a git
@@ -388,7 +427,7 @@ Instructions come in three layers, and this setting is the **middle** one.
 - It applies to **sessions started from now on**. Running sessions keep what they read at start.
   lcpp is the exception: it has no file to write, so its row says it is added to the system
   prompt every turn, and a running lcpp session picks up a change on its next turn.
-- It can be delivered to claude / codex / opencode / GitHub Copilot / agy / Kiro / lcpp / muse.
+- It can be delivered to claude / codex / opencode / GitHub Copilot / agy / Kiro / lcpp / muse (opencode 2 takes it through an `AGENTS.md` block; see [OpenCode](#how-opencode-2-differs)).
   **Cursor is the only one that can't take it**, and it still appears in the list with the reason
   (Cursor keeps User Rules in your Cursor account, with no local per-user place for instructions).
 - Each row shows **where it goes** (the file it was written to, or for lcpp the system prompt) and **whether it is actually in effect**. When

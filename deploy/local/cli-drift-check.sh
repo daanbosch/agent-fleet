@@ -59,8 +59,9 @@ CURL_RETRY=(--retry 3 --retry-delay 1 --retry-all-errors)
 
 # opencode ships as two npm packages, one per major: `opencode-ai` (1.x) and `@opencode/cli`
 # (2.x, which also installs an `opencode2` bin). The row follows the package of the PIN's
-# major, so while the pin is 1.x the row reports the newest 1.x and never offers 2.x as an
-# update; moving across the major is a manual cut-over (#2101), not drift.
+# major: since the cut-over (#2101) the pin is 2.x and the row reports the newest 2.x; a rollback
+# re-pin to 1.x follows `opencode-ai` the same way. A row never offers the other major as an
+# update; moving across the major is a manual cut-over, not drift.
 major_of() { local m="${1%%.*}"; case "$m" in ''|*[!0-9]*) echo 0 ;; *) echo "$m" ;; esac; }
 opencode_pkg() { if [ "$(major_of "$1")" -ge 2 ]; then echo "@opencode/cli"; else echo "opencode-ai"; fi; }
 
@@ -164,9 +165,9 @@ for t in "${TARGETS[@]}"; do
   fi
 done
 
-# While the pin is on opencode 1.x, say what the 2.x line is at. Informational only: it is not
-# a row (it neither counts toward "no source could be read" nor sets drift), and a registry
-# that does not answer is silently skipped. latest_opencode2= lets the watcher show it.
+# While the pin is on opencode 1.x (a rollback), say what the 2.x line is at. Informational only:
+# it is not a row (it neither counts toward "no source could be read" nor sets drift), and a
+# registry that does not answer is silently skipped. latest_opencode2= lets the watcher show it.
 if { [ -z "$want" ] || [ "$want" = opencode ]; } && oc_pin="$(arg_pin OPENCODE_VERSION)" &&
    [ "$(major_of "$oc_pin")" -lt 2 ]; then
   if oc2="$(npm view @opencode/cli version 2>/dev/null)" && [ -n "$oc2" ]; then

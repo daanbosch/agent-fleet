@@ -57,6 +57,23 @@ func requireBins(t *testing.T, bins ...string) {
 	}
 }
 
+// opencodeIs2 reports whether the opencode on PATH is 2.x ("opencode v2.0.29"; 1.x prints "1.19.0").
+func opencodeIs2(t *testing.T) bool {
+	t.Helper()
+	return strings.HasPrefix(strings.TrimPrefix(opencodeVer(t), "opencode v"), "2.")
+}
+
+// skipOnOpencode2 skips a test of the opencode 1.x contract when PATH has 2.x: OPENCODE_CONFIG
+// is ignored there (af passes OPENCODE_CONFIG_CONTENT, pinned by the 2.x contract tests in
+// internal/agents/opencode), so a failure would say nothing about drift. It runs again if the
+// image is re-pinned to 1.x.
+func skipOnOpencode2(t *testing.T, why string) {
+	t.Helper()
+	if opencodeIs2(t) {
+		t.Skipf("opencode 1.x contract, not applicable to %s: %s", opencodeVer(t), why)
+	}
+}
+
 func opencodeVer(t *testing.T) string {
 	t.Helper()
 	out, _ := exec.Command("opencode", "--version").Output()
@@ -92,7 +109,13 @@ func TestContractOpencodeTUIPaneMode(t *testing.T) {
 	name := "af-contract-opencode"
 	// Prefix the env onto the command itself: tmux -e sets the session environment, which
 	// does NOT reach the pane's process (the same reason buildProgram prefixes env).
-	tmuxSession(t, name, dir, strings.Join(isolatedHomeEnv(home), " ")+" opencode --auto")
+	launch := " opencode --auto"
+	if opencodeIs2(t) {
+		// buildProgram launches a 2.x TUI with --standalone; a bare one would start the per-user
+		// background service on its fixed port.
+		launch = " opencode --standalone --auto"
+	}
+	tmuxSession(t, name, dir, strings.Join(isolatedHomeEnv(home), " ")+launch)
 
 	ver := opencodeVer(t)
 	// Boot is slow (splash → composer, ~30s cold); paneMode is exactly the readiness
@@ -114,7 +137,12 @@ func TestContractOpencodeTUIPaneMode(t *testing.T) {
 		t.Errorf("paneMode = %q on a default launch, want \"Build\" (opencode's non-plan agent) — opencode %s", got, ver)
 	}
 
-	// Tab cycles the agent; the chip must follow the TUI's own state.
+	// Tab cycles the agent on 1.x; the chip must follow the TUI's own state. On 2.0.29 Tab does
+	// nothing at the start screen (measured), so there is no key to drive and only the first
+	// reading above applies.
+	if opencodeIs2(t) {
+		return
+	}
 	if err := tmuxx.Cmd("send-keys", "-t", name, "Tab").Run(); err != nil {
 		t.Fatalf("send-keys Tab: %v", err)
 	}
@@ -142,6 +170,7 @@ func TestContractOpencodeTUIPaneMode(t *testing.T) {
 //	go test -tags contract -run TestContractOpencodeEnvConfig ./
 func TestContractOpencodeEnvConfig(t *testing.T) {
 	requireBins(t, "opencode")
+	skipOnOpencode2(t, "OPENCODE_CONFIG (a file) is ignored in 2.x")
 	home, dir := t.TempDir(), t.TempDir()
 	// The project config defines NO server: anything `mcp list` reports can only have
 	// come from the env-pointed file.
@@ -191,6 +220,7 @@ func TestContractOpencodeEnvConfig(t *testing.T) {
 //	go test -tags contract -run TestContractOpencodeConfigPrecedence ./
 func TestContractOpencodeConfigPrecedence(t *testing.T) {
 	requireBins(t, "opencode")
+	skipOnOpencode2(t, "it resolves colliding MCP names through the v1 `mcp` config shape")
 	home, dir := t.TempDir(), t.TempDir()
 	write := func(path, body string) {
 		t.Helper()

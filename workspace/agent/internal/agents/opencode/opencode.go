@@ -183,6 +183,9 @@ func (agentImpl) BuildLaunch(m session.Meta, _ agents.LaunchOpts) (agents.Launch
 	ocSid := session.UUID(m.Dir, m.Name)
 	// One reading of the opt-in switch for the whole launch: binary, database and program agree.
 	spec := CurrentLaunch()
+	if err := EnsureMigrated(spec); err != nil {
+		return agents.LaunchPlan{}, err
+	}
 	// The fleet's own inference engines (ADR 0071): env() already carries a workspace-scoped
 	// engine token (it has to, for the managed route's shared daemon), and this route can do
 	// better — a tmux session is its own process, so it gets a token scoped to THIS session,
