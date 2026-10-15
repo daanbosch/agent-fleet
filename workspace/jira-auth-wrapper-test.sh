@@ -36,6 +36,7 @@ set +x
   echo "LOGIN=${JIRA_LOGIN-<unset>}"
   echo "INSTALLATION=${JIRA_INSTALLATION-<unset>}"
   echo "CONFIG=${JIRA_CONFIG_FILE-<unset>}"
+  echo "DEBUG=${JIRA_DEBUG-<unset>}"
   for a in "$@"; do echo "ARG=$a"; done
 } >"$STUB_DIR/jira.seen"
 exit "${STUB_JIRA_EXIT:-0}"
@@ -257,9 +258,12 @@ run JIRA_DEBUG=1 -- issue view KEY-1
 expect debug-env TOKEN '<unset>'
 run JIRA_DEBUG=false -- issue view KEY-1
 expect debug-env-off TOKEN fake-oauth-tok
-config "$MANAGED/config.yml" "\"debug\": True"
+# A config's own debug cannot be parsed reliably, so every injected run forces it off instead.
+expect debug-env-off DEBUG false
+config "$MANAGED/config.yml" "{installation: Cloud, debug: !!bool true}"
 run -- issue view KEY-1
-expect debug-config TOKEN '<unset>'
+expect debug-config TOKEN fake-oauth-tok
+expect debug-config DEBUG false
 
 # 10. `jira version` skips the helper.
 reset

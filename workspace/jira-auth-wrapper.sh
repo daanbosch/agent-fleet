@@ -19,6 +19,8 @@
 # - A misread argv can only make a config look like someone else's, which runs jira without the
 #   token. That is the direction to fail in.
 # - A debug run is never given the token: jira --debug dumps every request, Authorization included.
+#   A config's own `debug:` cannot be read reliably (YAML tags, flow style, JSON), so an injected
+#   run forces JIRA_DEBUG=false, which jira ranks above the config and below the flag.
 # - Fails closed: any helper error leaves jira running with no injected auth.
 # - The token only ever lives in this shell's variables and, at the very end, in the exec'd
 #   jira's environment: never argv, never a file, never printed. xtrace and allexport are
@@ -94,11 +96,6 @@ else
   fi
   [ -s "$gen" ] && export JIRA_CONFIG_FILE="$gen"
 fi
-# A config that is not managed is never read: debug: true in a managed one is the user's edit.
-if [ -z "$debug" ] && [ -n "${JIRA_CONFIG_FILE:-}" ] && [ -e "$JIRA_CONFIG_FILE" ] &&
-  grep -qiE '^[[:space:]]*["'"'"']?debug["'"'"']?[[:space:]]*:[[:space:]]*["'"'"']?(true|yes|on|1)' "$JIRA_CONFIG_FILE" 2>/dev/null; then
-  debug=1
-fi
 if [ -n "$debug" ]; then
   echo "jira: debug output prints the Authorization header, so this run gets no credential from the connection" >&2
   exec "$real" "$@"
@@ -122,6 +119,6 @@ if [ "$sub" = init ]; then
   set -- "$@" --installation cloud --server "$server" --auth-type "$auth" --login "${login:-oauth}"
 fi
 
-export JIRA_API_TOKEN="$tok" JIRA_SERVER="$server" JIRA_AUTH_TYPE="$auth" JIRA_INSTALLATION=Cloud
+export JIRA_API_TOKEN="$tok" JIRA_SERVER="$server" JIRA_AUTH_TYPE="$auth" JIRA_INSTALLATION=Cloud JIRA_DEBUG=false
 if [ -n "$login" ]; then export JIRA_LOGIN="$login"; else unset JIRA_LOGIN; fi
 exec "$real" "$@"

@@ -276,8 +276,9 @@ those variables in for one `exec`:
   `~/.config/.jira/.config.yml`) makes the wrapper exec jira unchanged. A misread argv can only
   make a config look like someone else's, which runs jira without the token.
 - **No credential for a debug run**: `jira --debug` dumps every request, Authorization header
-  included, so `--debug`, `JIRA_DEBUG` or `debug: true` in a managed config runs jira without
-  the token and says why on stderr.
+  included, so `--debug` or `JIRA_DEBUG` runs jira without the token and says why on stderr.
+  A config's own `debug:` cannot be read reliably (YAML tags, flow style, JSON), so every
+  injected run sets `JIRA_DEBUG=false`, which jira ranks above the config file.
 - **Fails closed**: if `jira-cred` errors or answers without a token, jira runs with no
   injected auth. The token is never an argument, never written to a file, and exists only in
   the environment of that one jira process: the wrapper switches off an inherited xtrace and
