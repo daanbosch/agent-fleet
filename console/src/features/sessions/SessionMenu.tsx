@@ -30,6 +30,7 @@ import { usePopoutMode } from "../../lib/popoutMode.ts";
 import { useSessionUI } from "./ui.ts";
 import { useSessionsStore } from "./store.ts";
 import { HandoffModal } from "./HandoffModal.tsx";
+import { exportSessionMarkdown } from "./exportMarkdown.ts";
 import { RecreateWorktreeModal } from "./RecreateWorktreeModal.tsx";
 import { recreatableGroup } from "./ArchivedModal.tsx";
 import { ShareCreateModal } from "../sharing/ShareCreateModal.tsx";
@@ -315,6 +316,26 @@ export function SessionMenu({ s, actions, running, open, place, keepOpenRefs, on
               >
                 <Icon name="broadcast" /> {tr("srow.share")}
               </button>
+            )}
+            {/* The Agent reads the transcript, so it has to be reachable; the session itself
+                may be stopped. */}
+            {agentOf(s.kind).caps.transcript && running && (
+              <>
+                <div className="ui-menu-caption">{tr("srow.export_caption")}</div>
+                {(["names", "full"] as const).map((tools) => (
+                  <button
+                    key={tools}
+                    type="button"
+                    className="ui-menu-item"
+                    onClick={() => {
+                      onClose();
+                      void exportSessionMarkdown(s.name, tools, toast);
+                    }}
+                  >
+                    <Icon name="download" /> {tr(tools === "full" ? "srow.export_full" : "srow.export_names")}
+                  </button>
+                ))}
+              </>
             )}
             {/* Working sets (docs/log/52): membership toggles — repo-less rows only. */}
             {repoLess && wsets.length > 0 && (

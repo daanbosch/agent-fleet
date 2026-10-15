@@ -654,6 +654,17 @@ off.** In the chat view, **"Branch here"** on one of your past messages
 conversation up to that point copied as-is, on the same agent. The exact wording and the
 fine details survive, which is what you want for "redo it from that instruction".
 
+### Saving a conversation as Markdown
+
+The **⋯** menu of any session that has a conversation offers **"Export as Markdown"** with two
+choices: **"Conversation (tool names only)"** keeps what you and the agent said and reduces each
+tool call to one line, and **"Including tool output"** adds command output and edit diffs. The
+file covers the whole conversation, not just the part the chat view has loaded. Thinking and a
+subagent's own exchanges are left out. Strings that look like tokens or passwords are masked as
+`[secret redacted]`; the masking is a best-effort pattern match, so read the file before you
+share it. Times are shown in your browser's time zone. The workspace has to be running; the
+session itself may be stopped.
+
 ## Starting sessions from a session (child sessions)
 
 A running session can **start another session, hand it a task, and look after what it started**.
