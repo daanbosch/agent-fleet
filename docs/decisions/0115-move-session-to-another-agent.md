@@ -4,7 +4,7 @@ English | [日本語](0115-move-session-to-another-agent.ja.md)
 
 - Status: **proposed** (2026-10-15). Nothing is implemented.
 - Tracking: #2182. Builds on #2183 (the shared Markdown renderer, `transcript.Markdown`).
-- See also: [0039](0039-fork-at-message.md) (fork, same kind only) /
+- See also: [0039](0039-fork-at-message.md) (fork) /
   [0049](0049-session-changed-files.md) (the changed-files list) /
   [0042](0042-user-instructions.md) (instructions delivered per kind)
 
@@ -17,7 +17,7 @@ cap. Two ways to continue elsewhere exist, and both fall short:
   summary. That is an LLM call that can hit a limit itself, it is lossy, and what survives depends
   on the operator's judgement.
 - **Fork** (ADR 0039) carries the whole conversation, but only into the same agent kind, which is
-  the kind that just ran out.
+  the kind that just ran out, and only for the kinds that can fork.
 
 P1 (#2183) gave every transcript-capable kind one renderer from the normalized
 `transcript.Turn` to Markdown, with secrets scrubbed before layout. This record decides how that
@@ -26,24 +26,29 @@ file becomes the start of a session on a **different** kind.
 ### What each kind's transcript yields today
 
 Read from `Agent.Transcript` / `claude.CollectAllTurns` on develop (2026-10-15). Tool output is
-capped by the parser, not by the renderer.
+capped by the parser, not by the renderer, and a move cannot recover what a parser already cut.
+"runes" and "bytes" are as the code counts them: `transcript.CapOutput` counts runes, the
+parsers with their own `outClip` / `toolOutputMax` slice bytes. A cut output ends with an
+omission marker.
 
-| Kind | Source | Whole history? | Tool output | Usage-limit detection (`limited`) |
-|---|---|---|---|---|
-| claude | session jsonl via `CollectAllTurns` | yes, compaction summaries included | full | yes |
-| codex | rollout | yes | capped at 4000 runes | managed only |
-| opencode | SQLite store | yes | capped at 4000 runes | no |
-| cursor | TUI: transcript file. **managed: the driver's memory** | managed: **empty once stopped** | capped at 4000 | no |
-| kiro | managed: memory while alive, v2 JSONL after | yes | capped at 4000 | no |
-| agy | conversation jsonl (+ DB probe for a pending question) | yes | parser's own | no |
-| copilot | `events.jsonl` | yes | capped at 4000 | no |
-| lcpp | its own store | yes | capped at 4000 | no |
-| muse | its own store + commentary log | yes | parser's own | yes |
-| shell / ssm | none | — | — | — |
+| Kind | Source | Tool output | Usage-limit detection (`limited`) |
+|---|---|---|---|
+| claude | session jsonl via `CollectAllTurns`, compaction summaries included | at most 4000 runes | yes |
+| codex | rollout | at most 4000 runes | managed only |
+| opencode | managed and a Terminal on the shared server: the v2 HTTP API; otherwise the SQLite store | at most 4000 runes | no |
+| cursor | Terminal: transcript file. **managed: the driver's memory, empty once stopped** | Terminal: none. managed: at most 4000 bytes | no |
+| kiro | managed: memory while alive, v2 JSONL after | at most 4000 bytes | no |
+| agy | conversation jsonl (+ DB probe for a pending question) | at most 4000 bytes | no |
+| copilot | `events.jsonl` | at most 4000 bytes | no |
+| lcpp | its own store | at most 4000 runes | no |
+| muse | its own store + commentary log | at most 4000 runes | yes |
+| shell / ssm | none | — | — |
 
-Two consequences: the move is offered for every `CanTranscript` kind, but only claude, managed
-codex and muse can **trigger** it from `limited`; and a managed cursor session must be moved while
-its handle is alive, because the conversation does not exist anywhere else.
+Consequences: the move is offered for every `CanTranscript` kind, but only claude, managed codex
+and muse can **trigger** it from `limited`. A managed cursor session must be moved while its
+handle is alive, because the conversation does not exist anywhere else. A read that fails (an
+opencode v2 server that does not answer, say) returns no turns, which the move must refuse rather
+than write an empty file (decision 6).
 
 ## Decisions
 
@@ -54,87 +59,132 @@ its handle is alive, because the conversation does not exist anywhere else.
 2. **Rejected: synthesizing the target CLI's native store.** Every store is a private,
    version-drifting contract (the opencode v2 store replaced its schema outright), and claude's
    thinking blocks are signed, so a synthesized history is either rejected or silently replayed
-   without them. Fork already does this where it is safe: within one kind, through the CLI's own
-   fork API.
+   without them. Writing a store is safe only within one kind, where fork already does it, each
+   kind its own way (ADR 0039; for example the CLI's fork API for codex and opencode, a truncated
+   jsonl for claude's point fork, Fleet's own store for lcpp).
 3. **Rejected: sending the whole history as the first turn.** It overflows small context windows
    (lcpp) and makes the first turn's cost proportional to the history. A file lets the target read
    the head and page into the rest only when needed.
 4. **Rejected: an LLM summary.** That is the existing handover. It stays, for when a summary is
    what the user wants; the move is the deterministic alternative next to it.
-5. **Same-kind targets are not offered.** The move exists to leave a kind; within a kind, fork
-   carries more (native history, thinking, tool state). The dialog points at fork instead.
+5. **Same-kind targets are not offered.** The move exists to get away from a kind's quota, and a
+   session of the same kind draws on the same account. Where the kind can fork (`CanFork`), the
+   dialog points at fork, which carries more (native history, thinking, tool state); for the
+   kinds that cannot (cursor, kiro and agy today), it says only that another kind is needed.
 6. **File layout: the state first, the history after.** A target that reads only the first
    screen must already know what to do. In order:
    1. A header: source session, kind, model, working folder, branch, the time of the move, and
       one sentence saying this file is the whole record and the source's own files must not be
       opened.
-   2. **Where it stopped**: the last user message verbatim, the last assistant text, an unanswered
-      question if any, and whether the last turn was cut off by the limit.
+   2. **Where it stopped**: the last user message verbatim (by decision 7's rule, an Agent-internal
+      prompt is not it), the last assistant text, an unanswered question if any, instructions
+      that were queued but never reached the transcript (`TranscriptData.Queued` /
+      `QueuedItems`), and whether the last turn was cut off by the limit.
    3. **Working copy state** at the moment of the move: `git status --porcelain`, the diff stat,
       and the branch's commits ahead of its upstream.
    4. **Changed files** of the session (the ADR 0049 list, Agent-side aggregation).
    5. **Open threads**: children the source started and their states, and the source's pending
       handoff proposals, by name (decision 12).
-   6. **The conversation**, rendered by `transcript.Markdown` and compressed by decision 7.
-7. **Keep what the target needs to continue, drop the rest.** The question for every part is
-   "would the target act differently without it?", not "did it happen?". The rules are
-   mechanical, by part kind and position; no LLM and no guess at importance.
-   - **Kept verbatim:** user messages (the intent), questions and their answers, plans, peer and
-     operator messages, compaction summaries, and assistant text.
-   - **Kept as one line:** an edit-family tool call (verb and file; the diff is in the working
-     copy and decision 6.3 and 6.4 already list it), an `error` part, a delegation (its instruction
-     and result, without the subagent's tool calls).
-   - **Dropped:** thinking and sidechains (as in P1), reads, searches, listings and other tool
-     calls that changed nothing, tool output, usage and cost rows (`CostOnly`), model badges,
-     the Agent's own injected prompts (the usage-limit resume "continue" and similar, which are
-     instructions to the source, not to the target).
-   - **The exception is where it stopped:** the last 3 turns keep every tool call with its output
-     (`ToolOutput: true`). A turn cut off by the limit is usually mid-investigation, and the
-     output is what the target would otherwise run again.
-   - If the file still exceeds 256 KiB, the oldest assistant texts are cut to their first
-     paragraph, oldest first, until it fits; each cut leaves a visible marker. User messages are
-     never cut.
+   6. **The conversation**, filtered by decision 7 and rendered by decision 8.
+
+   A source whose read yields no turns is refused with a reason, never written as an empty file.
+7. **Keep what the target needs to continue, drop what it provably does not.** The question for
+   every part is "would the target act differently without it?". The rules are mechanical, by
+   part kind, tool and position; no LLM and no guess at importance. When the data cannot show
+   that a part is safe to drop, it is kept.
+   - **Kept in full:** user messages, questions with their options and answers, plans, peer and
+     operator messages, compaction summaries, assistant text, and `userfile` parts (paths and
+     caption: "fix this image" needs the path).
+   - **Kept as one line (name and label):** every tool call that is not on the read-only list
+     below, and every `error` part. The data does not say whether a shell command or an MCP call
+     changed something (`Part` has no side-effect field, and `File` is set only for recognised
+     edits), and dropping a finished side effect invites the target to repeat it. An edit keeps
+     its verb and file; its diff is in the working copy and in 6.3 and 6.4.
+   - **Kept as instruction and result:** a delegation, without the subagent's own tool calls.
+   - **Dropped:** thinking and sidechains (as in P1); usage and cost rows (`CostOnly`); model
+     badges; tool output outside the last 3 turns; tool calls on an explicit per-kind list of
+     read-only tools (file reads, searches, listings, web fetches), maintained next to each
+     parser's tool names; and prompts the Agent itself injected **whose text matches a known
+     Agent prompt** (the usage-limit resume, `isRateLimitResumePrompt`, and its siblings).
+     Provenance alone is not enough: `Turn.Source` is `schedule` for both the Agent's resume and
+     a user's own schedule, operator, peer, chat-bridge and spawn messages are tagged too, and
+     the tag ledger keeps only recent bodies. A turn of unknown origin is kept.
+   - **Unknown part kinds** are kept as the renderer writes them.
+   - **The exception is where it stopped:** the last 3 turns keep every tool call with its output.
+     A turn cut off by the limit is usually mid-investigation, and the output is what the target
+     would otherwise run again.
+   - **Size:** 256 KiB of final Markdown (UTF-8 bytes, measured on the rendered file) is a soft
+     target. Over it, the oldest assistant texts are cut to their first paragraph, oldest first,
+     each cut leaving a visible marker. User messages, the last 3 turns and sections 6.1–6.5 are
+     never cut, so the file can still exceed the target; it is then written as is and the dialog
+     shows its size. Refusing would leave the user with no way forward, and the target pages
+     into the file anyway.
    - 256 KiB and 3 are starting values, not measurements. They are constants in one place, to be
      revised after the first live moves.
    - Secrets are always scrubbed (`bridge.ScrubSecrets`), as in P1.
-8. **No new on-disk format; one in-memory one.** The normalized `transcript.Turn` is already the
-   kind-neutral representation, and the file the target reads is Markdown, because an LLM reads
-   Markdown best. A JSON handover format would be a second contract to keep in step with the
-   renderer. In between, the Agent builds a `Handover` value (the parts of decision 6, with the
-   conversation already filtered by decision 7) and renders that; the filtering and the size
-   bound are tested on the value, not by comparing Markdown. A machine-readable form, if one is
+8. **No new on-disk format; one in-memory one, rendered once in full.** The normalized
+   `transcript.Turn` is already the kind-neutral representation, and the file the target reads is
+   Markdown, because an LLM reads Markdown best. A JSON handover format would be a second
+   contract to keep in step with the renderer. In between, the Agent builds a `Handover` value:
+   the parts of decision 6, with decision 7 applied to the value itself (dropped parts removed,
+   `Output` / `Edits` cleared where only the call is kept). It is then rendered with
+   `ToolOutput: true` throughout, because `ToolOutput: false` hides more than tool output: it
+   also drops compaction summaries, delegation prompts and results, and question previews.
+   Tests check both the value (what was kept) and the final Markdown (that compaction summaries,
+   delegations and previews survive, and its byte size). A machine-readable form, if one is
    ever needed, is a second rendering of the same value.
 9. **The file lives in the target's throwaway directory**: `~/.af-work/<target>/handover-<source>.md`
-   (`paths.SessionWorkDir`). The target can read it, it is not in the working copy so it can
-   never be committed, and deleting the target session deletes it (`removeSessionSideFiles`).
-   This holds for managed targets too, where `$AF_WORK_DIR` is not set: the path is computed, not
+   (`paths.SessionWorkDir`). It is not in the working copy, so it can never be committed. This
+   holds for managed targets too, where `$AF_WORK_DIR` is not set: the path is computed, not
    read from the environment.
-   The file is part of the target's conversation, not scratch: the target reads the head first
-   and pages into the rest later, and its first prompt names the path. So moving the target to
-   the trash archives the file with the session and restoring it puts the file back
-   (`archiveSessionForDelete` gains it as a payload with its destination, the way it carries
-   claude's jsonl). Without that, `removeSessionSideFiles` deletes `~/.af-work/<target>` and a
-   restored target points at a file that no longer exists. Stopping or archiving the target
-   without deleting it leaves the file in place, so only the trash path needs this.
-   Open: whether every kind reads outside its working folder without
-   a permission prompt (cursor and kiro in plan mode are the ones to measure); the fallback is to
-   paste the head (decision 6, parts 1–5) into the prompt and keep only the history in the file.
+   - **Only kinds that can read it are offered as targets.** lcpp's builtin file tools refuse any
+     path outside the working folder (`harness/cwd.go` `resolvePath`), so lcpp is not a target in
+     P2a. cursor and kiro are measured in P2a (plan mode and the default permission mode); a kind
+     that cannot read the file without a prompt the user did not expect is left out the same
+     way. Pasting only the head into the prompt is not a fallback: the target would have no way
+     to reach the history, and the user would not know.
+   - **The file is part of the target's conversation, not scratch**: the target reads the head
+     first and pages into the rest later, and its first prompt names the path. So moving the
+     target to the trash archives the file with the session and restoring it puts the file back
+     (`archiveSessionForDelete` gains it as a payload with its destination, the way it carries
+     claude's jsonl). Without that, `removeSessionSideFiles` deletes `~/.af-work/<target>` and a
+     restored target points at a file that no longer exists. Stopping or archiving the target
+     without deleting it leaves the file in place, so only the trash path needs this.
 10. **The target runs in the same working copy**, as fork does. The source is frozen first
     (decision 11), so two writers never share it; the `shared-working-copy` warning is not added.
-11. **Freezing the source.** In this order, before the target starts:
-    1. Record `movedTo: <target>` in the source's meta. `rateLimitTick` skips a moved session;
-       without this the next tick books a fresh resume, because the transcript tail still reads
-       as limited.
-    2. Cancel the booked resume (`dropRateLimitSchedule`) and close the episode.
-    3. Stop the source. It is at its limit, so nothing is lost; it is not archived, so its
-       mirror stays readable and the user can still delete it.
-    4. Resuming a moved session asks for confirmation, naming the target ("this conversation
-       continues in X"). It is allowed: the user may want the source back once the window resets.
-12. **Ownership does not move.** Children, peer messages addressed to the source and pending
-    handoff proposals keep naming the source. Moving them is a separate, harder change (the
-    spawn ledger, the child limit and the peer ACL are all keyed by name). The file lists them
-    (decision 6.5) so the target knows they exist; the move dialog warns when there are children
-    still running.
+11. **Freezing the source.** The move must leave exactly one session that can act on the working
+    copy, against every path that can wake the source, not just the next tick.
+    1. **Movable states.** The source must be idle, `limited` or `spendLimit`. A working source
+       is refused (the user stops it or lets the turn end); a pending question, plan or
+       permission is refused too, since the move would silently abandon it.
+    2. **Close input first.** Under the session's meta lock, record `movedTo: <target>`. From
+       then on every Agent path that would start a turn or a process on the source refuses with
+       `session_moved` naming the target: `/input` and `/turn` (including the managed route that
+       resumes a stopped session from `/input`), start and resume, peer delivery (a peer message
+       to a moved session is refused, so the sender learns the new name), report-back, and
+       scheduled deliveries. Only the user lifts it, by an explicit "resume here anyway" that
+       clears `movedTo`.
+    3. **Settle the usage-limit watch.** `rateLimitTick` works on a `ListMetas` snapshot, so a
+       tick that read the meta before step 2 can still book after it. The tick therefore re-reads
+       the meta under the same lock immediately before `putRateLimitSchedule` and gives up when
+       `movedTo` is set, and the move cancels the booking and closes the episode under that lock.
+       `deleteRateLimitSchedule` is best-effort (it logs and moves on), so a booking that
+       survives is cleaned up by the next tick, which drops the schedule of any moved session
+       it sees, and a booking that fires anyway is refused by step 2's gate.
+    4. **Snapshot, then stop.** Read the transcript, `Pending`, `Queued` / `QueuedItems` and the
+       working copy (decision 6) while the handle still exists, then stop the source. cursor and
+       kiro drop their queue (`q.DropAll`) on stop, and a managed cursor's transcript exists only
+       in the handle, so the order matters. Stopping consumes a stop-after-turn arm.
+    5. **What the user sees afterwards.** The source is stopped, not archived, and its row says
+       where the conversation went. A managed cursor source's mirror is empty once stopped; the
+       handover file is then the only record, and the dialog says so before the move. A moved
+       source is otherwise an ordinary stopped session: the stopped-session TTL archives it
+       like any other.
+12. **Ownership does not move.** Children and pending handoff proposals keep naming the source.
+    Moving them is a separate, harder change (the spawn ledger, the child limit and the peer ACL
+    are all keyed by name). The file lists them (decision 6.5) so the target knows they exist;
+    the move dialog warns when children are still running. Their report-back to the source is
+    refused by decision 11.2, so the user reads them in the Console.
 13. **A turn cut off mid-edit is shown before the move, not fixed.** The dialog shows the
     working copy's dirty state (the same data as decision 6.3). The user decides; the Agent does
     not commit, stash or reset anything.
@@ -149,12 +199,15 @@ its handle is alive, because the conversation does not exist anywhere else.
 ## Phases
 
 - **P2a — the move.** `POST /api/sessions/{name}/move {kind, model?, driver?}` on the Agent:
-  build and render (decisions 6–8), write (9), freeze (11), create the target with `initial_prompt` (1).
-  The CP route allow-list gains it. Console: a session-menu item next to the existing handover,
-  a dialog with the agent picker (other kinds only, with `get_agent_usage` where the kind has a
-  source), the dirty state and running children. Tests: compression bounds, freeze order (no
-  booking after a move), a managed cursor source that is stopped is refused with a reason,
-  and a target moved to the trash and restored still has its handover file.
+  check the state (decision 11.1), close input (11.2), settle the watch (11.3), build and render
+  (decisions 6–8), write (9), snapshot and stop (11.4), create the target with `initial_prompt`
+  (1). The CP route allow-list gains it. Console: a session-menu item next to the existing
+  handover, a dialog with the agent picker (other kinds that can read the file, with
+  `get_agent_usage` where the kind has a source), the dirty state, queued instructions and running
+  children. Tests: the filter and size rules on the value and on the final Markdown; a tick racing
+  the move books nothing that survives; every input path refuses a moved source; a stopped managed
+  cursor source is refused with a reason; a target moved to the trash and restored still has its
+  handover file.
 - **P2b — the trigger.** When a session shows `limited` (or `spendLimit`), the mirror's limit
   banner offers the move with candidates that have quota left. Only claude, managed codex and
   muse reach this state today.
@@ -164,9 +217,9 @@ its handle is alive, because the conversation does not exist anywhere else.
 
 - A limited session can continue on another kind in one action, without any model call before
   the target's own first turn.
-- The target starts with less than the source had: no thinking, no native tool state, and no
-  record of what was read or searched before the last turns. That is the price of not touching
-  native stores, and why fork stays the answer within one kind. A target that needs a file the
-  source read reads it again; the working copy is the same.
-- The source's status keeps meaning "this conversation stopped here"; the `movedTo` mark is what
-  tells it apart from a session that is simply waiting.
+- The target starts with less than the source had: no thinking, no native tool state, no tool
+  output before the last turns, and no record of read-only calls. That is the price of not
+  touching native stores, and why fork stays the answer within one kind where it exists. A target
+  that needs a file the source read reads it again; the working copy is the same.
+- A moved source cannot be woken by anything but its user. That is stricter than any other
+  stopped session, and it is what keeps one writer per working copy.
