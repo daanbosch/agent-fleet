@@ -570,3 +570,76 @@ func TestTypePromptTextSendsLeadingDashLiterally(t *testing.T) {
 		}
 	}
 }
+
+// A line break in a literal send-keys stream is an Enter, so a multi-line (or long) claude
+// prompt would be submitted line by line (suspected cause of issue #2195, unconfirmed live).
+// Such prompts must go in as one bracketed paste carrying the whole text, while a short
+// single-line prompt keeps the literal-key path.
+func TestTypeLineAndSubmitClaudePastesMultilineAndLongPrompts(t *testing.T) {
+	envelope := "[agent-fleet:peer from=child intent=report reply=when-needed] "
+	cases := []struct {
+		name, text, want string // want = what must reach load-buffer; "" = literal keys
+	}{
+		{"short single line", "こんにちは", ""},
+		{"multi line", envelope + "1行目\n2行目", envelope + "1行目\n2行目"},
+		{"crlf becomes one LF", "a\r\nb", "a\nb"},
+		{"just under the threshold", strings.Repeat("a", claudePasteMinBytes-1), ""},
+		{"at the threshold", strings.Repeat("a", claudePasteMinBytes), strings.Repeat("a", claudePasteMinBytes)},
+		{"long multi line", envelope + strings.Repeat("レビュー結果: bundle には問題あり\n", 400),
+			envelope + strings.Repeat("レビュー結果: bundle には問題あり\n", 400)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withTempHome(t)
+			bin := t.TempDir()
+			logPath := filepath.Join(bin, "tmux.log")
+			stdinPath := filepath.Join(bin, "tmux.stdin")
+			script := `#!/bin/sh
+printf '%s\n' "$*" >> "$TMUX_TEST_LOG"
+case "$1" in
+  load-buffer) /bin/cat > "$TMUX_TEST_STDIN" ;;
+esac
+`
+			if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin)
+			t.Setenv("TMUX_TEST_LOG", logPath)
+			t.Setenv("TMUX_TEST_STDIN", stdinPath)
+			t.Setenv("AGENT_INPUT_SUBMIT_DELAY_MS", "0")
+			t.Setenv("AF_SESSIONS_DIR", filepath.Join(t.TempDir(), "sessions"))
+			const name = "claude_paste"
+			session.WriteMeta(session.Meta{Name: name, Dir: t.TempDir(), Kind: session.KindClaude})
+
+			if err := typeLineAndSubmit(name, "%7", tc.text); err != nil {
+				t.Fatal(err)
+			}
+			b, _ := os.ReadFile(logPath)
+			lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+			if tc.want == "" {
+				// The text may itself hold no newline here, so the log is exactly two lines.
+				want := []string{"send-keys -t %7 -l -- " + tc.text, "send-keys -t %7 Enter"}
+				if strings.Join(lines, "\n") != strings.Join(want, "\n") {
+					t.Fatalf("tmux = %q, want %q", lines, want)
+				}
+				return
+			}
+			if len(lines) != 3 {
+				t.Fatalf("want load-buffer, paste-buffer, Enter; tmux = %q", lines)
+			}
+			load := strings.Fields(lines[0])
+			if len(load) != 4 || load[0] != "load-buffer" || load[1] != "-b" || load[3] != "-" {
+				t.Fatalf("load-buffer argv = %q", lines[0])
+			}
+			if want := "paste-buffer -p -d -b " + load[2] + " -t %7"; lines[1] != want {
+				t.Fatalf("paste argv = %q, want %q", lines[1], want)
+			}
+			if lines[2] != "send-keys -t %7 Enter" {
+				t.Fatalf("submit = %q", lines[2])
+			}
+			if got, _ := os.ReadFile(stdinPath); string(got) != tc.want {
+				t.Fatalf("pasted %d bytes, want %d (head %.40q)", len(got), len(tc.want), got)
+			}
+		})
+	}
+}

@@ -76,6 +76,11 @@ tmux -L "$sock" kill-server
 で上書き可——待ってから Enter を送る。codex・opencode・copilot・cursor・kiro には本文を
 `send-keys -l` ではなく bracketed paste（`load-buffer` ＋ `paste-buffer -p`）で渡す
 （`typePromptText`）。
+claude も、本文に改行がある（literal の LF は Enter なので行ごとに submit される）か 2 KiB
+以上のときは同じ経路を使い、Enter までの待ちは 20ms ではなく 200ms になる（tmux は paste 内の
+LF を CR に変えるため CRLF は LF にして渡す）。短い単一行は従来どおり `send-keys -l`。200ms・
+2 KiB の閾値・「これで peer メッセージの切り詰め（#2195）が直る」ことは、実機の claude TUI では
+未確認。
 
 Agent 自身の画面読み取り（`internal/tmuxx/tmuxx.go` の `tmuxx.CapturePane`・`ReadPane`・
 状態プローブ）は `-J` を**付けずに**取る。pane の幅を超える行は、それらが見るのと同じ形で
