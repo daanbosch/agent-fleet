@@ -293,15 +293,15 @@ export function SessionMenu({ s, actions, running, open, place, keepOpenRefs, on
             onClose();
             setShareOpen(true);
           }, <Icon name="broadcast" />, tr("srow.share")),
-        // The two export variants stay captioned rows: two choices do not earn a submenu, which
+        // The three export variants stay captioned rows: a few choices do not earn a submenu, which
         // would add a click and a second roving level to a menu that is one flat list.
         exportShown && <div key="export-caption" className="ui-menu-caption">{tr("srow.export_caption")}</div>,
         ...(exportShown
-          ? (["names", "full"] as const).map((tools) =>
+          ? (["none", "names", "full"] as const).map((tools) =>
               item(`export-${tools}`, () => {
                 onClose();
                 void exportSessionMarkdown(s.name, tools, toast);
-              }, <Icon name="download" />, tr(tools === "full" ? "srow.export_full" : "srow.export_names")),
+              }, <Icon name="download" />, tr(`srow.export_${tools}` as const)),
             )
           : []),
       ],

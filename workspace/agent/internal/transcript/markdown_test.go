@@ -48,7 +48,7 @@ func TestMarkdownNamesOnly(t *testing.T) {
 }
 
 func TestMarkdownToolOutput(t *testing.T) {
-	md := Markdown(sampleTurns(), MarkdownOptions{ToolOutput: true, Lang: "en"})
+	md := Markdown(sampleTurns(), MarkdownOptions{Tools: ToolsFull, Lang: "en"})
 	if !strings.Contains(md, "````\nok\n```\ninner fence\n````") {
 		t.Errorf("tool output containing a fence must get a longer fence:\n%s", md)
 	}
@@ -59,7 +59,7 @@ func TestMarkdownToolOutput(t *testing.T) {
 
 func TestMarkdownScrub(t *testing.T) {
 	turns := []Turn{{Role: "assistant", Parts: []Part{{Kind: "tool", Tool: "Bash", Output: "TOKEN=abc123"}}}}
-	md := Markdown(turns, MarkdownOptions{ToolOutput: true, Scrub: func(s string) string {
+	md := Markdown(turns, MarkdownOptions{Tools: ToolsFull, Scrub: func(s string) string {
 		return strings.ReplaceAll(s, "abc123", "[redacted]")
 	}})
 	if strings.Contains(md, "abc123") || !strings.Contains(md, "[redacted]") {
@@ -93,11 +93,11 @@ func TestMarkdownScrubCoversEveryField(t *testing.T) {
 		}},
 		{Role: "user", Source: SourcePeer, PeerFrom: "p" + tok, Parts: []Part{{Kind: "text", Text: "hi"}}},
 	}
-	for _, full := range []bool{false, true} {
-		md := Markdown(turns, MarkdownOptions{Title: tok, Header: []string{tok}, ToolOutput: full,
+	for _, full := range []ToolDetail{ToolsNone, ToolsNames, ToolsFull} {
+		md := Markdown(turns, MarkdownOptions{Title: tok, Header: []string{tok}, Tools: full,
 			Scrub: func(s string) string { return strings.ReplaceAll(s, tok, "[x]") }})
 		if strings.Contains(md, tok) {
-			t.Errorf("full=%v: token survived:\n%s", full, md)
+			t.Errorf("tools=%v: token survived:\n%s", full, md)
 		}
 	}
 }
@@ -109,7 +109,7 @@ func TestMarkdownPlanAnswerAndOptionPreview(t *testing.T) {
 			{Label: "A", Preview: "+--+\n```\n|A |"},
 		}}}, Answer: "A"},
 	}}}
-	md := Markdown(turns, MarkdownOptions{Lang: "en", ToolOutput: true})
+	md := Markdown(turns, MarkdownOptions{Lang: "en", Tools: ToolsFull})
 	for _, want := range []string{"**Answer:** User has approved your plan", "  ````\n  +--+\n  ```\n  |A |\n  ````"} {
 		if !strings.Contains(md, want) {
 			t.Errorf("missing %q in:\n%s", want, md)
@@ -128,7 +128,7 @@ func TestMarkdownScrubCannotEatAFence(t *testing.T) {
 		{Role: "assistant", Parts: []Part{{Kind: "tool", Tool: "Bash", Output: "`````\nPASSWORD="}}},
 		{Role: "user", Parts: []Part{{Kind: "text", Text: "next"}}},
 	}
-	md := Markdown(turns, MarkdownOptions{Lang: "en", ToolOutput: true, Scrub: assign})
+	md := Markdown(turns, MarkdownOptions{Lang: "en", Tools: ToolsFull, Scrub: assign})
 	if !strings.Contains(md, "PASSWORD=\n``````\n\n---\n\n## User") {
 		t.Errorf("closing fence lost:\n%s", md)
 	}
@@ -178,10 +178,10 @@ func TestMarkdownScrubReachesEveryStringField(t *testing.T) {
 		tr.Role, tr.Parts[0].Kind, tr.Sidechain, tr.Compact, tr.CostOnly = "assistant", kind, false, false, false
 		turns = append(turns, tr)
 	}
-	for _, full := range []bool{false, true} {
-		md := Markdown(turns, MarkdownOptions{ToolOutput: full, Scrub: func(s string) string { return strings.ReplaceAll(s, tok, "[x]") }})
+	for _, full := range []ToolDetail{ToolsNone, ToolsNames, ToolsFull} {
+		md := Markdown(turns, MarkdownOptions{Tools: full, Scrub: func(s string) string { return strings.ReplaceAll(s, tok, "[x]") }})
 		if strings.Contains(md, tok) {
-			t.Errorf("full=%v: an unscrubbed field reached the file:\n%s", full, md)
+			t.Errorf("tools=%v: an unscrubbed field reached the file:\n%s", full, md)
 		}
 	}
 }
@@ -205,5 +205,49 @@ func TestMarkdownPassesTurnTextThrough(t *testing.T) {
 		if !strings.Contains(md, body+"\n\n---\n\n## Assistant") {
 			t.Errorf("turn text changed for %q:\n%s", body, md)
 		}
+	}
+}
+
+func TestMarkdownNoTools(t *testing.T) {
+	turns := append(sampleTurns(),
+		Turn{Role: "user", Parts: []Part{{Kind: "userfile", Files: []string{"uploads/a.png"}}, {Kind: "text", Text: "see file"}}},
+		Turn{Role: "assistant", Parts: []Part{
+			{Kind: "delegation", AgentType: "Explore", Info: "look around", Prompt: "DELEG-PROMPT"},
+			{Kind: "question", Questions: []Question{{Question: "Which?", Options: []Option{{Label: "A", Preview: "PREVIEW-X"}}}}, Answer: "A"},
+			{Kind: "plan", Plan: "do X", Answer: "approved"},
+			{Kind: "error", Info: "boom"},
+		}},
+		Turn{Compact: true, Role: "assistant", Text: "COMPACT-BODY"},
+	)
+	md := Markdown(turns, MarkdownOptions{Lang: "en", Tools: ToolsNone})
+	for _, want := range []string{"Fix the build", "Looking.", "Done.", "**Question:** Which?", "- A", "**Answer:** A", "**Plan:**", "approved", "> **Error:** boom", "_Context compaction summary_"} {
+		if !strings.Contains(md, want) {
+			t.Errorf("missing %q in:\n%s", want, md)
+		}
+	}
+	for _, bad := range []string{"Tool:", "Bash", "Edit", "main.go", "inner fence", "Subagent", "DELEG-PROMPT", "Files", "a.png", "PREVIEW-X", "COMPACT-BODY"} {
+		if strings.Contains(md, bad) {
+			t.Errorf("unexpected %q in:\n%s", bad, md)
+		}
+	}
+	// "Looking." and "Done." sit on either side of tool-only content and stay one section.
+	if n := strings.Count(md, "## Assistant (m1)"); n != 1 {
+		t.Errorf("assistant rows split into %d sections:\n%s", n, md)
+	}
+}
+
+// A row that held only tools leaves no heading, and the text rows around it still fold.
+func TestMarkdownNoToolsFoldsAcrossAToolOnlyRow(t *testing.T) {
+	turns := []Turn{
+		{Role: "assistant", Parts: []Part{{Kind: "text", Text: "one"}}},
+		{Role: "assistant", Parts: []Part{{Kind: "tool", Tool: "Bash"}}},
+		{Role: "assistant", Parts: []Part{{Kind: "text", Text: "two"}}},
+	}
+	md := Markdown(turns, MarkdownOptions{Lang: "en", Tools: ToolsNone})
+	if md != "## Assistant\n\none\n\ntwo\n" {
+		t.Errorf("got %q", md)
+	}
+	if md := Markdown(turns[1:2], MarkdownOptions{Lang: "en", Tools: ToolsNone}); md != "(no conversation yet)\n" {
+		t.Errorf("tool-only conversation: %q", md)
 	}
 }

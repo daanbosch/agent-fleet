@@ -14,8 +14,8 @@ import (
 
 // HandleSessionExport serves a session's whole conversation as one Markdown file (#2183).
 // It reads the full transcript rather than the mirror's tail window, so the file does not
-// depend on how far the member has scrolled. ?tools=full adds tool output and edit diffs;
-// the default reduces every tool call to its name and label. ?tz= is the browser's IANA zone,
+// depend on how far the member has scrolled. ?tools=none leaves tool calls out, ?tools=full
+// adds tool output and edit diffs; anything else reduces every tool call to its name and label. ?tz= is the browser's IANA zone,
 // so the file shows the same times as the mirror; an unknown zone falls back to the Agent's.
 //
 // Secrets are scrubbed with the chat bridge's scrubber whatever the option: tool output
@@ -38,7 +38,7 @@ func HandleSessionExport(w http.ResponseWriter, r *http.Request) {
 	turns := exportTurns(meta)
 	tagInjectedTurns(name, turns)
 	q := r.URL.Query()
-	md := renderSessionExport(meta, turns, q.Get("tools") == "full", q.Get("tz"), time.Now())
+	md := renderSessionExport(meta, turns, exportToolDetail(q.Get("tools")), q.Get("tz"), time.Now())
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+exportFileName(name)+`"`)
 	w.Header().Set("Cache-Control", "no-store")
@@ -84,9 +84,19 @@ func exportFileName(name string) string {
 	return name + ".md"
 }
 
+func exportToolDetail(v string) transcript.ToolDetail {
+	switch v {
+	case "none":
+		return transcript.ToolsNone
+	case "full":
+		return transcript.ToolsFull
+	}
+	return transcript.ToolsNames
+}
+
 // renderSessionExport is the handler minus I/O, so a test can pin that the scrubber is
 // always applied.
-func renderSessionExport(meta session.Meta, turns []transcript.Turn, toolOutput bool, tz string, now time.Time) string {
+func renderSessionExport(meta session.Meta, turns []transcript.Turn, tools transcript.ToolDetail, tz string, now time.Time) string {
 	lang := uiprefs.Locale()
 	loc := time.Local
 	if tz != "" {
@@ -95,12 +105,12 @@ func renderSessionExport(meta session.Meta, turns []transcript.Turn, toolOutput 
 		}
 	}
 	return transcript.Markdown(turns, transcript.MarkdownOptions{
-		Title:      exportTitle(meta),
-		Header:     exportHeader(meta, lang, now.In(loc)),
-		ToolOutput: toolOutput,
-		Lang:       lang,
-		Loc:        loc,
-		Scrub:      bridge.ScrubSecrets,
+		Title:  exportTitle(meta),
+		Header: exportHeader(meta, lang, now.In(loc)),
+		Tools:  tools,
+		Lang:   lang,
+		Loc:    loc,
+		Scrub:  bridge.ScrubSecrets,
 	})
 }
 

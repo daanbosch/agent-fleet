@@ -8,7 +8,7 @@ import { t } from "../../lib/i18n/index.ts";
 
 type Notify = (message: string, opts?: { kind?: "error" | "warn" | "info" | "success" }) => void;
 
-export async function exportSessionMarkdown(name: string, tools: "names" | "full", notify: Notify): Promise<void> {
+export async function exportSessionMarkdown(name: string, tools: "none" | "names" | "full", notify: Notify): Promise<void> {
   let res: Response;
   try {
     // The browser's zone, so the file's times match the mirror's.

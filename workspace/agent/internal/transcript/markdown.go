@@ -15,9 +15,8 @@ type MarkdownOptions struct {
 	Title string
 	// Header lines are written as a bullet list under the title, already formatted.
 	Header []string
-	// ToolOutput includes tool output, edit diffs and delegation prompts. Without it a
-	// tool call is reduced to its name and one-line label.
-	ToolOutput bool
+	// Tools says how much of the tool activity is written; the zero value is ToolsNames.
+	Tools ToolDetail
 	// Lang picks the labels ("en", anything else = Japanese), as uiprefs.Locale() does.
 	Lang string
 	// Loc is the zone turn times are shown in; nil = time.Local.
@@ -29,6 +28,20 @@ type MarkdownOptions struct {
 	// caller that leaves this nil writes them verbatim.
 	Scrub func(string) string
 }
+
+// ToolDetail is how much tool activity a Markdown rendering carries.
+type ToolDetail int
+
+const (
+	// ToolsNames reduces a tool call or delegation to its name and one-line label.
+	ToolsNames ToolDetail = iota
+	// ToolsNone leaves tool calls, delegations and uploaded-file lists out; what was said,
+	// asked, planned and any error stay. Option previews and compaction summaries follow
+	// ToolsNames.
+	ToolsNone
+	// ToolsFull adds tool output, edit diffs, delegation prompts and option previews.
+	ToolsFull
+)
 
 type mdLabels struct {
 	user, assistant, peer, operator, injected, compacted, tool, subagent,
@@ -180,7 +193,7 @@ func turnHeading(t Turn, lb mdLabels, loc *time.Location) string {
 }
 
 func writeCompact(b *strings.Builder, t Turn, o MarkdownOptions, lb mdLabels) {
-	if !o.ToolOutput {
+	if o.Tools != ToolsFull {
 		// The heading alone says a compaction happened; its summary repeats what the
 		// turns above already hold.
 		b.WriteString("_" + lb.compacted + "_\n\n")
@@ -197,12 +210,15 @@ func writePart(b *strings.Builder, p Part, o MarkdownOptions, lb mdLabels) {
 			b.WriteString(s + "\n\n")
 		}
 	case "tool":
+		if o.Tools == ToolsNone {
+			return
+		}
 		b.WriteString("> " + lb.tool + ": `" + oneLine(p.Tool) + "`")
 		if label := firstNonEmpty(p.Info, p.File); label != "" {
 			b.WriteString(" — " + oneLine(label))
 		}
 		b.WriteString("\n\n")
-		if !o.ToolOutput {
+		if o.Tools != ToolsFull {
 			return
 		}
 		for _, e := range p.Edits {
@@ -212,6 +228,9 @@ func writePart(b *strings.Builder, p Part, o MarkdownOptions, lb mdLabels) {
 			writeFenced(b, "", s)
 		}
 	case "delegation":
+		if o.Tools == ToolsNone {
+			return
+		}
 		h := lb.subagent
 		if p.AgentType != "" {
 			h += " (" + p.AgentType + ")"
@@ -221,7 +240,7 @@ func writePart(b *strings.Builder, p Part, o MarkdownOptions, lb mdLabels) {
 			b.WriteString(" — " + oneLine(p.Info))
 		}
 		b.WriteString("\n\n")
-		if !o.ToolOutput {
+		if o.Tools != ToolsFull {
 			return
 		}
 		if s := strings.TrimSpace(p.Prompt); s != "" {
@@ -239,7 +258,7 @@ func writePart(b *strings.Builder, p Part, o MarkdownOptions, lb mdLabels) {
 					line += " — " + oneLine(opt.Description)
 				}
 				b.WriteString(line + "\n")
-				if o.ToolOutput && strings.TrimSpace(opt.Preview) != "" {
+				if o.Tools == ToolsFull && strings.TrimSpace(opt.Preview) != "" {
 					// The preview is what the options were compared on; indented so it
 					// stays inside its list item.
 					var pb strings.Builder
@@ -266,6 +285,9 @@ func writePart(b *strings.Builder, p Part, o MarkdownOptions, lb mdLabels) {
 			b.WriteString("**" + lb.answer + ":** " + s + "\n\n")
 		}
 	case "userfile":
+		if o.Tools == ToolsNone {
+			return
+		}
 		b.WriteString("**" + lb.files + ":**")
 		if p.Caption != "" {
 			b.WriteString(" " + oneLine(p.Caption))
