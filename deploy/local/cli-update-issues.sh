@@ -96,7 +96,10 @@ bump_pr_for() {
 
 sync_kind() { # sync_kind <kind> <pin> <latest>
   local kind="$1" pin="$2" latest="$3" num="" red_ver="" streak=false state="" tested="" cred
-  num="$(number "$kind")"
+  # KNOWN_ISSUE: the number of an issue created moments ago by cli-contract-report.sh,
+  # which the list lookup may not show yet; without it a second issue would open.
+  num="${KNOWN_ISSUE:-}"
+  [[ "$num" =~ ^[0-9]+$ ]] || num="$(number "$kind")"
   : > "$WORK/rows"
   if [ -n "$num" ]; then
     gh issue view "$num" --json body --jq .body |

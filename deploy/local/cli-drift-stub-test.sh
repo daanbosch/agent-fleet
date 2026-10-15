@@ -857,4 +857,18 @@ sync_ok agy
 title_is agy "agy CLI: contract fails on develop"
 has agy 'gh workflow run agy-contract.yml --ref develop -f cli_version=latest'
 
+echo "== case 35: the list lookup stays empty through the real sync -> still one issue, with the row and the marker =="
+for d in "$STUB_ISSUES"/1[0-9][0-9]; do echo closed > "$d/state"; done
+releases muse=1.0.0:1.1.0
+touch "$STUB_RUNS/nolist-muse"
+SYNC="$SYNC_SH" "$REPORT" failure muse 1.1.0 || fail "failure with a lagging lookup exited $?"
+rm "$STUB_RUNS/nolist-muse"
+n=0
+for d in "$STUB_ISSUES"/1[0-9][0-9]; do
+  [ "$(cat "$d/state")" = open ] && case "$(cat "$d/title")" in "muse CLI: "*) n=$((n + 1)) ;; esac
+done
+[ "$n" = 1 ] || fail "expected one muse issue after report + sync, got $n"
+has muse '`muse` `1.1.0`'
+title_is muse "muse CLI: contract failed on 1.1.0"
+
 echo "OK: one unreadable release source no longer stops the watcher"

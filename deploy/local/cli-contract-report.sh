@@ -54,6 +54,10 @@ SYNC="${SYNC:-$HERE/cli-update-issues.sh}"
 
 issue_number() { "$ISSUES" number "$1"; }
 
+# The kind's issue number as mutate last saw or created it. `sync` gets it through
+# KNOWN_ISSUE: its own list lookup lags just after a creation and would open a second issue.
+MUTATED_NUM=""
+
 kind_of_workflow() { case "$1" in claude-tui-contract) echo claude ;; *) echo "${1%-contract}" ;; esac; }
 
 # The rows (list lines) of the section in a body, one per line.
@@ -83,6 +87,7 @@ mutate() {
   local kind="$1" fn="$2" title="${3:-$1 CLI: contract failed}" num url attempt
   for attempt in 1 2 3 4; do
     num="$(issue_number "$kind")"
+    MUTATED_NUM="$num"
     if [ -n "$num" ]; then
       gh issue view "$num" --json body --jq .body > "$tmp"
     else
@@ -105,6 +110,7 @@ mutate() {
       url="$(gh issue create --title "$title" --body-file "$tmp.new" --label cli-drift)"
       num="${url##*/}"
       [[ "$num" =~ ^[0-9]+$ ]] || { echo "could not read the new issue's number from: $url" >&2; return 1; }
+      MUTATED_NUM="$num"
     else
       gh issue edit "$num" --body-file "$tmp.new" >/dev/null
     fi
@@ -148,7 +154,7 @@ case "$cmd" in
     if [ "$version" != unknown ] && case " $RED_KINDS " in *" $kind "*) true ;; *) false ;; esac; then
       "$HERE/cli-release-state.sh" set red "$kind" "$version"
     fi
-    "$SYNC" sync "$kind" || echo "::warning::could not update the $kind issue's next step"
+    KNOWN_ISSUE="$MUTATED_NUM" "$SYNC" sync "$kind" || echo "::warning::could not update the $kind issue's next step"
     ;;
   success)
     kind="${2:?kind}"
