@@ -22,7 +22,9 @@ export async function exportSessionMarkdown(name: string, tools: "names" | "full
   }
   if (!res.ok) {
     const body = await res.json().catch(() => null);
-    notify(body?.error ? t("srow.export_failed") + ": " + errDetail(body.error) : t("srow.export_failed"));
+    // A non-JSON answer (an Agent older than this route says 404 in plain text) still names
+    // its status, so "failed" is never the whole story.
+    notify(t("srow.export_failed") + ": " + (body?.error ? errDetail(body.error) : "HTTP " + res.status));
     return;
   }
   // The body can still fail after a 200 (a connection dropped mid-transfer); that must reach

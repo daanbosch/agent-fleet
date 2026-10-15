@@ -127,6 +127,9 @@ export function SessionMenu({ s, actions, running, open, place, keepOpenRefs, on
   const repos = useReposStore((st) => st.repos);
   const folder = sessionFolder(s);
   const repoLess = !folder || !repos.some((r) => r.name === folder);
+  const wsetShown = repoLess && wsets.length > 0;
+  // The Agent reads the transcript, so it has to be reachable; the session itself may be stopped.
+  const exportShown = agentOf(s.kind).caps.transcript && running;
   // The repository menu is the row's own, opened where the row sits in the rail (#1557). No
   // rail to open it in: a pop-out has none, and on a phone the rail is a drawer only the App
   // shell can open.
@@ -317,10 +320,9 @@ export function SessionMenu({ s, actions, running, open, place, keepOpenRefs, on
                 <Icon name="broadcast" /> {tr("srow.share")}
               </button>
             )}
-            {/* The Agent reads the transcript, so it has to be reachable; the session itself
-                may be stopped. */}
-            {agentOf(s.kind).caps.transcript && running && (
+            {exportShown && (
               <>
+                <div className="ui-menu-sep" aria-hidden="true" />
                 <div className="ui-menu-caption">{tr("srow.export_caption")}</div>
                 {(["names", "full"] as const).map((tools) => (
                   <button
@@ -338,8 +340,9 @@ export function SessionMenu({ s, actions, running, open, place, keepOpenRefs, on
               </>
             )}
             {/* Working sets (docs/log/52): membership toggles — repo-less rows only. */}
-            {repoLess && wsets.length > 0 && (
+            {wsetShown && (
               <>
+                <div className="ui-menu-sep" aria-hidden="true" />
                 <div className="ui-menu-caption">{tr("wset.menu_caption")}</div>
                 {wsets.map((w) => (
                   <button
@@ -356,6 +359,9 @@ export function SessionMenu({ s, actions, running, open, place, keepOpenRefs, on
                 ))}
               </>
             )}
+            {/* A captioned block is fenced on both sides; without the closing rule the items
+                after it read as part of it. */}
+            {(exportShown || wsetShown) && <div className="ui-menu-sep" aria-hidden="true" />}
             {/* Deletion lock (docs/log/45): pin or unpin this row against deletion. The
                 protection itself lives in the Agent (403); this only toggles it and
                 suppresses the affordance. */}
