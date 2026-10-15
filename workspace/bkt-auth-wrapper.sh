@@ -18,6 +18,14 @@ set +x
 
 real="${AF_BKT_REAL:-/usr/local/libexec/bkt}"
 
+# `bkt --version` needs no credential. Skipping the helper keeps the Toolchains probe (which
+# runs this wrapper) from taking the store lock or refreshing an OAuth token over the network,
+# which with a connection can outlast the probe timeout and report the effective column as a
+# timeout.
+if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then
+  exec "$real" "$@"
+fi
+
 if [ -n "${BKT_TOKEN:-}" ] || [ -n "${BKT_HOST:-}" ] ||
   [ -e "${BKT_CONFIG_DIR:-${XDG_CONFIG_HOME:-${HOME:-/nonexistent}/.config}/bkt}/config.yml" ]; then
   exec "$real" "$@"
