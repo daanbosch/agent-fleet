@@ -256,22 +256,32 @@ those variables in for one `exec`:
   same rotating refresh token, so `jiraRefreshNow` takes the `jira-refresh` store lock
   (the same pattern as the GitHub refresh) and re-reads the store inside it. Presenting a
   spent refresh token twice can revoke the authorization.
-- **Config**: jira-cli refuses to start without a config file. With none, the wrapper points
-  `JIRA_CONFIG_FILE` at `~/.cache/agent-fleet/jira/config.yml`, which holds only
-  `installation: Cloud`. That is enough for `issue view` and for `issue list -p KEY`.
-  `issue create`, `sprint list` and the epic commands need the issue types, the board and the
-  epic fields, which only `jira init` writes. Run through the wrapper,
-  `jira init --project KEY --board NAME [--force]` gets `--installation`, `--server`,
-  `--login` and `--auth-type` from the connection and does not prompt. The file it writes
-  holds no secret.
-- **The user's own setup wins**: an explicit `JIRA_API_TOKEN`, a `jira init` given its own
-  `--server` / `--login` / `--installation` / `--auth-type`, or a config (from `-c`,
-  `JIRA_CONFIG_FILE` or the default `~/.config/.jira/.config.yml`) whose `server:` is neither
-  the connected site nor its `api.atlassian.com` route makes the wrapper exec jira unchanged.
-  Otherwise a Data Center config would receive this connection's token.
+- **Config, decided by location, never by contents**: a config's `server` can be spelt in more
+  ways than a shell can parse (quoted keys, comments, other formats), and a wrong guess would
+  send this connection's token to another Jira. So the credential goes only to a config under
+  `~/.config/agent-fleet/jira/` (the managed directory) or to a generated one:
+  - `jira init --project KEY --board NAME [--force]` (or any alias: `configure`, `config`,
+    `setup`, `initialize`) run through the wrapper writes `~/.config/agent-fleet/jira/config.yml`
+    and gets `--installation`, `--server`, `--login` and `--auth-type` from the connection, so it
+    does not prompt. Another board is `jira init -c ~/.config/agent-fleet/jira/<board>.yml …`,
+    then `jira -c` that file. The files hold no secret.
+  - With no config named, the wrapper uses the managed `config.yml`, or else points
+    `JIRA_CONFIG_FILE` at `~/.cache/agent-fleet/jira/config.yml`, which holds only
+    `installation: Cloud`: enough for `issue view` and `issue list -p KEY`. `issue create`,
+    `sprint list` and the epic commands need the issue types, board and epic fields that only
+    `jira init` writes.
+- **The user's own setup wins**: an explicit `JIRA_API_TOKEN` or `JIRA_SERVER`, a `jira init`
+  given its own `--server` / `--login` / `--installation` / `--auth-type`, or any config outside
+  the managed directory (`-c` in any spelling, `JIRA_CONFIG_FILE`, or jira's own default
+  `~/.config/.jira/.config.yml`) makes the wrapper exec jira unchanged. A misread argv can only
+  make a config look like someone else's, which runs jira without the token.
+- **No credential for a debug run**: `jira --debug` dumps every request, Authorization header
+  included, so `--debug`, `JIRA_DEBUG` or `debug: true` in a managed config runs jira without
+  the token and says why on stderr.
 - **Fails closed**: if `jira-cred` errors or answers without a token, jira runs with no
   injected auth. The token is never an argument, never written to a file, and exists only in
-  the environment of that one jira process. `jira version` skips the helper, so the
+  the environment of that one jira process: the wrapper switches off an inherited xtrace and
+  allexport before it holds the token. `jira version` skips the helper, so the
   Toolchains probe takes no store lock.
 
 **Limits worth knowing:**

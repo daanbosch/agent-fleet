@@ -71,10 +71,11 @@ no_leak() { # no_leak <label> <secret>: not in argv, not in any file under HOME,
 SITE=https://acme.atlassian.net
 ROUTE=https://api.atlassian.com/ex/jira/cid-1
 DEFCFG="$T/home/.config/.jira/.config.yml"
+MANAGED="$T/home/.config/agent-fleet/jira"
 GEN="$T/home/.cache/agent-fleet/jira/config.yml"
 oauth() { printf 'site=%s\nserver=%s\nauth=bearer\nlogin=me@example.com\ntoken=fake-oauth-tok\n' "$SITE" "$ROUTE" >"$T/agent.out"; }
 apitok() { printf 'site=%s\nserver=%s\nauth=basic\nlogin=me@example.com\ntoken=fake-api-tok\n' "$SITE" "$SITE" >"$T/agent.out"; }
-reset() { rm -f "$T/agent.out"; rm -rf "$T/home/.config" "$T/home/.cache"; }
+reset() { rm -f "$T/agent.out"; rm -rf "$T/home/.config" "$T/home/.cache" "$T/other.yml"; }
 config() { mkdir -p "${1%/*}"; printf '%s\n' "$2" >"$1"; }
 
 # 1. OAuth connection, no config → bearer on the api.atlassian.com route, through a generated
@@ -118,7 +119,7 @@ run STUB_JIRA_EXIT=7 -- issue list
 [ "$rc" = 7 ] || fail "helper failure: exit status $rc, want 7 from jira"
 expect nohelper TOKEN '<unset>'
 expect nohelper SERVER '<unset>'
-expect nohelper CONFIG '<unset>'
+expect nohelper CONFIG "$GEN" # secret-free, and jira refuses to start without one
 printf 'site=%s\nserver=%s\nauth=bearer\n' "$SITE" "$ROUTE" >"$T/agent.out"
 run -- issue list
 expect notoken TOKEN '<unset>'
@@ -131,45 +132,66 @@ expect explicit TOKEN mine
 expect explicit SERVER '<unset>'
 [ ! -f "$T/agent.calls" ] || fail "explicit JIRA_API_TOKEN: helper was consulted"
 
-# 6. A config written by `jira init` through this wrapper (server = the route or the site) gets
-#    the credential; the user's own file is used as is, not swapped for the generated one.
+# 6. A config under the managed directory (where `jira init` through the wrapper writes) gets
+#    the credential, however -c is spelt; the default managed config is picked up with no -c.
 reset
 oauth
-config "$DEFCFG" "server: $ROUTE"
+config "$MANAGED/config.yml" "installation: Cloud"
 run -- sprint list
-expect initcfg TOKEN fake-oauth-tok
-expect initcfg CONFIG '<unset>'
-config "$DEFCFG" "server: \"$SITE/\""
-run -- sprint list
-expect sitecfg TOKEN fake-oauth-tok
+expect managed-default TOKEN fake-oauth-tok
+expect managed-default CONFIG "$MANAGED/config.yml"
+config "$MANAGED/board-b.yml" "installation: Cloud"
+for form in "-c $MANAGED/board-b.yml" "-c$MANAGED/board-b.yml" "-c=$MANAGED/board-b.yml" "--config=$MANAGED/board-b.yml"; do
+  # shellcheck disable=SC2086 # the form is split on purpose
+  run -- $form sprint list
+  expect "managed $form" TOKEN fake-oauth-tok
+done
+run JIRA_CONFIG_FILE="$MANAGED/board-b.yml" -- sprint list
+expect managed-env TOKEN fake-oauth-tok
+run -- -c "$MANAGED/../../agent-fleet/jira/board-b.yml" sprint list
+expect managed-dotdot TOKEN fake-oauth-tok
 
-# 7. A config for another Jira (a Data Center host) is the user's setup: nothing injected,
-#    wherever it is named from.
+# 7. Any other config is the user's setup, whatever its contents say: nothing injected, in every
+#    -c spelling, via JIRA_CONFIG_FILE, at jira's own default location, or one that only looks like
+#    the managed directory.
 reset
 oauth
-config "$DEFCFG" "server: https://jira.example.test"
-run -- issue list
-expect othercfg TOKEN '<unset>'
-config "$T/other.yml" "server: https://jira.example.test"
+config "$T/other.yml" '"server": https://jira.example.test'
+for form in "-c $T/other.yml" "-c$T/other.yml" "-c=$T/other.yml" "--config $T/other.yml" "--config=$T/other.yml"; do
+  # shellcheck disable=SC2086
+  run -- $form issue list
+  expect "other $form" TOKEN '<unset>'
+done
+run -- issue list -c "$MANAGED/board-b.yml" -c "$T/other.yml"
+expect other-last-wins TOKEN '<unset>'
 run JIRA_CONFIG_FILE="$T/other.yml" -- issue list
-expect othercfg-env TOKEN '<unset>'
-run -- -c "$T/other.yml" issue list
-expect othercfg-flag TOKEN '<unset>'
-run -- issue list --config="$T/other.yml"
-expect othercfg-eq TOKEN '<unset>'
+expect other-env TOKEN '<unset>'
+config "$DEFCFG" "server: $SITE"
+run -- issue list
+expect jira-default TOKEN '<unset>'
+rm -f "$DEFCFG"
+config "$MANAGED-evil/config.yml" "x: 1"
+run -- -c "$MANAGED-evil/config.yml" issue list
+expect lookalike TOKEN '<unset>'
+run JIRA_SERVER=https://jira.example.test -- issue list
+expect explicit-server SERVER https://jira.example.test
+expect explicit-server TOKEN '<unset>'
 
-# 8. JIRA_CONFIG_FILE naming a file that does not exist yet is not replaced by the generated one.
+# 8. JIRA_CONFIG_FILE naming a managed file that does not exist yet is not replaced by the
+#    generated one.
 reset
 oauth
-run JIRA_CONFIG_FILE="$T/missing.yml" -- issue list
-expect missingcfg CONFIG "$T/missing.yml"
+run JIRA_CONFIG_FILE="$MANAGED/missing.yml" -- issue list
+expect missingcfg CONFIG "$MANAGED/missing.yml"
 [ ! -e "$GEN" ] || fail "missingcfg: generated a config the user did not ask for"
 
-# 9. `jira init` gets the connection as flags, so it never prompts for them.
+# 9. `jira init` (and every alias of it) writes the managed config and gets the connection as
+#    flags, so it never prompts for them.
 reset
 oauth
 run -- init --project ABC --board "ABC board" --force
 expect init TOKEN fake-oauth-tok
+expect init CONFIG "$MANAGED/config.yml"
 want_args="init
 --project
 ABC
@@ -186,11 +208,20 @@ bearer
 me@example.com"
 [ "$(seen ARG)" = "$want_args" ] || fail "init: argv = $(seen ARG | tr '\n' ' ')"
 no_leak init fake-oauth-tok
+for alias in initialize configure config setup; do
+  run -- "$alias" --project ABC
+  expect "init alias $alias" CONFIG "$MANAGED/config.yml"
+  seen ARG | grep -qx -- --server || fail "init alias $alias: connection flags not added"
+done
+run -- init -c "$MANAGED/board-b.yml" --project ABC
+expect init-managed-c TOKEN fake-oauth-tok
+expect init-managed-c CONFIG '<unset>'
 
-# 9b. …even over an existing config (init --force rewrites it).
+# 9b. …even when jira's own default config exists (init writes the managed one instead).
 config "$DEFCFG" "server: https://jira.example.test"
 run -- init --project ABC --force
-expect init-existing TOKEN fake-oauth-tok
+expect init-existing CONFIG "$MANAGED/config.yml"
+rm -f "$DEFCFG"
 
 # 9c. An OAuth account with no email still gets past init's login prompt.
 rm -f "$T/agent.out"
@@ -198,12 +229,37 @@ printf 'site=%s\nserver=%s\nauth=bearer\ntoken=fake-oauth-tok\n' "$SITE" "$ROUTE
 run -- init --project ABC
 seen ARG | grep -qx oauth || fail "init without email: no placeholder login"
 
-# 9d. `jira init` naming its own server or login configures another Jira: untouched.
+# 9d. Any init (or alias) naming its own server or login, or a config outside the managed
+#     directory, configures another Jira: untouched.
 reset
 oauth
-run -- init --server https://jira.example.test --installation local
-expect init-own TOKEN '<unset>'
-[ "$(grep -c '^ARG=' "$T/jira.seen")" = 5 ] || fail "init-own: flags were added"
+for alias in init configure setup; do
+  run -- "$alias" --server https://jira.example.test --installation local
+  expect "init-own $alias" TOKEN '<unset>'
+  [ "$(grep -c '^ARG=' "$T/jira.seen")" = 5 ] || fail "init-own $alias: flags were added"
+done
+run -- configure --server=https://jira.example.test --force
+expect init-own-eq TOKEN '<unset>'
+run -- init -c "$T/other.yml" --project ABC
+expect init-other-c TOKEN '<unset>'
+
+# 9e. A debug run dumps the Authorization header, so it never gets the token: --debug, JIRA_DEBUG,
+#     or debug: true in the managed config.
+reset
+oauth
+run -- --debug issue view KEY-1
+expect debug-flag TOKEN '<unset>'
+[ ! -f "$T/agent.calls" ] || fail "debug-flag: helper was consulted"
+grep -q 'Authorization' "$T/err" || fail "debug-flag: no explanation on stderr"
+run -- issue view KEY-1 --debug=true
+expect debug-eq TOKEN '<unset>'
+run JIRA_DEBUG=1 -- issue view KEY-1
+expect debug-env TOKEN '<unset>'
+run JIRA_DEBUG=false -- issue view KEY-1
+expect debug-env-off TOKEN fake-oauth-tok
+config "$MANAGED/config.yml" "\"debug\": True"
+run -- issue view KEY-1
+expect debug-config TOKEN '<unset>'
 
 # 10. `jira version` skips the helper.
 reset
@@ -218,6 +274,25 @@ oauth
 run SHELLOPTS=xtrace -- issue list
 expect xtrace TOKEN fake-oauth-tok
 no_leak xtrace fake-oauth-tok
+
+# 11b. An inherited allexport must not export the token (or the helper's answer) to the helpers
+#      the wrapper runs, nor may a pre-exported variable of the same name.
+reset
+oauth
+cat >"$T/bin/sed" <<'STUB'
+#!/bin/sh
+env | grep -q fake-oauth-tok && echo leaked >"$STUB_DIR/sed.leak"
+exec /bin/sed "$@"
+STUB
+chmod +x "$T/bin/sed"
+rm -f "$T/sed.leak"
+run SHELLOPTS=allexport -- issue list
+[ ! -f "$T/sed.leak" ] || fail "allexport: the token reached a helper's environment"
+expect allexport TOKEN fake-oauth-tok
+rm -f "$T/sed.leak"
+run tok=preexported cred=preexported -- issue list
+[ ! -f "$T/sed.leak" ] || fail "pre-exported names: the token reached a helper's environment"
+rm -f "$T/bin/sed"
 
 # 12. The helper runs before the export, so it never sees a token in its environment.
 reset

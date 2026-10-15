@@ -238,21 +238,31 @@ Jira は git でなく作業項目インボックス
   式の refresh token を持つので、`jiraRefreshNow` は `jira-refresh` のストアロックを取り
   （GitHub の更新と同じ形）、その中でストアを読み直す。使用済みの refresh token を 2 度
   出すと、認可ごと取り消されることがある。
-- **設定ファイル**: jira-cli は設定ファイルがないと起動しない。ないときラッパーは
-  `JIRA_CONFIG_FILE` を `~/.cache/agent-fleet/jira/config.yml`（中身は
-  `installation: Cloud` だけ）に向ける。`issue view` や `issue list -p KEY` はこれで動く。
-  `issue create`・`sprint list`・エピック系は課題タイプ・ボード・エピック用フィールドが要り、
-  それを書くのは `jira init` だけ。ラッパー経由の `jira init --project KEY --board NAME [--force]`
-  は `--installation` / `--server` / `--login` / `--auth-type` を接続から受け取るので、
-  対話なしで終わる。書かれるファイルに秘密は入らない。
-- **利用者自身の設定が勝つ**: 明示の `JIRA_API_TOKEN`、自分で `--server` / `--login` /
-  `--installation` / `--auth-type` を渡した `jira init`、または `server:` が接続先のサイトでも
-  その `api.atlassian.com` 経路でもない設定ファイル（`-c`、`JIRA_CONFIG_FILE`、既定の
-  `~/.config/.jira/.config.yml` のどれで指定されたものでも）があると、ラッパーは jira を
-  そのまま exec する。そうしないと Data Center 用の設定にこの接続のトークンが渡ってしまう。
+- **設定ファイルは中身ではなく置き場所で判断する**: 設定の `server` の書き方はシェルで
+  解釈しきれないほどある（キーの引用・コメント・別の形式）。推測を誤ると、この接続のトークンが
+  別の Jira に渡ってしまう。そこで、資格を渡すのは `~/.config/agent-fleet/jira/`（管理
+  ディレクトリ）の下の設定か、ラッパーが作った設定だけにする:
+  - ラッパー経由の `jira init --project KEY --board NAME [--force]`（別名の `configure`・
+    `config`・`setup`・`initialize` も同じ）は `~/.config/agent-fleet/jira/config.yml` に書き、
+    `--installation` / `--server` / `--login` / `--auth-type` を接続から受け取るので対話なしで
+    終わる。別のボードは `jira init -c ~/.config/agent-fleet/jira/<ボード>.yml …` で作り、
+    `jira -c` でそのファイルを指定する。どのファイルにも秘密は入らない。
+  - 設定を指定しないときは管理ディレクトリの `config.yml` を使い、なければ
+    `JIRA_CONFIG_FILE` を `~/.cache/agent-fleet/jira/config.yml`（中身は
+    `installation: Cloud` だけ）に向ける。`issue view` や `issue list -p KEY` はこれで動く。
+    `issue create`・`sprint list`・エピック系は、`jira init` だけが書く課題タイプ・ボード・
+    エピック用フィールドが要る。
+- **利用者自身の設定が勝つ**: 明示の `JIRA_API_TOKEN` か `JIRA_SERVER`、自分で `--server` /
+  `--login` / `--installation` / `--auth-type` を渡した `jira init`、または管理ディレクトリの
+  外の設定（どの書き方の `-c` でも、`JIRA_CONFIG_FILE` でも、jira 自身の既定の
+  `~/.config/.jira/.config.yml` でも）があると、ラッパーは jira をそのまま exec する。引数を
+  読み誤っても、設定が他人のものに見えるだけで、jira はトークンなしで動く。
+- **デバッグ実行には資格を渡さない**: `jira --debug` は Authorization ヘッダーを含むリクエストを
+  すべて出力する。そのため `--debug`・`JIRA_DEBUG`・管理ディレクトリの設定の `debug: true` の
+  どれかがあると、トークンなしで jira を動かし、理由を標準エラーに出す。
 - **失敗したら認証なしに倒す**: `jira-cred` がエラーになるかトークンを返さなければ、jira は
   認証を注入せずに動く。トークンは引数にもファイルにも出ず、その jira プロセス 1 つの環境に
-  だけ存在する。`jira version` はヘルパーを呼ばないので、Toolchains の確認でストアのロックは
+  だけ存在する（ラッパーはトークンを持つ前に、引き継いだ xtrace と allexport を切る）。`jira version` はヘルパーを呼ばないので、Toolchains の確認でストアのロックは
   取られない。
 
 **知っておくべき制限:**

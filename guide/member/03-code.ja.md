@@ -58,8 +58,12 @@ Jira を接続していれば（設定の**課題管理**）、Jira CLI の `jir
   を実行してください（前の設定を置き換えるときは `--force` を付けます）。既定のプロジェクト・
   ボード・課題タイプ・エピック用フィールドが書き込まれ、`jira issue create`・`jira sprint list`・
   エピック系のコマンドが使えるようになります。質問はされません。実行しない場合は、コマンド
-  ごとに `-p PROJ` を付けてください。ボードを使い分けるときは、ボードごとに設定ファイルを
-  用意して `jira -c <ファイル>` か `JIRA_CONFIG_FILE` で選びます。
+  ごとに `-p PROJ` を付けてください。2 つ目のボードは
+  `jira init -c ~/.config/agent-fleet/jira/other-board.yml --project PROJ --board "Other board"`
+  で作り、`jira -c ~/.config/agent-fleet/jira/other-board.yml …` で使います。接続が使われるのは
+  `~/.config/agent-fleet/jira/` の中の設定だけです。
+- **`--debug` では接続を使いません**: jira のデバッグ出力は認可ヘッダーまで表示するので、
+  ラッパーはデバッグ実行にトークンを渡しません。
 - **変更できる範囲**は接続の権限どおりです。CLI はあなたとして Jira に書き込むので、課題の
   作成・編集・遷移にはそれが許されたアカウントが必要です。
 - **OAuth でボード・スプリント・エピックを使う**には、テナントの Jira アプリに Jira Software の
@@ -67,8 +71,8 @@ Jira を接続していれば（設定の**課題管理**）、Jira CLI の `jir
   ください。それまでは、これらのコマンドと `jira init` は認可エラーになります。また、CLI が
   表示するリンクはサイトではなく `api.atlassian.com` を指します。
 - **Jira Data Center**（またはほかの Jira）は設定画面からは接続できません。自分で設定して
-  ください（自分の `--server` を付けた `jira init`、または `JIRA_API_TOKEN`）。設定があると
-  ラッパーは `jira` に手を出しません。
+  ください（自分の `--server` を付けた `jira init`、`~/.config/agent-fleet/jira/` の外の設定、
+  または `JIRA_API_TOKEN`）。設定があるとラッパーは `jira` に手を出しません。
 
 ## リポジトリをクローンする
 
