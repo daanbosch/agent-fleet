@@ -40,6 +40,11 @@ type gitOAuthBody struct {
 	// flow has no callback (GitHub's device flow). Returning it is the difference between
 	// a form somebody can complete and one they have to guess at.
 	RedirectURI string `json:"redirect_uri,omitempty"`
+	// ScopeGroups is writable: the optional scope groups the administrator confirms the
+	// app grants (gitOAuthScopeGroupsFor). A save without it clears them, as unticking
+	// every box would. ScopeGroupsAvailable is read-only: what this provider offers.
+	ScopeGroups          []string `json:"scope_groups,omitempty"`
+	ScopeGroupsAvailable []string `json:"scope_groups_available,omitempty"`
 
 	// GitHub only (issue #1667). Source is writable: none / builtin_oauth / builtin_app /
 	// custom, and a save without it means custom so a client written against the old
@@ -108,6 +113,7 @@ func (a tenantGitOAuthAPI) list(w http.ResponseWriter, r *http.Request) {
 			HasSecret: row.SecretEnc != "", NeedsSecret: gitOAuthNeedsSecret(p),
 			UpdatedBy: row.UpdatedBy, UpdatedAt: row.UpdatedAt,
 			RedirectURI: a.mgr.gitOAuthRedirectURI(p),
+			ScopeGroups: parseScopeGroups(p, row.ScopeGroups), ScopeGroupsAvailable: gitOAuthScopeGroupsFor[p],
 		}
 		if p == gitOAuthGitHub {
 			if err := a.mgr.githubCard(r.Context(), t.ID, &card); err != nil {
@@ -149,6 +155,13 @@ func (a tenantGitOAuthAPI) save(w http.ResponseWriter, r *http.Request) {
 		writeAPIErr(w, &apiError{http.StatusBadRequest, "bad_request", "client_id is required"})
 		return
 	}
+	for _, g := range b.ScopeGroups {
+		if !validScopeGroup(provider, g) {
+			writeAPIErr(w, &apiError{http.StatusBadRequest, "bad_scope_group", "unknown scope group for " + provider + ": " + g})
+			return
+		}
+	}
+	groups := strings.Join(parseScopeGroups(provider, strings.Join(b.ScopeGroups, ",")), ",")
 	prev, existed, err := a.mgr.store.GetTenantGitOAuth(r.Context(), t.ID, provider)
 	if err != nil {
 		writeAPIErr(w, internalErr(err))
@@ -180,7 +193,7 @@ func (a tenantGitOAuthAPI) save(w http.ResponseWriter, r *http.Request) {
 		ID: prev.ID, TenantID: t.ID, Provider: provider, ClientID: b.ClientID,
 		SecretEnc: secretEnc, KeyRef: keyRef, UpdatedBy: ident.ID,
 		Source: gh.source, AppType: gh.appType, AppTypeBy: gh.appTypeBy, InstallURL: gh.installURL,
-		CreatedAt: prev.CreatedAt, UpdatedAt: now,
+		ScopeGroups: groups, CreatedAt: prev.CreatedAt, UpdatedAt: now,
 	}
 	if !existed {
 		row.ID, row.CreatedAt = store.NewID(), now
@@ -194,12 +207,13 @@ func (a tenantGitOAuthAPI) save(w http.ResponseWriter, r *http.Request) {
 	_ = a.mgr.store.InsertAudit(r.Context(), store.AuditLog{
 		ID: store.NewID(), TenantID: t.ID, ActorKind: "user", ActorID: ident.ID,
 		Action: "tenant.git_oauth_save", Target: provider,
-		Detail: "client_id=" + b.ClientID + " secret=" + boolWord(secretEnc != "") + gh.auditDetail(), At: now,
+		Detail: "client_id=" + b.ClientID + " secret=" + boolWord(secretEnc != "") + scopeGroupsAudit(groups) + gh.auditDetail(), At: now,
 	})
 	out := gitOAuthBody{
 		Provider: provider, ClientID: row.ClientID, HasSecret: secretEnc != "",
 		NeedsSecret: gitOAuthNeedsSecret(provider), UpdatedBy: ident.ID, UpdatedAt: now,
 		RedirectURI: a.mgr.gitOAuthRedirectURI(provider),
+		ScopeGroups: parseScopeGroups(provider, groups), ScopeGroupsAvailable: gitOAuthScopeGroupsFor[provider],
 	}
 	if provider == gitOAuthGitHub {
 		if err := a.mgr.githubCard(r.Context(), t.ID, &out); err != nil {
@@ -347,4 +361,13 @@ func boolWord(b bool) string {
 		return "yes"
 	}
 	return "no"
+}
+
+// scopeGroupsAudit records the groups a save confirmed: a grant that suddenly covers sprints
+// is traced back to the save that asked for it.
+func scopeGroupsAudit(groups string) string {
+	if groups == "" {
+		return ""
+	}
+	return " scope_groups=" + groups
 }

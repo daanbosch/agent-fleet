@@ -110,3 +110,44 @@ func (m *manager) gitOAuthConfigured(ctx context.Context, tenantID, provider str
 	_, _, ok, err := m.gitOAuthApp(ctx, tenantID, provider)
 	return ok && err == nil
 }
+
+// scopeGroupJiraSoftware is the Jira Software scopes (boards, sprints, epics) on a Jira app.
+const scopeGroupJiraSoftware = "jira_software"
+
+// gitOAuthScopeGroupsFor is the closed set of optional scope groups per provider.
+//
+// A group is opt-in rather than always requested because Atlassian refuses an authorize
+// request naming a scope the app was not given in the developer console, and that would
+// break connecting for every member of a tenant whose administrator has not added it yet.
+var gitOAuthScopeGroupsFor = map[string][]string{
+	gitOAuthJira: {scopeGroupJiraSoftware},
+}
+
+// parseScopeGroups splits the stored column, dropping anything outside the provider's set.
+func parseScopeGroups(provider, stored string) []string {
+	out := []string{}
+	for _, g := range strings.Split(stored, ",") {
+		if g = strings.TrimSpace(g); g != "" && validScopeGroup(provider, g) {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+func validScopeGroup(provider, group string) bool {
+	for _, k := range gitOAuthScopeGroupsFor[provider] {
+		if k == group {
+			return true
+		}
+	}
+	return false
+}
+
+// gitOAuthScopeGroups is the optional scope groups the tenant's app for provider grants.
+func (m *manager) gitOAuthScopeGroups(ctx context.Context, tenantID, provider string) ([]string, error) {
+	row, found, err := m.store.GetTenantGitOAuth(ctx, tenantID, provider)
+	if err != nil || !found {
+		return nil, err
+	}
+	return parseScopeGroups(provider, row.ScopeGroups), nil
+}

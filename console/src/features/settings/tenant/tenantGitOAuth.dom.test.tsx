@@ -102,7 +102,58 @@ describe("git provider OAuth", () => {
     expect(apiJSON).toHaveBeenCalledWith("api/admin/tenants/acme/git-oauth/bitbucket", "PUT", {
       client_id: "key-2",
       client_secret: "",
+      scope_groups: [],
     });
+  });
+
+  // The Jira Software scopes are requested only once the admin confirms the app grants them;
+  // ticking the box before the Developer Console has them would stop every member connecting.
+  it("offers the Jira Software scope group unticked, and saves it once ticked", async () => {
+    api.mockResolvedValue({
+      providers: [
+        {
+          provider: "jira",
+          client_id: "cid-1",
+          has_secret: true,
+          needs_secret: true,
+          redirect_uri: "https://af.example/api/oauth/jira/callback",
+          scope_groups_available: ["jira_software", "from_a_newer_server"],
+        },
+      ],
+    });
+    apiJSON.mockResolvedValue({ provider: "jira", client_id: "cid-1", scope_groups: ["jira_software"] });
+    await mount();
+    const jira = groupFor("Jira");
+    const boxes = jira.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+    // A group this build cannot explain is not drawn.
+    expect(boxes.length).toBe(1);
+    expect(boxes[0].checked).toBe(false);
+    expect(jira.textContent).toContain("Jira Software");
+    expect(jira.textContent).toContain("read:sprint:jira-software");
+    await act(async () => boxes[0].click());
+    await act(async () => buttonIn(jira, "保存").click());
+    expect(apiJSON).toHaveBeenCalledWith("api/admin/tenants/acme/git-oauth/jira", "PUT", {
+      client_id: "cid-1",
+      client_secret: "",
+      scope_groups: ["jira_software"],
+    });
+  });
+
+  it("shows a stored scope group as ticked", async () => {
+    api.mockResolvedValue({
+      providers: [
+        {
+          provider: "jira",
+          client_id: "cid-1",
+          has_secret: true,
+          needs_secret: true,
+          scope_groups: ["jira_software"],
+          scope_groups_available: ["jira_software"],
+        },
+      ],
+    });
+    await mount();
+    expect(groupFor("Jira").querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked).toBe(true);
   });
 
   it("blocks the save when client_id is empty, so no empty row is created", async () => {
