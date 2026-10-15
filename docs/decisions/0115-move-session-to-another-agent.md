@@ -79,7 +79,8 @@ than write an empty file (decision 6).
    2. **Where it stopped**: the last user message verbatim (by decision 7's rule, an Agent-internal
       prompt is not it), the last assistant text, an unanswered question if any, instructions
       that were queued but never reached the transcript (`TranscriptData.Queued` /
-      `QueuedItems`), and whether the last turn was cut off by the limit.
+      `QueuedItems`), peer messages waiting in the source's pending spool (sender, intent and
+      body), and whether the last turn was cut off by the limit.
    3. **Working copy state** at the moment of the move: `git status --porcelain`, the diff stat,
       and the branch's commits ahead of its upstream.
    4. **Changed files** of the session (the ADR 0049 list, Agent-side aggregation).
@@ -150,32 +151,63 @@ than write an empty file (decision 6).
      claude's jsonl). Without that, `removeSessionSideFiles` deletes `~/.af-work/<target>` and a
      restored target points at a file that no longer exists. Stopping or archiving the target
      without deleting it leaves the file in place, so only the trash path needs this.
+   - **A chain of moves copies the earlier records forward.** When the source was itself a move
+     target (A → B, now B → C), B's conversation holds only the pointer to `handover-A.md` and
+     whatever B happened to read of it. So the move copies B's own handover files into C's
+     directory next to `handover-B.md`, and the new file's header lists them as the earlier
+     history. C then owns every file it depends on, and deleting A or B later takes nothing C
+     needs. The trash rule above covers all of them.
 10. **The target runs in the same working copy**, as fork does. The source is frozen first
     (decision 11), so two writers never share it; the `shared-working-copy` warning is not added.
 11. **Freezing the source.** The move must leave exactly one session that can act on the working
-    copy, against every path that can wake the source, not just the next tick.
-    1. **Movable states.** The source must be idle, `limited` or `spendLimit`. A working source
-       is refused (the user stops it or lets the turn end); a pending question, plan or
-       permission is refused too, since the move would silently abandon it.
-    2. **Close input first.** Under the session's meta lock, record `movedTo: <target>`. From
-       then on every Agent path that would start a turn or a process on the source refuses with
-       `session_moved` naming the target: `/input` and `/turn` (including the managed route that
-       resumes a stopped session from `/input`), start and resume, peer delivery (a peer message
-       to a moved session is refused, so the sender learns the new name), report-back, and
-       scheduled deliveries. Only the user lifts it, by an explicit "resume here anyway" that
-       clears `movedTo`.
-    3. **Settle the usage-limit watch.** `rateLimitTick` works on a `ListMetas` snapshot, so a
-       tick that read the meta before step 2 can still book after it. The tick therefore re-reads
-       the meta under the same lock immediately before `putRateLimitSchedule` and gives up when
-       `movedTo` is set, and the move cancels the booking and closes the episode under that lock.
-       `deleteRateLimitSchedule` is best-effort (it logs and moves on), so a booking that
-       survives is cleaned up by the next tick, which drops the schedule of any moved session
-       it sees, and a booking that fires anyway is refused by step 2's gate.
-    4. **Snapshot, then stop.** Read the transcript, `Pending`, `Queued` / `QueuedItems` and the
+    copy, against every path that can wake the source, not just the next tick. The move has two
+    states recorded in the source's meta, `moving: <target>` while it runs and `movedTo: <target>`
+    once the target exists, and both close the source's input.
+    1. **A per-session gate, not the meta lock.** The meta lock (`sessionLockMu`) is one mutex for
+       every session, so it cannot be held across a send or a CP call. Each session gets its own
+       lifecycle gate instead. Every path that can start a turn or a process on the source holds
+       it shared from its check through the point where the input is committed: `/input` and
+       `/turn` (including the managed route that resumes a stopped session and then sends), start
+       and resume, peer delivery (`deliverPendingPeer`, which goes through `/input`), report-back,
+       scheduled deliveries, and a driver's own queue pump before it commits a queued item (the
+       cursor `pump` runs outside any HTTP handler). The move takes the gate exclusively, so it
+       waits for inputs already accepted to finish committing, and none can start after.
+    2. **Under the exclusive gate, check the state, then close input.** The source must be idle,
+       `limited` or `spendLimit`. A working source is refused (the user stops it or lets the turn
+       end); a pending question, plan or permission is refused too, since the move would silently
+       abandon it. Then `moving: <target>` is written. From here every gated path refuses with
+       `session_moved` naming the target; a peer message is refused so its sender learns the new
+       name.
+    3. **Snapshot, then stop.** Read the transcript, `Pending`, `Queued` / `QueuedItems`, the
+       pending peer spool (`agents.PendingPeers`, held apart from the driver queue) and the
        working copy (decision 6) while the handle still exists, then stop the source. cursor and
        kiro drop their queue (`q.DropAll`) on stop, and a managed cursor's transcript exists only
        in the handle, so the order matters. Stopping consumes a stop-after-turn arm.
-    5. **What the user sees afterwards.** The source is stopped, not archived, and its row says
+    4. **Render, write, create the target.** If anything fails before the target is created (no
+       turns, a write error, a create that the Agent refused), the move is rolled back: the file
+       is removed, `moving` is cleared, and the usage-limit episode and its booking are left as
+       they were (a booking that fired during the move was refused by the gate; the next tick
+       books again, as after any resume that did not take), so the source is exactly as before except that it is stopped (and a managed
+       cursor source has lost its mirror, which the dialog says before the move). If the create
+       may have started a target (a timeout, an error after the session was written), `moving`
+       stays: the source remains closed, and its row offers "retry" and "cancel the move"
+       instead of guessing which side may act.
+    5. **Commit.** Once the target exists, `moving` becomes `movedTo`, and the spooled peer
+       messages are taken out of the source's spool (they are in the file, decision 6.2; their
+       senders are not told). Then the usage-limit watch is settled:
+       - `rateLimitTick` works on a `ListMetas` snapshot, so a tick that read the meta before the
+         move can still book after it. The tick therefore re-reads the meta under the gate
+         immediately before `putRateLimitSchedule` and gives up when `moving` or `movedTo` is set.
+       - Cancelling a booking must be able to fail visibly: `deleteRateLimitSchedule` returns
+         its error, and a schedule id whose cancellation is unconfirmed is kept in a durable
+         cleanup record separate from the episode. The episode closes for display; the id is
+         dropped only when the CP confirms the delete or reports the schedule gone. Each tick
+         retries the cleanup records, so a cancellation that failed while the CP was unreachable
+         is finished after the CP returns, across an Agent restart, without waking the source.
+         A booking that fires before that is refused by the gate.
+    6. **Only the user reopens a moved source**, by an explicit "resume here anyway" that clears
+       `movedTo`.
+    7. **What the user sees afterwards.** The source is stopped, not archived, and its row says
        where the conversation went. A managed cursor source's mirror is empty once stopped; the
        handover file is then the only record, and the dialog says so before the move. A moved
        source is otherwise an ordinary stopped session: the stopped-session TTL archives it
@@ -198,16 +230,21 @@ than write an empty file (decision 6).
 
 ## Phases
 
-- **P2a — the move.** `POST /api/sessions/{name}/move {kind, model?, driver?}` on the Agent:
-  check the state (decision 11.1), close input (11.2), settle the watch (11.3), build and render
-  (decisions 6–8), write (9), snapshot and stop (11.4), create the target with `initial_prompt`
-  (1). The CP route allow-list gains it. Console: a session-menu item next to the existing
-  handover, a dialog with the agent picker (other kinds that can read the file, with
-  `get_agent_usage` where the kind has a source), the dirty state, queued instructions and running
-  children. Tests: the filter and size rules on the value and on the final Markdown; a tick racing
-  the move books nothing that survives; every input path refuses a moved source; a stopped managed
-  cursor source is refused with a reason; a target moved to the trash and restored still has its
-  handover file.
+- **P2a — the move.** `POST /api/sessions/{name}/move {kind, model?, driver?}` on the Agent: take
+  the gate and check the state, then close input (decision 11.1–11.2), snapshot and stop (11.3),
+  build and render (decisions 6–8), write (9), create the target with `initial_prompt` (1), then
+  commit or roll back (11.4–11.5). The CP route allow-list gains it. Console: a session-menu item
+  next to the existing handover, a dialog with the agent picker (other kinds that can read the
+  file, with `get_agent_usage` where the kind has a source), the dirty state, queued instructions,
+  spooled peer messages and running children. Tests: the filter and size rules on the value and on
+  the final Markdown; an input held between its gate check and its commit, and a queue pump about
+  to commit, either finish before the snapshot or are refused; a tick racing the move books
+  nothing that survives; a cancellation that fails while the CP is unreachable is finished after
+  an Agent restart without waking the source; every input path refuses a moving or moved source;
+  an empty transcript, a write error and a refused create each roll back cleanly; a source with
+  spooled peer messages carries them into the file once; a stopped managed cursor source is
+  refused with a reason; a target moved to the trash and restored still has its handover files;
+  after A → B → C, deleting A and B leaves C's files readable.
 - **P2b — the trigger.** When a session shows `limited` (or `spendLimit`), the mirror's limit
   banner offers the move with candidates that have quota left. Only claude, managed codex and
   muse reach this state today.
