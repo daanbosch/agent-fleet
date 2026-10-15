@@ -645,7 +645,10 @@ Follow-ups: #1942, #1943.
 Note (2026-10-16): a carried plan can now be reviewed in another session (#2211). `Carried`
 keeps the plan file path (`planFile`) when promoted, because `status.Remove` drops the
 session's path record; `GET /sessions/{name}/plan-file` falls back to the carried plan,
-re-validating the path and otherwise snapshotting the text. The carried card shows a review
-button that sends nothing to the session (no modal is left) and disables "Approve and run"
-while the card stays mounted. The reviewer's peer message resumes the planner, which may no
-longer be in plan mode, so findings arrive as prose.
+re-validating the path (symlinks resolved back into the plans dir) and otherwise snapshotting
+the text. The carried card shows a review button that sends nothing to the session (no modal
+is left). Once the reviewer session has been created the card is discarded (`discard` does
+not wake the session), so no reload or pane can approve a plan under review; a cancelled
+launch dialog leaves the card alone, and a failed discard is reported with the card's own
+Discard as the retry. The reviewer's peer message resumes the planner, which may no longer be
+in plan mode, so findings arrive as prose.

@@ -1,11 +1,12 @@
 import { useEffect } from "react";
-import { sessionCarriedAnswer, sessionPlanFile, sessionPlanRespond } from "../../../core/api/client.ts";
+import { sessionPlanFile, sessionPlanRespond } from "../../../core/api/client.ts";
 import type { Session } from "../../../types/session.ts";
 import { t as tr } from "../../../lib/i18n/index.ts";
 import type { useLayoutStore } from "../../../layout/store.ts";
 import type { useToast } from "../../../ui/ToastProvider.tsx";
 import { useLaunchSeed, useLaunchTarget, useReposStore } from "../../repos/store.ts";
 import { handoffLaunchTarget } from "../handoffLaunch.ts";
+import { discardCarriedAfterReview } from "../carriedPlanReview.ts";
 import { deliverPlanComments, planKey } from "../planComments.ts";
 import { reviewPrompt, reviewTitle } from "../planReview.ts";
 import { planTitle } from "../transcript/blocks.tsx";
@@ -138,11 +139,7 @@ export function usePlanActions({
       reviewPrompt({ parent: session, path: res.path, dir: target.repo.path || "" }),
       reviewTitle(planTitle(plan)),
     );
-    useLaunchSeed.getState().setOnLaunched(() => {
-      void sessionCarriedAnswer(session, { decision: "discard" }).then((r) => {
-        if (r.ok) setCarried(null);
-      });
-    });
+    useLaunchSeed.getState().setOnLaunched(discardCarriedAfterReview({ session, setCarried, toast }));
     useLaunchTarget.getState().open(target.repo, "", true);
   };
 
