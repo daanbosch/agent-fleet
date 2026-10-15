@@ -110,9 +110,12 @@ af_efs_backup_check() {
         --query 'BackupSelectionsList[].SelectionId' --output text 2>/dev/null)" || rc=1
       for sid in $sel_ids; do
         [ "$sid" = None ] && continue
+        # Conditions counts the condition entries, not its keys: AWS returns all four operator
+        # keys with empty lists on a selection that has no conditions, so counting the keys
+        # reads every real selection as COMPLEX and the verdict can never be ok.
         # shellcheck disable=SC2016  # backticks are JMESPath literals, not a subshell
         extra="$("${AWS[@]}" backup get-backup-selection --backup-plan-id "$plan" --selection-id "$sid" \
-          --query 'BackupSelection.[length(NotResources||`[]`),length(Conditions||`{}`),length(ListOfTags||`[]`)]' \
+          --query 'BackupSelection.[length(NotResources||`[]`),length(Conditions.*[]||`[]`),length(ListOfTags||`[]`)]' \
           --output text 2>/dev/null)" || { rc=1; continue; }
         if [ "$extra" != "$(printf '0\t0\t0')" ]; then res="$res COMPLEX"; continue; fi
         got="$("${AWS[@]}" backup get-backup-selection --backup-plan-id "$plan" --selection-id "$sid" \
