@@ -41,6 +41,12 @@ func TestProbeKinds(t *testing.T) {
 	}
 	deadAddr := closed.Addr().String()
 	_ = closed.Close()
+	// Probe the freed port before any other listener starts: the kernel may hand the same
+	// port to one of the listeners below (seen: the TLS-alert one), after which "nothing
+	// listening" would answer.
+	if got := Probe(context.Background(), deadAddr); got != Unreachable {
+		t.Errorf("nothing listening: Probe = %q, want %q", got, Unreachable)
+	}
 
 	notHTTP, _ := rawListener(t, func(c net.Conn) {
 		defer c.Close()
@@ -64,7 +70,6 @@ func TestProbeKinds(t *testing.T) {
 	defer httpSrv.Close()
 
 	for _, tc := range []struct{ name, addr, want string }{
-		{"nothing listening", deadAddr, Unreachable},
 		{"banner that is not HTTP", notHTTP, NotHTTP},
 		{"hangs up after connect", hangsUp, NotHTTP},
 		{"TLS alert record", tlsAlert, TLS},
