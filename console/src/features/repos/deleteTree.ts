@@ -183,9 +183,18 @@ export function sessionsToClear(p: CopyPlan, withStop: boolean): { archive: Sess
   };
 }
 
+/** Live sessions the "stop them first" option could stop: every row held ONLY by a running
+ *  session, whatever it would cost once stopped. Gates whether the option is offered at all —
+ *  a row that would lose work still needs it (that is when the user is stuck), and the
+ *  tick on the row afterwards is the confirmation of the loss. A lock keeps a row out. */
+export function stoppableSessions(plans: CopyPlan[]): number {
+  return plans.filter((p) => p.aliveOnlyBlock).reduce((n, p) => n + p.alive.length, 0);
+}
+
 /** Rows to tick when the "stop them first" tick goes on: the ones held ONLY by a running
  *  session and safe once it is gone. A row that would also take work with it stays for the
- *  user to tick, exactly as it does without the option. */
+ *  user to tick, exactly as it does without the option. Not the visibility rule — see
+ *  stoppableSessions. */
 export function stopUnblocks(plans: CopyPlan[]): CopyPlan[] {
   return plans.filter((p) => p.aliveOnlyBlock && p.stoppedGrade === "safe");
 }
