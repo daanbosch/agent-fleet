@@ -217,6 +217,8 @@ func buildMux() *http.ServeMux {
 	mux.HandleFunc("POST /sessions/{name}/start", sessionx.HandleStartSession)
 	// Structured transcript (role + text + timestamp) for the Console chat view.
 	mux.HandleFunc("GET /sessions/{name}/messages", sessionx.HandleSessionMessages)
+	// The whole conversation as one Markdown file, for download (#2183).
+	mux.HandleFunc("GET /sessions/{name}/export", sessionx.HandleSessionExport)
 	// Session-side MCP may propose the prompt for a follow-up session. Creation itself
 	// remains a user action in the Console launch dialog.
 	mux.HandleFunc("GET /sessions/{name}/handoff-proposal", sessionx.HandleSessionHandoffProposal)

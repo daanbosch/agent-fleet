@@ -1,0 +1,301 @@
+package transcript
+
+import (
+	"fmt"
+	"strings"
+	"time"
+)
+
+// MarkdownOptions shapes a Markdown rendering of a conversation (issue #2183). The same
+// renderer is meant to feed the cross-agent move (#2182), so everything that differs
+// between a person's download and an agent's input is an option here, not a second
+// renderer.
+type MarkdownOptions struct {
+	Title string
+	// Header lines are written as a bullet list under the title, already formatted.
+	Header []string
+	// ToolOutput includes tool output, edit diffs and delegation prompts. Without it a
+	// tool call is reduced to its name and one-line label.
+	ToolOutput bool
+	// Lang picks the labels ("en", anything else = Japanese), as uiprefs.Locale() does.
+	Lang string
+	// Loc is the zone turn times are shown in; nil = time.Local.
+	Loc *time.Location
+	// Scrub runs over every piece of conversation text before it is written. Tool output
+	// carries tokens even when the user downloads the file themselves, so a caller that
+	// leaves this nil writes them verbatim.
+	Scrub func(string) string
+}
+
+type mdLabels struct {
+	user, assistant, peer, operator, injected, compacted, tool, subagent,
+	question, answer, declined, plan, files, errorL, empty string
+}
+
+var mdLabelsJA = mdLabels{
+	user: "ユーザー", assistant: "アシスタント", peer: "ピアセッション", operator: "オペレーター経由",
+	injected: "自動送信", compacted: "コンテキスト圧縮の要約", tool: "ツール", subagent: "サブエージェント",
+	question: "質問", answer: "回答", declined: "回答されませんでした", plan: "計画", files: "ファイル",
+	errorL: "エラー", empty: "（会話はまだありません）",
+}
+
+var mdLabelsEN = mdLabels{
+	user: "User", assistant: "Assistant", peer: "Peer session", operator: "via operator",
+	injected: "sent automatically", compacted: "Context compaction summary", tool: "Tool", subagent: "Subagent",
+	question: "Question", answer: "Answer", declined: "not answered", plan: "Plan", files: "Files",
+	errorL: "Error", empty: "(no conversation yet)",
+}
+
+// Markdown renders turns, oldest first, as one Markdown document. Thinking is never
+// written: it is the model's scratch work, not part of what was said. Sidechain turns
+// (a subagent's own conversation) are left out too; the delegation part in the parent
+// turn carries the instruction and the result.
+func Markdown(turns []Turn, o MarkdownOptions) string {
+	lb := mdLabelsJA
+	if o.Lang == "en" {
+		lb = mdLabelsEN
+	}
+	scrub := o.Scrub
+	if scrub == nil {
+		scrub = func(s string) string { return s }
+	}
+	var b strings.Builder
+	if t := strings.TrimSpace(o.Title); t != "" {
+		b.WriteString("# " + oneLine(scrub(t)) + "\n\n")
+	}
+	for _, h := range o.Header {
+		b.WriteString("- " + oneLine(scrub(h)) + "\n")
+	}
+	if len(o.Header) > 0 {
+		b.WriteString("\n")
+	}
+
+	wrote := false
+	prevRole := ""
+	for _, t := range turns {
+		if t.Sidechain || t.CostOnly {
+			continue
+		}
+		var body strings.Builder
+		if t.Compact {
+			writeCompact(&body, t, o, lb, scrub)
+		} else {
+			for _, p := range t.Parts {
+				writePart(&body, p, o, lb, scrub)
+			}
+			if len(t.Parts) == 0 && strings.TrimSpace(t.Text) != "" {
+				body.WriteString(strings.TrimSpace(scrub(t.Text)) + "\n\n")
+			}
+		}
+		if body.Len() == 0 {
+			continue
+		}
+		// claude and codex write one assistant turn as many rows; a heading per row would
+		// split one answer into a dozen sections.
+		if t.Role != "assistant" || prevRole != "assistant" || t.Compact {
+			if wrote {
+				b.WriteString("---\n\n")
+			}
+			b.WriteString("## " + turnHeading(t, lb, o.Loc) + "\n\n")
+		}
+		b.WriteString(body.String())
+		wrote = true
+		prevRole = t.Role
+		if t.Compact {
+			prevRole = ""
+		}
+	}
+	if !wrote {
+		b.WriteString(lb.empty + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n") + "\n"
+}
+
+func turnHeading(t Turn, lb mdLabels, loc *time.Location) string {
+	var h string
+	switch {
+	case t.Compact:
+		h = lb.compacted
+	case t.Role == "assistant":
+		h = lb.assistant
+		if t.Model != "" {
+			h += " (" + t.Model + ")"
+		}
+	case t.Source == SourcePeer:
+		h = lb.peer
+		if t.PeerFrom != "" {
+			h += " (" + t.PeerFrom + ")"
+		}
+	case t.Source == "operator":
+		h = lb.user + " (" + lb.operator + ")"
+	case t.Source != "":
+		h = lb.user + " (" + lb.injected + ": " + t.Source + ")"
+	default:
+		h = lb.user
+	}
+	if t.TS != "" {
+		h += " · " + ShortTime(t.TS, loc)
+	}
+	return oneLine(h)
+}
+
+func writeCompact(b *strings.Builder, t Turn, o MarkdownOptions, lb mdLabels, scrub func(string) string) {
+	if !o.ToolOutput {
+		// The heading alone says a compaction happened; its summary repeats what the
+		// turns above already hold.
+		b.WriteString("_" + lb.compacted + "_\n\n")
+		return
+	}
+	writeFenced(b, "", scrub(t.Text))
+}
+
+func writePart(b *strings.Builder, p Part, o MarkdownOptions, lb mdLabels, scrub func(string) string) {
+	switch p.Kind {
+	case "thinking":
+	case "text":
+		if s := strings.TrimSpace(p.Text); s != "" {
+			b.WriteString(scrub(s) + "\n\n")
+		}
+	case "tool":
+		b.WriteString("> " + lb.tool + ": `" + oneLine(p.Tool) + "`")
+		if label := firstNonEmpty(p.Info, p.File); label != "" {
+			b.WriteString(" — " + oneLine(scrub(label)))
+		}
+		b.WriteString("\n\n")
+		if !o.ToolOutput {
+			return
+		}
+		for _, e := range p.Edits {
+			writeFenced(b, "diff", scrub(editDiff(e)))
+		}
+		if s := strings.TrimSpace(p.Output); s != "" {
+			writeFenced(b, "", scrub(s))
+		}
+	case "delegation":
+		h := lb.subagent
+		if p.AgentType != "" {
+			h += " (" + p.AgentType + ")"
+		}
+		b.WriteString("> " + oneLine(h))
+		if p.Info != "" {
+			b.WriteString(" — " + oneLine(scrub(p.Info)))
+		}
+		b.WriteString("\n\n")
+		if !o.ToolOutput {
+			return
+		}
+		if s := strings.TrimSpace(p.Prompt); s != "" {
+			writeFenced(b, "", scrub(s))
+		}
+		if s := strings.TrimSpace(p.Output); s != "" {
+			writeFenced(b, "", scrub(s))
+		}
+	case "question":
+		for _, q := range p.Questions {
+			b.WriteString("**" + lb.question + ":** " + scrub(strings.TrimSpace(q.Question)) + "\n\n")
+			for _, opt := range q.Options {
+				line := "- " + oneLine(scrub(opt.Label))
+				if opt.Description != "" {
+					line += " — " + oneLine(scrub(opt.Description))
+				}
+				b.WriteString(line + "\n")
+			}
+			if len(q.Options) > 0 {
+				b.WriteString("\n")
+			}
+		}
+		switch {
+		case p.Declined:
+			b.WriteString("**" + lb.answer + ":** _" + lb.declined + "_\n\n")
+		case strings.TrimSpace(p.Answer) != "":
+			b.WriteString("**" + lb.answer + ":** " + scrub(strings.TrimSpace(p.Answer)) + "\n\n")
+		}
+	case "plan":
+		// A plan is what the agent proposed to do, so it is conversation, not tool output.
+		if s := strings.TrimSpace(p.Plan); s != "" {
+			b.WriteString("**" + lb.plan + ":**\n\n" + scrub(s) + "\n\n")
+		}
+	case "userfile":
+		b.WriteString("**" + lb.files + ":**")
+		if p.Caption != "" {
+			b.WriteString(" " + oneLine(scrub(p.Caption)))
+		}
+		b.WriteString("\n\n")
+		for _, f := range p.Files {
+			b.WriteString("- `" + oneLine(f) + "`\n")
+		}
+		b.WriteString("\n")
+	case "error":
+		b.WriteString("> **" + lb.errorL + ":** " + oneLine(scrub(firstNonEmpty(p.Info, p.Text))) + "\n\n")
+		if p.Info != "" && strings.TrimSpace(p.Text) != "" {
+			writeFenced(b, "", scrub(strings.TrimSpace(p.Text)))
+		}
+	}
+}
+
+// ShortTime shows an RFC3339 stamp to the minute in loc (nil = time.Local). A stamp that
+// does not parse is returned as it is rather than dropped.
+func ShortTime(ts string, loc *time.Location) string {
+	t, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
+		return ts
+	}
+	if loc == nil {
+		loc = time.Local
+	}
+	return t.In(loc).Format("2006-01-02 15:04")
+}
+
+func editDiff(e Edit) string {
+	var b strings.Builder
+	for _, l := range splitLines(e.Old) {
+		b.WriteString("-" + l + "\n")
+	}
+	for _, l := range splitLines(e.New) {
+		b.WriteString("+" + l + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func splitLines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimRight(s, "\n"), "\n")
+}
+
+// writeFenced writes s as a code block whose fence is longer than any backtick run inside
+// it, so tool output that itself contains ``` cannot close the block early.
+func writeFenced(b *strings.Builder, lang, s string) {
+	if strings.TrimSpace(s) == "" {
+		return
+	}
+	fence := strings.Repeat("`", max(3, longestRun(s, '`')+1))
+	fmt.Fprintf(b, "%s%s\n%s\n%s\n\n", fence, lang, strings.TrimRight(s, "\n"), fence)
+}
+
+func longestRun(s string, c byte) int {
+	best, cur := 0, 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			cur++
+			best = max(best, cur)
+		} else {
+			cur = 0
+		}
+	}
+	return best
+}
+
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+func firstNonEmpty(ss ...string) string {
+	for _, s := range ss {
+		if strings.TrimSpace(s) != "" {
+			return strings.TrimSpace(s)
+		}
+	}
+	return ""
+}
