@@ -249,9 +249,11 @@ run.
 ```bash
 PWDIR="$(mktemp -d)"; chmod 700 "$PWDIR"
 cleanup() {
-  kubectl -n default delete pod psql-grant --ignore-not-found
-  kubectl -n default delete secret psql-grant-pw --ignore-not-found
-  rm -rf "$PWDIR"
+  rm -rf "$PWDIR"                                   # the local copy first: it needs no API
+  kubectl -n default delete pod psql-grant --ignore-not-found --wait=false --request-timeout=30s \
+    || echo "could not delete pod psql-grant: delete it by hand"
+  kubectl -n default delete secret psql-grant-pw --ignore-not-found --request-timeout=30s \
+    || echo "WARNING: secret psql-grant-pw may remain (it holds the postgres password): delete it by hand"
 }
 trap cleanup EXIT                                   # runs under `set -e` too
 read -rs -p 'postgres password: ' PGPW; echo        # or read it from your vault
@@ -267,7 +269,9 @@ kubectl -n default wait --for=jsonpath='{.status.phase}'=Succeeded pod/psql-gran
 kubectl -n default logs psql-grant        # expect GRANT ROLE, ALTER DATABASE, ALTER SCHEMA
 ```
 
-The `EXIT` trap removes the pod, the Secret and the password file even when `wait` times out
+The `EXIT` trap removes the password file first, then tries each delete on its own, so one
+failing `kubectl delete` (expired login, no connection) does not skip the rest; if the Secret
+could not be deleted it says so and you delete it by hand. It runs even when `wait` times out
 or a command fails under `set -e`; the `|| echo` keeps `logs` reachable so the `ERROR` can be
 read before the trap fires. (The password file is a mode-700 directory's file on your machine
 for the length of the run; use a FIFO or your vault's own file mechanism if that is not
