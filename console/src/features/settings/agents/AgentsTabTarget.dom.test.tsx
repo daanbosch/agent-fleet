@@ -43,7 +43,7 @@ beforeEach(() => {
   Element.prototype.scrollIntoView = function (this: HTMLElement, opts?: unknown) {
     scrolled.push({ id: this.dataset.settingsTarget, opts });
   };
-  window.matchMedia = ((q: string) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {} })) as typeof window.matchMedia;
+  window.matchMedia = ((q: string) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia;
 });
 
 afterEach(() => {
@@ -66,7 +66,7 @@ describe("Settings > Agents target", () => {
   });
 
   it("jumps instead of animating when the user prefers reduced motion", async () => {
-    window.matchMedia = ((q: string) => ({ matches: true, media: q, addEventListener() {}, removeEventListener() {} })) as typeof window.matchMedia;
+    window.matchMedia = ((q: string) => ({ matches: true, media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia;
     useSettingsUI.getState().openSettings("agents", { target: "claude" });
     await mount();
     expect(scrolled[0].opts).toEqual({ block: "start", behavior: "auto" });
