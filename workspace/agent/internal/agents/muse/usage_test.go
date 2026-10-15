@@ -196,3 +196,47 @@ func waitFor(t *testing.T, cond func() bool) {
 		}
 	}
 }
+
+// The reported case: weekly at 99% stops every turn, so the observation freezes with a 5-hour
+// 98% whose reset has passed. The chip must get that window as stale (and rolled forward), and
+// the weekly one untouched.
+func TestUsageMarksAPastWindowStale(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	resetQuota(t)
+	writeAuth(t, accountJSON)
+	installedMuse(t)
+
+	past := time.Now().Add(-time.Hour)
+	weekly := time.Now().Add(4 * 24 * time.Hour)
+	recordQuota(msp.SubscriptionUsage{ObservedAtMs: time.Now().Add(-2 * time.Hour).UnixMilli(), Tier: "pro",
+		Window: msp.SubscriptionUsageWindow{UsedPercent: 98, WindowDurationMins: 300, ResetsAtMs: past.UnixMilli()},
+		Weekly: msp.SubscriptionUsageWeekly{UsedPercent: 99, ResetsAtMs: weekly.UnixMilli()}})
+
+	out := usageJSON(t)
+	five, _ := out["fiveHour"].(map[string]any)
+	if five["stale"] != true || five["pct"] != float64(0) {
+		t.Fatalf("past window = %+v, want pct 0 and stale", five)
+	}
+	at, err := time.Parse(time.RFC3339, five["resetsAt"].(string))
+	if err != nil || !at.After(time.Now()) {
+		t.Errorf("resetsAt %v not rolled into the future (%v)", five["resetsAt"], err)
+	}
+	week, _ := out["sevenDay"].(map[string]any)
+	if week["stale"] != nil || week["pct"] != float64(99) {
+		t.Errorf("live weekly = %+v, want 99 and no stale", week)
+	}
+}
+
+// windowMins can be 0 on the wire: then the length is unknown, so the window is flagged but
+// its reset stays where the host put it.
+func TestQuotaWindowWithoutLengthIsNotRolled(t *testing.T) {
+	now := time.Now()
+	past := now.Add(-time.Hour)
+	w := quotaWindow(98, 0, past.UnixMilli(), now)
+	if w["stale"] != true || w["pct"] != float64(0) {
+		t.Fatalf("window = %+v", w)
+	}
+	if w["resetsAt"] != past.UTC().Truncate(time.Second).Format(time.RFC3339) {
+		t.Errorf("resetsAt = %v, want the recorded instant", w["resetsAt"])
+	}
+}

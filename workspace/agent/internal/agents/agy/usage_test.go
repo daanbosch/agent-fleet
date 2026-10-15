@@ -182,3 +182,39 @@ func TestGroupHeaderShape(t *testing.T) {
 		t.Error("fixture should be pre-cleaned (no CR)")
 	}
 }
+
+// resetsAt is scrape time + "Refreshes in", so a cached reading outlives its own reset. Both
+// the weekly limit and the 5-hour sub-window must come back flagged stale with the reset rolled
+// forward, while a live window and the caller's cache stay as they were.
+func TestAdjustGroupsMarksPastWindowsStale(t *testing.T) {
+	now := time.Date(2026, 10, 15, 14, 0, 0, 0, time.UTC)
+	ts := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339) }
+	cached := []UsageGroup{
+		{Label: "GEMINI MODELS", RemainingPct: 1, ResetsAt: ts(4 * 24 * time.Hour),
+			FiveHour: &UsageLimit{RemainingPct: 2, ResetsAt: ts(-time.Hour)}},
+		{Label: "CLAUDE AND GPT MODELS", RemainingPct: 50, ResetsAt: ts(-time.Minute),
+			FiveHour: &UsageLimit{RemainingPct: 100}},
+	}
+	got := adjustGroups(cached, now)
+
+	g := got[0]
+	if g.Stale || g.ResetsAt != ts(4*24*time.Hour) || g.RemainingPct != 1 {
+		t.Errorf("live weekly changed: %+v", g)
+	}
+	if !g.FiveHour.Stale || g.FiveHour.ResetsAt != ts(4*time.Hour) {
+		t.Errorf("past 5h = %+v, want stale and rolled to +4h", g.FiveHour)
+	}
+	if g.FiveHour.RemainingPct != 2 {
+		t.Errorf("remaining was rewritten to %v; stale must read as unknown, not as a new value", g.FiveHour.RemainingPct)
+	}
+	h := got[1]
+	if !h.Stale || h.ResetsAt == ts(-time.Minute) {
+		t.Errorf("past weekly = %+v", h)
+	}
+	if h.FiveHour.Stale || h.FiveHour.ResetsAt != "" {
+		t.Errorf("a limit with no reset must not go stale: %+v", h.FiveHour)
+	}
+	if cached[0].FiveHour.Stale || cached[0].FiveHour.ResetsAt != ts(-time.Hour) {
+		t.Error("adjustGroups mutated the cache")
+	}
+}

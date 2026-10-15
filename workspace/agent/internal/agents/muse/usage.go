@@ -17,6 +17,7 @@ import (
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/msp"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/usagewin"
 )
 
 var quotaMu sync.Mutex
@@ -97,16 +98,28 @@ func HandleUsage(w http.ResponseWriter, r *http.Request) {
 	out["ok"] = true
 	out["plan"] = u.Tier
 	out["windowMins"] = u.Window.WindowDurationMins
-	out["fiveHour"] = map[string]any{
-		"pct":      u.Window.UsedPercent,
-		"resetsAt": epochMsToRFC3339(u.Window.ResetsAtMs),
-	}
-	out["sevenDay"] = map[string]any{
-		"pct":      u.Weekly.UsedPercent,
-		"resetsAt": epochMsToRFC3339(u.Weekly.ResetsAtMs),
-	}
-	out["ageSec"] = int(time.Since(time.UnixMilli(u.ObservedAtMs)).Seconds())
+	now := time.Now()
+	out["fiveHour"] = quotaWindow(u.Window.UsedPercent, int(u.Window.WindowDurationMins), u.Window.ResetsAtMs, now)
+	out["sevenDay"] = quotaWindow(u.Weekly.UsedPercent, 7*24*60, u.Weekly.ResetsAtMs, now)
+	out["ageSec"] = int(now.Sub(time.UnixMilli(u.ObservedAtMs)).Seconds())
 	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+// quotaWindow is one chip window. The observation only refreshes when a muse turn completes,
+// so once the weekly cap stops turns the 5-hour reading freezes with a reset that passes;
+// serving it verbatim showed a past reset time as the one to wait for. A window past its
+// reset goes through the shared rule (usagewin.Adjust): 0%, stale, reset rolled forward by
+// windowMins (not rolled when the host stated no length).
+func quotaWindow(pct int64, windowMins int, resetsAtMs int64, now time.Time) map[string]any {
+	if resetsAtMs <= 0 {
+		return map[string]any{"pct": pct, "resetsAt": ""}
+	}
+	p, reset, stale := usagewin.Adjust(float64(pct), windowMins, time.UnixMilli(resetsAtMs), now)
+	w := map[string]any{"pct": p, "resetsAt": reset.UTC().Format(time.RFC3339)}
+	if stale {
+		w["stale"] = true
+	}
+	return w
 }
 
 // epochMsToRFC3339 renders a wire timestamp the way the other usage endpoints do. Zero means

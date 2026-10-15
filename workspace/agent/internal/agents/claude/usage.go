@@ -6,6 +6,7 @@ import (
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/limitepoch"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/usagewin"
 )
 
 // Claude subscription usage (the 5-hour + weekly bars claude shows in its /usage view)
@@ -79,17 +80,7 @@ func HandleUsage(w http.ResponseWriter, r *http.Request) {
 // reset instant alone can't distinguish "genuinely idle" from "we stopped looking", so
 // say which one it is instead of dressing a guess up as a measurement.
 func adjustWindow(pct float64, windowMin int, resetEpoch int64, now time.Time) *usageWindow {
-	reset := time.Unix(resetEpoch, 0).UTC()
-	stale := false
-	if !reset.After(now) {
-		pct, stale = 0, true
-		if windowMin > 0 {
-			step := time.Duration(windowMin) * time.Minute
-			// Advance directly (not a loop) so a very stale capture can't spin.
-			n := now.Sub(reset)/step + 1
-			reset = reset.Add(step * n)
-		}
-	}
+	pct, reset, stale := usagewin.Adjust(pct, windowMin, time.Unix(resetEpoch, 0).UTC(), now)
 	return &usageWindow{Pct: pct, ResetsAt: reset.Format(time.RFC3339), Stale: stale}
 }
 
