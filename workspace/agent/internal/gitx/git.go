@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -440,17 +442,28 @@ func worktreeIntegration(parentDir, worktreeDir, targetBranch string) (RepoInteg
 }
 
 func HandleListRepos(w http.ResponseWriter, r *http.Request) {
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"repos": listRepos()})
+	repos, err := listRepos()
+	if err != nil {
+		// 5xx, never an empty 200: the Console treats a 200 as "this is the whole list" and
+		// would blank the rail on a read error that says nothing about what is on disk.
+		httpx.WriteErr(w, http.StatusInternalServerError, "repos_read_failed", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"repos": repos})
 }
 
 // listRepos builds the GET /repos list. The per-copy git answers come from listCache
 // (repos_cache.go), which says which field is invalidated by what.
-func listRepos() []Repo {
+// A missing ~/repos is an empty list; any other read error is returned.
+func listRepos() ([]Repo, error) {
 	repos := []Repo{}
 	global := globalConfigPaths()
 	live := map[string]bool{}
-	entries, _ := os.ReadDir(ReposRoot()) // missing root => empty list
-	var gitIdx []int                      // positions in repos that still need their git facts
+	entries, err := os.ReadDir(ReposRoot())
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	var gitIdx []int // positions in repos that still need their git facts
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -485,7 +498,7 @@ func listRepos() []Repo {
 			repos[i].Locked = locked[absPath(repos[i].Path)]
 		}
 	}
-	return repos
+	return repos, nil
 }
 
 type cloneReq struct {

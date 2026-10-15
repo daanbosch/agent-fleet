@@ -13,6 +13,7 @@ import { Button, IconButton } from "../../ui/Button.tsx";
 import { EmptyState } from "../../ui/EmptyState.tsx";
 import { useToast } from "../../ui/ToastProvider.tsx";
 import { useTenantStore } from "../../core/store/tenant.ts";
+import { useWorkspaceStore } from "../../core/store/workspace.ts";
 import { useReposStore, useLaunchTarget, useRepoReveal } from "../repos/store.ts";
 import { NewRepoModal } from "../repos/NewRepoModal.tsx";
 import { cloneRepo, svnCheckout, initRepo } from "../repos/clone.ts";
@@ -42,7 +43,8 @@ export const ProjectTree = memo(function ProjectTree() {
   const filterBarRef = usePublishedHeight<HTMLDivElement>("--proj-filter-h");
   const repos = useReposStore((s) => s.repos);
   const refreshRepos = useReposStore((s) => s.refresh);
-  const clearRepos = useReposStore((s) => s.clear);
+  const loadState = useReposStore((s) => s.loadState);
+  const wsState = useWorkspaceStore((s) => s.state);
   const sessions = useSessionsStore((s) => s.sessions);
   const openArchived = useSessionUI((u) => u.openArchived);
   const openCleanup = useSessionUI((u) => u.openCleanup);
@@ -82,22 +84,19 @@ export const ProjectTree = memo(function ProjectTree() {
 
   // Right after a WS start the agent is still unreachable and the CP answers GET /api/repos with
   // a plain-text 502. The store's refresh() treats that as a transient failure, keeps repos and
-  // returns false, so while running this retries with backoff until the agent is back — otherwise
-  // the rail sticks on "no repositories" until the 60s poll arrives and every session falls into
-  // the other-sessions section. A stopped WS returns the same 502 and the two can only be told
-  // apart by running, so while stopped the result is settled as empty to avoid pointless retries
-  // (same shape as ProjectFiles).
+  // returns false, so while running this retries with backoff until the agent is back. A stopped
+  // WS returns the same 502; it is not retried (the running edge re-runs this via deps), and the
+  // list is NOT cleared: `running` is also false for "unknown" / "starting" / "none" blips that
+  // say nothing about the repos, so the empty area below reports the state instead.
   useRetryLoad(
     async (signal) => {
       const settled = await refreshRepos();
       if (signal.aborted) return true;
       if (settled) return true;
-      if (running) return false; // agent still booting — retry
-      clearRepos(); // stopped WS — settle to empty
-      return true;
+      return !running;
     },
     // tenant: a switch between two running workspaces changes nothing else here.
-    [refreshRepos, clearRepos, running, tenant],
+    [refreshRepos, running, tenant],
   );
 
   // Working sets (docs/log/52): scope to the active set first — a whole project
@@ -207,6 +206,11 @@ export const ProjectTree = memo(function ProjectTree() {
         {jobs.map((j) => (
           <RepoJobRow key={j.id} job={j} />
         ))}
+        {repos.length > 0 && loadState === "unreachable" && (
+          <li className="proj-sub-empty" role="status">
+            {tr("pj.repos_stale")}
+          </li>
+        )}
         {roots.length === 0 && jobs.length === 0 && (
           nq ? (
             <li className="proj-sub-empty">{tr("pj.no_match", { q: q.trim() })}</li>
@@ -214,6 +218,12 @@ export const ProjectTree = memo(function ProjectTree() {
             // Empty because of the set filter, while repositories do exist: point at the row
             // menu for assigning one. Distinct from a genuine empty state (nothing cloned yet).
             <li className="proj-sub-empty">{tr("wset.no_repos")}</li>
+          ) : wsState === "stopped" ? (
+            <EmptyState icon="repo" title={tr("pj.ws_stopped")} hint={tr("pj.ws_stopped_hint")} />
+          ) : loadState === "loading" ? (
+            <EmptyState icon="repo" title={tr("pj.loading_repos")} />
+          ) : loadState === "unreachable" ? (
+            <EmptyState icon="repo" title={tr("pj.repos_unreachable")} hint={tr("pj.repos_unreachable_hint")} />
           ) : (
             <EmptyState icon="repo" title={tr("pj.no_repos")} hint={tr("pj.no_repos_hint")}>
               {running && (

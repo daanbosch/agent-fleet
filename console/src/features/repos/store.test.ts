@@ -35,7 +35,7 @@ const repo = (name: string): Repo => ({ name });
 describe("repos store refresh", () => {
   beforeEach(() => {
     fetchMock.mockReset();
-    useReposStore.setState({ repos: [] });
+    useReposStore.setState({ repos: [], loadState: "loading" });
   });
 
   it("commits the list and reports terminal on a real response", async () => {
@@ -69,13 +69,35 @@ describe("repos store refresh", () => {
     expect(settled).toBe(false);
   });
 
-  // An app-level failure — the request itself is refused — settles rather than retrying
-  // forever. Those come with a 4xx; a JSON body alone does not make one (see below).
-  it("treats a coded app error as terminal", async () => {
-    useReposStore.setState({ repos: [repo("agent-fleet")] });
+  // A refused request (4xx) or a non-JSON 2xx body (an auth gateway's HTML page, which api()
+  // resolves as {}) carries no list: it must not blank the rail. It is terminal — retrying a
+  // refusal changes nothing — but the outcome is recorded as unreachable.
+  it("keeps the list on a coded 4xx error and records unreachable", async () => {
+    useReposStore.setState({ repos: [repo("agent-fleet")], loadState: "ok" });
     fetchMock.mockResolvedValue(json({ error: { code: "forbidden_tenant" } }, 403));
     await expect(useReposStore.getState().refresh()).resolves.toBe(true);
-    expect(useReposStore.getState().repos).toEqual([]);
+    expect(useReposStore.getState().repos).toEqual([repo("agent-fleet")]);
+    expect(useReposStore.getState().loadState).toBe("unreachable");
+  });
+
+  it("keeps the list on a 2xx body without a repos array ({} from a non-JSON page)", async () => {
+    useReposStore.setState({ repos: [repo("agent-fleet")], loadState: "ok" });
+    fetchMock.mockResolvedValue(new Response("<html>sign in</html>", { status: 200 }));
+    await useReposStore.getState().refresh();
+    expect(useReposStore.getState().repos).toEqual([repo("agent-fleet")]);
+    expect(useReposStore.getState().loadState).toBe("unreachable");
+    fetchMock.mockResolvedValue(json({ repos: null }));
+    await useReposStore.getState().refresh();
+    expect(useReposStore.getState().repos).toEqual([repo("agent-fleet")]);
+  });
+
+  it("records ok after a failed load once a real list lands", async () => {
+    fetchMock.mockResolvedValue(agentUnreachable());
+    await useReposStore.getState().refresh();
+    expect(useReposStore.getState().loadState).toBe("unreachable");
+    fetchMock.mockResolvedValue(json({ repos: [] }));
+    await useReposStore.getState().refresh();
+    expect(useReposStore.getState().loadState).toBe("ok");
   });
 
   // A JSON body does NOT make a 500 an app error: the CP answers a database failure
@@ -103,9 +125,52 @@ describe("repos store refresh", () => {
     expect(useReposStore.getState().repos).toEqual([]);
   });
 
-  it("clear() settles to empty for a caller that knows the repos are unreachable", () => {
-    useReposStore.setState({ repos: [repo("agent-fleet")] });
+  // A failure from an older request must not overwrite a newer success, whether it lands
+  // after a tenant round trip or just after a concurrent refresh finished.
+  it("ignores a stale rejection after a tenant switch", async () => {
+    setTenant("alpha");
+    let reject!: (e: Error) => void;
+    fetchMock.mockReturnValueOnce(new Promise<Response>((_, rej) => (reject = rej)));
+    const stale = useReposStore.getState().refresh();
+    setTenant("beta");
+    useReposStore.getState().clear();
+    fetchMock.mockResolvedValueOnce(json({ repos: [repo("b")] }));
+    await useReposStore.getState().refresh();
+    reject(new TypeError("late drop"));
+    await expect(stale).resolves.toBe(false);
+    expect(useReposStore.getState().loadState).toBe("ok");
+    expect(useReposStore.getState().repos).toEqual([repo("b")]);
+  });
+
+  it("lets the later-started refresh win over a slow earlier failure", async () => {
+    setTenant("gamma");
+    let reject!: (e: Error) => void;
+    fetchMock.mockReturnValueOnce(new Promise<Response>((_, rej) => (reject = rej)));
+    const first = useReposStore.getState().refresh();
+    fetchMock.mockResolvedValueOnce(json({ repos: [repo("new")] }));
+    await useReposStore.getState().refresh();
+    reject(new TypeError("slow failure"));
+    await first;
+    expect(useReposStore.getState().loadState).toBe("ok");
+    expect(useReposStore.getState().repos).toEqual([repo("new")]);
+  });
+
+  it("ignores an earlier success that lands after a newer refresh started", async () => {
+    setTenant("delta");
+    let answer!: (r: Response) => void;
+    fetchMock.mockReturnValueOnce(new Promise<Response>((res) => (answer = res)));
+    const first = useReposStore.getState().refresh();
+    fetchMock.mockResolvedValueOnce(json({ repos: [repo("new")] }));
+    await useReposStore.getState().refresh();
+    answer(json({ repos: [repo("old")] }));
+    await first;
+    expect(useReposStore.getState().repos).toEqual([repo("new")]);
+  });
+
+  it("clear() forgets the list and goes back to loading (tenant switch)", () => {
+    useReposStore.setState({ repos: [repo("agent-fleet")], loadState: "ok" });
     useReposStore.getState().clear();
     expect(useReposStore.getState().repos).toEqual([]);
+    expect(useReposStore.getState().loadState).toBe("loading");
   });
 });
