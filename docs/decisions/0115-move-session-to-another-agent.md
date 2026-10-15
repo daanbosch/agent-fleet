@@ -108,7 +108,15 @@ its handle is alive, because the conversation does not exist anywhere else.
    (`paths.SessionWorkDir`). The target can read it, it is not in the working copy so it can
    never be committed, and deleting the target session deletes it (`removeSessionSideFiles`).
    This holds for managed targets too, where `$AF_WORK_DIR` is not set: the path is computed, not
-   read from the environment. Open: whether every kind reads outside its working folder without
+   read from the environment.
+   The file is part of the target's conversation, not scratch: the target reads the head first
+   and pages into the rest later, and its first prompt names the path. So moving the target to
+   the trash archives the file with the session and restoring it puts the file back
+   (`archiveSessionForDelete` gains it as a payload with its destination, the way it carries
+   claude's jsonl). Without that, `removeSessionSideFiles` deletes `~/.af-work/<target>` and a
+   restored target points at a file that no longer exists. Stopping or archiving the target
+   without deleting it leaves the file in place, so only the trash path needs this.
+   Open: whether every kind reads outside its working folder without
    a permission prompt (cursor and kiro in plan mode are the ones to measure); the fallback is to
    paste the head (decision 6, parts 1–5) into the prompt and keep only the history in the file.
 10. **The target runs in the same working copy**, as fork does. The source is frozen first
@@ -145,7 +153,8 @@ its handle is alive, because the conversation does not exist anywhere else.
   The CP route allow-list gains it. Console: a session-menu item next to the existing handover,
   a dialog with the agent picker (other kinds only, with `get_agent_usage` where the kind has a
   source), the dirty state and running children. Tests: compression bounds, freeze order (no
-  booking after a move), a managed cursor source that is stopped is refused with a reason.
+  booking after a move), a managed cursor source that is stopped is refused with a reason,
+  and a target moved to the trash and restored still has its handover file.
 - **P2b — the trigger.** When a session shows `limited` (or `spendLimit`), the mirror's limit
   banner offers the move with candidates that have quota left. Only claude, managed codex and
   muse reach this state today.
