@@ -77,6 +77,14 @@ resources hold; the pool goes back to zero nodes when none runs. Every member's 
 (50 GB home, 5 GB state, pd-balanced) bill **always**, stopped or not, as a member's persistent
 home does on ECS. A full acceptance day with a workspace node up about 18.5 hours came to ¥2,325.
 
+**At creation the workspace pool is not at zero.** The pool is created with a node (the
+configuration sets no initial size, so GKE's default of one per zone applies; observed, not
+traced in GKE's documentation), and the autoscaler removes the idle node only after a delay: on a second stand-up of the small
+profile (one zone) it scaled to 0 about 12 minutes after the pool came up. Until then one
+workspace node bills at the hourly rate above (~¥39/hour for `n2-standard-4`), so a short trial
+pays roughly ¥8 for it; with nodes in two zones, twice that. `kubectl get nodes -L agent-fleet.io/pool`
+shows whether it has gone.
+
 Not measured: egress (negligible in the test), Cloud Logging volume under real use, and the
 growth of the CP disk's snapshots.
 
