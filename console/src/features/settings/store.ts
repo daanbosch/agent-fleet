@@ -91,7 +91,12 @@ interface SettingsUIStore {
   /** A port the "Expose this port…" entry asked to add to the preview list. Nothing is saved
    *  until the Preview tab's Add strip is confirmed; closing the dialog drops it. */
   previewAddPort: number | null;
-  openSettings(section?: string, opts?: { addPort?: number }): void;
+  /** An element inside the opened section that should be scrolled into view and flashed, named by
+   *  the `data-settings-target` it carries (an agent kind for Settings > Agents). The section
+   *  that owns it consumes it once its content exists (useSettingsTarget); null = nothing asked. */
+  settingsTarget: string | null;
+  openSettings(section?: string, opts?: { addPort?: number; target?: string }): void;
+  clearSettingsTarget(): void;
   clearPreviewAddPort(): void;
   closeSettings(): void;
   openAdmin(): void;
@@ -114,8 +119,9 @@ export const useSettingsUI = create<SettingsUIStore>((set) => ({
   tenantSection: lastTenantSection() || "signin",
   guideOpen: false,
   previewAddPort: null,
+  settingsTarget: null,
 
-  openSettings(section?: string, opts?: { addPort?: number }) {
+  openSettings(section?: string, opts?: { addPort?: number; target?: string }) {
     // "connections" is a legacy alias for the merged agents tab (the old connections
     // tab was folded into it), so any caller asking for connections lands there.
     // No explicit section → restore the last-opened one (localStorage), else display.
@@ -123,14 +129,18 @@ export const useSettingsUI = create<SettingsUIStore>((set) => ({
       settingsSection: section === "connections" ? "agents" : section || lastSection() || "display",
       settingsOpen: true,
       previewAddPort: opts?.addPort ?? null,
+      settingsTarget: opts?.target ?? null,
     });
+  },
+  clearSettingsTarget() {
+    set({ settingsTarget: null });
   },
   clearPreviewAddPort() {
     set({ previewAddPort: null });
   },
   closeSettings() {
     // Close-on-back is handled by ui/Modal (useBackClose); just drop the flag.
-    set({ settingsOpen: false, previewAddPort: null });
+    set({ settingsOpen: false, previewAddPort: null, settingsTarget: null });
   },
 
   // The admin modal rides on the same ui/Modal as the personal settings, so close-on-back is

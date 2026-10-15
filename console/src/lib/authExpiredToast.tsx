@@ -16,7 +16,7 @@ type ToastSink = (message: ReactNode, opts?: ToastOptions) => unknown;
 
 /** openAgentsSettings opens Settings on the Agents section, where the Claude card's login lives. */
 export function openAgentsSettings(): void {
-  useSettingsUI.getState().openSettings("agents");
+  useSettingsUI.getState().openSettings("agents", { target: "claude" });
 }
 
 export function AuthExpiredToast() {

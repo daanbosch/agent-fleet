@@ -28,6 +28,27 @@
   margin-bottom: 8px;
 }
 
+/* Landing highlight (useSettingsTarget): a ring that fades out. Reduced motion keeps the ring
+   but drops the fade — the hook removes the class after a fixed time either way. */
+.p-card.p-card-flash {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
+  animation: p-card-flash 1.8s ease-out forwards;
+}
+
+@keyframes p-card-flash {
+  to {
+    border-color: var(--border2);
+    box-shadow: 0 0 0 3px transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .p-card.p-card-flash {
+    animation: none;
+  }
+}
+
 .p-head {
   display: flex;
   align-items: center;
