@@ -411,3 +411,28 @@ before the upgrade; sessions created or extended under 2.x are invisible to it. 
 `~/.local/share/opencode/opencode.db*` before the first v2 start to restore exactly. The v1 code
 paths (launch line, store reads, plugins, instruction delivery) are kept and covered by the existing
 tests for both majors.
+
+### 2026-10-16 (later) — review round 1 on the cut-over
+
+- **First-start migration race.** On 2.0.29 a 253 MB 1.x database (50 conversations x 1000
+  messages) keeps importing for 25-70 s after `/api/info` answers; meanwhile `GET /api/session/{id}`
+  is 404 for a conversation that exists (503 right at the start) and a create succeeds, so the
+  Managed `Resume` started a new conversation and overwrote the slot's recorded session id.
+  `GET /api/experimental/migration/v1` answers `{"status":"running","progress":{…}}` and then
+  `{"status":"completed"}`. `EnsureMigrated` (migrate.go) now runs before the supervised serve,
+  `BuildLaunch`, the models listing and both chat `run` paths open the database: it takes one
+  lock, starts a throwaway `serve` on a free port, waits for the status and records a marker
+  (binary version + database). `TestContractFirstStartWaitsForV1Migration` (needs
+  `AF_TEST_V1_SEED_DB`) is red with the gate bypassed (404/503) and green with it. What the gate
+  cannot cover: an `opencode` a member runs by hand in a shell before af's first start.
+- **Self-update swap.** The other opencode package is now moved aside and put back when the
+  install fails (`oc_install_swap`, `deploy/local/opencode-swap-test.sh`), instead of being
+  uninstalled first.
+- **`opencode run` on 2.x has no `--dir`** (`Unrecognized flag`, exit 1): every assistant chat and
+  one-shot would have failed. 2.x gets `run --format json --standalone` with the directory from
+  `cmd.Dir`; `session delete` gets `--standalone` too. `TestContractV2ChatPostureAndMCP` runs the
+  production config path on a real 2.x with a stub provider: the read-only posture holds (shell and
+  write calls do not run, while they do without the config), the af server of the inline
+  config runs ahead of a same-named project entry and carries `--conv`. Not reproduced: the
+  agent-rule bypass of the `permission` deny measured earlier; the hard-deny policies stay as a
+  second layer.

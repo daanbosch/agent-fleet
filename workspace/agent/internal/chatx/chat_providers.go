@@ -815,7 +815,7 @@ func (opencodeChat) Send(ctx context.Context, c *ChatConversation, prompt string
 	call := usagex.Call{Kind: session.KindOpencode, ModelReq: pinned} // usage ledger (ADR 0029 §3)
 	defer usagex.RecordCall(ctx, &call, time.Now())
 	dir := opencodeChatDir(c)
-	args := []string{"run", "--format", "json", "--dir", dir}
+	args := opencodeRunArgs(dir)
 	if c.OpencodeSessionID != "" {
 		args = append(args, "--session", c.OpencodeSessionID)
 	}
@@ -824,6 +824,9 @@ func (opencodeChat) Send(ctx context.Context, c *ChatConversation, prompt string
 	}
 	args = append(args, headlessPrompt(c.personaOf(), c.knowledgeDirs(), prompt))
 	spec := opencode.CurrentLaunch()
+	if err := opencode.EnsureMigrated(spec); err != nil {
+		return "", err
+	}
 	cmd := exec.CommandContext(ctx, spec.Bin, args...)
 	cmd.Dir = dir
 	env := spec.Env()
@@ -880,6 +883,18 @@ func (opencodeChat) Send(ctx context.Context, c *ChatConversation, prompt string
 // deny also beats whatever the user's global opencode config says.
 func opencodeChatPolicy() map[string]any {
 	return map[string]any{"edit": "deny", "bash": "deny"}
+}
+
+// opencodeRunArgs is the head of every headless `opencode run` af starts. opencode 1 takes the
+// project directory as --dir. opencode 2's `run` has no such flag (measured on 2.0.29: "Unrecognized
+// flag: --dir", exit 1, so every chat and one-shot failed) and works in the process's directory,
+// which both callers set (cmd.Dir). A bare 2.x `run` also talks to the per-user background service
+// on a fixed port; --standalone gives the run a private server whatever service.json says.
+func opencodeRunArgs(dir string) []string {
+	if opencode.InstalledMajor() >= 2 {
+		return []string{"run", "--format", "json", "--standalone"}
+	}
+	return []string{"run", "--format", "json", "--dir", dir}
 }
 
 // opencodeConfigEnv hands a config file to `opencode run`. opencode 1 reads it from
@@ -2110,7 +2125,7 @@ func OneShotHeadlessRun(ctx context.Context, feature string, tier OneShotTier, p
 		return reply, "", "", err
 	case session.KindOpencode:
 		call.Kind = session.KindOpencode
-		args := []string{"run", "--format", "json", "--dir", chatWorkdir()}
+		args := opencodeRunArgs(chatWorkdir())
 		spec := opencode.CurrentLaunch()
 		env := spec.Env()
 		// read-only posture (docs/log/44 §1.3): unlike a chat, a one-shot runs in the bare
@@ -2134,6 +2149,9 @@ func OneShotHeadlessRun(ctx context.Context, feature string, tier OneShotTier, p
 			call.ModelReq = m
 		}
 		args = append(args, headlessPrompt(persona, nil, prompt))
+		if err := opencode.EnsureMigrated(spec); err != nil {
+			return "", "", "", err
+		}
 		cmd := exec.CommandContext(ctx, spec.Bin, args...)
 		cmd.Dir = chatWorkdir()
 		cmd.Env = envWith(env...)
@@ -2154,7 +2172,11 @@ func OneShotHeadlessRun(ctx context.Context, feature string, tier OneShotTier, p
 		// from ctx (the reply is already in hand; cleanup shouldn't be cancelled).
 		if sesID != "" {
 			go func() {
-				cl := exec.Command(spec.Bin, "session", "delete", sesID)
+				delArgs := []string{"session", "delete", sesID}
+				if spec.Maj >= 2 {
+					delArgs = []string{"session", "delete", "--standalone", sesID} // not the background service
+				}
+				cl := exec.Command(spec.Bin, delArgs...)
 				cl.Dir = chatWorkdir()
 				cl.Env = envWith(spec.Env()...)
 				_ = cl.Run()

@@ -85,6 +85,10 @@ var Entries = []string{
 	// (opencode/optin.go, optin_serve.go). Introduced directly under AgentStateDir.
 	"opencode-major",
 	"opencode-serve.json",
+	// Which opencode 2 build migrated which database (opencode/migrate.go), and its lock.
+	// Introduced directly under AgentStateDir.
+	"opencode-v2-migrated",
+	"opencode-v2-migrated.lock",
 	"plan-file",
 	"plan-review",
 	// Per-agent id ledgers and message rings (agents.NewSidStore / NewMsgLedger).

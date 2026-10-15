@@ -58,6 +58,10 @@ func TestOpencodeChatFollowsTheOptIn(t *testing.T) {
 	if err := opencode.SetWantsV2(true); err != nil {
 		t.Fatal(err)
 	}
+	// The recorder does not migrate anything; vouch for the database so the gate stays out of it.
+	if err := opencode.MarkMigrated(opencode.CurrentLaunch()); err != nil {
+		t.Fatal(err)
+	}
 	if got, want := send(), "v2 "+opencode.V2DBPath(); got != want {
 		t.Fatalf("opt-in on: ran %q, want %q", got, want)
 	}

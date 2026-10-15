@@ -334,6 +334,34 @@ cli_present() { [ -x "/usr/local/bin/$1" ] || [ -e "$HOME/.local/bin/$1" ]; }
 oc_pkg() { case "${1%%.*}" in ''|*[!0-9]*|0|1) echo opencode-ai ;; *) echo @opencode/cli ;; esac; }
 OC_PKG="$(oc_pkg "$(vj_pin opencode)")"
 OC_OTHER=@opencode/cli; [ "$OC_PKG" = opencode-ai ] || OC_OTHER=opencode-ai
+# oc_install_swap <prefix> <npm specs...> — `npm install -g` into <prefix>, with the other opencode
+# package (OC_OTHER) out of the way. Both packages claim the `opencode` bin, so npm exits EEXIST
+# while the other one is linked (a home that self-updated on the old pin; measured opencode-ai
+# 1.19.0 -> @opencode/cli 2.0.29), and the stale shadow then keeps winning on PATH. The other
+# package is moved aside rather than uninstalled: when the install fails (a registry error, another
+# CLI in the same command) it is moved back, so a lean home never ends up with no opencode at all.
+oc_install_swap() {
+  local pfx="$1" bak="$1/.af-oc-swap" b l; shift
+  rm -rf "$bak"
+  if [ -d "$pfx/lib/node_modules/$OC_OTHER" ]; then
+    mkdir -p "$bak/pkg/$(dirname "$OC_OTHER")" "$bak/bin"
+    mv "$pfx/lib/node_modules/$OC_OTHER" "$bak/pkg/$OC_OTHER"
+    for b in opencode opencode2; do
+      l="$pfx/bin/$b"
+      if [ -L "$l" ]; then case "$(readlink "$l")" in *"/$OC_OTHER/"*) mv "$l" "$bak/bin/$b" ;; esac; fi
+    done
+  fi
+  if npm install -g --prefix "$pfx" "$@" >/dev/null 2>&1; then rm -rf "$bak"; return 0; fi
+  if [ -d "$bak/pkg/$OC_OTHER" ]; then
+    rm -rf "$pfx/lib/node_modules/$OC_OTHER"
+    mv "$bak/pkg/$OC_OTHER" "$pfx/lib/node_modules/$OC_OTHER"
+    for b in opencode opencode2; do
+      if [ -L "$bak/bin/$b" ]; then rm -f "$pfx/bin/$b"; mv "$bak/bin/$b" "$pfx/bin/$b"; fi
+    done
+  fi
+  rm -rf "$bak"
+  return 1
+}
 # agy_effective_version — the version of the agy that is actually installed now.
 #
 # The marker (.agy.version) is the version AF last installed, not the one present now. agy
@@ -670,16 +698,14 @@ elif [ "${AF_AGENT_SELF_UPDATE_ALLOWED:-0}" = "1" ] && [ "${AF_AGENT_SELF_UPDATE
   ' 2>/dev/null || echo 1)
   if [ "$NPM_NEED" = "0" ]; then
     echo "[entrypoint] agent CLIs already latest; skip"
-  elif { # A ~/.local copy of the other opencode package (a home that self-updated on the old pin)
-         # owns the `opencode` bin: npm exits EEXIST and the stale shadow keeps winning on PATH
-         # (measured with opencode-ai 1.19.0 -> @opencode/cli 2.0.29). Drop it first.
-         # shellcheck disable=SC2086
-         [ -z "$(npm ls -g $NPM_PREFIX_ARG --depth=0 "$OC_OTHER" 2>/dev/null | grep -F "$OC_OTHER")" ] \
-           || npm uninstall -g $NPM_PREFIX_ARG "$OC_OTHER" >/dev/null 2>&1 || true
-         npm install -g $NPM_PREFIX_ARG @anthropic-ai/claude-code@latest "$OC_PKG@latest" @openai/codex@latest @github/copilot@latest >/dev/null 2>&1; }; then
+  elif oc_install_swap "$NPM_PREFIX_DIR" @anthropic-ai/claude-code@latest "$OC_PKG@latest" @openai/codex@latest @github/copilot@latest; then
     echo "[entrypoint] agent CLIs updated${NPM_PREFIX_DIR:+ (~/.local)}: claude $(claude --version 2>/dev/null | head -1) | opencode $(opencode --version 2>/dev/null | head -1) | codex $(codex --version 2>/dev/null | head -1) | copilot $(copilot --version 2>/dev/null | head -1)"
   else
-    echo "[entrypoint] WARN: agent CLI update failed (using baked versions)"
+    if [ -x /usr/local/bin/opencode ]; then
+      echo "[entrypoint] WARN: agent CLI update failed (using baked versions)"
+    else
+      echo "[entrypoint] WARN: agent CLI update failed (kept the installed versions; a swapped opencode package was put back)"
+    fi
   fi
   # agy (Antigravity) follows the same opt-in to latest. It ships via Google's install.sh
   # rather than npm, and a baked copy (BAKE_AGENT_CLIS=1) is in root-owned /usr/local/bin,

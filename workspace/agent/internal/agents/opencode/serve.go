@@ -343,6 +343,10 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 			useServePassword(prevPassword)
 		}
 	}()
+	// A database still holding 1.x data is migrated before the daemon opens it (migrate.go).
+	if err := EnsureMigrated(spec); err != nil {
+		return "", 0, err
+	}
 	cmd := exec.Command(spec.Bin, "serve", "--hostname", host, "--port", port)
 	// Provider keys are env-injected (auth.go) — the same set a TUI launch gets, so
 	// managed turns authenticate identically. Re-keying requires a Restart (§7). The
