@@ -29,6 +29,7 @@ export function CarriedBlock({
   onDone,
   onError,
   onOpenPlan,
+  onReviewPlan,
   translate,
 }: {
   carried: CarriedInteraction;
@@ -38,6 +39,9 @@ export function CarriedBlock({
   onDone: () => void;
   onError: (message: string, code?: string) => void;
   onOpenPlan?: (plan: string) => void;
+  /** Opens the review launch dialog for the carried plan. The container discards this
+   *  card itself once the reviewer session exists. */
+  onReviewPlan?: (plan: string) => Promise<void>;
   translate?: TranscriptTranslateWiring;
 }) {
   const [sending, setSending] = useState(false);
@@ -115,6 +119,20 @@ export function CarriedBlock({
               <button type="button" className="ghost" disabled={sending} onClick={() => void send({ decision: "discard" })}>
                 <Icon name="close" /> {tr("mirror.carried_discard")}
               </button>
+              {/* No interrupt or reject first (unlike the live plan card): there is no modal
+                  left to swallow the reviewer's peer message, which resumes the session and
+                  arrives as prose. */}
+              {onReviewPlan && carried.plan && (
+                <button
+                  type="button"
+                  className="ghost mt-plan-review"
+                  disabled={sending}
+                  title={tr("mirror.carried_plan_review_title")}
+                  onClick={() => void onReviewPlan(carried.plan!)}
+                >
+                  <Icon name="comment-discussion" /> {tr("plan.review_in_session")}
+                </button>
+              )}
               <button
                 type="button"
                 className="ghost"

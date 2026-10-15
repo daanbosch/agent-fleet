@@ -42,7 +42,7 @@ export function MirrorPendingCards({
     carried, setCarried, markRejected, sending,
   } = st;
   const { sendKeys, sendSeq, sendInterrupt, cancelQuestion, sendApproval, sendRespond } = actions;
-  const { openPlan, openFile, planSendBlocked, sendPlanComments, reviewPlanElsewhere } = plan;
+  const { openPlan, openFile, planSendBlocked, sendPlanComments, reviewPlanElsewhere, reviewCarriedPlan } = plan;
   const byId = answersByRespond(managed, pending);
   return (
     <>
@@ -55,6 +55,7 @@ export function MirrorPendingCards({
           session={session}
           agentName={agentName}
           onOpenPlan={openPlan}
+          onReviewPlan={reviewCarriedPlan}
           onError={(m, code) => toastSendFailure(toast, { message: m, code }, m)}
           onDone={() => setCarried(null)}
           translate={translate}

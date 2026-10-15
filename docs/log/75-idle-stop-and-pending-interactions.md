@@ -641,3 +641,14 @@ Note (2026-10-09): Terminal codex / cursor / copilot / kiro / opencode are now b
 pane repaint alone (measured through a 120 s silent tool; see ADR 0055's 2026-10-09 addendum).
 Still unbounded: Managed (#1942) and muse / lcpp / shell / ssm (#1943).
 Follow-ups: #1942, #1943.
+
+Note (2026-10-16): a carried plan can now be reviewed in another session (#2211). `Carried`
+keeps the plan file path (`planFile`) when promoted, because `status.Remove` drops the
+session's path record; `GET /sessions/{name}/plan-file` falls back to the carried plan,
+re-validating the path (symlinks resolved back into the plans dir) and otherwise snapshotting
+the text. The carried card shows a review button that sends nothing to the session (no modal
+is left). Once the reviewer session has been created the card is discarded (`discard` does
+not wake the session), so no reload or pane can approve a plan under review; a cancelled
+launch dialog leaves the card alone, and a failed discard is reported with the card's own
+Discard as the retry. The reviewer's peer message resumes the planner, which may no longer be
+in plan mode, so findings arrive as prose.

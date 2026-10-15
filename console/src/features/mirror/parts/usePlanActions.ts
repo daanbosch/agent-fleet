@@ -6,6 +6,7 @@ import type { useLayoutStore } from "../../../layout/store.ts";
 import type { useToast } from "../../../ui/ToastProvider.tsx";
 import { useLaunchSeed, useLaunchTarget, useReposStore } from "../../repos/store.ts";
 import { handoffLaunchTarget } from "../handoffLaunch.ts";
+import { discardCarriedAfterReview } from "../carriedPlanReview.ts";
 import { deliverPlanComments, planKey } from "../planComments.ts";
 import { reviewPrompt, reviewTitle } from "../planReview.ts";
 import { planTitle } from "../transcript/blocks.tsx";
@@ -46,7 +47,7 @@ export function usePlanActions({
   setActivePane: LayoutState["setActive"];
 }) {
   const {
-    applyEchoes, setFinalizing, finalizingRef, wasWorkingRef, alive, pendingPlan, markRejected, sending,
+    applyEchoes, setFinalizing, finalizingRef, wasWorkingRef, alive, pendingPlan, markRejected, sending, setCarried,
     setSending, tickRef,
   } = st;
   const { wsDown, sendInterrupt, sendPrompt, newestIdx } = actions;
@@ -111,6 +112,34 @@ export function usePlanActions({
     );
     // inPlace: the reviewer reads the working copy this plan is about, uncommitted work
     // included. A worktree would show it the base instead — the dialog still offers one.
+    useLaunchTarget.getState().open(target.repo, "", true);
+  };
+
+  // Review the plan a STOPPED session was waiting on (the carried plan card). The same
+  // launch dialog, minus everything the live card needs: no modal is up, so nothing is
+  // rejected or interrupted, and the session need not be running — the reviewer's peer
+  // message resumes it.
+  //
+  // The carried card is discarded once a reviewer session has actually been created (not
+  // when the dialog opens: a cancelled dialog must leave the plan reachable). Discarding is
+  // server-side state, so no pane or reload can approve a plan whose review is under way,
+  // and discard does not wake the session.
+  const reviewCarriedPlan = async (plan: string) => {
+    const res = await sessionPlanFile(session);
+    if (!res.ok || !res.path) {
+      toast(tr("plan.review_launch_failed", { err: res.message || "" }));
+      return;
+    }
+    const target = handoffLaunchTarget(sessionMeta, useReposStore.getState().repos, false);
+    if ("error" in target) {
+      toast(tr(target.error === "no_parent" ? "mirror.handoff_no_parent" : "mirror.handoff_no_dir"));
+      return;
+    }
+    useLaunchSeed.getState().set(
+      reviewPrompt({ parent: session, path: res.path, dir: target.repo.path || "" }),
+      reviewTitle(planTitle(plan)),
+    );
+    useLaunchSeed.getState().setOnLaunched(discardCarriedAfterReview({ session, setCarried, toast }));
     useLaunchTarget.getState().open(target.repo, "", true);
   };
 
@@ -212,5 +241,5 @@ export function usePlanActions({
     openTargetInNew(target, true);
   };
 
-  return { openPlan, reviewPlanElsewhere, planSendBlocked, sendPlanComments, openFile, openDiff };
+  return { openPlan, reviewPlanElsewhere, reviewCarriedPlan, planSendBlocked, sendPlanComments, openFile, openDiff };
 }
