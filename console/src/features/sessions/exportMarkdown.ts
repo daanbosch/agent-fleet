@@ -25,9 +25,18 @@ export async function exportSessionMarkdown(name: string, tools: "names" | "full
     notify(body?.error ? t("srow.export_failed") + ": " + errDetail(body.error) : t("srow.export_failed"));
     return;
   }
-  const blob = await res.blob();
+  // The body can still fail after a 200 (a connection dropped mid-transfer); that must reach
+  // the member as a failure, not vanish as an unhandled rejection.
+  let blob: Blob;
+  try {
+    blob = await res.blob();
+  } catch {
+    notify(t("srow.export_failed"));
+    return;
+  }
   const cd = res.headers.get("Content-Disposition") ?? "";
-  const file = /filename="?([^";]+)"?/.exec(cd)?.[1] ?? name + ".md";
+  // The Agent masks a token-shaped session name; never fall back to the raw name here.
+  const file = /filename="?([^";]+)"?/.exec(cd)?.[1] ?? "session.md";
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

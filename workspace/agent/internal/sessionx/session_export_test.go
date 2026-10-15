@@ -34,3 +34,26 @@ func TestExportUsesTheRequestedZone(t *testing.T) {
 		t.Fatalf("turn time not shown in the requested zone:\n%s", md)
 	}
 }
+
+func TestExportFileNameMasksATokenShapedSlug(t *testing.T) {
+	if got := exportFileName("ghp_" + strings.Repeat("A1b2C3d4", 4)); got != "session.md" {
+		t.Errorf("got %q", got)
+	}
+	if got := exportFileName("s1abc"); got != "s1abc.md" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// A question the agent is still waiting on is held apart from the turns; the file keeps it,
+// once.
+func TestExportAppendsThePendingQuestion(t *testing.T) {
+	q := []transcript.Question{{Question: "Which one?"}}
+	turns := []transcript.Turn{{Role: "user", Parts: []transcript.Part{{Kind: "text", Text: "go"}}}}
+	got := withPendingQuestions(turns, q)
+	if len(got) != 2 || got[1].Parts[0].Kind != "question" || got[1].Parts[0].Questions[0].Question != "Which one?" {
+		t.Fatalf("pending question not appended: %+v", got)
+	}
+	if again := withPendingQuestions(got, q); len(again) != 2 {
+		t.Fatalf("a question already in the turns was appended twice")
+	}
+}

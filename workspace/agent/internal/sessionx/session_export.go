@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/claude"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/bridge"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
@@ -34,15 +35,53 @@ func HandleSessionExport(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusBadRequest, "unsupported_kind", "export is available for transcript-capable sessions only")
 		return
 	}
-	turns := sessionTitleTurns(meta)
+	turns := exportTurns(meta)
 	tagInjectedTurns(name, turns)
 	q := r.URL.Query()
 	md := renderSessionExport(meta, turns, q.Get("tools") == "full", q.Get("tz"), time.Now())
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-	// The session name is a slug, so it is safe in a quoted filename as it is.
-	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`.md"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+exportFileName(name)+`"`)
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write([]byte(md))
+}
+
+// exportTurns reads the whole conversation. claude goes through CollectAllTurns, because the
+// mirror's collector keeps only the newest 1 MiB and leaves ordinary tool results out. A
+// question the agent is still waiting on is held apart from the turns (TranscriptData.Pending)
+// so the mirror can render it as a live card; the file appends it, since it was asked.
+func exportTurns(m session.Meta) []transcript.Turn {
+	if m.Kind == session.KindClaude {
+		lines, _, _ := claude.TranscriptRead(session.UUID(m.Dir, m.Name))
+		return claude.CollectAllTurns(lines)
+	}
+	td, ok := AgentOf(m.Kind).Transcript(m)
+	if !ok {
+		return nil
+	}
+	return withPendingQuestions(td.Turns, td.Pending)
+}
+
+func withPendingQuestions(turns []transcript.Turn, pending []transcript.Question) []transcript.Turn {
+	if len(pending) == 0 {
+		return turns
+	}
+	if n := len(turns); n > 0 {
+		for _, p := range turns[n-1].Parts {
+			if p.Kind == "question" && len(p.Questions) > 0 && p.Answer == "" && p.Questions[0].Question == pending[0].Question {
+				return turns // the kind left it in the turns as well
+			}
+		}
+	}
+	return append(turns, transcript.Turn{Role: "assistant", Parts: []transcript.Part{{Kind: "question", Questions: pending}}})
+}
+
+// exportFileName is the session slug, unless the scrubber would mask part of it: a slug can
+// be any token-shaped string, and the body's masking means nothing if the file name keeps it.
+func exportFileName(name string) string {
+	if bridge.ScrubSecrets(name) != name {
+		return "session.md"
+	}
+	return name + ".md"
 }
 
 // renderSessionExport is the handler minus I/O, so a test can pin that the scrubber is

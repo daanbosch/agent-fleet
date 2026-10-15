@@ -21,9 +21,9 @@ type MarkdownOptions struct {
 	Lang string
 	// Loc is the zone turn times are shown in; nil = time.Local.
 	Loc *time.Location
-	// Scrub runs over every piece of conversation text before it is written. Tool output
-	// carries tokens even when the user downloads the file themselves, so a caller that
-	// leaves this nil writes them verbatim.
+	// Scrub runs over the finished document, so no field (a path, a tool name, a model)
+	// slips past it. Tool output carries tokens even when the user downloads the file
+	// themselves, so a caller that leaves this nil writes them verbatim.
 	Scrub func(string) string
 }
 
@@ -55,16 +55,12 @@ func Markdown(turns []Turn, o MarkdownOptions) string {
 	if o.Lang == "en" {
 		lb = mdLabelsEN
 	}
-	scrub := o.Scrub
-	if scrub == nil {
-		scrub = func(s string) string { return s }
-	}
 	var b strings.Builder
 	if t := strings.TrimSpace(o.Title); t != "" {
-		b.WriteString("# " + oneLine(scrub(t)) + "\n\n")
+		b.WriteString("# " + oneLine(t) + "\n\n")
 	}
 	for _, h := range o.Header {
-		b.WriteString("- " + oneLine(scrub(h)) + "\n")
+		b.WriteString("- " + oneLine(h) + "\n")
 	}
 	if len(o.Header) > 0 {
 		b.WriteString("\n")
@@ -78,18 +74,19 @@ func Markdown(turns []Turn, o MarkdownOptions) string {
 		}
 		var body strings.Builder
 		if t.Compact {
-			writeCompact(&body, t, o, lb, scrub)
+			writeCompact(&body, t, o, lb)
 		} else {
 			for _, p := range t.Parts {
-				writePart(&body, p, o, lb, scrub)
+				writePart(&body, p, o, lb)
 			}
 			if len(t.Parts) == 0 && strings.TrimSpace(t.Text) != "" {
-				body.WriteString(strings.TrimSpace(scrub(t.Text)) + "\n\n")
+				body.WriteString(strings.TrimSpace(t.Text) + "\n\n")
 			}
 		}
 		if body.Len() == 0 {
 			continue
 		}
+		closeOpenFence(&body)
 		// claude and codex write one assistant turn as many rows; a heading per row would
 		// split one answer into a dozen sections.
 		if t.Role != "assistant" || prevRole != "assistant" || t.Compact {
@@ -108,7 +105,11 @@ func Markdown(turns []Turn, o MarkdownOptions) string {
 	if !wrote {
 		b.WriteString(lb.empty + "\n")
 	}
-	return strings.TrimRight(b.String(), "\n") + "\n"
+	out := strings.TrimRight(b.String(), "\n") + "\n"
+	if o.Scrub != nil {
+		out = o.Scrub(out)
+	}
+	return out
 }
 
 func turnHeading(t Turn, lb mdLabels, loc *time.Location) string {
@@ -139,37 +140,37 @@ func turnHeading(t Turn, lb mdLabels, loc *time.Location) string {
 	return oneLine(h)
 }
 
-func writeCompact(b *strings.Builder, t Turn, o MarkdownOptions, lb mdLabels, scrub func(string) string) {
+func writeCompact(b *strings.Builder, t Turn, o MarkdownOptions, lb mdLabels) {
 	if !o.ToolOutput {
 		// The heading alone says a compaction happened; its summary repeats what the
 		// turns above already hold.
 		b.WriteString("_" + lb.compacted + "_\n\n")
 		return
 	}
-	writeFenced(b, "", scrub(t.Text))
+	writeFenced(b, "", t.Text)
 }
 
-func writePart(b *strings.Builder, p Part, o MarkdownOptions, lb mdLabels, scrub func(string) string) {
+func writePart(b *strings.Builder, p Part, o MarkdownOptions, lb mdLabels) {
 	switch p.Kind {
 	case "thinking":
 	case "text":
 		if s := strings.TrimSpace(p.Text); s != "" {
-			b.WriteString(scrub(s) + "\n\n")
+			b.WriteString(s + "\n\n")
 		}
 	case "tool":
 		b.WriteString("> " + lb.tool + ": `" + oneLine(p.Tool) + "`")
 		if label := firstNonEmpty(p.Info, p.File); label != "" {
-			b.WriteString(" — " + oneLine(scrub(label)))
+			b.WriteString(" — " + oneLine(label))
 		}
 		b.WriteString("\n\n")
 		if !o.ToolOutput {
 			return
 		}
 		for _, e := range p.Edits {
-			writeFenced(b, "diff", scrub(editDiff(e)))
+			writeFenced(b, "diff", editDiff(e))
 		}
 		if s := strings.TrimSpace(p.Output); s != "" {
-			writeFenced(b, "", scrub(s))
+			writeFenced(b, "", s)
 		}
 	case "delegation":
 		h := lb.subagent
@@ -178,27 +179,34 @@ func writePart(b *strings.Builder, p Part, o MarkdownOptions, lb mdLabels, scrub
 		}
 		b.WriteString("> " + oneLine(h))
 		if p.Info != "" {
-			b.WriteString(" — " + oneLine(scrub(p.Info)))
+			b.WriteString(" — " + oneLine(p.Info))
 		}
 		b.WriteString("\n\n")
 		if !o.ToolOutput {
 			return
 		}
 		if s := strings.TrimSpace(p.Prompt); s != "" {
-			writeFenced(b, "", scrub(s))
+			writeFenced(b, "", s)
 		}
 		if s := strings.TrimSpace(p.Output); s != "" {
-			writeFenced(b, "", scrub(s))
+			writeFenced(b, "", s)
 		}
 	case "question":
 		for _, q := range p.Questions {
-			b.WriteString("**" + lb.question + ":** " + scrub(strings.TrimSpace(q.Question)) + "\n\n")
+			b.WriteString("**" + lb.question + ":** " + strings.TrimSpace(q.Question) + "\n\n")
 			for _, opt := range q.Options {
-				line := "- " + oneLine(scrub(opt.Label))
+				line := "- " + oneLine(opt.Label)
 				if opt.Description != "" {
-					line += " — " + oneLine(scrub(opt.Description))
+					line += " — " + oneLine(opt.Description)
 				}
 				b.WriteString(line + "\n")
+				if o.ToolOutput && strings.TrimSpace(opt.Preview) != "" {
+					// The preview is what the options were compared on; indented so it
+					// stays inside its list item.
+					var pb strings.Builder
+					writeFenced(&pb, "", opt.Preview)
+					b.WriteString("\n" + indent(pb.String(), "  "))
+				}
 			}
 			if len(q.Options) > 0 {
 				b.WriteString("\n")
@@ -208,17 +216,20 @@ func writePart(b *strings.Builder, p Part, o MarkdownOptions, lb mdLabels, scrub
 		case p.Declined:
 			b.WriteString("**" + lb.answer + ":** _" + lb.declined + "_\n\n")
 		case strings.TrimSpace(p.Answer) != "":
-			b.WriteString("**" + lb.answer + ":** " + scrub(strings.TrimSpace(p.Answer)) + "\n\n")
+			b.WriteString("**" + lb.answer + ":** " + strings.TrimSpace(p.Answer) + "\n\n")
 		}
 	case "plan":
 		// A plan is what the agent proposed to do, so it is conversation, not tool output.
 		if s := strings.TrimSpace(p.Plan); s != "" {
-			b.WriteString("**" + lb.plan + ":**\n\n" + scrub(s) + "\n\n")
+			b.WriteString("**" + lb.plan + ":**\n\n" + s + "\n\n")
+		}
+		if s := strings.TrimSpace(p.Answer); s != "" {
+			b.WriteString("**" + lb.answer + ":** " + s + "\n\n")
 		}
 	case "userfile":
 		b.WriteString("**" + lb.files + ":**")
 		if p.Caption != "" {
-			b.WriteString(" " + oneLine(scrub(p.Caption)))
+			b.WriteString(" " + oneLine(p.Caption))
 		}
 		b.WriteString("\n\n")
 		for _, f := range p.Files {
@@ -226,9 +237,9 @@ func writePart(b *strings.Builder, p Part, o MarkdownOptions, lb mdLabels, scrub
 		}
 		b.WriteString("\n")
 	case "error":
-		b.WriteString("> **" + lb.errorL + ":** " + oneLine(scrub(firstNonEmpty(p.Info, p.Text))) + "\n\n")
+		b.WriteString("> **" + lb.errorL + ":** " + oneLine(firstNonEmpty(p.Info, p.Text)) + "\n\n")
 		if p.Info != "" && strings.TrimSpace(p.Text) != "" {
-			writeFenced(b, "", scrub(strings.TrimSpace(p.Text)))
+			writeFenced(b, "", strings.TrimSpace(p.Text))
 		}
 	}
 }
@@ -244,6 +255,53 @@ func ShortTime(ts string, loc *time.Location) string {
 		loc = time.Local
 	}
 	return t.In(loc).Format("2006-01-02 15:04")
+}
+
+// closeOpenFence appends a closing fence when a turn's own Markdown left a code block open,
+// so it cannot swallow the separator, the next heading and every turn after it.
+func closeOpenFence(b *strings.Builder) {
+	var open string
+	for _, line := range strings.Split(b.String(), "\n") {
+		t := strings.TrimLeft(line, " ")
+		if len(line)-len(t) > 3 {
+			continue
+		}
+		f := fenceRun(t)
+		switch {
+		case open == "" && f != "":
+			open = f
+		case open != "" && f != "" && f[0] == open[0] && len(f) >= len(open) && strings.TrimSpace(t[len(f):]) == "":
+			open = ""
+		}
+	}
+	if open != "" {
+		b.WriteString(open + "\n\n")
+	}
+}
+
+// fenceRun returns the leading run of ` or ~ when it is long enough to be a fence.
+func fenceRun(line string) string {
+	if line == "" || (line[0] != '`' && line[0] != '~') {
+		return ""
+	}
+	n := 0
+	for n < len(line) && line[n] == line[0] {
+		n++
+	}
+	if n < 3 {
+		return ""
+	}
+	return line[:n]
+}
+
+func indent(s, pad string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i, l := range lines {
+		if l != "" {
+			lines[i] = pad + l
+		}
+	}
+	return strings.Join(lines, "\n") + "\n\n"
 }
 
 func editDiff(e Edit) string {

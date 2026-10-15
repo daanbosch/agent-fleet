@@ -80,3 +80,56 @@ func TestShortTimeKeepsUnparsable(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+// Scrub sees the finished document, so fields that are not prose cannot slip past it.
+func TestMarkdownScrubCoversEveryField(t *testing.T) {
+	const tok = "TOKENSENTINEL"
+	turns := []Turn{
+		{Role: "user", Source: "x" + tok, Parts: []Part{{Kind: "userfile", Files: []string{"uploads/" + tok + "/a.txt"}}}},
+		{Role: "assistant", Model: "m" + tok, TS: "bad" + tok, Parts: []Part{
+			{Kind: "tool", Tool: "T" + tok},
+			{Kind: "delegation", AgentType: "A" + tok},
+		}},
+		{Role: "user", Source: SourcePeer, PeerFrom: "p" + tok, Parts: []Part{{Kind: "text", Text: "hi"}}},
+	}
+	for _, full := range []bool{false, true} {
+		md := Markdown(turns, MarkdownOptions{Title: tok, Header: []string{tok}, ToolOutput: full,
+			Scrub: func(s string) string { return strings.ReplaceAll(s, tok, "[x]") }})
+		if strings.Contains(md, tok) {
+			t.Errorf("full=%v: token survived:\n%s", full, md)
+		}
+	}
+}
+
+// A turn that opens a fence and never closes it must not swallow the turns after it.
+func TestMarkdownClosesAnOpenFence(t *testing.T) {
+	for _, fence := range []string{"```", "~~~~"} {
+		turns := []Turn{
+			{Role: "user", Parts: []Part{{Kind: "text", Text: fence + "text\nunclosed"}}},
+			{Role: "assistant", Parts: []Part{{Kind: "text", Text: "answer"}}},
+		}
+		md := Markdown(turns, MarkdownOptions{Lang: "en"})
+		want := "unclosed\n\n" + fence + "\n\n---\n\n## Assistant"
+		if !strings.Contains(md, want) {
+			t.Errorf("fence %q left open:\n%s", fence, md)
+		}
+	}
+}
+
+func TestMarkdownPlanAnswerAndOptionPreview(t *testing.T) {
+	turns := []Turn{{Role: "assistant", Parts: []Part{
+		{Kind: "plan", Plan: "do X", Answer: "User has approved your plan"},
+		{Kind: "question", Questions: []Question{{Question: "Which?", Options: []Option{
+			{Label: "A", Preview: "+--+\n```\n|A |"},
+		}}}, Answer: "A"},
+	}}}
+	md := Markdown(turns, MarkdownOptions{Lang: "en", ToolOutput: true})
+	for _, want := range []string{"**Answer:** User has approved your plan", "  ````\n  +--+\n  ```\n  |A |\n  ````"} {
+		if !strings.Contains(md, want) {
+			t.Errorf("missing %q in:\n%s", want, md)
+		}
+	}
+	if md := Markdown(turns, MarkdownOptions{Lang: "en"}); strings.Contains(md, "+--+") {
+		t.Errorf("preview belongs to the full export only:\n%s", md)
+	}
+}
