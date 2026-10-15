@@ -220,7 +220,7 @@ export function SessionMenu({ s, actions, running, open, place, keepOpenRefs, on
             onClose();
             void actions.halt(s.name, displayName(s));
           }, <Icon name="debug-stop" />, tr("srow.stop")),
-        // terminalDriver === false (lcpp, ADR 0093 決定 2): no Terminal (CLI) route exists to
+        // terminalDriver === false (lcpp, ADR 0093 decision 2): no Terminal (CLI) route exists to
         // switch to, ever — never offer the toggle (the server would 400 it anyway).
         !dead &&
           running &&

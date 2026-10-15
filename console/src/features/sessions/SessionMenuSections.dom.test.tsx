@@ -162,6 +162,46 @@ describe("session menu sections", () => {
     expect(menuEl().querySelectorAll(".ui-menu-sep")).toHaveLength(5);
   });
 
+  // The issue's membership, pinned by label so moving an item to another section fails here.
+  it("puts each item in the section the issue names, in order", async () => {
+    setSetting("workingSets", [{ id: "w1", name: "Set one", repos: [], sessions: [] }] as never);
+    await renderMenu(
+      base({ remoteUrl: "https://example.test/r", generatedImages: 1, generatedImagesPath: "p", worktree: true }),
+    );
+    const t = (await import("../../lib/i18n/index.ts")).t;
+    const inGroup = (id: string) =>
+      [...menuEl().querySelectorAll<HTMLElement>(`[data-menu-section=${id}] .ui-menu-item`)].map((e) => e.textContent!.trim());
+    expect(inGroup("run")).toEqual([t("srow.stop"), t("srow.open_remote")]);
+    expect(inGroup("view")).toEqual([
+      t("srow.generated_images", { n: 1 }),
+      t("srow.copy_id", { name: "sk7f3q9" }),
+      t("srow.rename"),
+      t("srow.rename_branch"),
+    ]);
+    expect(inGroup("keep")).toEqual([
+      t("srow.handoff"),
+      t("srow.share"),
+      t("srow.export_names"),
+      t("srow.export_full"),
+    ]);
+    expect(inGroup("wsets")).toEqual(["Set one"]);
+    expect(inGroup("behaviour")).toEqual([
+      t("srow.lock"),
+      t("srow.keep_awake_on", { hours: 4 }),
+      t("srow.stop_after_turn_on"),
+      t("srow.budget"),
+    ]);
+    expect(inGroup("cleanup")).toEqual([t("srow.archive"), t("srow.recreate")]);
+  });
+
+  // jsdom computes no layout, so the shrink is pinned at its source: the menu scrolls at
+  // max-height as a flex column, and a rule that may shrink collapses to 0px.
+  it("keeps the rules from shrinking when the menu scrolls", async () => {
+    const { readFileSync } = await import("node:fs");
+    const css = readFileSync("src/ui/ui.css", "utf8");
+    expect(css).toMatch(/\.ui-menu-sep \{[^}]*flex-shrink: 0;/);
+  });
+
   it("a dead shell keeps only the sections that have items", async () => {
     await renderMenu(base({ kind: "shell", alive: false, resumable: false }));
     expect(sectionIds()).toEqual(["view", "behaviour", "cleanup"]);
