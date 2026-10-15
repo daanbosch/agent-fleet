@@ -117,7 +117,8 @@ var toolSpecs = []toolSpec{
 	// Pin key "mysql" holds the pinned tarball version (e.g. 8.4.6).
 	{Name: "mysql", Cmd: "mysqld", Baked: "", Pin: "mysql"},
 	{Name: "rtk", Cmd: "rtk", Baked: "/usr/local/bin/rtk", Pin: "rtk"},
-	{Name: "gh", Cmd: "gh", Baked: "/usr/local/libexec/gh", Pin: "gh"}, // /usr/local/bin/gh is the transparent-auth wrapper
+	{Name: "gh", Cmd: "gh", Baked: "/usr/local/libexec/gh", Pin: "gh"},     // /usr/local/bin/gh is the transparent-auth wrapper
+	{Name: "bkt", Cmd: "bkt", Baked: "/usr/local/libexec/bkt", Pin: "bkt"}, // /usr/local/bin/bkt is the transparent-auth wrapper
 	{Name: "go", Cmd: "go", Baked: "/usr/local/go/bin/go", Args: []string{"version"}, Pin: "go"},
 	{Name: "node", Cmd: "node", Baked: "/usr/local/bin/node"},
 	{Name: "python", Cmd: "python3", Baked: "/usr/bin/python3"},

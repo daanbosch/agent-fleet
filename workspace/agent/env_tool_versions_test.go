@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // extractVer pulls the version number out of the real --version output of each tool
@@ -160,4 +161,76 @@ func binStr(b *toolBin) string {
 		return "-"
 	}
 	return b.Version
+}
+
+// bkt is wrapped like gh, so its row points Baked at the libexec binary and the pin must
+// reach versions.json: without the Dockerfile half the row has nothing to compare against.
+func TestBktRowAndPin(t *testing.T) {
+	var spec *toolSpec
+	for i := range toolSpecs {
+		if toolSpecs[i].Name == "bkt" {
+			spec = &toolSpecs[i]
+		}
+	}
+	if spec == nil {
+		t.Fatal("toolSpecs has no bkt row")
+	}
+	if spec.Cmd != "bkt" || spec.Baked != "/usr/local/libexec/bkt" || spec.Pin != "bkt" {
+		t.Errorf("bkt row = %+v, want Cmd=bkt Baked=/usr/local/libexec/bkt Pin=bkt", *spec)
+	}
+	df, err := os.ReadFile("../Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(df)
+	if !strings.Contains(s, `"bkt":"%s"`) || !strings.Contains(s, `"$BKT_VERSION"`) {
+		t.Error("Dockerfile versions.json printf must carry the bkt key and the BKT_VERSION argument")
+	}
+	// The printf is positional: the bkt value must sit right after GH_VERSION, as the key
+	// does after "gh".
+	if !strings.Contains(s, `"gh":"%s","bkt":"%s"`) || !strings.Contains(s, `"$GH_VERSION" "$BKT_VERSION"`) {
+		t.Error("bkt key and argument must directly follow gh in the versions.json printf")
+	}
+}
+
+// `bkt --version` prints "bkt version 0.33.1"; the extracted value has to equal the pin
+// (ARG BKT_VERSION) or the row reads as drifted on a correct image.
+func TestExtractVerBkt(t *testing.T) {
+	if got := extractVer("bkt version 0.33.1"); got != "0.33.1" {
+		t.Errorf("extractVer(bkt) = %q, want 0.33.1", got)
+	}
+}
+
+// The probe goes through the transparent-auth wrapper (/usr/local/bin/bkt). With no
+// Bitbucket connection (git credential fill fails) it must answer promptly with the version
+// line only: nothing extra on stdout, and no token anywhere.
+func TestProbeBktThroughWrapperWithoutConnection(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real-bkt")
+	if err := os.WriteFile(real, []byte("#!/bin/sh\necho 'bkt version 0.33.1'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A git whose credential helper finds nothing.
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "cfg"))
+	t.Setenv("BKT_TOKEN", "")
+	t.Setenv("BKT_HOST", "")
+	t.Setenv("AF_BKT_REAL", real)
+
+	start := time.Now()
+	got := probeVersion(context.Background(), "../bkt-auth-wrapper.sh", nil, nil)
+	if got == nil || got.Version != "0.33.1" || got.Raw != "bkt version 0.33.1" {
+		t.Fatalf("probe through wrapper = %+v, want version 0.33.1", got)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("probe took %v, want prompt answer", d)
+	}
 }
