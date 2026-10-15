@@ -349,3 +349,65 @@ one by the pid in `opencode-serve.json` (written only while the opt-in is on). P
 1.x are never counted as attached to the serve (their stale `opencode-mode` record is cleared).
 Open Terminal panes keep the opencode they started with; a 2.x pane loses its server when the
 serve is replaced and must be relaunched.
+
+## 2026-10-16 — the cut-over: image pin to opencode 2.0.29 (#2105, #2134)
+
+`OPENCODE_VERSION` moves from `1.19.0` to `2.0.29`; `@opencode/cli` is installed for a 2.x pin and
+`opencode-ai` for a 1.x one in the Dockerfile, the entrypoint, `release-gate.yml`,
+`setup-agent-cli`, `cli-drift-check.sh` and `cli-pin-bump.sh` (`deploy/local/opencode-pkg-test.sh`
+runs all five rules on the same versions). The pin-bump script keeps refusing a major crossing and
+now bumps inside 2.x.
+
+**2.0.29 rather than 2.0.28.** Measured with both binaries in isolated homes: `/openapi.json`
+differs only by one added optional `policies` array in a config schema, `--help` for the root,
+`serve`, `run` and `service` is identical, and the six opencode 2 contract tests (serve API, form
+round trip, state reads, shared serve, Terminal form respond, plugin modules) pass on 2.0.29.
+
+**The opt-in (#2133) after the cut-over.** The `opencode` on PATH is v2 and owns
+`~/.local/share/opencode/opencode.db`, so a second private v2 with `OPENCODE_DB` would split a
+member's sessions in two. `opencode.PinnedV2()` (the PATH opencode, then the image pin, is 2.x)
+makes `UseV2` and `CurrentLaunch` ignore the switch file, the `AF_OPENCODE_MAJOR` variable and the
+private install; `install-opencode2` and `opencode-major 2` print why and change nothing, `opencode-major 1`
+still clears a leftover switch file, and the status names the private install and
+`opencode2-data` as leftovers that are **not merged** into the main database (sessions that exist
+only there are not visible). Nothing is deleted. With a 1.x PATH opencode (a rollback) the opt-in is
+live again unchanged, so the code stays; `V2Version` follows the pin.
+
+**Data on upgrade, measured** (real `opencode-ai@1.19.0` and `@opencode/cli@2.0.29`, isolated HOME,
+loopback stub provider with an explicit model; two sessions created through the 1.19.0 serve, the
+home copied, 2.0.29 started on the copy):
+- The v1 session ids survive the import (`ses_…` identical), titles, directory, model and the
+  message history come across (`GET /api/session/{id}/message` returns the assistant text and the
+  user text).
+- Resume through af's v2 calls works on an imported session: `POST /api/session/{id}/prompt` queues
+  and runs a turn, and the provider request carried the whole earlier history (system, the v1 user
+  message, the v1 assistant reply, the new message); `POST …/model` and `…/agent` answer 204;
+  `PATCH` metadata (`af.sid`/`af.name`, the Terminal claim tag) answers 204.
+- A real 2.0.29 TUI started as `opencode --server … --session <v1 id> --auto` (the Terminal route)
+  opens the imported conversation with its history, and shows `Plan auto · m` after the agent switch.
+- Rollback direction: a copy of the migrated home started under 1.19.0 lists the two imported
+  sessions and their v1 messages, but not the session created under 2.0.29 and not the turn added
+  to an imported session under 2.0.29. Nothing is deleted; the data is invisible to the other major.
+
+**Entrypoint trap, measured.** With `opencode-ai@1.19.0` installed into a prefix,
+`npm install -g @opencode/cli@2.0.29` fails with `EEXIST` on the `opencode` bin and the prefix keeps
+answering `1.19.0`; uninstalling the other package first works in both directions. The boot-install
+path already did that; the self-update path did not, so a home that had self-updated on the old pin
+would have kept a v1 shadow ahead of the baked v2. It now drops the other package first.
+
+**Contract tests in CI.** The `contract` job runs `go test -tags contract -run TestContract` against
+the pinned and the newest version, which are both 2.x now. Eight tests of the 1.x contract failed
+on 2.0.29 (SQLite tables, `/global` and `/session` paths, the v1 plugin file, `OPENCODE_CONFIG`,
+`PATCH /global/config`, the v1 `/doc` spec) and the pane-mode test launched a bare `opencode`, which
+on 2.x starts the per-user service on its fixed port (the test now passes `--standalone`, as
+`buildProgram` does; Tab does not cycle the agent at the 2.0.29 start screen, so only the first
+reading is asserted there). The 1.x-only tests skip on a 2.x binary (`skipOnOpencode2`, naming the
+test that pins the 2.x counterpart) and were re-run green on 1.19.0, so a rollback keeps them.
+`setup-agent-cli` resolved `latest` to `opencode-ai` unconditionally; it now follows the pin's major.
+
+**Rolling back.** Rebuild the image with `--build-arg OPENCODE_VERSION=1.19.0` (or edit the ARG),
+Stop and Start the workspaces. 1.19.0 runs on the migrated database and sees every session from
+before the upgrade; sessions created or extended under 2.x are invisible to it. Copy
+`~/.local/share/opencode/opencode.db*` before the first v2 start to restore exactly. The v1 code
+paths (launch line, store reads, plugins, instruction delivery) are kept and covered by the existing
+tests for both majors.
