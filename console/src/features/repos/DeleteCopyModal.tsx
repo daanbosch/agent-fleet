@@ -37,6 +37,7 @@ import {
   effectiveGrade,
   sessionsToClear,
   stopUnblocks,
+  stoppableSessions,
   summarize,
   type CopyPlan,
 } from "./deleteTree.ts";
@@ -98,7 +99,7 @@ export function DeleteCopyModal({ node, onClose, onDeleted }: DeleteCopyModalPro
   // Live sessions this plan could stop, and so whether the tick is worth offering at all.
   // Counted over the whole plan rather than the selection: the tick is what MAKES those rows
   // selectable, so gating it on them already being ticked would hide it forever.
-  const stoppable = useMemo(() => stopUnblocks(plans).reduce((n, p) => n + p.alive.length, 0), [plans]);
+  const stoppable = useMemo(() => stoppableSessions(plans), [plans]);
   // Offered independently of the tick: the checkbox has to be visible to be ticked, and its
   // count is "how many of the selected copies have a branch that could go", not "how many
   // will go".
@@ -307,7 +308,8 @@ export function DeleteCopyModal({ node, onClose, onDeleted }: DeleteCopyModalPro
             and come back. Ticking this makes those rows actionable — /archive and /stop kill
             the pane themselves, so the run stops them on its way through. The rows it frees
             and nothing else takes with it are ticked along with it; anything that would still
-            lose work stays for the user to tick, as it does without the option. */}
+            lose work stays for the user to tick, as it does without the option. Offered for
+            those rows too: a worktree still being worked on is usually one of them. */}
         {stoppable > 0 && (
           <label className="wcdel-opt">
             <input

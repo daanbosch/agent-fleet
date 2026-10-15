@@ -11,6 +11,7 @@ import {
   effectiveGrade,
   sessionsToClear,
   stopUnblocks,
+  stoppableSessions,
   summarize,
 } from "./deleteTree.ts";
 import type { Repo } from "./store.ts";
@@ -219,6 +220,24 @@ describe("稼働中セッションを先に停止する", () => {
     expect(effectiveGrade(p, true)).toBe("review");
     expect(p.stoppedWhyKey).toBe("rp.del.why_dirty");
     expect(stopUnblocks([p])).toEqual([]); // ticking the option alone must not select it
+  });
+
+  it("止めると要確認になる行にも、停止の選択肢は出す（自動では選ばない）", () => {
+    const plans = planTree(node(repo("app@a", { ahead: 2 })), [sess("s1", "app@a", { alive: true })]);
+    expect(stoppableSessions(plans)).toBe(1);
+    expect(stopUnblocks(plans)).toEqual([]);
+    const sel = defaultSelection(plans);
+    expect(deleteOrder(plans, sel, true)).toEqual([]); // unticked, so nothing runs
+    const ticked = new Set(["app@a"]);
+    expect(summarize(plans, ticked, false, true)).toMatchObject({ copies: 1, force: 1, stop: 1 });
+  });
+
+  it("ロック行は停止の選択肢の対象に数えない", () => {
+    const plans = planTree(node(repo("app@a", { ahead: 1 })), [
+      sess("s1", "app@a", { alive: true }),
+      sess("s2", "app@a", { locked: true }),
+    ]);
+    expect(stoppableSessions(plans)).toBe(0);
   });
 
   it("稼働中も停止中と同じ振り分けで片付ける（claude は棚へ、shell は忘れる）", () => {
