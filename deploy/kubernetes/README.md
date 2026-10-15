@@ -305,10 +305,10 @@ out of the clone, two things in `kustomization.yaml` must change:
 - **The paths.** `resources: ../../base` and `components: ../../components/gke` and
   `../../components/params` are relative to `deploy/kubernetes/overlays/<name>/` inside this
   repository and resolve to nothing elsewhere. Point them at the clone's `deploy/kubernetes/base`
-  and `deploy/kubernetes/components/…` (a relative path from your overlay, or an absolute one),
-  and check with `kubectl kustomize <your overlay>` before applying. Rewriting them by hand is
-  what a stand-up outside the clone needed; the exact form is yours to choose and is not
-  prescribed here.
+  and `deploy/kubernetes/components/…` with **relative** paths from your overlay: `kubectl
+  kustomize` rejects an absolute directory reference (`new root '…' cannot be absolute`). Check
+  with `kubectl kustomize <your overlay>` before applying. Rewriting them by hand is what a
+  stand-up outside the clone needed.
 - **`newName`.** The copied `images:` entry carries a placeholder `newName` (an Artifact
   Registry path). With the public images (`ghcr.io/k-k1/agent-fleet/…`, step 1) delete the
   `newName` line and keep `newTag`, so the name stays the public one; with your own Artifact
