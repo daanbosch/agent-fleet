@@ -17,7 +17,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECK="$HERE/cli-fragment-check.sh"
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+trap 'chmod -R u+rwx "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 STUB="$WORK/bin"; FIX="$WORK/pkgs"
 mkdir -p "$STUB" "$FIX"
 
@@ -38,7 +38,14 @@ for a in "$@"; do [ "$prev" = --pack-destination ] && dest="$a"; prev="$a"; done
 dir="$STUB_PKGS/$(printf '%s' "${spec%@*}" | tr '/@' '__')@${spec##*@}"
 [ -d "$dir" ] || { echo "npm error 404 $spec" >&2; exit 1; }
 name="$(basename "$dir").tgz"
-tar -czf "$dest/$name" -C "$dir" --transform 's|^\.|package|' .
+if [ -n "${STUB_UNREADABLE:-}" ] && [ -f "$dir/$STUB_UNREADABLE" ]; then
+  # That one file ships with mode 000 (a package whose file cannot be read once unpacked).
+  tar -cf "$dest/$name.tar" -C "$dir" --exclude="./$STUB_UNREADABLE" --transform 's|^\.|package|' .
+  tar -rf "$dest/$name.tar" -C "$dir" --mode=a-rwx --transform 's|^|package/|' "./$STUB_UNREADABLE"
+  gzip -c "$dest/$name.tar" > "$dest/$name"; rm "$dest/$name.tar"
+else
+  tar -czf "$dest/$name" -C "$dir" --transform 's|^\.|package|' .
+fi
 echo "$name"
 FAKE
 chmod +x "$STUB/npm"
@@ -140,6 +147,65 @@ code_is 2   # `has` must not read a broken registry as "no rows"
 echo "== case 9: has =="
 "$CHECK" has claude || fail "has claude"
 if "$CHECK" has kiro; then fail "has kiro must be false"; fi
+
+echo "== case 9b: an unreadable file is a checker failure (2), never a verdict =="
+# claude (the platform package) holds the target in latest; the main package's cli.js is the
+# control that would be found. Unreadable cli.js: the control is lost, the target is fine.
+pkg 1.0.0 "main has Esc to cancel" 'run /login'
+pkg 1.0.1 "main has Esc to cancel" 'run /login'
+STUB_UNREADABLE=cli.js run 1.0.0 1.0.1
+code_is 2
+grep -q 'could not search' "$WORK/err" || fail "the error does not say a search failed"
+if grep -q '^missing\|^unverifiable' "$WORK/out"; then fail "a read error was turned into a verdict"; fi
+# Latest's `claude` binary unreadable: the target string is still inside it, so reporting it
+# missing would be wrong; and a match elsewhere (cli.js has Esc to cancel) must not hide it.
+STUB_UNREADABLE=claude run 1.0.0 1.0.1
+code_is 2
+# CONTROL: the same fixtures, nothing unreadable.
+run 1.0.0 1.0.1
+code_is 0
+
+echo "== case 9c: registry rows are exactly kind TAB fragment TAB why =="
+reg_bad() { # reg_bad <label> <row>
+  printf '%s\n' "$2" > "$WORK/bad.txt"
+  set +e; FRAGMENTS="$WORK/bad.txt" "$CHECK" has claude > "$WORK/out" 2> "$WORK/err"; rc=$?; set -e
+  [ "$rc" = 2 ] || fail "$1: a malformed row must stop the run (exit $rc)"
+}
+reg_bad "empty fragment" "claude${tab}${tab}accidentally-used-as-fragment${tab}why"
+reg_bad "empty kind" "${tab}frag${tab}why"
+reg_bad "empty why" "claude${tab}frag${tab}"
+reg_bad "extra column" "claude${tab}frag${tab}why${tab}more"
+reg_bad "one column" "claude"
+printf 'claude%sfrag%swhy\n' "$tab" "$tab" > "$WORK/good.txt"
+FRAGMENTS="$WORK/good.txt" "$CHECK" has claude || fail "CONTROL: a well-formed row was refused"
+
+echo "== case 9d: fragments are literal text, not patterns =="
+# One registry of awkward literals; each exists verbatim in both versions' binary, and a
+# decoy that only a regex reading (or a trimmed one) would match is all that the "wrong"
+# files hold: with -F dropped, "a.b" would match "axb" and "[text]" a single letter.
+{
+  printf 'claude\ta.b\tdot\n'
+  printf 'claude\t[text]\tbracket\n'
+  printf 'claude\t-leading dash\tdash\n'
+  printf 'claude\tsay "quoted"\tquote\n'
+  printf 'claude\t  padded  \tspaces\n'
+} > "$WORK/lit.txt"
+pkg 1.0.0 "x" 'a.b' '[text]' '-leading dash' 'say "quoted"' 'a  padded  b'
+pkg 1.0.1 "x" 'a.b' '[text]' '-leading dash' 'say "quoted"' 'a  padded  b'
+set +e; FRAGMENTS="$WORK/lit.txt" "$CHECK" check claude 1.0.0 1.0.1 > "$WORK/out" 2> "$WORK/err"; rc=$?; set -e
+code_is 0
+[ "$(grep -c '^ok' "$WORK/out")" = 5 ] || fail "every literal must be found as written"
+# Decoys only: nothing literal is there, a pattern reading would find them all.
+pkg 1.0.0 "x" 'axb' 't' 'leading-dash' 'say quoted' 'a padded b'
+pkg 1.0.1 "x" 'axb' 't' 'leading-dash' 'say quoted' 'a padded b'
+set +e; FRAGMENTS="$WORK/lit.txt" "$CHECK" check claude 1.0.0 1.0.1 > "$WORK/out" 2> "$WORK/err"; rc=$?; set -e
+code_is 2   # none found even in the pin: nothing was matched by pattern
+# Present in the pin, only the decoy in latest: must be missing, not matched.
+pkg 1.0.0 "x" 'a.b' 'x' 'x' 'x' 'x'
+pkg 1.0.1 "x" 'axb' 'x' 'x' 'x' 'x'
+set +e; FRAGMENTS="$WORK/lit.txt" "$CHECK" check claude 1.0.0 1.0.1 > "$WORK/out" 2> "$WORK/err"; rc=$?; set -e
+code_is 1
+line_is "missing${tab}a.b${tab}dot"
 
 echo "== case 10: the shipped registry is well-formed and every fragment is whole ASCII text =="
 FRAGMENTS="$HERE/cli-message-fragments.txt" "$CHECK" has claude || fail "the shipped registry has no claude rows"

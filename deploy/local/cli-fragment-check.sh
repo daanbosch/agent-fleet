@@ -72,11 +72,15 @@ packages_of() {
 # cannot silently drop a fragment from the check.
 rows_of() {
   [ -f "$FRAGMENTS" ] || die "no registry at $FRAGMENTS"
-  local line k f w
+  local line k f w t
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|'#'*) continue ;; esac
-    IFS=$'\t' read -r k f w <<< "$line"
-    [ -n "$k" ] && [ -n "$f" ] && [ -n "$w" ] || die "malformed registry row (want kind TAB fragment TAB why): $line"
+    # Exactly two TABs, cut by position: `read` with a TAB IFS would collapse an empty
+    # column and shift the next one into its place.
+    t="${line//[^$'\t']/}"
+    [ "${#t}" -eq 2 ] || die "malformed registry row (want kind TAB fragment TAB why): $line"
+    k="${line%%$'\t'*}"; w="${line#*$'\t'}"; f="${w%%$'\t'*}"; w="${w#*$'\t'}"
+    [ -n "$k" ] && [ -n "$f" ] && [ -n "$w" ] || die "malformed registry row (empty column): $line"
     [[ "$k" =~ ^[a-z0-9-]+$ ]] || die "invalid kind in registry row: $line"
     case "$f" in *'`'*) die "a fragment must not contain a backtick: $line" ;; esac
     [ "$k" != "$1" ] || printf '%s\t%s\n' "$f" "$w"
@@ -129,7 +133,15 @@ unpack() {
   [ -n "$(find "$dir" -type f -print -quit)" ] || die "the $v package holds no files"
 }
 
-found_in() { grep -raFq -e "$1" "$2"; } # found_in <fragment> <dir>
+# found_in <fragment> <dir>: 0 found, 1 not found, and a read error (grep exit 2) stops the
+# run: an unreadable file says nothing about the fragment. No -q: it would stop at the first
+# match and hide a later read error; the output is discarded instead.
+found_in() {
+  local rc=0
+  grep -raF -e "$1" "$2" > /dev/null 2> "$WORK/grep.err" || rc=$?
+  [ "$rc" -le 1 ] || die "could not search $2: $(head -n 3 "$WORK/grep.err" | tr '\n' ' ')"
+  return "$rc"
+}
 
 unpack "$pinned" "$WORK/pinned"
 unpack "$latest" "$WORK/latest"

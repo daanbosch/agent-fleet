@@ -219,7 +219,7 @@ resolve_muse() {
 fragment_error=false
 fragment_notes=()   # PR body list lines
 check_fragments() {
-  local kind="$1" pin="$2" latest="$3" rc status frag why gone=() unver=() line
+  local kind="$1" pin="$2" latest="$3" rc i status frag why gone=() gone_why=() unver=()
   set +e
   "$FRAGMENT_CHECK" has "$kind"
   rc=$?
@@ -248,14 +248,13 @@ check_fragments() {
   esac
   while IFS=$'\t' read -r status frag why; do
     case "$status" in
-      missing) gone+=("$frag") ;;
+      missing) gone+=("$frag"); gone_why+=("$why") ;;
       unverifiable) unver+=("$frag") ;;
     esac
   done < "$WORK/frag.out"
   if [ "${#gone[@]}" -gt 0 ]; then
-    for frag in "${gone[@]}"; do
-      line="$(grep -F -- "missing"$'\t'"$frag"$'\t' "$WORK/frag.out" | head -n 1 | cut -f3)"
-      fragment_notes+=("- \`$kind\` \`$latest\`: **\`$frag\` is gone** (was in \`$pin\`; used in $line)")
+    for i in "${!gone[@]}"; do
+      fragment_notes+=("- \`$kind\` \`$latest\`: **\`${gone[$i]}\` is gone** (was in \`$pin\`; used in ${gone_why[$i]})")
     done
     if ! "$REPORT" fragments "$kind" "$latest" "${gone[@]}"; then
       fragment_error=true
