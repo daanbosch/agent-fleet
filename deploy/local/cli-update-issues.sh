@@ -19,6 +19,8 @@
 #   dispatch    cursor / kiro: the credential rotates, so the watcher never runs them
 #   credential  claude / copilot / agy while their CI secret is not configured
 #   manual      rtk: no contract exists, it is bumped by hand
+#   fragments   the latest release no longer contains upstream text Agent Fleet matches on
+#               (a row in `Red contracts`, written by cli-pin-bump.sh via cli-fragment-check.sh)
 #
 # An issue that is already open is kept, with a new title, through `merge` (latest passed
 # its contract: merge the bump PR, which closes it). It is closed when nothing is left for
@@ -127,6 +129,14 @@ sync_kind() { # sync_kind <kind> <pin> <latest>
   else state=waiting
   fi
 
+  # A gone fragment outranks "the watcher will handle it" and "merge the bump PR": the
+  # contract passing says nothing about wording, and merging is the moment to look.
+  if [ "$state" = waiting ] || [ "$state" = merge ]; then
+    local frag_ver
+    frag_ver="$(sed -n "s/^- \`$kind\` \`\([^\`]*\)\`.*<!-- cli-contract-fragments $kind -->.*/\1/p" "$WORK/rows" | tail -1)"
+    [ "$frag_ver" != "$latest" ] || state=fragments
+  fi
+
   case "$state" in
     current|waiting)
       [ -n "$num" ] || return 0
@@ -173,6 +183,10 @@ sync_kind() { # sync_kind <kind> <pin> <latest>
       title="$kind CLI: run the contract on $latest"
       next="\`$kind\` signs in with a credential that rotates, so the watcher never runs its contract unattended. Run it by hand. If it fails at sign-in, refresh $(secret_of "$kind") and run it again. When it passes, the pin-bump PR that follows closes this issue."
       cmd="$(dispatch_cmd "$kind")" ;;
+    fragments)
+      title="$kind CLI: upstream message fragments gone in $latest"
+      next="\`$latest\` no longer contains text Agent Fleet matches on (listed under **Red contracts** below). Check whether the code that matches it still works against the new wording (\`deploy/local/cli-message-fragments.txt\` says where each fragment is used), fix it in a PR that mentions this issue, and update the registry. This is a place to look, not proof of a break. Merging the pin-bump PR closes this issue."
+      cmd="" ;;
     credential)
       title="$kind CLI: verify $latest (no CI credential)"
       next="The contract secret $(secret_of "$kind") is not configured, so nothing tested \`$latest\`. Either register the secret and run the contract (the pin-bump PR that follows closes this issue), or verify it by hand in a signed-in Terminal (CLI) session — the composer readiness/footer is detected; a prompt sent from the mirror reaches the TUI; both turns appear in \`/messages\`; it returns to idle — then bump the pin in a PR that closes this issue."

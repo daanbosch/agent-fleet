@@ -143,6 +143,19 @@ backstop, and on dispatch. The decision and the edit are `deploy/local/cli-pin-b
   different: the run then leaves the branch and the PR as they are until a complete
   run, so a network blip never drops a kind or closes the PR. The npm kinds have no
   checksum.
+- **Upstream message fragments.** For every drifting kind that has rows in
+  `deploy/local/cli-message-fragments.txt` (today: claude's TUI footer fragments and
+  auth-failure wording), `cli-fragment-check.sh` unpacks the pinned and the latest npm
+  package and `grep -F`s each fragment. A fragment found in the pinned package and absent
+  from the latest is named in the PR body and in a row of the kind's update issue
+  (`Red contracts`); it never holds the bump back, because it says "look here", not "broken".
+  A fragment that is also absent from the pinned package (assembled by string
+  concatenation, escaped or encoded in the bundle) is listed as *unverifiable* instead of
+  passing. A checker that could not run (download, unpack, nothing found even in the pinned
+  package) sets `fragment_error=true`, is written into the PR body, and fails the workflow's
+  last step after the PR is opened. Add a row when new code starts matching on upstream text;
+  `cli-fragment-check-stub-test.sh` proves a missing fragment is reported and a present one
+  passes. Binary-only CLIs (agy, cursor, kiro, muse) need an unpack recipe first.
 - **The edit** touches only the bumped kinds' `ARG` lines, is checked line by line
   before it replaces the file, and a second run changes nothing.
 - **The PR** carries the evidence table — each kind's `pin → latest`, a link to the
@@ -167,6 +180,7 @@ above is the whole interaction. An issue opens only for:
 | `<kind> CLI: verify <v> (no CI credential)` | claude, copilot or agy with no contract secret: register it and run the contract, or probe the release by hand in Terminal (CLI) | the bump PR, or a hand bump |
 | `<kind> CLI: contract failed on <v>` | the contract is red on latest (its row and run are in the issue's `Red contracts` section; `deploy/local/cli-contract-report.sh`) | the bump PR once the fixed contract passes |
 | `<kind> CLI: contract fails on develop` | the contract failed its last 2 runs on `develop` whatever the version: the harness or its secret is broken | itself, once the contract passes and the pin is current |
+| `<kind> CLI: upstream message fragments gone in <v>` | the new release no longer contains text Agent Fleet matches on (named in the `Red contracts` section); check the code that matches it, fix it and the registry | the bump PR, or a newer release |
 | `rtk CLI: bump the pin to <v>` | rtk has a release source but no contract, so no `tested` to gate on; bump it by hand (§10.2.1) | the hand-bump PR |
 
 An open issue follows its CLI: once latest passes, the same issue is retitled

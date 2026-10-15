@@ -127,6 +127,17 @@ contract ワークフローが終わったとき、保険として2 時間ごと
   していない値、manifest が別の版に進んでいた場合、その kind はピンのまま。取得元やダウンロードが
   読めなかった場合は別扱いで、その実行はブランチと PR に触らず次の完全な実行を待つ。ネットワークの
   一時的な失敗で kind が PR から落ちたり PR が閉じたりはしない。npm の kind にチェックサムは無い。
+- **上流メッセージ断片。** `deploy/local/cli-message-fragments.txt` に行がある drift 中の kind
+  （現状は claude の TUI フッター断片と認証失敗の文言）について、`cli-fragment-check.sh` が
+  ピン版と latest の npm パッケージを展開し、各断片を `grep -F` で探す。ピン版にあって latest に
+  無い断片は、PR 本文とその kind の更新 issue（`Red contracts` の行）に名指しで載る。版上げは
+  止めない（「見てほしい」であって「壊れた」ではない）。ピン版にも無い断片（文字列連結・
+  エスケープ・別エンコードでバンドルに入っているもの）は通過扱いにせず *unverifiable* として
+  並べる。チェッカー自体が動かなかった場合（ダウンロード・展開の失敗、ピン版でも 1 つも
+  見つからない）は `fragment_error=true` を立て、PR 本文に書き、PR を開いた後でワークフローの
+  最終ステップを失敗させる。新しいコードが上流の文言に依存し始めたら行を足す。
+  `cli-fragment-check-stub-test.sh` が「無い断片は報告され、有る断片は通る」ことを固定する。
+  バイナリ配布のみの CLI（agy・cursor・kiro・muse）は先に展開レシピが要る。
 - **書き換え**は上げる kind の `ARG` 行だけに触れ、ファイルを置き換える前に 1 行ずつ
   照合する。2 回目の実行は何も変えない。
 - **PR** には証拠表が載る — kind ごとの `ピン → latest`、`tested` を記録した contract 実行への
@@ -148,6 +159,7 @@ issue が開くのは次のときだけ:
 | `<kind> CLI: verify <v> (no CI credential)` | claude・copilot・agy で contract の secret が無い。登録して contract を回すか、ターミナル（CLI）で手で確かめる | 版上げ PR か手での版上げ |
 | `<kind> CLI: contract failed on <v>` | latest で contract が赤（行と実行は issue の `Red contracts` 欄。`deploy/local/cli-contract-report.sh`） | 直した contract が通ったあとの版上げ PR |
 | `<kind> CLI: contract fails on develop` | 版に関係なく `develop` で直近 2 回落ちた: ハーネスか secret が壊れている | contract が通りピンが最新になれば自分で閉じる |
+| `<kind> CLI: upstream message fragments gone in <v>` | 新しい版から Agent Fleet が照合する文言が消えた（`Red contracts` に名前が載る）。照合するコードを確かめ、直し、レジストリも更新する | 版上げ PR、または新しい版 |
 | `rtk CLI: bump the pin to <v>` | rtk は取得元はあるが contract が無く `tested` で門番できない。手で上げる（§10.2.1） | 手での版上げ PR |
 
 開いた issue は CLI に付いていく: latest が通れば同じ issue が `<kind> CLI: merge the pin bump to <v>`

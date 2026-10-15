@@ -9,7 +9,10 @@
 #     fails half way (x64 resolved, arm64 refused) leaves none of its lines changed;
 #   - a second run is a no-op;
 #   - every line other than the bumped `ARG` lines is unchanged byte for byte;
-#   - a failure after the decision leaves the Dockerfile untouched.
+#   - a failure after the decision leaves the Dockerfile untouched;
+#   - the upstream message-fragment check (cases 13-15) names a gone fragment in the PR body
+#     and the update issue without holding the bump back, and a checker that could not run
+#     is loud (`fragment_error=true`, stderr, PR body), not an empty result.
 #
 # Case 3 is the positive control for case 1's checksum refusal: the same muse fixture with
 # honest bytes must bump, or "muse was left out" could mean muse was never looked at.
@@ -30,7 +33,7 @@ mkdir -p "$STUB" "$WWW"
 
 fail() {
   echo "NG: $1"
-  for f in out err gh_out body.md; do
+  for f in out err gh_out body.md frag.log report.log; do
     [ -s "$WORK/$f" ] || continue
     echo "--- $f ---"; cat "$WORK/$f"
   done
@@ -114,6 +117,29 @@ cat > "$STUB_ISSUES" <<'JSON'
 [{"number": 9, "title": "CLI release watcher state", "author": {"login": "someone"}},
  {"number": 4, "title": "CLI release watcher state", "author": {"login": "app/github-actions"}}]
 JSON
+# cli-fragment-check.sh and cli-contract-report.sh are stubbed (their own tests walk them):
+# STUB_FRAG says what the checker answers, and every report call lands in $WORK/report.log.
+cat > "$STUB/fragment-check" <<'FAKE'
+#!/usr/bin/env bash
+echo "$*" >> "$STUB_FRAG_LOG"
+t="$(printf '\t')"
+case "$1:${STUB_FRAG:-ok}" in
+  has:none) exit 1 ;;
+  has:*) [ "$2" = claude ] || exit 1; exit 0 ;;
+esac
+case "${STUB_FRAG:-ok}" in
+  ok)      printf 'ok%srun /login%serrors.go\n' "$t" "$t" ;;
+  missing) printf 'missing%srun /login%serrors.go authMarkers\nok%sEsc to cancel%stmuxx.go\nunverifiable%sRe-authenticate%serrors.go\n' "$t" "$t" "$t" "$t" "$t" "$t"; exit 1 ;;
+  error)   echo "could not fetch @anthropic-ai/claude-code@$3" >&2; exit 2 ;;
+esac
+FAKE
+cat > "$STUB/report" <<'FAKE'
+#!/usr/bin/env bash
+echo "$*" >> "$STUB_REPORT_LOG"
+[ -z "${STUB_REPORT_FAIL:-}" ] || exit 1
+FAKE
+chmod +x "$STUB/fragment-check" "$STUB/report"
+export STUB_FRAG_LOG="$WORK/frag.log" STUB_REPORT_LOG="$WORK/report.log"
 export P_CLAUDE P_CODEX P_OPENCODE P_COPILOT P_AGY P_CURSOR P_KIRO P_MUSE P_RTK
 
 serve() { # serve <url> <file>
@@ -198,8 +224,10 @@ DF="$WORK/Dockerfile"
 rc=0
 run_bump() {
   : > "$WORK/out"; : > "$WORK/err"; : > "$WORK/gh_out"; : > "$WORK/body.md"
+  : > "$STUB_FRAG_LOG"; : > "$STUB_REPORT_LOG"
   set +e
   DOCKERFILE="$DF" DRIFT_CHECK="$STUB/drift-check" RELEASE_STATE="$STATE" \
+    FRAGMENT_CHECK="$STUB/fragment-check" REPORT="$STUB/report" \
     BODY_FILE="$WORK/body.md" GITHUB_OUTPUT="$WORK/gh_out" "$BUMP" > "$WORK/out" 2> "$WORK/err"
   rc=$?
   set -e
@@ -439,5 +467,59 @@ STUB_LATEST_OPENCODE="$L_OC" run_bump
 code_is 0
 grep -qE '^bumped=.*opencode' "$WORK/gh_out" || fail "opencode did not bump within its major"
 expect_changed "${BUMP_OK[@]}" "${MUSE_OK[@]}" "+ARG OPENCODE_VERSION=$L_OC"
+
+echo "== case 13: a gone fragment is named in the PR body and the issue report, and the bump still happens =="
+cp "$ROOT/workspace/Dockerfile" "$DF"
+issue_with "$L_MUSE"
+muse_serves muse-x86-tampered
+STUB_FRAG=missing run_bump
+code_is 0
+expect_changed "${BUMP_OK[@]}"
+out_has "bumped=claude,agy,cursor,kiro"
+out_has "fragment_error=false"
+grep -qxF "check claude $P_CLAUDE $L_CLAUDE" "$STUB_FRAG_LOG" || fail "the checker was not asked about claude $P_CLAUDE -> $L_CLAUDE"
+[ "$(grep -c '^check ' "$STUB_FRAG_LOG")" = 1 ] || fail "only a kind with registry rows is checked: $(cat "$STUB_FRAG_LOG")"
+grep -qxF "fragments claude $L_CLAUDE run /login" "$STUB_REPORT_LOG" || fail "the gone fragment was not reported to the issue: $(cat "$STUB_REPORT_LOG")"
+body_has "**Upstream message fragments**"
+body_has "- \`claude\` \`$L_CLAUDE\`: **\`run /login\` is gone** (was in \`$P_CLAUDE\`; used in errors.go authMarkers)"
+body_has "- \`claude\`: \`Re-authenticate\` is unverifiable"
+body_hasnt "\`Esc to cancel\` is gone"
+
+echo "== case 13b: CONTROL -- every fragment present: the row is cleared and the body says nothing =="
+cp "$ROOT/workspace/Dockerfile" "$DF"
+STUB_FRAG=ok run_bump
+code_is 0
+grep -qxF "fragments-clear claude" "$STUB_REPORT_LOG" || fail "a clean check must clear the issue's row: $(cat "$STUB_REPORT_LOG")"
+if grep -q '^fragments ' "$STUB_REPORT_LOG"; then fail "nothing is gone, yet a fragment was reported"; fi
+body_hasnt "Upstream message fragments"
+out_has "fragment_error=false"
+
+echo "== case 14: a checker that could not run is loud, leaves the issue alone and does not stop the bump =="
+cp "$ROOT/workspace/Dockerfile" "$DF"
+STUB_FRAG=error run_bump
+code_is 0
+expect_changed "${BUMP_OK[@]}"
+out_has "fragment_error=true"
+grep -q '^::error::.*claude' "$WORK/err" || fail "no ::error:: annotation on stderr"
+[ ! -s "$STUB_REPORT_LOG" ] || fail "an unknown result must not touch the issue: $(cat "$STUB_REPORT_LOG")"
+body_has "**the fragment check could not run** (exit 2): could not fetch @anthropic-ai/claude-code@$P_CLAUDE"
+
+echo "== case 14b: a report that could not be written is loud too =="
+cp "$ROOT/workspace/Dockerfile" "$DF"
+STUB_FRAG=missing STUB_REPORT_FAIL=1 run_bump
+code_is 0
+out_has "fragment_error=true"
+body_has "**the report to its update issue failed**"
+body_has "**\`run /login\` is gone**"
+
+echo "== case 15: a kind with no registry rows is never checked; a kind at its pin is not either =="
+cp "$ROOT/workspace/Dockerfile" "$DF"
+STUB_FRAG=none run_bump
+code_is 0
+[ "$(grep -c '^check ' "$STUB_FRAG_LOG")" = 0 ] || fail "checked a kind with no rows"
+[ ! -s "$STUB_REPORT_LOG" ] || fail "reported for a kind with no rows"
+cp "$ROOT/workspace/Dockerfile" "$DF"
+STUB_LATEST_CLAUDE="$P_CLAUDE" STUB_FRAG=missing run_bump
+if grep -q '^check ' "$STUB_FRAG_LOG"; then fail "checked claude while it is at its latest"; fi
 
 echo "OK: cli-pin-bump.sh bumps only tested kinds, refuses bad checksums, and is idempotent"
