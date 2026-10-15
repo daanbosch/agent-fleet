@@ -436,6 +436,9 @@
   color: var(--err);
 }
 .ui-menu-sep {
+  /* The menu is a column flexbox that scrolls at max-height; without this the rules are the
+     only flex items with slack to give and shrink to 0px. */
+  flex-shrink: 0;
   height: 1px;
   background: var(--border2);
   margin: 4px 2px;
