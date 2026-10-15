@@ -164,6 +164,15 @@ func runOpencode(t *testing.T, dir string, env []string) string {
 		t.Fatalf("opencode run did not finish: %s", out)
 	}
 	t.Logf("opencode run (err %v):\n%s", err, out)
+	// A run that never worked leaves no file behind either, so the denials below would pass for the
+	// wrong reason: demand a clean exit and the stub's final answer, parsed the way chat parses it.
+	if err != nil {
+		t.Fatalf("opencode run failed: %v", err)
+	}
+	reply, _, _, turnErr, _ := parseOpencodeRunEvents(out)
+	if turnErr != "" || reply != "done" {
+		t.Fatalf("opencode run: reply %q, turn error %q; want the stub's \"done\" and no error", reply, turnErr)
+	}
 	return string(out)
 }
 

@@ -1,14 +1,17 @@
 package opencode
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -61,34 +64,76 @@ var startMigrationServe = func(spec LaunchSpec) (addr, password string, exited <
 	return "http://127.0.0.1:" + port, password, done, stop, nil
 }
 
-func migrationMarker() string { return filepath.Join(paths.AgentStateDir(), "opencode-v2-migrated") }
-
-// migrationKey names what the marker vouches for: this binary version on this database.
-func migrationKey(spec LaunchSpec) string {
-	db := filepath.Join(paths.HomeDir(), ".local", "share", "opencode", "opencode.db")
-	if spec.V2 {
-		db = V2DBPath()
-	}
-	return spec.version() + "\n" + db + "\n"
+func migrationLock() string {
+	return filepath.Join(paths.AgentStateDir(), "opencode-v2-migration.lock")
 }
 
-// EnsureMigrated returns once the database spec's opencode will open has been migrated by an
-// opencode 2 (immediately for 1.x, and for a database already vouched for). Concurrent callers,
-// across processes, queue on one lock, so the import runs once and nobody opens the database
-// while it does. A failure leaves no marker and is retried by the next caller.
+// specDBPath is the database the opencode of spec opens.
+func specDBPath(spec LaunchSpec) string {
+	if spec.V2 {
+		return V2DBPath()
+	}
+	return filepath.Join(paths.HomeDir(), ".local", "share", "opencode", "opencode.db")
+}
+
+// needsMigration reads the database itself, so a restored or replaced file is judged on what it
+// holds and not on what an earlier look at the path found. opencode 2 records the import in
+// kv.migration.v1-v2 ({"phase":"completed"}, measured on 2.0.29). Without it, a database that has
+// 1.x sessions still has to be imported; a missing file, a database without a 1.x session table
+// or with no session rows has nothing to import. Anything unreadable counts as "needs", and the
+// throwaway server then decides.
+func needsMigration(path string) bool {
+	if _, err := os.Stat(path); err != nil {
+		return false
+	}
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(3000)")
+	if err != nil {
+		return true
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`select count(*) from sqlite_master where type='table' and name='kv'`).Scan(&n); err != nil {
+		return true
+	}
+	if n > 0 {
+		var v string
+		if err := db.QueryRow(`select value from kv where key='migration.v1-v2'`).Scan(&v); err == nil {
+			var st struct {
+				Phase string `json:"phase"`
+			}
+			if json.Unmarshal([]byte(v), &st) == nil && st.Phase == "completed" {
+				return false
+			}
+		}
+	}
+	if err := db.QueryRow(`select count(*) from sqlite_master where type='table' and name='session'`).Scan(&n); err != nil {
+		return true
+	}
+	if n == 0 {
+		return false
+	}
+	if err := db.QueryRow(`select count(*) from (select 1 from session limit 1)`).Scan(&n); err != nil {
+		return true
+	}
+	return n > 0
+}
+
+// EnsureMigrated returns once the database spec's opencode will open holds no 1.x data that is
+// still to be imported (immediately for 1.x, and for a database that needs nothing). Concurrent
+// callers, across processes, queue on one lock, so the import runs once and nobody opens the
+// database while it does. A failure is retried by the next caller.
 func EnsureMigrated(spec LaunchSpec) error {
 	if spec.Maj < 2 {
 		return nil
 	}
-	key := migrationKey(spec)
-	done := func() bool { b, err := os.ReadFile(migrationMarker()); return err == nil && string(b) == key }
-	if done() {
+	db := specDBPath(spec)
+	if !needsMigration(db) {
 		return nil
 	}
 	if err := os.MkdirAll(paths.AgentStateDir(), 0o755); err != nil {
 		return err
 	}
-	lock, err := os.OpenFile(migrationMarker()+".lock", os.O_CREATE|os.O_RDWR, 0o644)
+	lock, err := os.OpenFile(migrationLock(), os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return err
 	}
@@ -99,11 +144,11 @@ func EnsureMigrated(spec LaunchSpec) error {
 			break
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("opencode 2 is still migrating the database (another process holds %s)", migrationMarker()+".lock")
+			return fmt.Errorf("opencode 2 is still migrating the database (another process holds %s)", migrationLock())
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	if done() {
+	if !needsMigration(db) {
 		return nil
 	}
 	addr, password, exited, stop, err := startMigrationServe(spec)
@@ -111,22 +156,14 @@ func EnsureMigrated(spec LaunchSpec) error {
 		return fmt.Errorf("opencode 2 database migration: %w", err)
 	}
 	defer stop()
-	if err := waitMigrated(addr, password, exited, deadline); err != nil {
-		return err
-	}
-	return MarkMigrated(spec)
+	return waitMigrated(addr, password, exited, deadline)
 }
 
-// MarkMigrated records that the database spec's opencode opens has been migrated. Tests with a
-// stand-in binary use it to skip the gate.
-func MarkMigrated(spec LaunchSpec) error {
-	return writeAtomic(migrationMarker(), []byte(migrationKey(spec)), 0o644)
-}
-
-// waitMigrated polls GET /api/experimental/migration/v1 until it stops answering "running".
-// Measured shapes: {"status":"running","progress":{…}} and {"status":"completed"}. Anything
-// that is not "running" ends the wait: a status this code does not know must not hold every
-// launch for half an hour.
+// waitMigrated polls GET /api/experimental/migration/v1. The upstream status is one of required,
+// running, completed or error: "completed" ends the wait, "required" and "running" keep it, and
+// "error" and anything else (an empty or unknown status included) fail it, so a failed or
+// unstarted import never reads as a finished one. Measured shapes on 2.0.29:
+// {"status":"running","progress":{…}} and {"status":"completed"}.
 func waitMigrated(addr, password string, exited <-chan struct{}, deadline time.Time) error {
 	c := &http.Client{Timeout: 5 * time.Second}
 	var last string
@@ -142,15 +179,20 @@ func waitMigrated(addr, password string, exited <-chan struct{}, deadline time.T
 		}
 		req.SetBasicAuth(serveUser, password)
 		if res, err := c.Do(req); err == nil {
-			var st struct {
-				Status string `json:"status"`
-			}
-			ok := res.StatusCode == 200 && json.NewDecoder(res.Body).Decode(&st) == nil
+			body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 			res.Body.Close()
-			if ok {
+			if res.StatusCode == 200 {
+				var st struct {
+					Status string `json:"status"`
+				}
+				_ = json.Unmarshal(body, &st)
 				last = st.Status
-				if st.Status != "running" {
+				switch st.Status {
+				case "completed":
 					return nil
+				case "required", "running":
+				default:
+					return fmt.Errorf("opencode 2 database migration did not complete: status %q (%s)", st.Status, strings.TrimSpace(string(body)))
 				}
 			}
 		}

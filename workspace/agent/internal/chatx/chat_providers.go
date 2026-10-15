@@ -1170,7 +1170,10 @@ func parseOpencodeRunEvents(out []byte) (reply, sesID, model, turnErr string, us
 			} `json:"message"`
 			Error struct {
 				Name string `json:"name"`
-				Data struct {
+				// opencode 2 flattens the error: {"type":"compaction.failed","message":"…"}.
+				Type    string `json:"type"`
+				Message string `json:"message"`
+				Data    struct {
 					Message string `json:"message"`
 					Ref     string `json:"ref"`
 				} `json:"data"`
@@ -1183,7 +1186,14 @@ func parseOpencodeRunEvents(out []byte) (reply, sesID, model, turnErr string, us
 			sesID = ev.SessionID
 		}
 		if ev.Type == "error" {
-			if msg := opencodeErrText(ev.Error.Name, ev.Error.Data.Message, ev.Error.Data.Ref); msg != "" {
+			name, text := ev.Error.Name, ev.Error.Data.Message
+			if name == "" {
+				name = ev.Error.Type
+			}
+			if text == "" {
+				text = ev.Error.Message
+			}
+			if msg := opencodeErrText(name, text, ev.Error.Data.Ref); msg != "" {
 				turnErr = msg // the last error wins (later ones tend to be more specific)
 			}
 		}

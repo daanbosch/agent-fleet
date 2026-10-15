@@ -58,11 +58,20 @@ func TestOpencodeChatFollowsTheOptIn(t *testing.T) {
 	if err := opencode.SetWantsV2(true); err != nil {
 		t.Fatal(err)
 	}
-	// The recorder does not migrate anything; vouch for the database so the gate stays out of it.
-	if err := opencode.MarkMigrated(opencode.CurrentLaunch()); err != nil {
-		t.Fatal(err)
-	}
 	if got, want := send(), "v2 "+opencode.V2DBPath(); got != want {
 		t.Fatalf("opt-in on: ran %q, want %q", got, want)
+	}
+}
+
+// opencode 2 reports a failed turn as {"type":"error","error":{"type":"…","message":"…"}} (measured
+// 2.0.29); 1.x nests it under error.data. Both must reach the user as the turn error.
+func TestParseOpencodeRunEventsReadsTheV2ErrorShape(t *testing.T) {
+	_, _, _, got, _ := parseOpencodeRunEvents([]byte(`{"type":"error","sessionID":"ses_1","error":{"type":"compaction.failed","message":"Compaction produced no summary"}}` + "\n"))
+	if got != "Compaction produced no summary" {
+		t.Fatalf("v2 error = %q", got)
+	}
+	_, _, _, got, _ = parseOpencodeRunEvents([]byte(`{"type":"error","error":{"name":"APIError","data":{"message":"boom","ref":"r1"}}}` + "\n"))
+	if got != "boom (ref: r1)" {
+		t.Fatalf("v1 error = %q", got)
 	}
 }

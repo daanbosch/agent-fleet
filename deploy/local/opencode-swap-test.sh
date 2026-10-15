@@ -32,16 +32,17 @@ chmod +x "$WORK/bin/npm"
 export PATH="$WORK/bin:$PATH"
 
 # The function, cut out of the entrypoint (a file that no longer has it fails the extraction).
-sed -n '/^oc_install_swap() {$/,/^}$/p' "$ROOT/workspace/entrypoint.sh" > "$WORK/fn.sh"
+sed -n '/^oc_swap_restore() {/,/^}$/p;/^oc_install_swap() {$/,/^}$/p' "$ROOT/workspace/entrypoint.sh" > "$WORK/fn.sh"
 [ -s "$WORK/fn.sh" ] || fail "workspace/entrypoint.sh: oc_install_swap() was not found"
 
-home_with_v1() { # a prefix whose opencode is opencode-ai
+home_with() { # home_with <pkg>: a prefix whose opencode is <pkg>
   rm -rf "$WORK/p"; mkdir -p "$WORK/p/bin"
-  STUB_NPM_FAIL=0 npm install -g --prefix "$WORK/p" opencode-ai@1.19.0
+  STUB_NPM_FAIL=0 npm install -g --prefix "$WORK/p" "$1@1.0.0"
 }
-swap() { # swap <fail 0|1>
-  (OC_OTHER=opencode-ai; STUB_NPM_FAIL="$1"; export STUB_NPM_FAIL; . "$WORK/fn.sh"
-   oc_install_swap "$WORK/p" @anthropic-ai/claude-code@latest @opencode/cli@latest)
+home_with_v1() { home_with opencode-ai; }
+swap() { # swap <fail 0|1> [<other> <new>]: the install carries a second CLI, as boot-install and self-update do
+  (OC_OTHER="${2:-opencode-ai}"; STUB_NPM_FAIL="$1"; export STUB_NPM_FAIL; . "$WORK/fn.sh"
+   oc_install_swap "$WORK/p" @anthropic-ai/claude-code@latest "${3:-@opencode/cli}@latest")
 }
 owner() { cat "$WORK/p/lib/node_modules/$(readlink "$WORK/p/bin/opencode" | sed 's|.*node_modules/\(.*\)/bin/.*|\1|')/marker"; }
 
@@ -63,6 +64,36 @@ if swap 1; then fail "the swap reported success although npm failed"; fi
 [ -x "$WORK/p/bin/opencode" ] || [ -L "$WORK/p/bin/opencode" ] || fail "the opencode bin is gone"
 [ ! -e "$WORK/p/.af-oc-swap" ] || fail "the backup directory was left behind"
 echo "ok  failure: the original opencode-ai and its bin are back"
+
+# Reverse direction (a rollback from 2.x to 1.x), success and failure.
+home_with @opencode/cli
+swap 0 @opencode/cli opencode-ai || fail "the reverse swap failed although npm succeeds"
+[ "$(owner)" = "opencode-ai" ] || fail "reverse: the bin belongs to '$(owner)'"
+home_with @opencode/cli
+if swap 1 @opencode/cli opencode-ai; then fail "reverse: reported success although npm failed"; fi
+[ "$(owner)" = "@opencode/cli" ] || fail "reverse: after a failed install the bin belongs to '$(owner)'"
+echo "ok  reverse direction: swap, and restore on failure"
+
+# A start that stopped right after moving the copy aside: the aside copy is the only one. The
+# next start must put it back before it installs, also when that install then fails.
+home_with_v1
+mkdir -p "$WORK/p/.af-oc-swap/pkg" "$WORK/p/.af-oc-swap/bin"
+mv "$WORK/p/lib/node_modules/opencode-ai" "$WORK/p/.af-oc-swap/pkg/opencode-ai"
+mv "$WORK/p/bin/opencode" "$WORK/p/.af-oc-swap/bin/opencode"
+if swap 1; then fail "resume: reported success although npm failed"; fi
+[ "$(owner)" = "opencode-ai" ] || fail "resume after an interrupted swap, install failing: opencode is '$(owner)', want the original back"
+home_with_v1
+mkdir -p "$WORK/p/.af-oc-swap/pkg" "$WORK/p/.af-oc-swap/bin"
+mv "$WORK/p/lib/node_modules/opencode-ai" "$WORK/p/.af-oc-swap/pkg/opencode-ai"
+mv "$WORK/p/bin/opencode" "$WORK/p/.af-oc-swap/bin/opencode"
+swap 0 || fail "resume: the swap failed although npm succeeds"
+[ "$(owner)" = "@opencode/cli" ] || fail "resume after an interrupted swap, install ok: bin belongs to '$(owner)'"
+echo "ok  interrupted swap: the aside copy is restored first, never deleted"
+
+# The boot-install and self-update paths both go through the helper and nothing uninstalls first.
+[ "$(grep -c 'oc_install_swap "' "$ROOT/workspace/entrypoint.sh")" -ge 2 ] || fail "entrypoint.sh: boot-install and self-update must both call oc_install_swap"
+! grep -q 'npm uninstall -g --prefix "$HOME/.local" \$NPM_DROP\|NPM_DROP' "$ROOT/workspace/entrypoint.sh" || fail "entrypoint.sh: a drop-then-install path is left"
+echo "ok  both install paths use the helper"
 
 # Nothing to move aside: the install is just the install.
 rm -rf "$WORK/p"; mkdir -p "$WORK/p/bin"

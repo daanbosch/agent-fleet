@@ -1,38 +1,79 @@
 package opencode
 
 import (
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// fakeMigration answers the migration status the way opencode 2.0.29 does ("running" while the
-// import goes, then "completed") and counts the throwaway servers EnsureMigrated starts.
-type fakeMigration struct {
-	running  atomic.Int32 // polls still answered "running"
-	started  atomic.Int32
-	stopped  atomic.Int32
-	finished atomic.Bool
+// seedDB writes a database the way opencode leaves it: v1 with one session, or (kvDone) already
+// imported by opencode 2, which records {"phase":"completed"} under kv.migration.v1-v2.
+func seedDB(t *testing.T, path string, sessions int, kvDone bool) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(path)
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	stmts := []string{`create table session (id text primary key)`}
+	for i := 0; i < sessions; i++ {
+		stmts = append(stmts, `insert into session values ('ses_`+string(rune('a'+i))+`')`)
+	}
+	if kvDone {
+		stmts = append(stmts, `create table kv (key text primary key, value text, a int, b int)`,
+			`insert into kv values ('migration.v1-v2','{"phase":"completed"}',1,1)`)
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
-func useFakeMigration(t *testing.T, running int32) *fakeMigration {
+// fakeMigration answers the migration status like opencode 2.0.29: a script of statuses, then
+// "completed". Completing writes kv.migration.v1-v2 into the database, as the real import does.
+type fakeMigration struct {
+	script  []string // statuses answered before "completed", one per poll
+	final   string   // replaces "completed" when set
+	polls   atomic.Int32
+	started atomic.Int32
+	stopped atomic.Int32
+	done    atomic.Bool
+}
+
+func useFakeMigration(t *testing.T, dbp string, f *fakeMigration) {
 	t.Helper()
-	f := &fakeMigration{}
-	f.running.Store(running)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, pw, ok := r.BasicAuth(); !ok || pw != "pw" || r.URL.Path != "/api/experimental/migration/v1" {
 			http.Error(w, "no", http.StatusUnauthorized)
 			return
 		}
-		if f.running.Add(-1) >= 0 {
-			_, _ = w.Write([]byte(`{"status":"running","progress":{"label":"Migrating sessions","numerator":1,"denominator":50}}`))
+		n := int(f.polls.Add(1)) - 1
+		if n < len(f.script) {
+			_, _ = w.Write([]byte(f.script[n]))
 			return
 		}
-		f.finished.Store(true)
+		if f.final != "" {
+			_, _ = w.Write([]byte(f.final))
+			return
+		}
+		f.done.Store(true)
+		if db, err := sql.Open("sqlite", "file:"+dbp); err == nil {
+			_, _ = db.Exec(`create table if not exists kv (key text primary key, value text, a int, b int)`)
+			_, _ = db.Exec(`insert or replace into kv values ('migration.v1-v2','{"phase":"completed"}',1,1)`)
+			db.Close()
+		}
 		_, _ = w.Write([]byte(`{"status":"completed"}`))
 	}))
 	t.Cleanup(srv.Close)
@@ -42,34 +83,108 @@ func useFakeMigration(t *testing.T, running int32) *fakeMigration {
 		return srv.URL, "pw", nil, func() { f.stopped.Add(1) }, nil
 	}
 	t.Cleanup(func() { startMigrationServe = old })
-	return f
 }
+
+const running = `{"status":"running","progress":{"label":"Migrating sessions","numerator":1,"denominator":50}}`
+
+var spec2 = LaunchSpec{Maj: 2, Bin: "opencode"}
 
 // The defect: a resume asked an opencode 2 whose import was still running, got a 404 for a
 // conversation that exists and started a new one. EnsureMigrated must not return before the
-// status says the import is over, and must not ask again once it has seen that.
-func TestEnsureMigratedWaitsForTheImportOnce(t *testing.T) {
+// status says "completed".
+func TestEnsureMigratedWaitsForTheImport(t *testing.T) {
 	optInHome(t)
-	f := useFakeMigration(t, 3)
-	spec := LaunchSpec{Maj: 2, Bin: "opencode"}
-
-	if err := EnsureMigrated(spec); err != nil {
+	db := specDBPath(spec2)
+	seedDB(t, db, 2, false)
+	f := &fakeMigration{script: []string{"{\"status\":\"required\"}", running, running}}
+	useFakeMigration(t, db, f)
+	if err := EnsureMigrated(spec2); err != nil {
 		t.Fatal(err)
 	}
-	if !f.finished.Load() {
-		t.Fatal("returned while the import was still running")
+	if !f.done.Load() || f.started.Load() != 1 || f.stopped.Load() != 1 {
+		t.Fatalf("done %v started %d stopped %d", f.done.Load(), f.started.Load(), f.stopped.Load())
 	}
-	if f.started.Load() != 1 || f.stopped.Load() != 1 {
-		t.Fatalf("started %d stopped %d, want one throwaway server, stopped", f.started.Load(), f.stopped.Load())
+	if err := EnsureMigrated(spec2); err != nil || f.started.Load() != 1 {
+		t.Fatalf("second call: err %v started %d; the database says it is imported", err, f.started.Load())
 	}
-	if err := EnsureMigrated(spec); err != nil || f.started.Load() != 1 {
-		t.Fatalf("second call: err %v, started %d; the marker should have answered", err, f.started.Load())
+}
+
+// Only "completed" is success. "error" is an import that failed, "required" an import that has
+// not started (it keeps waiting, and times out), and an empty or unknown status is a server this
+// code does not understand: none of them may let a caller open the database.
+func TestEnsureMigratedOnlyCompletedIsSuccess(t *testing.T) {
+	for _, tc := range []struct{ name, status, want string }{
+		{"error", `{"status":"error","message":"disk full"}`, "disk full"},
+		{"empty", `{}`, `status ""`},
+		{"unknown", `{"status":"weird"}`, "weird"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			optInHome(t)
+			db := specDBPath(spec2)
+			seedDB(t, db, 1, false)
+			useFakeMigration(t, db, &fakeMigration{final: tc.status})
+			err := EnsureMigrated(spec2)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err %v, want a failure naming %q", err, tc.want)
+			}
+			if !needsMigration(db) {
+				t.Fatal("the database reads as imported after a failed import")
+			}
+		})
+	}
+	t.Run("required never starts", func(t *testing.T) {
+		optInHome(t)
+		db := specDBPath(spec2)
+		seedDB(t, db, 1, false)
+		useFakeMigration(t, db, &fakeMigration{final: `{"status":"required"}`})
+		old := migrationWait
+		migrationWait = 1200 * time.Millisecond
+		t.Cleanup(func() { migrationWait = old })
+		if err := EnsureMigrated(spec2); err == nil {
+			t.Fatal("a migration that is only ever 'required' returned nil")
+		}
+	})
+}
+
+// The database decides, not a record of an earlier look at its path: restoring a pre-upgrade copy
+// over an imported one (the documented rollback) makes the next start import it again.
+func TestEnsureMigratedFollowsTheDatabaseContent(t *testing.T) {
+	optInHome(t)
+	db := specDBPath(spec2)
+	f := &fakeMigration{}
+	useFakeMigration(t, db, f)
+
+	if err := EnsureMigrated(spec2); err != nil || f.started.Load() != 0 {
+		t.Fatalf("no database: err %v started %d, want nothing to do", err, f.started.Load())
+	}
+	seedDB(t, db, 0, false)
+	if err := EnsureMigrated(spec2); err != nil || f.started.Load() != 0 {
+		t.Fatalf("a database with no sessions: err %v started %d, want nothing to do", err, f.started.Load())
+	}
+	seedDB(t, db, 2, false)
+	if err := EnsureMigrated(spec2); err != nil || f.started.Load() != 1 {
+		t.Fatalf("1.x sessions: err %v started %d, want one import", err, f.started.Load())
+	}
+	if err := EnsureMigrated(spec2); err != nil || f.started.Load() != 1 {
+		t.Fatalf("imported: err %v started %d, want none", err, f.started.Load())
+	}
+	seedDB(t, db, 2, false) // the pre-upgrade copy is put back
+	f.polls.Store(0)
+	if err := EnsureMigrated(spec2); err != nil || f.started.Load() != 2 {
+		t.Fatalf("restored 1.x copy: err %v started %d, want a second import", err, f.started.Load())
+	}
+	seedDB(t, db, 2, true)
+	if err := EnsureMigrated(spec2); err != nil || f.started.Load() != 2 {
+		t.Fatalf("kv says completed: err %v started %d", err, f.started.Load())
 	}
 }
 
 func TestEnsureMigratedSkipsOpencode1(t *testing.T) {
 	optInHome(t)
-	f := useFakeMigration(t, 0)
+	db := filepath.Join(os.Getenv("HOME"), ".local", "share", "opencode", "opencode.db")
+	seedDB(t, db, 2, false)
+	f := &fakeMigration{}
+	useFakeMigration(t, db, f)
 	if err := EnsureMigrated(LaunchSpec{Maj: 1, Bin: "opencode"}); err != nil || f.started.Load() != 0 {
 		t.Fatalf("err %v, started %d: a 1.x opencode does not migrate", err, f.started.Load())
 	}
@@ -78,16 +193,18 @@ func TestEnsureMigratedSkipsOpencode1(t *testing.T) {
 // Concurrent first starts (the serve, a chat run, a models listing) share one import.
 func TestEnsureMigratedSerialisesConcurrentCallers(t *testing.T) {
 	optInHome(t)
-	f := useFakeMigration(t, 4)
-	spec := LaunchSpec{Maj: 2, Bin: "opencode"}
+	db := specDBPath(spec2)
+	seedDB(t, db, 2, false)
+	f := &fakeMigration{script: []string{running, running, running, running}}
+	useFakeMigration(t, db, f)
 	var wg sync.WaitGroup
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := EnsureMigrated(spec); err != nil {
+			if err := EnsureMigrated(spec2); err != nil {
 				t.Error(err)
-			} else if !f.finished.Load() {
+			} else if !f.done.Load() {
 				t.Error("a caller returned before the import finished")
 			}
 		}()
@@ -98,17 +215,16 @@ func TestEnsureMigratedSerialisesConcurrentCallers(t *testing.T) {
 	}
 }
 
-func TestEnsureMigratedTimeoutLeavesNoMarker(t *testing.T) {
+func TestEnsureMigratedTimeoutFails(t *testing.T) {
 	optInHome(t)
-	useFakeMigration(t, 1<<20)
+	db := specDBPath(spec2)
+	seedDB(t, db, 1, false)
+	useFakeMigration(t, db, &fakeMigration{final: running})
 	old := migrationWait
 	migrationWait = 1500 * time.Millisecond
 	t.Cleanup(func() { migrationWait = old })
-	if err := EnsureMigrated(LaunchSpec{Maj: 2, Bin: "opencode"}); err == nil {
+	if err := EnsureMigrated(spec2); err == nil {
 		t.Fatal("a migration that never completes returned nil")
-	}
-	if _, err := os.Stat(migrationMarker()); err == nil {
-		t.Fatal("a marker vouches for a database that was never migrated")
 	}
 }
 
@@ -116,6 +232,7 @@ func TestEnsureMigratedTimeoutLeavesNoMarker(t *testing.T) {
 // of holding it for the whole wait.
 func TestEnsureMigratedFailsFastWhenTheServerExits(t *testing.T) {
 	optInHome(t)
+	seedDB(t, specDBPath(spec2), 1, false)
 	old := startMigrationServe
 	t.Cleanup(func() { startMigrationServe = old })
 	startMigrationServe = func(LaunchSpec) (string, string, <-chan struct{}, func(), error) {
@@ -124,7 +241,7 @@ func TestEnsureMigratedFailsFastWhenTheServerExits(t *testing.T) {
 		return "http://127.0.0.1:1", "pw", c, func() {}, nil
 	}
 	start := time.Now()
-	if err := EnsureMigrated(LaunchSpec{Maj: 2, Bin: "opencode"}); err == nil || time.Since(start) > 5*time.Second {
+	if err := EnsureMigrated(spec2); err == nil || time.Since(start) > 5*time.Second {
 		t.Fatalf("err %v after %v, want an immediate failure", err, time.Since(start))
 	}
 }

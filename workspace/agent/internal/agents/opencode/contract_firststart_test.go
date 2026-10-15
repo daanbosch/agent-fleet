@@ -72,29 +72,64 @@ func TestContractFirstStartWaitsForV1Migration(t *testing.T) {
 	}
 	t.Logf("EnsureMigrated took %v", time.Since(begin).Round(100*time.Millisecond))
 
-	port := freePort(t)
-	cmd := exec.Command("opencode", "serve", "--hostname", "127.0.0.1", "--port", port)
-	cmd.Env = append(os.Environ(), "OPENCODE_SERVER_USERNAME=opencode", "OPENCODE_SERVER_PASSWORD=pw")
-	cmd.Dir = home
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		req, _ := http.NewRequest("GET", "http://127.0.0.1:"+port+"/api/session/"+id, nil)
-		req.SetBasicAuth("opencode", "pw")
-		res, err := http.DefaultClient.Do(req)
-		if err == nil {
-			res.Body.Close()
-			if res.StatusCode == 200 {
+	check := func(label string) {
+		port := freePort(t)
+		cmd := exec.Command("opencode", "serve", "--hostname", "127.0.0.1", "--port", port)
+		cmd.Env = append(os.Environ(), "OPENCODE_SERVER_USERNAME=opencode", "OPENCODE_SERVER_PASSWORD=pw")
+		cmd.Dir = home
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() }()
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			req, _ := http.NewRequest("GET", "http://127.0.0.1:"+port+"/api/session/"+id, nil)
+			req.SetBasicAuth("opencode", "pw")
+			res, err := http.DefaultClient.Do(req)
+			if err == nil {
+				res.Body.Close()
+				if res.StatusCode == 503 && time.Now().Before(deadline) { // still booting, not an answer about the session
+					time.Sleep(200 * time.Millisecond)
+					continue
+				}
+				if res.StatusCode != 200 {
+					t.Fatalf("%s: GET /api/session/%s = %d right after the gate, want 200 (the import was still running)", label, id, res.StatusCode)
+				}
 				return
 			}
-			t.Fatalf("GET /api/session/%s = %d right after the gate, want 200 (the import was still running)", id, res.StatusCode)
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: the server never answered: %v", label, err)
+			}
+			time.Sleep(200 * time.Millisecond)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the server never answered: %v", err)
-		}
-		time.Sleep(200 * time.Millisecond)
 	}
+	check("first start")
+
+	// The documented rollback restores the pre-upgrade database over the imported one. The next
+	// start must import it again: the gate follows the file's content, not its path.
+	if needsMigration(filepath.Join(dir, "opencode.db")) {
+		t.Fatal("the imported database still reads as needing migration")
+	}
+	in2, err := os.Open(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out2, err := os.Create(filepath.Join(dir, "opencode.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(out2, in2); err != nil {
+		t.Fatal(err)
+	}
+	in2.Close()
+	out2.Close()
+	_ = os.Remove(filepath.Join(dir, "opencode.db-wal"))
+	_ = os.Remove(filepath.Join(dir, "opencode.db-shm"))
+	if !needsMigration(filepath.Join(dir, "opencode.db")) {
+		t.Fatal("a restored 1.x database does not read as needing migration")
+	}
+	if err := EnsureMigrated(CurrentLaunch()); err != nil {
+		t.Fatal(err)
+	}
+	check("after restoring the 1.x copy")
 }

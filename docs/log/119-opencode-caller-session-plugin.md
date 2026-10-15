@@ -436,3 +436,18 @@ tests for both majors.
   config runs ahead of a same-named project entry and carries `--conv`. Not reproduced: the
   agent-rule bypass of the `permission` deny measured earlier; the hard-deny policies stay as a
   second layer.
+
+### 2026-10-16 (round 2)
+
+- The migration gate no longer keeps a marker. It reads the database: opencode 2 records the import
+  in `kv.migration.v1-v2` (`{"phase":"completed"}`, measured), and a file without it that still
+  has rows in the 1.x `session` table needs the import; a missing file, no `session` table or no
+  rows needs nothing. A pre-upgrade copy restored over an imported database (the documented
+  rollback) is imported again; the real-seed contract test now does exactly that. Only status
+  `completed` ends the wait: `required`/`running` wait, `error` and any unknown or empty status
+  fail with the body.
+- Boot-install (lean) and self-update both install through `oc_install_swap`; a copy left aside by
+  an interrupted start is put back before anything else, never deleted.
+- `parseOpencodeRunEvents` reads the flattened 2.x error event
+  (`error.type`/`error.message`); the chat contract test demands a clean exit and the stub's reply
+  from every run.
