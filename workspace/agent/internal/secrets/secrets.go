@@ -127,6 +127,10 @@ type JiraCreds struct {
 	Account string `json:"account,omitempty"`
 
 	// --- OAuth (3LO) only ---
+	// Login is the account email /myself reported at connect time, kept for the jira CLI's
+	// `login` (`jira me`, assignee filters). A bearer token carries no email, and Jira Cloud
+	// answers /myself without one when the account hides it, so "" is a normal value.
+	Login        string `json:"login,omitempty"`
 	AccessToken  string `json:"accessToken,omitempty"`
 	RefreshToken string `json:"refreshToken,omitempty"`
 	// Expiry is the unix second the access token dies. ~1h out, which is why the CP
