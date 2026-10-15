@@ -216,14 +216,22 @@
 .sess-row .session-state.mini {
   padding: 1px 4px;
 }
-/* On hover/active the ⋯ button overlays the row's right edge (see .sess-menu-wrap),
-   so fade the state chip out to hand that spot over instead of stacking two icons.
+/* On hover the ⋯ button overlays the row's right edge (see .sess-menu-wrap), so fade the
+   state chip out to hand that spot over instead of stacking two icons. The fade is
+   transient; the active row never takes it, because its ⋯ is always shown and would hide
+   the chip for as long as the row stays selected — it makes room instead (next rule).
    :has(.sess-menu-wrap) — a readOnly row (the history rail) draws no ⋯ button, so hiding
    the chip there would leave nothing at all. Limit this to rows that have one. */
-.sess-row:has(.sess-menu-wrap):hover .session-state,
-.sess-row:has(.sess-menu-wrap).hover .session-state,
-.sess-row:has(.sess-menu-wrap).active .session-state {
+.sess-row:has(.sess-menu-wrap):not(.active):hover .session-state,
+.sess-row:has(.sess-menu-wrap):not(.active).hover .session-state {
   opacity: 0;
+}
+/* Active row with a ⋯ button: keep the chip, and pad the button so the chip ends left of
+   the overlaid ⋯ (28px = its 4px inset + the ~24px button). While split, .sess-ords already
+   reserves that room with its own margin, so the padding applies only when there are none —
+   both would offset the chip twice. Horizontal only: the row height does not change. */
+.sess-row.active:has(.sess-menu-wrap):not(:has(.sess-ords)) .sess-btn {
+  padding-right: 30px;
 }
 .sess-drift {
   flex: none;
