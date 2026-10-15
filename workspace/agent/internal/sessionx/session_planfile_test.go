@@ -164,3 +164,78 @@ func TestStatusHookRecordsOnlyThePlanFile(t *testing.T) {
 		t.Fatalf("plan file = %q, want %q", got, plan)
 	}
 }
+
+// The real stop path: PromoteCarried, then Remove drops the pending plan and the path
+// record. The review launch must still work from the carried copy.
+func TestPlanFileServesTheCarriedPlanAfterAStop(t *testing.T) {
+	m, sid := planFileEnv(t, "# Plan\n\nbody\n")
+	path := writePlanInPlansDir(t, "stopped-while-waiting", "# Plan\n\nbody\n")
+	status.WritePlanFile(sid, path)
+	if !status.PromoteCarried(sid, "halt") {
+		t.Fatal("PromoteCarried = false")
+	}
+	status.Remove(sid)
+
+	var got planFileResp
+	do(t, planFileServer(t), "GET", "/sessions/"+m.Name+"/plan-file", nil, 200, &got)
+	if got.Source != "claude" || got.Path != path {
+		t.Fatalf("got %+v, want the carried plan file %s with source=claude", got, path)
+	}
+}
+
+// A carried path that no longer validates (outside the plans dir, or the file is gone)
+// is never handed out; the carried text is snapshotted instead.
+func TestPlanFileCarriedPathIsRevalidated(t *testing.T) {
+	const plan = "# Plan\n\ncarried\n"
+	for name, setup := range map[string]func(t *testing.T) string{
+		"outside the plans dir": func(t *testing.T) string {
+			p := filepath.Join(t.TempDir(), "secret.md")
+			if err := os.WriteFile(p, []byte("secret"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		},
+		"traversal": func(t *testing.T) string {
+			return filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "plans", "..", "settings.md")
+		},
+		"file gone": func(t *testing.T) string {
+			return filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "plans", "gone.md")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m, sid := planFileEnv(t, "")
+			bad := setup(t)
+			if err := status.PutCarried(sid, status.Carried{Kind: "plan", Plan: plan, PlanFile: bad}, "halt"); !err {
+				t.Fatal("PutCarried = false")
+			}
+			var got planFileResp
+			do(t, planFileServer(t), "GET", "/sessions/"+m.Name+"/plan-file", nil, 200, &got)
+			if got.Source != "snapshot" || got.Path == bad {
+				t.Fatalf("got %+v, want a snapshot, not %s", got, bad)
+			}
+			if b, _ := os.ReadFile(got.Path); string(b) != plan {
+				t.Fatalf("snapshot = %q, want %q", b, plan)
+			}
+		})
+	}
+}
+
+// An entry persisted before PlanFile existed has no such key; it still answers, by snapshot.
+func TestPlanFileCarriedEntryWithoutPathField(t *testing.T) {
+	m, sid := planFileEnv(t, "")
+	status.PutCarried(sid, status.Carried{Kind: "plan", Plan: "# Old\n"}, "stopped")
+	var got planFileResp
+	do(t, planFileServer(t), "GET", "/sessions/"+m.Name+"/plan-file", nil, 200, &got)
+	if got.Source != "snapshot" {
+		t.Fatalf("got %+v, want snapshot", got)
+	}
+}
+
+// Only a carried PLAN counts: a question or permission has nothing to review.
+func TestPlanFileRefusesForANonPlanCarriedInteraction(t *testing.T) {
+	m, sid := planFileEnv(t, "")
+	status.PutCarried(sid, status.Carried{Kind: "permission", Permission: "Bash · ls", Plan: "# not a plan"}, "halt")
+	if code := httpStatus(t, planFileServer(t), "GET", "/sessions/"+m.Name+"/plan-file", nil); code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", code)
+	}
+}

@@ -114,6 +114,29 @@ export function usePlanActions({
     useLaunchTarget.getState().open(target.repo, "", true);
   };
 
+  // Review the plan a STOPPED session was waiting on (the carried plan card). The same
+  // launch dialog, minus everything the live card needs: no modal is up, so nothing is
+  // rejected or interrupted, and the session need not be running — the reviewer's peer
+  // message resumes it. Resolves true once the dialog is open.
+  const reviewCarriedPlan = async (plan: string): Promise<boolean> => {
+    const res = await sessionPlanFile(session);
+    if (!res.ok || !res.path) {
+      toast(tr("plan.review_launch_failed", { err: res.message || "" }));
+      return false;
+    }
+    const target = handoffLaunchTarget(sessionMeta, useReposStore.getState().repos, false);
+    if ("error" in target) {
+      toast(tr(target.error === "no_parent" ? "mirror.handoff_no_parent" : "mirror.handoff_no_dir"));
+      return false;
+    }
+    useLaunchSeed.getState().set(
+      reviewPrompt({ parent: session, path: res.path, dir: target.repo.path || "" }),
+      reviewTitle(planTitle(plan)),
+    );
+    useLaunchTarget.getState().open(target.repo, "", true);
+    return true;
+  };
+
   // Why plan comments cannot be sent ("" = they can). The composer disappears entirely while
   // stopped, but the plan card stays in the history, so its send button must block itself.
   // Collecting comments while stopped is still allowed — they go out after a resume.
@@ -212,5 +235,5 @@ export function usePlanActions({
     openTargetInNew(target, true);
   };
 
-  return { openPlan, reviewPlanElsewhere, planSendBlocked, sendPlanComments, openFile, openDiff };
+  return { openPlan, reviewPlanElsewhere, reviewCarriedPlan, planSendBlocked, sendPlanComments, openFile, openDiff };
 }

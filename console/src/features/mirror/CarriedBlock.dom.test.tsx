@@ -26,7 +26,10 @@ let host: HTMLDivElement | null = null;
 const errors: string[] = [];
 let done = 0;
 
-function mount(carried: Parameters<typeof CarriedBlock>[0]["carried"]) {
+function mount(
+  carried: Parameters<typeof CarriedBlock>[0]["carried"],
+  onReviewPlan?: (plan: string) => Promise<boolean>,
+) {
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -38,6 +41,7 @@ function mount(carried: Parameters<typeof CarriedBlock>[0]["carried"]) {
         agentName="claude"
         onDone={() => done++}
         onError={(m) => errors.push(m)}
+        onReviewPlan={onReviewPlan}
       />,
     ),
   );
@@ -118,6 +122,26 @@ describe("CarriedBlock", () => {
     await act(async () => {});
     const [, body] = sessionCarriedAnswer.mock.calls[0] as unknown as [string, Record<string, unknown>];
     expect(body).toMatchObject({ decision: "reject", feedback: "手順 2 を分けて" });
+  });
+
+  it("a carried plan offers review in another session, sends nothing, and locks approval once the dialog opens", async () => {
+    const review = vi.fn(async () => true);
+    mount({ kind: "plan", plan: "# 計画" }, review);
+    const approve = () => byText(/承認して実行|Approve and run/) as HTMLButtonElement;
+    expect(approve().disabled).toBe(false);
+    click(byText(/別セッションでレビュー|Review in another session/));
+    await act(async () => {});
+    expect(review).toHaveBeenCalledWith("# 計画");
+    expect(sessionCarriedAnswer).not.toHaveBeenCalled(); // no reject/discard on launch
+    expect(approve().disabled).toBe(true);
+    expect(document.querySelector('[data-testid="carried-plan-under-review"]')).not.toBeNull();
+  });
+
+  it("a review launch that fails to open leaves approval available", async () => {
+    mount({ kind: "plan", plan: "# 計画" }, vi.fn(async () => false));
+    click(byText(/別セッションでレビュー|Review in another session/));
+    await act(async () => {});
+    expect((byText(/承認して実行|Approve and run/) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("a permission offers only resume-and-continue, since the answer cannot be delivered", async () => {

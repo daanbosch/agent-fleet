@@ -367,6 +367,8 @@ export const mirror: Record<keyof typeof jaMirror, string> = {
   "mirror.carried_plan_approve": "Approve and run",
   "mirror.carried_plan_reject": "Do not approve",
   "mirror.carried_plan_approve_confirm": "Approving resumes the session and runs this plan straight away. This cannot be undone. Continue?",
+  "mirror.carried_plan_under_review": "The plan is under review in another session. Approve once its findings are in, or discard it.",
+  "mirror.carried_plan_review_title": "Start a review session for this plan. The findings come back to this session as a message.",
   "mirror.carried_plan_feedback_ph": "Notes or changes (optional)",
   "mirror.carried_no_keys": "A carried interaction cannot be answered with key presses.",
   "mirror.question_cancel_title": "Dismiss this question without answering and return to normal conversation (Esc)",

@@ -35,6 +35,12 @@ type Carried struct {
 	// Plan is the ExitPlanMode plan body. A pending plan never reaches the transcript
 	// (measured, docs/log/75 §75.10 D), so this is its only record.
 	Plan string `json:"plan,omitempty"`
+	// PlanFile is the plan file path recorded for the session (ReadPlanFile) when the plan
+	// was promoted. Remove drops that record with the rest of the session's state, but the
+	// file itself stays on disk, so this is what lets a reviewer session still be pointed at
+	// it. Unvalidated here: the consumer re-checks it (sessionx.planFileOf) before use.
+	// Entries written before the field existed decode with it empty.
+	PlanFile string `json:"planFile,omitempty"`
 	// Permission describes the tool that was asking for approval ("Bash · npm ci"). An
 	// answer cannot reach a dead tool call, so this is a record of the fact rather than
 	// something to respond to.
@@ -85,6 +91,9 @@ func PromoteCarried(sid, reason string) bool {
 	} else if p, ok := ReadPendingPlan(sid); ok && strings.TrimSpace(p) != "" {
 		c.Kind = "plan"
 		c.Plan = p
+		if pf, ok := ReadPlanFile(sid); ok {
+			c.PlanFile = pf
+		}
 	} else if pm, ok := ReadPendingPermission(sid); ok && strings.TrimSpace(pm) != "" {
 		c.Kind = "permission"
 		c.Permission = pm

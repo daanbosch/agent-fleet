@@ -69,8 +69,9 @@ func underDir(p, dir string) bool {
 }
 
 // HandleSessionPlanFile (GET /sessions/{name}/plan-file) answers {path, source} for the
-// plan this session is waiting on. It refuses when no plan is pending: the path alone
-// would not say WHICH revision, and the only caller is the plan card's review launch.
+// plan this session is waiting on, or — once it has stopped — the plan it was waiting on
+// (the carried interaction). It refuses when neither exists: the path alone would not say
+// WHICH revision, and the only callers are the plan cards' review launches.
 func HandleSessionPlanFile(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !session.ValidName(name) {
@@ -83,20 +84,26 @@ func HandleSessionPlanFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sid := session.UUID(meta.Dir, meta.Name)
-	plan, ok := status.ReadPendingPlan(sid)
-	if !ok || strings.TrimSpace(plan) == "" {
+	// A pending plan wins; once the session has stopped the plan lives on only as the
+	// carried interaction, which keeps its own copy of the file path (Remove drops the
+	// session's record).
+	plan, recorded := "", ""
+	if p, ok := status.ReadPendingPlan(sid); ok && strings.TrimSpace(p) != "" {
+		plan = p
+		recorded, _ = status.ReadPlanFile(sid)
+	} else if c, ok := status.ReadCarried(sid); ok && c.Kind == "plan" && strings.TrimSpace(c.Plan) != "" {
+		plan, recorded = c.Plan, c.PlanFile
+	} else {
 		httpx.WriteErr(w, http.StatusConflict, "no_plan", "no pending plan approval (already handled?)")
 		return
 	}
-	if p, ok := status.ReadPlanFile(sid); ok {
-		// Re-validate the stored path rather than trusting the record: the config dir can
-		// move between agent versions, and a record pointing outside it must never be
-		// handed to another session as "the plan".
-		if p = planFileOf(p); p != "" {
-			if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
-				httpx.WriteJSON(w, http.StatusOK, map[string]any{"path": p, "source": "claude"})
-				return
-			}
+	// Re-validate the stored path rather than trusting the record: the config dir can
+	// move between agent versions, and a record pointing outside it must never be
+	// handed to another session as "the plan".
+	if p := planFileOf(recorded); p != "" {
+		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
+			httpx.WriteJSON(w, http.StatusOK, map[string]any{"path": p, "source": "claude"})
+			return
 		}
 	}
 	path, err := writePlanSnapshot(sid, plan)
