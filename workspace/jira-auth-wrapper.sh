@@ -7,7 +7,7 @@
 # asks the Agent for the Connections credential on every call (`workspace-agent jira-cred`, which
 # renews an OAuth token about to expire) and hands it over through jira's environment, which
 # overrides the config file key by key (JIRA_SERVER, JIRA_LOGIN, JIRA_AUTH_TYPE,
-# JIRA_INSTALLATION). docs/build/08 §8.3.
+# JIRA_INSTALLATION). docs/build/08 §8.4.2.
 #
 # - An explicit JIRA_API_TOKEN is the user's own setup: exec unchanged.
 # - A config file (the one -c/--config, JIRA_CONFIG_FILE or the default location names) whose

@@ -100,6 +100,17 @@ To register one:
 > Atlassian Marketplace. Members will still see a notice that the app has not been
 > reviewed by Atlassian; that is expected for an app you registered yourself.
 
+> **Jira: boards, sprints and epics need more scopes.** The Jira CLI in members' sessions
+> reaches boards, sprints and epics through Jira Software, which accepts none of the
+> scopes above. Add these to the app under **Permissions** first:
+> `read:board-scope:jira-software`, `read:sprint:jira-software`, `write:sprint:jira-software`,
+> `read:epic:jira-software`, `write:epic:jira-software`, `read:project:jira`,
+> `read:issue-details:jira` and `read:jql:jira`. **Then** tick *The app also grants the Jira
+> Software scopes* on the Jira card and save. In that order: Atlassian refuses an
+> authorization that asks for a scope the app does not have, so ticking first stops every
+> member from connecting. Members who are already connected get the new scopes when they
+> reconnect Jira.
+
 The secret is **encrypted on save and never shown again**. When you edit the
 registration later, leaving the secret field empty keeps the stored one; fill it in
 only when you actually want to change it. **Remove registration** takes the OAuth

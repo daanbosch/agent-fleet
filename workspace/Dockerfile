@@ -277,7 +277,7 @@ RUN set -eux; \
 # Jira CLI (jira, ankitpokhrel/jira-cli): same shape as bkt. The real binary goes to
 # /usr/local/libexec/jira and /usr/local/bin/jira is the transparent-auth wrapper
 # (jira-auth-wrapper.sh). The tarball must match the release's own checksums.txt. Bump
-# JIRA_CLI_VERSION to upgrade (docs/build/08 §8.3).
+# JIRA_CLI_VERSION to upgrade (docs/build/08 §8.4.2).
 ARG JIRA_CLI_VERSION=1.7.0
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
