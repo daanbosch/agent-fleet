@@ -102,22 +102,6 @@ func TestMarkdownScrubCoversEveryField(t *testing.T) {
 	}
 }
 
-// A turn that opens a fence and never closes it must not swallow the turns after it.
-func TestMarkdownClosesAnOpenFence(t *testing.T) {
-	for _, fence := range []string{"```", "~~~~"} {
-		turns := []Turn{
-			// The indented run inside is content, not the close.
-			{Role: "user", Parts: []Part{{Kind: "text", Text: fence + "text\n    " + fence + "\nunclosed"}}},
-			{Role: "assistant", Parts: []Part{{Kind: "text", Text: "answer"}}},
-		}
-		md := Markdown(turns, MarkdownOptions{Lang: "en"})
-		want := "unclosed\n\n" + fence + "\n\n---\n\n## Assistant"
-		if !strings.Contains(md, want) {
-			t.Errorf("fence %q left open:\n%s", fence, md)
-		}
-	}
-}
-
 func TestMarkdownPlanAnswerAndOptionPreview(t *testing.T) {
 	turns := []Turn{{Role: "assistant", Parts: []Part{
 		{Kind: "plan", Plan: "do X", Answer: "User has approved your plan"},
@@ -133,21 +117,6 @@ func TestMarkdownPlanAnswerAndOptionPreview(t *testing.T) {
 	}
 	if md := Markdown(turns, MarkdownOptions{Lang: "en"}); strings.Contains(md, "+--+") {
 		t.Errorf("preview belongs to the full export only:\n%s", md)
-	}
-}
-
-// Markdown that is valid as it stands gets no stray fence: inline code that starts a line,
-// and a list item's fence whose close is indented relative to the item.
-func TestMarkdownLeavesValidFencesAlone(t *testing.T) {
-	for _, body := range []string{"```inline```", "- item\n\n  ```\n  code\n    ```\n\noutside", "```text\n    ```\n```"} {
-		turns := []Turn{
-			{Role: "user", Parts: []Part{{Kind: "text", Text: body}}},
-			{Role: "assistant", Parts: []Part{{Kind: "text", Text: "answer"}}},
-		}
-		md := Markdown(turns, MarkdownOptions{Lang: "en"})
-		if !strings.Contains(md, body+"\n\n---\n\n## Assistant") {
-			t.Errorf("stray fence added after %q:\n%s", body, md)
-		}
 	}
 }
 
@@ -213,6 +182,28 @@ func TestMarkdownScrubReachesEveryStringField(t *testing.T) {
 		md := Markdown(turns, MarkdownOptions{ToolOutput: full, Scrub: func(s string) string { return strings.ReplaceAll(s, tok, "[x]") }})
 		if strings.Contains(md, tok) {
 			t.Errorf("full=%v: an unscrubbed field reached the file:\n%s", full, md)
+		}
+	}
+}
+
+// A turn's own Markdown goes through untouched; these valid bodies are the ones line-level
+// fence repairs used to break.
+func TestMarkdownPassesTurnTextThrough(t *testing.T) {
+	for _, body := range []string{
+		"```inline```",
+		"- item\n\n  ```\n  code\n    ```\n\noutside",
+		"```text\n    ```\n```",
+		"intro\n\n ```text\n    ```\n ```",
+		"<!--\n```\n-->",
+		"- item\n\n  ```\n  code\n\noutside",
+	} {
+		turns := []Turn{
+			{Role: "user", Parts: []Part{{Kind: "text", Text: body}}},
+			{Role: "assistant", Parts: []Part{{Kind: "text", Text: "answer"}}},
+		}
+		md := Markdown(turns, MarkdownOptions{Lang: "en"})
+		if !strings.Contains(md, body+"\n\n---\n\n## Assistant") {
+			t.Errorf("turn text changed for %q:\n%s", body, md)
 		}
 	}
 }

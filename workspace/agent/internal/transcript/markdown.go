@@ -53,6 +53,10 @@ var mdLabelsEN = mdLabels{
 // written: it is the model's scratch work, not part of what was said. Sidechain turns
 // (a subagent's own conversation) are left out too; the delegation part in the parent
 // turn carries the instruction and the result.
+//
+// A turn's own text is written as the Markdown it already is. A fence it leaves open is not
+// repaired: line-level guesses at "open" kept breaking valid Markdown (indented fences, HTML
+// blocks, lists that end a block), and only a full parser could tell.
 func Markdown(turns []Turn, o MarkdownOptions) string {
 	lb := mdLabelsJA
 	if o.Lang == "en" {
@@ -94,7 +98,6 @@ func Markdown(turns []Turn, o MarkdownOptions) string {
 		if body.Len() == 0 {
 			continue
 		}
-		closeOpenFence(&body)
 		// claude and codex write one assistant turn as many rows; a heading per row would
 		// split one answer into a dozen sections.
 		if t.Role != "assistant" || prevRole != "assistant" || t.Compact {
@@ -291,56 +294,6 @@ func ShortTime(ts string, loc *time.Location) string {
 		loc = time.Local
 	}
 	return t.In(loc).Format("2006-01-02 15:04")
-}
-
-// closeOpenFence appends a closing fence when a turn's own Markdown left a code block open,
-// so it cannot swallow the separator, the next heading and every turn after it.
-func closeOpenFence(b *strings.Builder) {
-	var open string
-	openIndent := 0
-	for _, line := range strings.Split(b.String(), "\n") {
-		t := strings.TrimLeft(line, " ")
-		f := fenceRun(t)
-		if f == "" {
-			continue
-		}
-		rest := t[len(f):]
-		if open == "" {
-			// CommonMark: an opening fence is indented at most three spaces, and a backtick
-			// fence's info string holds no backtick (```inline``` is inline code). Deeper
-			// indentation is a list item's fence or an indented block; leaving it alone can
-			// only miss a close, never add a stray fence.
-			if len(line)-len(t) <= 3 && (f[0] != '`' || !strings.Contains(rest, "`")) {
-				open, openIndent = f, len(line)-len(t)
-			}
-			continue
-		}
-		// A close is indented at most three spaces relative to its container. This scan
-		// cannot see containers, so the opening fence's own indent stands in for one: a
-		// list item's close indented past the item still closes, while an indented run of
-		// backticks inside a top-level block stays content.
-		if f[0] == open[0] && len(f) >= len(open) && strings.TrimSpace(rest) == "" && len(line)-len(t)-openIndent <= 3 {
-			open = ""
-		}
-	}
-	if open != "" {
-		b.WriteString(open + "\n\n")
-	}
-}
-
-// fenceRun returns the leading run of ` or ~ when it is long enough to be a fence.
-func fenceRun(line string) string {
-	if line == "" || (line[0] != '`' && line[0] != '~') {
-		return ""
-	}
-	n := 0
-	for n < len(line) && line[n] == line[0] {
-		n++
-	}
-	if n < 3 {
-		return ""
-	}
-	return line[:n]
 }
 
 func indent(s, pad string) string {
