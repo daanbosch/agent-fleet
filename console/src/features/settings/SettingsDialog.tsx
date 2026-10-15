@@ -152,7 +152,9 @@ export function SettingsDialog() {
   // Mobile drill-down: `entered` = viewing a section's content. Settings always opens
   // to the rail on a phone; the selected/remembered section only marks the active item.
   // Ignored by the desktop two-pane layout (CSS).
-  const [entered, setEntered] = useState(false);
+  // A request with a scroll target opens straight into its section: the target lives inside
+  // the detail view, and scrolling to an element under display:none does nothing.
+  const [entered, setEntered] = useState(() => useSettingsUI.getState().settingsTarget !== null);
   // A detail view gets its own history layer above Modal's close layer. Therefore the
   // first device/browser back returns to this list and the second closes the modal.
   useBackClose(() => setEntered(false), mobileMatches() && entered);
