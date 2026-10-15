@@ -39,8 +39,9 @@ export function CarriedBlock({
   onDone: () => void;
   onError: (message: string, code?: string) => void;
   onOpenPlan?: (plan: string) => void;
-  /** Opens the review launch dialog for the carried plan; resolves true once it is open. */
-  onReviewPlan?: (plan: string) => Promise<boolean>;
+  /** Opens the review launch dialog for the carried plan. The container discards this
+   *  card itself once the reviewer session exists. */
+  onReviewPlan?: (plan: string) => Promise<void>;
   translate?: TranscriptTranslateWiring;
 }) {
   const [sending, setSending] = useState(false);
@@ -50,10 +51,6 @@ export function CarriedBlock({
     carried.text || "",
   );
   const [feedback, setFeedback] = useState("");
-  // Set once the review dialog has opened: the reviewer is about to propose changes, so
-  // "Approve and run" would execute a plan nobody has settled. Component state only — a
-  // remount (reload) offers it again, which is the safe direction for a cancelled dialog.
-  const [underReview, setUnderReview] = useState(false);
 
   // Returns whether the answer actually left: the question card puts its draft back on a
   // false, since the card it belongs to stays on screen.
@@ -118,11 +115,6 @@ export function CarriedBlock({
               disabled={sending}
               onChange={(e) => setFeedback(e.target.value)}
             />
-            {underReview && (
-              <div className="mt-carried-note muted" data-testid="carried-plan-under-review">
-                <Icon name="info" /> {tr("mirror.carried_plan_under_review")}
-              </div>
-            )}
             <div className="mq-submit-row mq-footer">
               <button type="button" className="ghost" disabled={sending} onClick={() => void send({ decision: "discard" })}>
                 <Icon name="close" /> {tr("mirror.carried_discard")}
@@ -136,7 +128,7 @@ export function CarriedBlock({
                   className="ghost mt-plan-review"
                   disabled={sending}
                   title={tr("mirror.carried_plan_review_title")}
-                  onClick={() => void onReviewPlan(carried.plan!).then((opened) => opened && setUnderReview(true))}
+                  onClick={() => void onReviewPlan(carried.plan!)}
                 >
                   <Icon name="comment-discussion" /> {tr("plan.review_in_session")}
                 </button>
@@ -155,7 +147,7 @@ export function CarriedBlock({
               <button
                 type="button"
                 className="btn primary"
-                disabled={sending || underReview}
+                disabled={sending}
                 onClick={() => {
                   if (!window.confirm(tr("mirror.carried_plan_approve_confirm"))) return;
                   void send({ decision: "approve", feedback });

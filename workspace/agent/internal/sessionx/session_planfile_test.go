@@ -198,6 +198,21 @@ func TestPlanFileCarriedPathIsRevalidated(t *testing.T) {
 		"traversal": func(t *testing.T) string {
 			return filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "plans", "..", "settings.md")
 		},
+		"symlink to a file outside the plans dir": func(t *testing.T) string {
+			target := filepath.Join(t.TempDir(), "unrelated.md")
+			if err := os.WriteFile(target, []byte("unrelated"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			dir := filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "plans")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(dir, "linked.md")
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+			return link
+		},
 		"file gone": func(t *testing.T) string {
 			return filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "plans", "gone.md")
 		},

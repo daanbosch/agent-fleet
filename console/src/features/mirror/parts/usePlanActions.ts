@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { sessionPlanFile, sessionPlanRespond } from "../../../core/api/client.ts";
+import { sessionCarriedAnswer, sessionPlanFile, sessionPlanRespond } from "../../../core/api/client.ts";
 import type { Session } from "../../../types/session.ts";
 import { t as tr } from "../../../lib/i18n/index.ts";
 import type { useLayoutStore } from "../../../layout/store.ts";
@@ -46,7 +46,7 @@ export function usePlanActions({
   setActivePane: LayoutState["setActive"];
 }) {
   const {
-    applyEchoes, setFinalizing, finalizingRef, wasWorkingRef, alive, pendingPlan, markRejected, sending,
+    applyEchoes, setFinalizing, finalizingRef, wasWorkingRef, alive, pendingPlan, markRejected, sending, setCarried,
     setSending, tickRef,
   } = st;
   const { wsDown, sendInterrupt, sendPrompt, newestIdx } = actions;
@@ -117,24 +117,33 @@ export function usePlanActions({
   // Review the plan a STOPPED session was waiting on (the carried plan card). The same
   // launch dialog, minus everything the live card needs: no modal is up, so nothing is
   // rejected or interrupted, and the session need not be running — the reviewer's peer
-  // message resumes it. Resolves true once the dialog is open.
-  const reviewCarriedPlan = async (plan: string): Promise<boolean> => {
+  // message resumes it.
+  //
+  // The carried card is discarded once a reviewer session has actually been created (not
+  // when the dialog opens: a cancelled dialog must leave the plan reachable). Discarding is
+  // server-side state, so no pane or reload can approve a plan whose review is under way,
+  // and discard does not wake the session.
+  const reviewCarriedPlan = async (plan: string) => {
     const res = await sessionPlanFile(session);
     if (!res.ok || !res.path) {
       toast(tr("plan.review_launch_failed", { err: res.message || "" }));
-      return false;
+      return;
     }
     const target = handoffLaunchTarget(sessionMeta, useReposStore.getState().repos, false);
     if ("error" in target) {
       toast(tr(target.error === "no_parent" ? "mirror.handoff_no_parent" : "mirror.handoff_no_dir"));
-      return false;
+      return;
     }
     useLaunchSeed.getState().set(
       reviewPrompt({ parent: session, path: res.path, dir: target.repo.path || "" }),
       reviewTitle(planTitle(plan)),
     );
+    useLaunchSeed.getState().setOnLaunched(() => {
+      void sessionCarriedAnswer(session, { decision: "discard" }).then((r) => {
+        if (r.ok) setCarried(null);
+      });
+    });
     useLaunchTarget.getState().open(target.repo, "", true);
-    return true;
   };
 
   // Why plan comments cannot be sent ("" = they can). The composer disappears entirely while

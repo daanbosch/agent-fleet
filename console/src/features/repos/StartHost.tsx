@@ -112,6 +112,7 @@ export function StartHost() {
               if (seedWorkItem && r.name) {
                 void recordWorkItemLaunch(seedWorkItem, r.name, launch.name, workItemLaunchBranch(o, launch.branch || ""));
               }
+              useLaunchSeed.getState().onLaunched?.();
               setShow(false); // launched — drop the hub underneath too
               clearSeed();
             }

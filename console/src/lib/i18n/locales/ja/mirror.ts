@@ -395,7 +395,6 @@ export const mirror = {
   "mirror.carried_plan_approve": "承認して実行",
   "mirror.carried_plan_reject": "承認しない",
   "mirror.carried_plan_approve_confirm": "この計画を承認すると、セッションを再開してそのまま実行します。取り消せません。よろしいですか？",
-  "mirror.carried_plan_under_review": "このプランは別セッションでレビュー中です。指摘が届いてから承認するか、破棄してください。",
   "mirror.carried_plan_review_title": "このプランのレビューセッションを起動します。指摘はメッセージとしてこのセッションに届きます",
   "mirror.carried_plan_feedback_ph": "補足や修正指示（任意）",
   "mirror.carried_no_keys": "持ち越した対話にキー操作は送れません。",

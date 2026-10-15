@@ -28,7 +28,7 @@ let done = 0;
 
 function mount(
   carried: Parameters<typeof CarriedBlock>[0]["carried"],
-  onReviewPlan?: (plan: string) => Promise<boolean>,
+  onReviewPlan?: (plan: string) => Promise<void>,
 ) {
   host = document.createElement("div");
   document.body.append(host);
@@ -124,24 +124,21 @@ describe("CarriedBlock", () => {
     expect(body).toMatchObject({ decision: "reject", feedback: "手順 2 を分けて" });
   });
 
-  it("a carried plan offers review in another session, sends nothing, and locks approval once the dialog opens", async () => {
-    const review = vi.fn(async () => true);
+  it("a carried plan offers review in another session and sends nothing to the session itself", async () => {
+    const review = vi.fn(async () => {});
     mount({ kind: "plan", plan: "# 計画" }, review);
-    const approve = () => byText(/承認して実行|Approve and run/) as HTMLButtonElement;
-    expect(approve().disabled).toBe(false);
     click(byText(/別セッションでレビュー|Review in another session/));
     await act(async () => {});
     expect(review).toHaveBeenCalledWith("# 計画");
-    expect(sessionCarriedAnswer).not.toHaveBeenCalled(); // no reject/discard on launch
-    expect(approve().disabled).toBe(true);
-    expect(document.querySelector('[data-testid="carried-plan-under-review"]')).not.toBeNull();
+    // Discarding is the container's job, after the reviewer session exists: opening (or
+    // cancelling) the dialog must neither discard nor lock approval.
+    expect(sessionCarriedAnswer).not.toHaveBeenCalled();
+    expect((byText(/承認して実行|Approve and run/) as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("a review launch that fails to open leaves approval available", async () => {
-    mount({ kind: "plan", plan: "# 計画" }, vi.fn(async () => false));
-    click(byText(/別セッションでレビュー|Review in another session/));
-    await act(async () => {});
-    expect((byText(/承認して実行|Approve and run/) as HTMLButtonElement).disabled).toBe(false);
+  it("without a review handler (other kinds, shared view) no review button is shown", () => {
+    mount({ kind: "plan", plan: "# 計画" });
+    expect(byText(/別セッションでレビュー|Review in another session/)).toBeNull();
   });
 
   it("a permission offers only resume-and-continue, since the answer cannot be delivered", async () => {
