@@ -297,6 +297,7 @@ func ShortTime(ts string, loc *time.Location) string {
 // so it cannot swallow the separator, the next heading and every turn after it.
 func closeOpenFence(b *strings.Builder) {
 	var open string
+	openIndent := 0
 	for _, line := range strings.Split(b.String(), "\n") {
 		t := strings.TrimLeft(line, " ")
 		f := fenceRun(t)
@@ -310,13 +311,15 @@ func closeOpenFence(b *strings.Builder) {
 			// indentation is a list item's fence or an indented block; leaving it alone can
 			// only miss a close, never add a stray fence.
 			if len(line)-len(t) <= 3 && (f[0] != '`' || !strings.Contains(rest, "`")) {
-				open = f
+				open, openIndent = f, len(line)-len(t)
 			}
 			continue
 		}
-		// A close may sit at any indentation: inside a list item it is indented relative
-		// to the item, which this line-level scan cannot see.
-		if f[0] == open[0] && len(f) >= len(open) && strings.TrimSpace(rest) == "" {
+		// A close is indented at most three spaces relative to its container. This scan
+		// cannot see containers, so the opening fence's own indent stands in for one: a
+		// list item's close indented past the item still closes, while an indented run of
+		// backticks inside a top-level block stays content.
+		if f[0] == open[0] && len(f) >= len(open) && strings.TrimSpace(rest) == "" && len(line)-len(t)-openIndent <= 3 {
 			open = ""
 		}
 	}

@@ -106,7 +106,8 @@ func TestMarkdownScrubCoversEveryField(t *testing.T) {
 func TestMarkdownClosesAnOpenFence(t *testing.T) {
 	for _, fence := range []string{"```", "~~~~"} {
 		turns := []Turn{
-			{Role: "user", Parts: []Part{{Kind: "text", Text: fence + "text\nunclosed"}}},
+			// The indented run inside is content, not the close.
+			{Role: "user", Parts: []Part{{Kind: "text", Text: fence + "text\n    " + fence + "\nunclosed"}}},
 			{Role: "assistant", Parts: []Part{{Kind: "text", Text: "answer"}}},
 		}
 		md := Markdown(turns, MarkdownOptions{Lang: "en"})
@@ -138,7 +139,7 @@ func TestMarkdownPlanAnswerAndOptionPreview(t *testing.T) {
 // Markdown that is valid as it stands gets no stray fence: inline code that starts a line,
 // and a list item's fence whose close is indented relative to the item.
 func TestMarkdownLeavesValidFencesAlone(t *testing.T) {
-	for _, body := range []string{"```inline```", "- item\n\n  ```\n  code\n    ```\n\noutside"} {
+	for _, body := range []string{"```inline```", "- item\n\n  ```\n  code\n    ```\n\noutside", "```text\n    ```\n```"} {
 		turns := []Turn{
 			{Role: "user", Parts: []Part{{Kind: "text", Text: body}}},
 			{Role: "assistant", Parts: []Part{{Kind: "text", Text: "answer"}}},
