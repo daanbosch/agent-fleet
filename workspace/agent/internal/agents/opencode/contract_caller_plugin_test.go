@@ -37,6 +37,7 @@ const (
 )
 
 func TestContractOpencodeCallerPluginStampsAFTools(t *testing.T) {
+	skipOnOpencode2(t, "it loads a v1 plugin file, which 2.x silently ignores; TestOpencodePluginModulesServeBothMajors and TestContractSharedServeTerminalSessions cover the 2.x plugins")
 	requireOpencode(t)
 	py, err := exec.LookPath("python3")
 	if err != nil {

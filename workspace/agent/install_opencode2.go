@@ -2,8 +2,10 @@ package main
 
 // install_opencode2.go — the on-demand installer and the switch for the opencode 2 opt-in.
 //
-// The image pins opencode 1.x and moving the pin switches every member at once. This lets one
-// workspace run 2.x next to it: `install-opencode2` puts `@opencode/cli` into a private npm
+// The opt-in exists for an image that pins opencode 1.x (moving the pin switches every member at
+// once). Once the pin is 2.x it has nothing to add: the pinned opencode 2 owns the main database,
+// so every function here answers with a no-op and a message (opencode.PinnedV2). While the pin is
+// 1.x this lets one workspace run 2.x next to it: `install-opencode2` puts `@opencode/cli` into a private npm
 // prefix under ~/.local/share/agent-fleet (the package's `opencode` and `opencode2` bins are
 // never put on PATH, so the pinned `opencode` is not shadowed), and `opencode-major 2` makes af
 // launch it, with its own database (opencode.OptIn* in internal/agents/opencode/optin.go).
@@ -26,6 +28,10 @@ import (
 
 // runInstallOpencode2 handles `workspace-agent install-opencode2 [<version>]`.
 func runInstallOpencode2(args []string) {
+	if opencode.PinnedV2() {
+		fmt.Fprintln(os.Stderr, "[install-opencode2] "+pinnedV2Message)
+		return
+	}
 	ver := opencode.V2Version
 	if len(args) > 0 && args[0] != "" {
 		ver = args[0]
@@ -133,6 +139,23 @@ func runOpencodeMajor(args []string) {
 		fmt.Println(opencodeMajorStatus())
 		return
 	}
+	if opencode.PinnedV2() {
+		// "1" still clears a leftover switch file; "2" changes nothing. Neither can move the
+		// pinned opencode, so both end in the status that says why.
+		switch args[0] {
+		case "1":
+			if err := opencode.SetWantsV2(false); err != nil {
+				fmt.Fprintf(os.Stderr, "[opencode-major] %v\n", err)
+				os.Exit(1)
+			}
+		case "2":
+		default:
+			fmt.Fprintln(os.Stderr, "usage: workspace-agent opencode-major [1|2]")
+			os.Exit(2)
+		}
+		fmt.Println(opencodeMajorStatus())
+		return
+	}
 	switch args[0] {
 	case "2":
 		if opencode.V2Binary() == "" {
@@ -162,7 +185,22 @@ func runOpencodeMajor(args []string) {
 	fmt.Println(opencodeMajorStatus())
 }
 
+// pinnedV2Message is what the opt-in commands say when the image's opencode is already 2.x.
+const pinnedV2Message = "this workspace's opencode is already 2.x, so there is nothing to install or switch: " +
+	"it uses the main database (~/.local/share/opencode/opencode.db). To go back to opencode 1.x, " +
+	"re-pin the image (see the release notes)."
+
 func opencodeMajorStatus() string {
+	if opencode.PinnedV2() {
+		msg := "opencode 2 opt-in: not used (" + pinnedV2Message + ")"
+		if opencode.V2Binary() != "" || opencode.WantsV2() {
+			msg += "\nLeftovers of an earlier opt-in are ignored, not merged into the main database: " +
+				opencode.V2Prefix() + " (the private install) and " + filepath.Dir(opencode.V2DBPath()) +
+				" (its database). Sessions that only exist there are not visible to the pinned opencode; " +
+				"delete the two directories when you no longer need them."
+		}
+		return msg
+	}
 	state := "off (pinned opencode 1.x)"
 	switch {
 	case opencode.UseV2():

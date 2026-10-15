@@ -670,7 +670,13 @@ elif [ "${AF_AGENT_SELF_UPDATE_ALLOWED:-0}" = "1" ] && [ "${AF_AGENT_SELF_UPDATE
   ' 2>/dev/null || echo 1)
   if [ "$NPM_NEED" = "0" ]; then
     echo "[entrypoint] agent CLIs already latest; skip"
-  elif npm install -g $NPM_PREFIX_ARG @anthropic-ai/claude-code@latest "$OC_PKG@latest" @openai/codex@latest @github/copilot@latest >/dev/null 2>&1; then
+  elif { # A ~/.local copy of the other opencode package (a home that self-updated on the old pin)
+         # owns the `opencode` bin: npm exits EEXIST and the stale shadow keeps winning on PATH
+         # (measured with opencode-ai 1.19.0 -> @opencode/cli 2.0.29). Drop it first.
+         # shellcheck disable=SC2086
+         [ -z "$(npm ls -g $NPM_PREFIX_ARG --depth=0 "$OC_OTHER" 2>/dev/null | grep -F "$OC_OTHER")" ] \
+           || npm uninstall -g $NPM_PREFIX_ARG "$OC_OTHER" >/dev/null 2>&1 || true
+         npm install -g $NPM_PREFIX_ARG @anthropic-ai/claude-code@latest "$OC_PKG@latest" @openai/codex@latest @github/copilot@latest >/dev/null 2>&1; }; then
     echo "[entrypoint] agent CLIs updated${NPM_PREFIX_DIR:+ (~/.local)}: claude $(claude --version 2>/dev/null | head -1) | opencode $(opencode --version 2>/dev/null | head -1) | codex $(codex --version 2>/dev/null | head -1) | copilot $(copilot --version 2>/dev/null | head -1)"
   else
     echo "[entrypoint] WARN: agent CLI update failed (using baked versions)"

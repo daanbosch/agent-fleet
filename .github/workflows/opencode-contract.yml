@@ -149,10 +149,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # The Dockerfile pin is the source of truth. While it is still on 1.x (before the v2
-      # cut-over, #2101) there is no 2.x number to read, so the newest @opencode/cli stands in,
-      # the same line cli-drift-check.sh reports as latest_opencode2. Once the pin moves to 2.x
-      # this job follows it with no edit.
+      # The Dockerfile pin is the source of truth. If it is ever rolled back to 1.x there is no
+      # 2.x number to read, so the newest @opencode/cli stands in (the line cli-drift-check.sh
+      # reports as latest_opencode2) and the 2.x contracts keep running next to the 1.x pin.
       - name: resolve the opencode 2 version
         id: v2
         run: |

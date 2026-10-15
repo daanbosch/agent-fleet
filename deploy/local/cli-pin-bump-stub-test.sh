@@ -448,15 +448,16 @@ add_tested() { # add_tested <kind> <version>
     url: "https://github.com/k-k1/agent-fleet/issues/4#c20", author: {login: "github-actions"}, authorAssociation: "NONE"}]' \
     "$STUB_ISSUE" > "$WORK/i" && mv "$WORK/i" "$STUB_ISSUE"
 }
-add_tested opencode 2.0.28
-STUB_LATEST_OPENCODE=2.0.28 run_bump
+OC_NEXT="$(( ${P_OPENCODE%%.*} + 1 )).0.0"
+add_tested opencode "$OC_NEXT"
+STUB_LATEST_OPENCODE="$OC_NEXT" run_bump
 code_is 0
 
 ! grep -qE "^bumped=.*opencode" "$WORK/gh_out" || fail "opencode was bumped across a major"
 for l in $(changed_lines); do
   case "$l" in *OPENCODE_VERSION*) fail "OPENCODE_VERSION moved across a major: $l" ;; esac
 done
-body_has "| opencode | \`$P_OPENCODE\` | \`2.0.28\` | a new major (${P_OPENCODE%%.*} -> 2): the cut-over is manual"
+body_has "| opencode | \`$P_OPENCODE\` | \`$OC_NEXT\` | a new major (${P_OPENCODE%%.*} -> ${OC_NEXT%%.*}): the cut-over is manual"
 out_has "incomplete=false"
 
 echo "== case 12b: CONTROL -- a newer release of the pin's own major is bumped =="

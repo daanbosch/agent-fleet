@@ -342,13 +342,14 @@ RUN if [ "${BAKE_RTK}" = "1" ] && [ "${BAKE_AGENT_CLIS}" = "1" ]; then set -eux;
 # 未ピン時代は同一 RUN 行が Docker レイヤキャッシュに当たり、再ビルドしても古い版の
 # ままになる罠があった（ピン止めなら ARG 変更が確実にキャッシュを破る）。
 ARG CLAUDE_CODE_VERSION=2.1.300
-ARG OPENCODE_VERSION=1.19.0
+ARG OPENCODE_VERSION=2.0.29
 ARG CODEX_VERSION=0.162.1
 ARG COPILOT_VERSION=1.0.98
 # opencode's npm package follows the pin's major: `opencode-ai` for 1.x, `@opencode/cli` for
-# 2.x (which also installs an `opencode2` bin). The pin stays 1.x until the v2 cut-over (#2101);
-# changing OPENCODE_VERSION across the major is the whole switch. entrypoint.sh,
-# deploy/local/cli-drift-check.sh and .github/workflows/release-gate.yml apply the same rule.
+# 2.x (which also installs an `opencode2` bin). The pin has been 2.x since the v2 cut-over
+# (#2101); rolling back is OPENCODE_VERSION=1.19.0, nothing else (docs/log/119). entrypoint.sh,
+# deploy/local/cli-drift-check.sh, .github/workflows/release-gate.yml and
+# .github/actions/setup-agent-cli apply the same rule.
 RUN if [ "${BAKE_AGENT_CLIS}" = "1" ]; then \
       case "${OPENCODE_VERSION%%.*}" in 0|1) oc_pkg=opencode-ai ;; *) oc_pkg=@opencode/cli ;; esac; \
       npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \

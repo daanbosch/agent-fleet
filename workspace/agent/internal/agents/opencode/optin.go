@@ -9,20 +9,24 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 )
 
-// The opt-in that runs opencode 2 beside the pinned 1.x in one workspace. Nothing here
+// The opt-in that runs opencode 2 beside a pinned 1.x in one workspace. Nothing here
 // is reachable until a member both installs the v2 package (`workspace-agent install-opencode2`)
 // and switches to it (`workspace-agent opencode-major 2`): UseV2 is false otherwise, and then
 // every function in this file answers what the code answered before it existed.
+//
+// It only has a job while the opencode on PATH is 1.x (an image re-pinned to 1.x for a rollback).
+// Once the pin is 2.x the PATH binary is opencode 2 and owns ~/.local/share/opencode/opencode.db,
+// which it migrated in place; a second v2 with a private database beside it would split the
+// member's sessions in two, so PinnedV2 makes the whole opt-in inert (docs/log/119).
 
 // MajorEnv selects the major for this Agent process: "2" opts in, "1" opts out whatever the
 // switch file says. Unset, the switch file decides.
 const MajorEnv = "AF_OPENCODE_MAJOR"
 
-// V2Version is the opencode 2 release the opt-in installs unless told otherwise: the one the
-// serve client, the state readers and the launch lines were measured on (docs/log/119), and the
-// one the repository's package-rule tests name. Moving it is a deliberate act, like the image
-// pin.
-const V2Version = "2.0.28"
+// V2Version is the opencode 2 release the opt-in installs unless told otherwise: the image pin
+// (workspace/Dockerfile), so a rolled-back workspace tries the same build the contract tests ran
+// on (docs/log/119). Moving it is a deliberate act, like the image pin.
+const V2Version = "2.0.29"
 
 // V2Prefix is the npm prefix `@opencode/cli` is installed into. It is a private tree, so the
 // package's `opencode` bin never lands on PATH next to the pinned 1.x one; the database is kept
@@ -80,9 +84,16 @@ func SetWantsV2(on bool) error {
 	return writeAtomic(f, []byte("2\n"), 0o644)
 }
 
-// UseV2 is whether af launches opencode 2 right now: chosen AND installed. A choice without a
-// binary falls back to the pinned 1.x, with its own data, instead of failing every launch.
-func UseV2() bool { return WantsV2() && V2Binary() != "" }
+// PinnedV2 is whether the opencode on PATH (or, failing that, the image pin) is already
+// opencode 2, so the opt-in has nothing to add. It does not look at the switch.
+func PinnedV2() bool { return pathMajor() >= 2 }
+
+// UseV2 is whether af launches the private opt-in opencode 2 right now: chosen AND installed AND
+// the PATH opencode is still 1.x. A choice without a binary falls back to the pinned 1.x, with its
+// own data, instead of failing every launch; a choice made before the pin moved to 2.x is ignored
+// and the pinned opencode 2 is used with the main database. The private install and its database
+// are left on disk untouched (they are not merged into the main one).
+func UseV2() bool { return WantsV2() && V2Binary() != "" && !PinnedV2() }
 
 // LaunchSpec is one reading of the switch: which binary, which database and which key a start
 // uses. A start takes it once and builds the command and the environment from it, so a switch
@@ -100,10 +111,12 @@ func CurrentLaunch() LaunchSpec {
 	// from them: the opt-in is major 2 by construction, and the off branch resolves its major from
 	// the PATH binary and the image pin only (pathMajor does not look at the switch), so no
 	// combination of {off, major 2} or {on, major 1} can be built.
-	if bin := V2Binary(); bin != "" && WantsV2() {
-		return LaunchSpec{V2: true, Maj: 2, Bin: bin, Key: "v2:" + bin}
+	bin := V2Binary()
+	wants := bin != "" && WantsV2() // before pathMajor: the switch is read once, ahead of the resolver
+	if pm := pathMajor(); !wants || pm >= 2 {
+		return LaunchSpec{Maj: pm, Bin: "opencode"}
 	}
-	return LaunchSpec{Maj: pathMajor(), Bin: "opencode"}
+	return LaunchSpec{V2: true, Maj: 2, Bin: bin, Key: "v2:" + bin}
 }
 
 // Env is the provider keys plus, for the opt-in, its own database: the whole environment an

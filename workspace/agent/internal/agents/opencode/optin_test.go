@@ -25,6 +25,9 @@ func optInHome(t *testing.T) string {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv(MajorEnv, "")
+	// The opt-in only exists next to a 1.x on PATH; pin that so a real opencode 2 on the machine
+	// (the image pin since the cut-over) cannot decide these tests.
+	useMajor(t, 1)
 	oldPins := buildPinsPath
 	buildPinsPath = filepath.Join(home, "no-versions.json")
 	t.Cleanup(func() { buildPinsPath = oldPins })
@@ -109,6 +112,46 @@ func TestOptInOnLaunchesTheV2BinaryWithItsOwnDatabase(t *testing.T) {
 	}
 	if filepath.Dir(V2DBPath()) == filepath.Join(home, ".local", "share", "opencode") {
 		t.Fatal("the v2 database sits in the v1 data directory")
+	}
+}
+
+// After the cut-over the PATH opencode is 2.x and owns the main database. A workspace that had the
+// opt-in on keeps its switch file and its private install, and none of it is used: the launch is the
+// bare pinned binary, no OPENCODE_DB, no daemon key, so nothing splits the member's sessions in two.
+func TestOptInIsInertWhenThePinnedOpencodeIsV2(t *testing.T) {
+	optInHome(t)
+	installFakeV2(t)
+	stubUsagePref(t, UsageOwn)
+	if err := SetWantsV2(true); err != nil {
+		t.Fatal(err)
+	}
+	useMajor(t, 2) // the pinned opencode on PATH is 2.x (after optInHome, which pins 1.x)
+
+	if !WantsV2() || V2Binary() == "" {
+		t.Fatal("the leftover switch and install must still read as they are on disk")
+	}
+	if UseV2() || !PinnedV2() {
+		t.Fatalf("UseV2=%v PinnedV2=%v, want the opt-in unused", UseV2(), PinnedV2())
+	}
+	spec := CurrentLaunch()
+	if spec.V2 || spec.Bin != "opencode" || spec.Maj != 2 || spec.Key != "" {
+		t.Fatalf("launch = %+v, want the bare pinned opencode 2", spec)
+	}
+	for _, kv := range env() {
+		if strings.HasPrefix(kv, "OPENCODE_DB=") {
+			t.Fatalf("env carries %s: the pinned opencode must use the main database", kv)
+		}
+	}
+	if line := buildProgram("", "", "", false); !strings.HasPrefix(line, "opencode --standalone") {
+		t.Fatalf("launch line = %q, want the pinned opencode (not the private one)", line)
+	}
+	if installedMajor() != 2 || installedVersion() != "2.0.28" {
+		t.Fatalf("major/version = %d/%q", installedMajor(), installedVersion())
+	}
+	// The same leftovers are live again once the image is re-pinned to 1.x (rollback).
+	useMajor(t, 1)
+	if !UseV2() || CurrentLaunch().Bin != V2Binary() {
+		t.Fatal("a rollback to a 1.x pin must give the opt-in back")
 	}
 }
 

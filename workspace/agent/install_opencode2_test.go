@@ -82,14 +82,73 @@ func TestInstallOpencode2WrongVersionKeepsThePreviousInstall(t *testing.T) {
 	}
 }
 
+// opencodeOnPath puts a fake opencode of the given package and version first on PATH, the shape
+// `npm install -g` leaves behind.
+func opencodeOnPath(t *testing.T, pkg, version string) {
+	t.Helper()
+	root := t.TempDir()
+	pkgDir := filepath.Join(root, "lib", "node_modules", filepath.FromSlash(pkg))
+	if err := os.MkdirAll(filepath.Join(pkgDir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte(`{"name":"`+pkg+`","version":"`+version+`"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(pkgDir, "bin", "opencode.exe")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(exe, filepath.Join(root, "bin", "opencode")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", filepath.Join(root, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 func TestOpencodeMajorStatusNamesTheState(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv(opencode.MajorEnv, "")
+	opencodeOnPath(t, "opencode-ai", "1.19.0") // a rollback pin: the opt-in is live only next to 1.x
 	if got := opencodeMajorStatus(); !strings.Contains(got, "off (pinned opencode 1.x)") {
 		t.Fatalf("default status = %q", got)
 	}
 	_ = opencode.SetWantsV2(true)
 	if got := opencodeMajorStatus(); !strings.Contains(got, "not installed") {
 		t.Fatalf("requested-without-binary status = %q", got)
+	}
+}
+
+// With the pinned opencode on 2.x, a workspace that had the opt-in on (switch file, private
+// install) is told the leftovers are ignored and where they are; one that never opted in is not
+// told about leftovers it does not have.
+func TestOpencodeMajorStatusWhenThePinIsV2(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(opencode.MajorEnv, "")
+	opencodeOnPath(t, "@opencode/cli", "2.0.29")
+
+	clean := opencodeMajorStatus()
+	if !strings.Contains(clean, "already 2.x") || strings.Contains(clean, "Leftovers") {
+		t.Fatalf("status for a workspace that never opted in = %q", clean)
+	}
+
+	if err := installOpencode2("2.0.28", fakeNpm(t, "2.0.28", new(int))); err != nil {
+		t.Fatal(err)
+	}
+	if err := opencode.SetWantsV2(true); err != nil {
+		t.Fatal(err)
+	}
+	if opencode.UseV2() {
+		t.Fatal("the private opt-in is used although the pinned opencode is 2.x")
+	}
+	got := opencodeMajorStatus()
+	for _, want := range []string{"already 2.x", "Leftovers", opencode.V2Prefix(), "opencode2-data", "not merged"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("status lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "on (opencode 2:") {
+		t.Fatalf("status claims the opt-in is on: %s", got)
 	}
 }
