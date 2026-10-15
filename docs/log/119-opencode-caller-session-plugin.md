@@ -451,3 +451,10 @@ tests for both majors.
 - `parseOpencodeRunEvents` reads the flattened 2.x error event
   (`error.type`/`error.message`); the chat contract test demands a clean exit and the stub's reply
   from every run.
+
+### 2026-10-16 (round 3)
+
+`oc_swap_restore` restores from what is in the aside directory, not from the current "other"
+package: each aside package under its own name, and the bins independently of the package, with the
+directory removed only after every move succeeded. This covers a stop between the package move and
+the bin move, and an image re-pinned to the other major while a copy was aside.

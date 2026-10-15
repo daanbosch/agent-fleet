@@ -90,6 +90,26 @@ swap 0 || fail "resume: the swap failed although npm succeeds"
 [ "$(owner)" = "@opencode/cli" ] || fail "resume after an interrupted swap, install ok: bin belongs to '$(owner)'"
 echo "ok  interrupted swap: the aside copy is restored first, never deleted"
 
+# Stopped again while restoring: the package is back, the bin is still aside. A failing install
+# must still leave a runnable opencode (the bin is restored independently of the package).
+home_with_v1
+mkdir -p "$WORK/p/.af-oc-swap/bin"
+mv "$WORK/p/bin/opencode" "$WORK/p/.af-oc-swap/bin/opencode"
+if swap 1; then fail "half-restored: reported success although npm failed"; fi
+[ "$(owner)" = "opencode-ai" ] || fail "half-restored (pkg back, bin aside), install failing: opencode is '$(owner)'"
+echo "ok  half-restored swap: the aside bin comes back"
+
+# Moved aside by the 1.x -> 2.x update, then the image was rolled back to 1.x: OC_OTHER is now
+# @opencode/cli, and the aside copy is opencode-ai. It must be restored by its own name.
+home_with_v1
+mkdir -p "$WORK/p/.af-oc-swap/pkg" "$WORK/p/.af-oc-swap/bin"
+mv "$WORK/p/lib/node_modules/opencode-ai" "$WORK/p/.af-oc-swap/pkg/opencode-ai"
+mv "$WORK/p/bin/opencode" "$WORK/p/.af-oc-swap/bin/opencode"
+if swap 1 @opencode/cli opencode-ai; then fail "re-pinned: reported success although npm failed"; fi
+[ "$(owner)" = "opencode-ai" ] || fail "aside opencode-ai after a re-pin to 1.x, install failing: opencode is '$(owner)'"
+[ ! -e "$WORK/p/.af-oc-swap" ] || fail "the backup directory was left behind after a complete restore"
+echo "ok  re-pinned during a swap: restored by the aside copy's own name"
+
 # The boot-install and self-update paths both go through the helper and nothing uninstalls first.
 [ "$(grep -c 'oc_install_swap "' "$ROOT/workspace/entrypoint.sh")" -ge 2 ] || fail "entrypoint.sh: boot-install and self-update must both call oc_install_swap"
 ! grep -q 'npm uninstall -g --prefix "$HOME/.local" \$NPM_DROP\|NPM_DROP' "$ROOT/workspace/entrypoint.sh" || fail "entrypoint.sh: a drop-then-install path is left"

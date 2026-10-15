@@ -340,17 +340,28 @@ OC_OTHER=@opencode/cli; [ "$OC_PKG" = opencode-ai ] || OC_OTHER=opencode-ai
 # 1.19.0 -> @opencode/cli 2.0.29), and the stale shadow then keeps winning on PATH. The other
 # package is moved aside rather than uninstalled: when the install fails (a registry error, another
 # CLI in the same command) it is moved back, so a lean home never ends up with no opencode at all.
-oc_swap_restore() { # oc_swap_restore <prefix>: put an aside copy of OC_OTHER back, if one is waiting
-  local pfx="$1" bak="$1/.af-oc-swap" b
-  if [ -d "$bak/pkg/$OC_OTHER" ]; then
-    rm -rf "$pfx/lib/node_modules/$OC_OTHER"
-    mkdir -p "$pfx/lib/node_modules/$(dirname "$OC_OTHER")"
-    mv "$bak/pkg/$OC_OTHER" "$pfx/lib/node_modules/$OC_OTHER"
-    for b in opencode opencode2; do
-      if [ -L "$bak/bin/$b" ]; then rm -f "$pfx/bin/$b"; mv "$bak/bin/$b" "$pfx/bin/$b"; fi
-    done
-  fi
-  rm -rf "$bak"
+oc_swap_restore() { # oc_swap_restore <prefix>: put back whatever an interrupted or failed swap left aside
+  # Driven by what is in $bak, not by which package is "other" now: the image may have been
+  # re-pinned to the other major since the copy was moved aside. Packages and bins are restored
+  # independently (a stop between the two moves leaves only the bin), and $bak is removed only
+  # once every move succeeded.
+  local pfx="$1" bak="$1/.af-oc-swap" p b ok=1
+  [ -d "$bak" ] || return 0
+  for p in opencode-ai @opencode/cli; do
+    if [ -d "$bak/pkg/$p" ]; then
+      rm -rf "$pfx/lib/node_modules/$p"
+      mkdir -p "$pfx/lib/node_modules/$(dirname "$p")"
+      mv "$bak/pkg/$p" "$pfx/lib/node_modules/$p" || ok=0
+    fi
+  done
+  for b in opencode opencode2; do
+    if [ -L "$bak/bin/$b" ]; then
+      rm -f "$pfx/bin/$b"
+      mv "$bak/bin/$b" "$pfx/bin/$b" || ok=0
+    fi
+  done
+  [ "$ok" = 1 ] && rm -rf "$bak"
+  return 0
 }
 oc_install_swap() {
   local pfx="$1" bak="$1/.af-oc-swap" b l; shift
