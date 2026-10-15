@@ -16,6 +16,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/limitepoch"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/usagewin"
 )
 
 // Codex subscription usage (the 5-hour + weekly rate-limit bars) surfaced for the
@@ -749,18 +750,8 @@ func isApproxWindow(minutes, expected int) bool {
 // reset (ADR 0111 decision 6: a derived value never clears "reset not yet observed").
 func adjustWindow(pct float64, windowMin int, resetEpoch int64, now time.Time) *usageWindow {
 	w := &usageWindow{raw: recordedWindow{UsedPercent: pct, WindowMinutes: windowMin, ResetsAt: resetEpoch}}
-	reset := time.Unix(resetEpoch, 0).UTC()
-	if !reset.After(now) {
-		pct = 0
-		w.Stale, w.Derived = true, true
-		if windowMin > 0 {
-			step := time.Duration(windowMin) * time.Minute
-			// Advance directly (not a loop) so a very old reading cannot spin.
-			n := now.Sub(reset)/step + 1
-			reset = reset.Add(step * n)
-		}
-	}
-	w.Pct, w.ResetsAt = pct, reset.Format(time.RFC3339)
+	adj, reset, stale := usagewin.Adjust(pct, windowMin, time.Unix(resetEpoch, 0).UTC(), now)
+	w.Pct, w.ResetsAt, w.Stale, w.Derived = adj, reset.Format(time.RFC3339), stale, stale
 	return w
 }
 

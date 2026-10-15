@@ -37,6 +37,7 @@ import { t, tCount, useT } from "../lib/i18n/index.ts";
 import type { MsgKey } from "../lib/i18n/index.ts";
 import { fmtGiB as fg } from "../lib/bytes.ts";
 import { useUsageResetNotify } from "./usageResetNotify.ts";
+import { pickNearCap } from "./usageNearCap.ts";
 import { AUTO_INLINE, noteSessionKinds, planUsageChips, readKindStamps, type KindStamps } from "./usageChipPlan.ts";
 import { setSettings, useSettings } from "../lib/settings.ts";
 import { useSettingsUI } from "../features/settings/store.ts";
@@ -110,7 +111,9 @@ interface UsageReading {
     label: string;
     remainingPct: number;
     resetsAt?: string;
-    fiveHour?: { remainingPct: number; resetsAt?: string };
+    // stale: the reset passed since the scrape, so the remaining % is unknown (see UsageWindow.stale).
+    stale?: boolean;
+    fiveHour?: { remainingPct: number; resetsAt?: string; stale?: boolean };
   }[];
   // copilot: a quota per pool plus one shared monthly reset.
   quotas?: { id: string; remainingPct: number }[];
@@ -398,12 +401,6 @@ function resetChipText(iso: string) {
   return sameDay ? fmtDateTime(d, TIME_HM) : fmtDateTime(d);
 }
 
-// Near-cap threshold: at or above this utilization the chip switches from "N% / M%" to
-// that window's reset time, because once you are about to be blocked (or already are)
-// "when does it clear" is the more useful answer. Kept in step with the dropdown's crit
-// coloring boundary (95%).
-const NEAR_MAX_PCT = 95;
-
 // A usage source = one agent's subscription-limit chip (Claude / Codex). Both endpoints
 // return the same {ok, fiveHour, sevenDay, ageSec} shape (codex reads its rate_limits
 // straight from the rollout — no network), so one chip component renders either.
@@ -620,18 +617,13 @@ export function UsageChip({ src, tenant }: { src: UsageSource; tenant: string | 
     .sort((a, b) => new Date(a.expiresAt).getTime() - new Date(b.expiresAt).getTime());
   const unavailable = !uh && !uw && !resetCount;
 
-  // If any window is near its cap (utilization >= NEAR_MAX_PCT), show when it clears
-  // instead of the %. Only near-cap windows are candidates, and exactly one is shown: the
-  // earliest to reset, i.e. the first relief. With both near the cap that is usually the
-  // 5-hour window. Which window, its % and the relative form go in the tooltip.
-  const nearMax: { label: string; pct: number; resetsAt: string }[] = [];
-  if (usage?.fiveHour && usage.fiveHour.pct >= NEAR_MAX_PCT && usage.fiveHour.resetsAt)
-    nearMax.push({ label: fiveLabel, ...usage.fiveHour });
-  if (usage?.sevenDay && usage.sevenDay.pct >= NEAR_MAX_PCT && usage.sevenDay.resetsAt)
-    nearMax.push({ label: weekLabel, ...usage.sevenDay });
-  const bind = nearMax.length
-    ? nearMax.reduce((a, b) => (new Date(a.resetsAt).getTime() <= new Date(b.resetsAt).getTime() ? a : b))
-    : null;
+  // Near the cap, the chip shows when the block lifts instead of the %: the latest reset among
+  // the live capped windows (see pickNearCap). The window, its % and the relative form go in
+  // the tooltip.
+  const bind = pickNearCap([
+    ...(usage?.fiveHour ? [{ label: fiveLabel, ...usage.fiveHour }] : []),
+    ...(usage?.sevenDay ? [{ label: weekLabel, ...usage.sevenDay }] : []),
+  ]);
 
   // Computed before the early return below, because useChipSlot is a hook: a chip with
   // nothing to show has to say so rather than skip its turn. `bind` moved above the return
@@ -758,24 +750,21 @@ export function AgyUsageChip({ tenant }: { tenant: string | null }) {
 
   // Flatten groups into rows: per group the weekly window, then the 5h one.
   const used = (remainingPct: number) => Math.round(Math.min(100, Math.max(0, 100 - remainingPct)));
-  const wins: { label: string; pct: number; resetsAt?: string }[] = [];
+  const wins: { label: string; pct: number; resetsAt?: string; stale?: boolean }[] = [];
   for (const g of (usage?.ok && Array.isArray(usage.groups) && usage.groups) || []) {
-    wins.push({ label: tr("wsbar.usage.agy.week_row", { group: g.label }), pct: used(g.remainingPct), resetsAt: g.resetsAt });
+    wins.push({ label: tr("wsbar.usage.agy.week_row", { group: g.label }), pct: used(g.remainingPct), resetsAt: g.resetsAt, stale: !!g.stale });
     if (g.fiveHour)
       wins.push({
         label: tr("wsbar.usage.agy.five_row", { group: g.label }),
         pct: used(g.fiveHour.remainingPct),
         resetsAt: g.fiveHour.resetsAt,
+        stale: !!g.fiveHour.stale,
       });
   }
   const unavailable = wins.length === 0;
 
-  // Near the cap: any window >= NEAR_MAX_PCT switches the chip to the earliest reset time
-  // among the constrained windows (same rule as UsageChip).
-  const nearMax = wins.filter((w) => w.pct >= NEAR_MAX_PCT && w.resetsAt);
-  const bind = nearMax.length
-    ? nearMax.reduce((a, b) => (new Date(a.resetsAt!).getTime() <= new Date(b.resetsAt!).getTime() ? a : b))
-    : null;
+  // Near the cap: the latest live capped reset (same rule as UsageChip).
+  const bind = pickNearCap(wins);
 
   // Report before the early return (see useChipSlot), same as the generic chip.
   const visible = !(unavailable && !usage?.authed);
@@ -785,7 +774,10 @@ export function AgyUsageChip({ tenant }: { tenant: string | null }) {
     ? "—"
     : bind
       ? resetChipText(bind.resetsAt!)
-      : [g0?.fiveHour && `${used(g0.fiveHour.remainingPct)}%`, g0 && `${used(g0.remainingPct)}%`]
+      : [
+          g0?.fiveHour && (g0.fiveHour.stale ? "—" : `${used(g0.fiveHour.remainingPct)}%`),
+          g0 && (g0.stale ? "—" : `${used(g0.remainingPct)}%`),
+        ]
           .filter(Boolean)
           .join(" / ");
   const { slot, host, reveal } = useChipSlot("agy", visible, !!bind, label, open, closePop);
@@ -830,7 +822,12 @@ export function AgyUsageChip({ tenant }: { tenant: string | null }) {
               <UsageRow
                 key={w.label}
                 label={w.label}
-                w={{ pct: w.pct, until: w.resetsAt ? untilText(w.resetsAt) : "", when: w.resetsAt ? whenText(w.resetsAt) : "" }}
+                w={{
+                  pct: w.pct,
+                  until: w.resetsAt ? untilText(w.resetsAt) : "",
+                  when: w.resetsAt ? whenText(w.resetsAt) : "",
+                  stale: w.stale,
+                }}
               />
             ))
           )}
@@ -884,10 +881,7 @@ export function CopilotUsageChip({ tenant }: { tenant: string | null }) {
   const wins = quotas.map((q) => ({ label: poolLabel(q.id), pct: used(q.remainingPct), resetsAt }));
   const unavailable = wins.length === 0;
 
-  const nearMax = wins.filter((w) => w.pct >= NEAR_MAX_PCT && w.resetsAt);
-  const bind = nearMax.length
-    ? nearMax.reduce((a, b) => (new Date(a.resetsAt!).getTime() <= new Date(b.resetsAt!).getTime() ? a : b))
-    : null;
+  const bind = pickNearCap(wins);
 
   // Report before the early return (see useChipSlot), same as the generic chip.
   const visible = !(unavailable && !usage?.authed);
