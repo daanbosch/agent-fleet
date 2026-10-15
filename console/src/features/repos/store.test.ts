@@ -125,6 +125,48 @@ describe("repos store refresh", () => {
     expect(useReposStore.getState().repos).toEqual([]);
   });
 
+  // A failure from an older request must not overwrite a newer success, whether it lands
+  // after a tenant round trip or just after a concurrent refresh finished.
+  it("ignores a stale rejection after a tenant switch", async () => {
+    setTenant("alpha");
+    let reject!: (e: Error) => void;
+    fetchMock.mockReturnValueOnce(new Promise<Response>((_, rej) => (reject = rej)));
+    const stale = useReposStore.getState().refresh();
+    setTenant("beta");
+    useReposStore.getState().clear();
+    fetchMock.mockResolvedValueOnce(json({ repos: [repo("b")] }));
+    await useReposStore.getState().refresh();
+    reject(new TypeError("late drop"));
+    await expect(stale).resolves.toBe(false);
+    expect(useReposStore.getState().loadState).toBe("ok");
+    expect(useReposStore.getState().repos).toEqual([repo("b")]);
+  });
+
+  it("lets the later-started refresh win over a slow earlier failure", async () => {
+    setTenant("gamma");
+    let reject!: (e: Error) => void;
+    fetchMock.mockReturnValueOnce(new Promise<Response>((_, rej) => (reject = rej)));
+    const first = useReposStore.getState().refresh();
+    fetchMock.mockResolvedValueOnce(json({ repos: [repo("new")] }));
+    await useReposStore.getState().refresh();
+    reject(new TypeError("slow failure"));
+    await first;
+    expect(useReposStore.getState().loadState).toBe("ok");
+    expect(useReposStore.getState().repos).toEqual([repo("new")]);
+  });
+
+  it("ignores an earlier success that lands after a newer refresh started", async () => {
+    setTenant("delta");
+    let answer!: (r: Response) => void;
+    fetchMock.mockReturnValueOnce(new Promise<Response>((res) => (answer = res)));
+    const first = useReposStore.getState().refresh();
+    fetchMock.mockResolvedValueOnce(json({ repos: [repo("new")] }));
+    await useReposStore.getState().refresh();
+    answer(json({ repos: [repo("old")] }));
+    await first;
+    expect(useReposStore.getState().repos).toEqual([repo("new")]);
+  });
+
   it("clear() forgets the list and goes back to loading (tenant switch)", () => {
     useReposStore.setState({ repos: [repo("agent-fleet")], loadState: "ok" });
     useReposStore.getState().clear();

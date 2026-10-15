@@ -197,7 +197,6 @@ export const repos: Record<keyof typeof jaRepos, string> = {
   "pj.no_match": "No repos or sessions match \"{q}\"",
   "pj.no_repos": "No repositories",
   "pj.no_repos_hint": "Cloned repositories appear here",
-  "pj.ws_stopped": "Workspace is stopped",
   "pj.ws_stopped_hint": "Start it to see your repositories",
   "pj.loading_repos": "Loading repositories…",
   "pj.repos_unreachable": "Can't reach the workspace",

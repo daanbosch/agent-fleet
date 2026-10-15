@@ -76,21 +76,29 @@ interface ReposStore {
   clear(): void;
 }
 
+// Bumped by every refresh() and by clear(). A response only counts when no later refresh
+// started (or clear ran) while it was in flight: refreshes run concurrently from the rail's
+// retry loop, the 60s poll, SSE and the SCM view, and a slow old failure must not overwrite the
+// outcome of a newer success (nor an old tenant's answer the new tenant's).
+let generation = 0;
+
 export const useReposStore = create<ReposStore>((set) => ({
   repos: [],
   loadState: "loading",
   async refresh() {
     const tenant = getTenant();
+    const mine = ++generation;
     let d: { repos?: unknown; error?: unknown };
     try {
       d = await api("api/repos");
     } catch {
-      set({ loadState: "unreachable" }); // network drop — transient; keep what the rail has.
+      // network drop — transient; keep what the rail has.
+      if (mine === generation && getTenant() === tenant) set({ loadState: "unreachable" });
       return false;
     }
     // The answer describes the workspace of the tenant that was active when it was asked; one
     // landing after a tenant switch would put the previous tenant's repos back on the rail.
-    if (getTenant() !== tenant) return false;
+    if (getTenant() !== tenant || mine !== generation) return false;
     if (isTransientErr(d)) {
       set({ loadState: "unreachable" });
       return false;
@@ -107,7 +115,10 @@ export const useReposStore = create<ReposStore>((set) => ({
   setLocked(name, locked) {
     set((s) => ({ repos: s.repos.map((r) => (r.name === name ? { ...r, locked } : r)) }));
   },
-  clear: () => set({ repos: [], loadState: "loading" }),
+  clear: () => {
+    generation++;
+    set({ repos: [], loadState: "loading" });
+  },
 }));
 
 /** Reveal-a-repo-in-the-rail signal (mirrors useFilesStore.revealInFiles): the

@@ -195,7 +195,6 @@ export const repos = {
   "pj.no_match": "「{q}」に一致するリポ・セッションはありません",
   "pj.no_repos": "リポジトリがありません",
   "pj.no_repos_hint": "クローンするとここに並びます",
-  "pj.ws_stopped": "ワークスペースは停止中です",
   "pj.ws_stopped_hint": "起動するとリポジトリが表示されます",
   "pj.loading_repos": "リポジトリを読み込み中…",
   "pj.repos_unreachable": "ワークスペースに接続できません",
