@@ -505,6 +505,8 @@ case "$1 $2" in
     case "$*" in
       *"--label cli-drift"*)
         kind="$(printf '%s' "$*" | sed -n 's/.*startswith("\([a-z0-9-]*\) CLI: ").*/\1/p')"
+        # The search index has not caught up with a new issue yet: the kind has none.
+        [ ! -e "$STUB_RUNS/nolist-$kind" ] || exit 0
         if [ -e "$STUB_RUNS/race-$kind" ]; then
           # Another writer opens the kind's issue just after this lookup answered "none".
           rm "$STUB_RUNS/race-$kind"
@@ -582,6 +584,14 @@ has codex 'actions/runs/555'
 n="$(body_of codex | grep -o 'real TUI pane drift contract' | wc -l)"
 [ "$n" = 1 ] || fail "a repeated step name must be listed once, got $n"
 state_is red codex 0.146.0
+
+echo "== case 16b: the list lookup stays empty after creation; the number comes from the create URL =="
+touch "$STUB_RUNS/nolist-agy"
+"$REPORT" failure agy 1.0.0 || fail "failure must survive a lagging issue lookup (exit $?)"
+rm "$STUB_RUNS/nolist-agy"
+has agy '`agy` `1.0.0`'
+state_is red agy 1.0.0
+echo closed > "$STUB_ISSUES/$(issue_of agy)/state"   # later cases expect no open agy issue
 
 echo "== case 17: another CLI gets its own issue; the same kind replaces its own row =="
 "$REPORT" failure claude 2.1.270
