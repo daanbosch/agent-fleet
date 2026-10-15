@@ -82,7 +82,7 @@ func TestShortTimeKeepsUnparsable(t *testing.T) {
 	}
 }
 
-// Scrub sees the finished document, so fields that are not prose cannot slip past it.
+// Fields that are not prose (paths, names, sources, stamps) are scrubbed too.
 func TestMarkdownScrubCoversEveryField(t *testing.T) {
 	const tok = "TOKENSENTINEL"
 	turns := []Turn{
