@@ -18,7 +18,7 @@ func TestExportScrubsSecrets(t *testing.T) {
 		{Kind: "text", Text: "the token is " + tok},
 		{Kind: "tool", Tool: "Bash", Info: "env", Output: "GITHUB_TOKEN=" + tok},
 	}}}
-	md := renderSessionExport(session.Meta{Name: "s1", Kind: "claude"}, turns, true, "Asia/Tokyo", time.Now())
+	md := renderSessionExport(session.Meta{Name: "s1", Kind: "claude"}, turns, transcript.ToolsFull, "Asia/Tokyo", time.Now())
 	if strings.Contains(md, tok) {
 		t.Fatalf("token survived the export:\n%s", md)
 	}
@@ -29,7 +29,7 @@ func TestExportScrubsSecrets(t *testing.T) {
 
 func TestExportUsesTheRequestedZone(t *testing.T) {
 	turns := []transcript.Turn{{Role: "user", TS: "2026-10-15T01:00:00Z", Parts: []transcript.Part{{Kind: "text", Text: "hi"}}}}
-	md := renderSessionExport(session.Meta{Name: "s1", Kind: "claude"}, turns, false, "Asia/Tokyo", time.Now())
+	md := renderSessionExport(session.Meta{Name: "s1", Kind: "claude"}, turns, transcript.ToolsNames, "Asia/Tokyo", time.Now())
 	if !strings.Contains(md, "2026-10-15 10:00") {
 		t.Fatalf("turn time not shown in the requested zone:\n%s", md)
 	}
@@ -65,8 +65,34 @@ func TestExportScrubKeepsTheClosingFence(t *testing.T) {
 		{Role: "assistant", Parts: []transcript.Part{{Kind: "tool", Tool: "Bash", Output: "`````\nPASSWORD="}}},
 		{Role: "user", Parts: []transcript.Part{{Kind: "text", Text: "next"}}},
 	}
-	md := renderSessionExport(session.Meta{Name: "s1", Kind: "claude"}, turns, true, "UTC", time.Now())
+	md := renderSessionExport(session.Meta{Name: "s1", Kind: "claude"}, turns, transcript.ToolsFull, "UTC", time.Now())
 	if !strings.Contains(md, "PASSWORD=\n``````\n\n---\n\n## ") {
 		t.Fatalf("closing fence lost:\n%s", md)
+	}
+}
+
+func TestExportToolDetailParam(t *testing.T) {
+	for in, want := range map[string]transcript.ToolDetail{
+		"none": transcript.ToolsNone, "names": transcript.ToolsNames, "full": transcript.ToolsFull,
+		"": transcript.ToolsNames, "bogus": transcript.ToolsNames,
+	} {
+		if got := exportToolDetail(in); got != want {
+			t.Errorf("%q: got %v want %v", in, got, want)
+		}
+	}
+}
+
+// The scrubber runs in every mode, tool-free included.
+func TestExportScrubsSecretsInEveryMode(t *testing.T) {
+	tok := "ghp_" + strings.Repeat("A1b2C3d4", 5)
+	turns := []transcript.Turn{{Role: "assistant", Parts: []transcript.Part{
+		{Kind: "text", Text: "the token is " + tok},
+		{Kind: "tool", Tool: "Bash", Info: "env", Output: "GITHUB_TOKEN=" + tok},
+	}}}
+	for _, m := range []transcript.ToolDetail{transcript.ToolsNone, transcript.ToolsNames, transcript.ToolsFull} {
+		md := renderSessionExport(session.Meta{Name: "s1", Kind: "claude"}, turns, m, "UTC", time.Now())
+		if strings.Contains(md, tok) || !strings.Contains(md, bridge.RedactedMark) {
+			t.Errorf("mode %v:\n%s", m, md)
+		}
 	}
 }

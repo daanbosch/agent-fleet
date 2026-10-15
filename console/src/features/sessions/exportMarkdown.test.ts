@@ -36,6 +36,12 @@ describe("exportSessionMarkdown", () => {
     expect(notify.mock.calls[0][0]).toBe(t("srow.export_failed") + ": nope");
   });
 
+  it("asks for the tool-free variant", async () => {
+    raw.mockResolvedValue({ ok: false, status: 400, json: () => Promise.resolve({}) });
+    await exportSessionMarkdown("s1", "none", vi.fn());
+    expect(String(raw.mock.calls[0][0])).toMatch(/\?tools=none&tz=/);
+  });
+
   // An Agent older than the route answers 404 in plain text.
   it("names the status when the error body is not JSON", async () => {
     raw.mockResolvedValue({ ok: false, status: 404, json: () => Promise.reject(new SyntaxError("not json")) });
