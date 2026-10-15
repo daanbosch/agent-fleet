@@ -57,3 +57,16 @@ func TestExportAppendsThePendingQuestion(t *testing.T) {
 		t.Fatalf("a question already in the turns was appended twice")
 	}
 }
+
+// With the real scrubber, an empty PASSWORD= right before the closing fence keeps the fence:
+// the scrubber's assignment rule spans a newline.
+func TestExportScrubKeepsTheClosingFence(t *testing.T) {
+	turns := []transcript.Turn{
+		{Role: "assistant", Parts: []transcript.Part{{Kind: "tool", Tool: "Bash", Output: "`````\nPASSWORD="}}},
+		{Role: "user", Parts: []transcript.Part{{Kind: "text", Text: "next"}}},
+	}
+	md := renderSessionExport(session.Meta{Name: "s1", Kind: "claude"}, turns, true, "UTC", time.Now())
+	if !strings.Contains(md, "PASSWORD=\n``````\n\n---\n\n## ") {
+		t.Fatalf("closing fence lost:\n%s", md)
+	}
+}

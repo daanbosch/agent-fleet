@@ -1,6 +1,7 @@
 package transcript
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -131,5 +132,86 @@ func TestMarkdownPlanAnswerAndOptionPreview(t *testing.T) {
 	}
 	if md := Markdown(turns, MarkdownOptions{Lang: "en"}); strings.Contains(md, "+--+") {
 		t.Errorf("preview belongs to the full export only:\n%s", md)
+	}
+}
+
+// Markdown that is valid as it stands gets no stray fence: inline code that starts a line,
+// and a list item's fence whose close is indented relative to the item.
+func TestMarkdownLeavesValidFencesAlone(t *testing.T) {
+	for _, body := range []string{"```inline```", "- item\n\n  ```\n  code\n    ```\n\noutside"} {
+		turns := []Turn{
+			{Role: "user", Parts: []Part{{Kind: "text", Text: body}}},
+			{Role: "assistant", Parts: []Part{{Kind: "text", Text: "answer"}}},
+		}
+		md := Markdown(turns, MarkdownOptions{Lang: "en"})
+		if !strings.Contains(md, body+"\n\n---\n\n## Assistant") {
+			t.Errorf("stray fence added after %q:\n%s", body, md)
+		}
+	}
+}
+
+// The scrubber must not reach the fences the renderer adds: bridge's assignment pattern
+// spans a newline, so an empty PASSWORD= right before a closing fence took the fence.
+func TestMarkdownScrubCannotEatAFence(t *testing.T) {
+	assign := regexpScrub()
+	turns := []Turn{
+		{Role: "assistant", Parts: []Part{{Kind: "tool", Tool: "Bash", Output: "`````\nPASSWORD="}}},
+		{Role: "user", Parts: []Part{{Kind: "text", Text: "next"}}},
+	}
+	md := Markdown(turns, MarkdownOptions{Lang: "en", ToolOutput: true, Scrub: assign})
+	if !strings.Contains(md, "PASSWORD=\n``````\n\n---\n\n## User") {
+		t.Errorf("closing fence lost:\n%s", md)
+	}
+}
+
+// regexpScrub mimics the bridge's assignment rule (the value may follow a newline).
+func regexpScrub() func(string) string {
+	return func(s string) string {
+		i := strings.Index(s, "PASSWORD=")
+		if i < 0 {
+			return s
+		}
+		rest := strings.TrimLeft(s[i+len("PASSWORD="):], " \n")
+		if j := strings.IndexAny(rest, " \n"); j >= 0 {
+			rest = rest[:j]
+		}
+		if len(rest) < 6 {
+			return s
+		}
+		return strings.Replace(s, rest, "[x]", 1)
+	}
+}
+
+// Every string a turn can hold goes through Scrub, including fields added after this test.
+func TestMarkdownScrubReachesEveryStringField(t *testing.T) {
+	const tok = "TOKSENTINEL"
+	var fill func(v reflect.Value)
+	fill = func(v reflect.Value) {
+		switch v.Kind() {
+		case reflect.String:
+			v.SetString(tok)
+		case reflect.Struct:
+			for i := 0; i < v.NumField(); i++ {
+				if v.Field(i).CanSet() {
+					fill(v.Field(i))
+				}
+			}
+		case reflect.Slice:
+			v.Set(reflect.MakeSlice(v.Type(), 1, 1))
+			fill(v.Index(0))
+		}
+	}
+	var turns []Turn
+	for _, kind := range []string{"text", "tool", "delegation", "question", "plan", "userfile", "error"} {
+		var tr Turn
+		fill(reflect.ValueOf(&tr).Elem())
+		tr.Role, tr.Parts[0].Kind, tr.Sidechain, tr.Compact, tr.CostOnly = "assistant", kind, false, false, false
+		turns = append(turns, tr)
+	}
+	for _, full := range []bool{false, true} {
+		md := Markdown(turns, MarkdownOptions{ToolOutput: full, Scrub: func(s string) string { return strings.ReplaceAll(s, tok, "[x]") }})
+		if strings.Contains(md, tok) {
+			t.Errorf("full=%v: an unscrubbed field reached the file:\n%s", full, md)
+		}
 	}
 }

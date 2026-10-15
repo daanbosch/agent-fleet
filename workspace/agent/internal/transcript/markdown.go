@@ -2,6 +2,7 @@ package transcript
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -21,9 +22,11 @@ type MarkdownOptions struct {
 	Lang string
 	// Loc is the zone turn times are shown in; nil = time.Local.
 	Loc *time.Location
-	// Scrub runs over the finished document, so no field (a path, a tool name, a model)
-	// slips past it. Tool output carries tokens even when the user downloads the file
-	// themselves, so a caller that leaves this nil writes them verbatim.
+	// Scrub runs over every string of the turns, the title and the header before anything
+	// is laid out: field by field so none (a path, a tool name, a model) slips past it, and
+	// before the fences are sized so it cannot eat one (a value pattern may span a newline).
+	// Tool output carries tokens even when the user downloads the file themselves, so a
+	// caller that leaves this nil writes them verbatim.
 	Scrub func(string) string
 }
 
@@ -54,6 +57,11 @@ func Markdown(turns []Turn, o MarkdownOptions) string {
 	lb := mdLabelsJA
 	if o.Lang == "en" {
 		lb = mdLabelsEN
+	}
+	if o.Scrub != nil {
+		turns = scrubStrings(turns, o.Scrub)
+		o.Title = o.Scrub(o.Title)
+		o.Header = scrubStrings(o.Header, o.Scrub)
 	}
 	var b strings.Builder
 	if t := strings.TrimSpace(o.Title); t != "" {
@@ -105,11 +113,39 @@ func Markdown(turns []Turn, o MarkdownOptions) string {
 	if !wrote {
 		b.WriteString(lb.empty + "\n")
 	}
-	out := strings.TrimRight(b.String(), "\n") + "\n"
-	if o.Scrub != nil {
-		out = o.Scrub(out)
+	return strings.TrimRight(b.String(), "\n") + "\n"
+}
+
+// scrubStrings returns a deep copy of v with f applied to every string in it, so a field
+// added to Turn or Part later is covered without anyone remembering to list it here.
+func scrubStrings[T any](v T, f func(string) string) T {
+	return scrubValue(reflect.ValueOf(v), f).Interface().(T)
+}
+
+func scrubValue(v reflect.Value, f func(string) string) reflect.Value {
+	switch v.Kind() {
+	case reflect.String:
+		return reflect.ValueOf(f(v.String())).Convert(v.Type())
+	case reflect.Slice:
+		if v.IsNil() {
+			return v
+		}
+		out := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		for i := 0; i < v.Len(); i++ {
+			out.Index(i).Set(scrubValue(v.Index(i), f))
+		}
+		return out
+	case reflect.Struct:
+		out := reflect.New(v.Type()).Elem()
+		out.Set(v)
+		for i := 0; i < v.NumField(); i++ {
+			if out.Field(i).CanSet() {
+				out.Field(i).Set(scrubValue(v.Field(i), f))
+			}
+		}
+		return out
 	}
-	return out
+	return v
 }
 
 func turnHeading(t Turn, lb mdLabels, loc *time.Location) string {
@@ -263,14 +299,24 @@ func closeOpenFence(b *strings.Builder) {
 	var open string
 	for _, line := range strings.Split(b.String(), "\n") {
 		t := strings.TrimLeft(line, " ")
-		if len(line)-len(t) > 3 {
+		f := fenceRun(t)
+		if f == "" {
 			continue
 		}
-		f := fenceRun(t)
-		switch {
-		case open == "" && f != "":
-			open = f
-		case open != "" && f != "" && f[0] == open[0] && len(f) >= len(open) && strings.TrimSpace(t[len(f):]) == "":
+		rest := t[len(f):]
+		if open == "" {
+			// CommonMark: an opening fence is indented at most three spaces, and a backtick
+			// fence's info string holds no backtick (```inline``` is inline code). Deeper
+			// indentation is a list item's fence or an indented block; leaving it alone can
+			// only miss a close, never add a stray fence.
+			if len(line)-len(t) <= 3 && (f[0] != '`' || !strings.Contains(rest, "`")) {
+				open = f
+			}
+			continue
+		}
+		// A close may sit at any indentation: inside a list item it is indented relative
+		// to the item, which this line-level scan cannot see.
+		if f[0] == open[0] && len(f) >= len(open) && strings.TrimSpace(rest) == "" {
 			open = ""
 		}
 	}
