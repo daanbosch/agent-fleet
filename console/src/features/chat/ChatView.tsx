@@ -76,6 +76,9 @@ interface ChatViewProps {
 
 const chatDraftKey = (conversationId: string) => "af.chat-draft." + conversationId;
 
+// A turn that failed, kept exactly as sent so Retry can re-run it (see send).
+type FailedTurn = { convId: string; prompt: string; source?: string };
+
 export function ChatView(props: ChatViewProps) {
   // Session slugs in the conversation open the session context menu (SessionLinkMenu.tsx), file
   // and folder links the path menu (PathLinkMenu.tsx).
@@ -188,8 +191,8 @@ function ChatViewBody({ conversationId, draftAssistantId, paneId, active, header
   const clearKaraokeFor = (key: string) => setKaraoke((k) => (k && k.key !== key ? k : null));
   const error = err && err.key === paneKey ? err.text : "";
   const setErrorFor = (key: string | null, text: string) => setErr(text && key ? { key, text } : null);
-  // The prompt of the turn that last failed, so the expired-login notice can offer a re-send.
-  const failedTextRef = useRef("");
+  // The turn that last failed, as sent, so the expired-login notice can offer a faithful re-send.
+  const failedTurnRef = useRef<FailedTurn | null>(null);
   const [loadError, setLoadError] = useState("");
   const [loadingConv, setLoadingConv] = useState(false); // fetching the conversation (with retry while the WS agent boots)
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -641,18 +644,22 @@ function ChatViewBody({ conversationId, draftAssistantId, paneId, active, header
 
   // source marks a turn the Console sends on the member's behalf (the handoff auto-send), so
   // it stays out of the composer's ↑ history both locally and once stored.
-  const send = async (override?: string, source?: string) => {
+  //
+  // `retry` re-runs a turn that already failed: it carries the exact prompt that was sent (images
+  // and source included) and touches neither the composer, its draft/attachments nor the
+  // transcript — the failed user message is already there, and the server stores no second one.
+  const send = async (override?: string, source?: string, retry?: FailedTurn) => {
     // Block a second turn on this conversation, whether it was started here or by another
     // pane whose turn is still running in the background (store busy).
     if (!paneKey || sending || compacting || (conversationId && storeBusy)) return;
     // `override` drives the auto-sent handoff first turn (its text isn't in the composer).
-    const text = (override ?? input).trim();
-    const paths = attachments.map((a) => a.path);
+    const text = retry ? retry.prompt : (override ?? input).trim();
+    const paths = retry ? [] : attachments.map((a) => a.path);
     if (!text && !paths.length) return;
     // Reply-suggestion learning (lib/quickReplies): only short plain text is taken in. Sending
     // a phrase again after hiding it from the menu signals intent to reuse it, so the hide is
     // lifted (same behaviour as MirrorView).
-    if (text && isQuickReplyCandidate(text, paths.length > 0)) {
+    if (!retry && text && isQuickReplyCandidate(text, paths.length > 0)) {
       setSetting("quickReplies", recordQuickReply(settings.quickReplies || {}, text, Date.now()));
       const hidden = settings.quickRepliesHidden || [];
       const unhidden = unhideQuickReply(hidden, text);
@@ -686,17 +693,20 @@ function ChatViewBody({ conversationId, draftAssistantId, paneId, active, header
     // Append the machine-facing image instruction + paths (kind-appropriate wording:
     // Read tool for claude, tool-neutral for codex). The bubble strips it back out
     // (splitPastedImages) and shows thumbnails instead.
-    const prompt = buildImagePrompt(text, paths, chatAgent);
+    const prompt = retry ? retry.prompt : buildImagePrompt(text, paths, chatAgent);
+    if (retry) source = retry.source;
     // Optimistically show the user's turn (full prompt so pasted-image thumbnails render
     // immediately); the server echoes the full conversation on done.
     const userMsg: ChatMessage = { role: "user", content: prompt, ts: Date.now(), ...(source ? { source } : {}) };
-    setConv((c) => (c ? { ...c, messages: [...c.messages, userMsg] } : c));
-    setInput("");
-    setHistIdx(null); // sending leaves history-recall mode
+    if (!retry) setConv((c) => (c ? { ...c, messages: [...c.messages, userMsg] } : c));
+    if (!retry) setInput("");
+    if (!retry) setHistIdx(null); // sending leaves history-recall mode
     // Drop the stored draft synchronously: on a just-promoted first turn the key flip
     // makes useDraft reload from storage, which would resurrect the moved (now sent) text.
-    clearDraft(chatDraftKey(target.id));
-    clearAttachments();
+    if (!retry) {
+      clearDraft(chatDraftKey(target.id));
+      clearAttachments();
+    }
     // On touch devices, drop focus so the soft keyboard (GBoard) retracts once the
     // turn is sent — the reply is what the user wants to read, not keep typing.
     if (coarsePointer()) inputRef.current?.blur();
@@ -790,7 +800,7 @@ function ChatViewBody({ conversationId, draftAssistantId, paneId, active, header
           }
         },
         onError: (m) => {
-          failedTextRef.current = text;
+          failedTurnRef.current = { convId, prompt, source };
           setErrorFor(convId, m);
         },
         onDone: (updated) => {
@@ -816,6 +826,7 @@ function ChatViewBody({ conversationId, draftAssistantId, paneId, active, header
       },
       ac.signal,
       source,
+      !!retry,
     );
     // Abort/error paths emit no done event. Work playback must not outlive the turn.
     if (!streamDone) workTts.close();
@@ -1185,7 +1196,11 @@ function ChatViewBody({ conversationId, draftAssistantId, paneId, active, header
           <ChatAuthError
             text={error}
             onReauth={() => useSettingsUI.getState().openSettings("agents", { target: "claude" })}
-            onRetry={failedTextRef.current ? () => void send(failedTextRef.current) : undefined}
+            onRetry={
+              failedTurnRef.current && failedTurnRef.current.convId === paneKey
+                ? () => void send(undefined, undefined, failedTurnRef.current!)
+                : undefined
+            }
           />
         ) : (
           <div className="chat-error" role="alert">
