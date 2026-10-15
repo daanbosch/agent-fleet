@@ -230,6 +230,46 @@ body on demand) is a second way to the same text; the other kinds have only the 
   time, so before adding to it, check that it is genuinely needed by everyone, every time; a
   topic file costs nothing until it is read. This layer cannot be delivered to cursor.
 
+## opencode 2: Terminal sessions and the shared server
+
+With opencode 2, Terminal (CLI) sessions attach to the one opencode server the Workspace Agent
+runs ([member/06](../member/06-agents.md#how-opencode-2-differs)). To force a private server per
+Terminal session instead (about 150-250 MB more memory per session, measured idle), start the
+Workspace Agent with this in its environment:
+
+```
+AF_OPENCODE_TUI_STANDALONE=1
+```
+
+- It takes effect for Terminal sessions launched after the Agent starts with it; running
+  sessions keep the mode they started in.
+- `AF_OPENCODE_SERVE_DISABLE=1` (managed opencode off) also gives private servers, because
+  there is no shared server to attach to.
+- On an image re-pinned to opencode 1 (below) neither variable has an effect on Terminal sessions.
+
+### Going back to opencode 1
+
+The image pins opencode 2 (`OPENCODE_VERSION` in `workspace/Dockerfile`). If it misbehaves in
+your deployment, the way back is an image whose pin is `1.19.0`: rebuild with
+`--build-arg OPENCODE_VERSION=1.19.0` (the install, the self-update and the drift check pick
+`opencode-ai` for a 1.x pin by themselves), then Stop and Start the workspaces.
+
+- **What carries over.** The first opencode 2 start converted `~/.local/share/opencode/opencode.db`
+  in place and imported the opencode 1 sessions, keeping their ids. opencode 1 still runs on the
+  converted file and sees every conversation from before the upgrade.
+- **What is lost.** Conversations created under opencode 2, and turns added under opencode 2 to
+  older ones, are not visible to opencode 1 (it does not read the tables opencode 2 writes), and
+  conversations started under opencode 1 after the way back are not visible to opencode 2 on a
+  later upgrade. The data is not deleted.
+- **To be able to undo an upgrade exactly,** copy `~/.local/share/opencode/opencode.db*` of the
+  workspace before the first opencode 2 start and put the copies back after the way back.
+- **Leftovers of the earlier opt-in.** A workspace that had run `workspace-agent opencode-major 2`
+  (a private opencode 2 install under `~/.local/share/agent-fleet/opencode2` with its own database
+  in `opencode2-data`) ignores both once the pin is 2.x: the pinned opencode 2 uses the main
+  database, and the sessions that only exist in the private database are **not merged** into it.
+  They stay on disk until you delete the two directories. After a way back to a 1.x pin the opt-in
+  works as it did before.
+
 ## Once it is on the public internet
 
 Put the Control Plane on a public hostname and **vulnerability scanners find it within
