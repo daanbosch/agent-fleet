@@ -694,6 +694,30 @@ state_is red opencode 1.2.0
 state_is red opencode none
 hasnt opencode '`opencode` `1.2.0`'
 
+echo "== case 24b: a fragments row is its own row: no red marker, kept by success, replaced, pruned, cleared =="
+red_before="$("$STATE" get red claude)"
+"$REPORT" fragments claude 2.1.300 'run /login' 'Esc to cancel'
+has claude '`claude` `2.1.300` — upstream message fragments gone from the package: `run /login`, `Esc to cancel`'
+has claude '<!-- cli-contract-fragments claude -->'
+state_is red claude "$red_before"
+"$REPORT" failure claude 2.1.300
+"$REPORT" success claude
+has claude '<!-- cli-contract-fragments claude -->'   # a passing contract does not vouch for wording
+hasnt claude '<!-- cli-contract-failure claude -->'
+"$REPORT" fragments claude 2.1.300 'Enter to confirm'
+n="$(body_of claude | grep -c '<!-- cli-contract-fragments ')"
+[ "$n" = 1 ] || fail "expected 1 fragments row, got $n"
+hasnt claude 'run /login'
+has claude '`Enter to confirm`'
+"$REPORT" fragments-clear agy   # clearing where there is nothing to clear is not an error
+LATEST_CLAUDE=2.1.301 "$REPORT" prune
+hasnt claude 'cli-contract-fragments'
+"$REPORT" fragments claude 2.1.301 'Enter to confirm'
+"$REPORT" fragments-clear claude
+hasnt claude 'cli-contract-fragments'
+if "$REPORT" fragments claude 2.1.301 'a`b' 2>/dev/null; then fail "a backtick in a fragment must be refused"; fi
+if "$REPORT" fragments claude 2.1.301 2>/dev/null; then fail "fragments without any fragment must be refused"; fi
+
 # --- cli-update-issues.sh ------------------------------------------------------------
 #
 # The per-CLI issues themselves. The release sources and the `tested` state are stubbed
@@ -870,5 +894,23 @@ done
 [ "$n" = 1 ] || fail "expected one muse issue after report + sync, got $n"
 has muse '`muse` `1.1.0`'
 title_is muse "muse CLI: contract failed on 1.1.0"
+
+echo "== case 30: a gone fragment keeps an issue open on a kind the watcher handles; clearing it lets it close =="
+for d in "$STUB_ISSUES"/1[0-9][0-9]; do case "$(cat "$d/title")" in "agy CLI: "*) echo closed > "$d/state" ;; esac; done
+releases agy=1.0.0:1.0.1
+sync_ok agy
+no_issue agy   # control: the same drift with no row opens nothing
+"$REPORT" fragments agy 1.0.1 'Esc to cancel'
+sync_ok agy
+title_is agy "agy CLI: upstream message fragments gone in 1.0.1"
+has agy '`Esc to cancel`'
+has agy 'This is a place to look, not proof of a break'
+tested agy 1.0.1                       # the contract passed: still not "just merge"
+sync_ok agy
+title_is agy "agy CLI: upstream message fragments gone in 1.0.1"
+releases agy=1.0.0:1.0.2               # a newer release replaced the one the row was about
+sync_ok agy
+no_issue agy
+"$REPORT" fragments-clear agy
 
 echo "OK: one unreadable release source no longer stops the watcher"

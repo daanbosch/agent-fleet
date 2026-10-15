@@ -3,6 +3,8 @@
 #
 #   cli-contract-report.sh failure <kind> <version>                 a contract finished red
 #   cli-contract-report.sh success <kind>                           it passed again
+#   cli-contract-report.sh fragments <kind> <version> <fragment>... upstream message fragments gone
+#   cli-contract-report.sh fragments-clear <kind>                   none are gone any more
 #   cli-contract-report.sh streak <workflow> <n>                    N red runs in a row?
 #   cli-contract-report.sh prune                                    drop rows for old versions
 #   cli-contract-report.sh carry <issue-number> <body-file>         re-append the section
@@ -19,6 +21,10 @@
 # Rows are one list line each, keyed by a trailing HTML comment:
 #   `failure` rows: `<!-- cli-contract-failure <kind> -->`, replaced by the newest failure;
 #                   removed by `success` or when `latest` moves (`prune`).
+#   `fragments` rows: `<!-- cli-contract-fragments <kind> -->`, from cli-fragment-check.sh via
+#                   cli-pin-bump.sh: the new release no longer contains text Agent Fleet matches
+#                   on. Not a failed contract, so it writes no `red` marker and `success` leaves
+#                   it; replaced by the newest check, removed by `fragments-clear` or `prune`.
 #   `streak` rows:  `<!-- cli-contract-streak <workflow> -->`, removed once the workflow's
 #                   newest run is no longer red.
 #
@@ -171,6 +177,26 @@ case "$cmd" in
       "$SYNC" sync "$kind" || echo "::warning::could not update the $kind issue's next step"
     fi
     ;;
+  fragments)
+    kind="${2:?kind}"; version="${3:?version}"; shift 3
+    [ "$#" -gt 0 ] || { echo "fragments needs at least one fragment" >&2; exit 2; }
+    [[ "$kind" =~ ^[a-z0-9-]+$ ]] || { echo "invalid kind: $kind" >&2; exit 2; }
+    [[ "$version" =~ ^[0-9A-Za-z._+-]+$ ]] || { echo "invalid version: $version" >&2; exit 2; }
+    list=""
+    for f in "$@"; do
+      case "$f" in *'`'*|*'<!--'*) echo "invalid fragment: $f" >&2; exit 2 ;; esac
+      list="${list:+$list, }\`$f\`"
+    done
+    row="- \`$kind\` \`$version\` — upstream message fragments gone from the package: $list (registry: \`deploy/local/cli-message-fragments.txt\`; a place to look, not proof of a break) <!-- cli-contract-fragments $kind -->"
+    add_row() { grep -v "<!-- cli-contract-fragments $kind -->" "$1" || true; printf '%s\n' "$row"; }
+    mutate "$kind" add_row "$kind CLI: upstream message fragments gone"
+    KNOWN_ISSUE="$MUTATED_NUM" "$SYNC" sync "$kind" || echo "::warning::could not update the $kind issue's next step"
+    ;;
+  fragments-clear)
+    kind="${2:?kind}"
+    drop_row() { grep -v "<!-- cli-contract-fragments $kind -->" "$1" || true; }
+    mutate "$kind" drop_row
+    ;;
   streak)
     wf="${2:?workflow}"; n="${3:?n}"
     [[ "$wf" =~ ^[a-z0-9-]+$ ]] || { echo "invalid workflow: $wf" >&2; exit 2; }
@@ -201,7 +227,7 @@ case "$cmd" in
     prune_rows() {
       local line k v upper cur
       while IFS= read -r line; do
-        k="$(sed -n 's/.*<!-- cli-contract-failure \([a-z0-9-]*\) -->.*/\1/p' <<< "$line")"
+        k="$(sed -n 's/.*<!-- cli-contract-\(failure\|fragments\) \([a-z0-9-]*\) -->.*/\2/p' <<< "$line")"
         if [ -n "$k" ]; then
           v="$(sed -n 's/^- `[a-z0-9-]*` `\([^`]*\)`.*/\1/p' <<< "$line")"
           upper="$(printf '%s' "$k" | tr '[:lower:]-' '[:upper:]_')"
@@ -230,7 +256,7 @@ case "$cmd" in
     gh issue view "$num" --json body --jq .body | rows_of | grep -q .
     ;;
   *)
-    echo "usage: $0 failure <kind> <version> | success <kind> | streak <workflow> <n> | prune | carry <issue> <file> | active <kind>" >&2
+    echo "usage: $0 failure <kind> <version> | success <kind> | fragments <kind> <version> <fragment>... | fragments-clear <kind> | streak <workflow> <n> | prune | carry <issue> <file> | active <kind>" >&2
     exit 2
     ;;
 esac

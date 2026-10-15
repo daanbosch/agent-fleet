@@ -33,7 +33,8 @@ on:
 
 permissions:
   contents: read
-  issues: read
+  # write: the message-fragment check reports a gone fragment into the CLI's update issue.
+  issues: write
 
 concurrency:
   group: cli-pin-bump
@@ -173,3 +174,11 @@ jobs:
           } > "$RUNNER_TEMP/close.md"
           gh pr close "$num" --repo "$GITHUB_REPOSITORY" --comment "$(cat "$RUNNER_TEMP/close.md")"
           echo "Closed PR #$num." >> "$GITHUB_STEP_SUMMARY"
+
+      # The fragment check could not run (cli-pin-bump.sh wrote why into the PR body and
+      # the log). It must not stop the steps above, so it fails the job only here, last.
+      - name: fail on a message-fragment check that could not run
+        if: always() && steps.bump.outputs.fragment_error == 'true'
+        run: |
+          echo "::error::The upstream message-fragment check could not run or could not report; see the bump step's log and the PR body (deploy/local/cli-fragment-check.sh)."
+          exit 1
