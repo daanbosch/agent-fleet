@@ -874,7 +874,8 @@ func typeLineAndSubmit(name, pane, text string) error {
 	}
 	delay := inputSubmitDelay(name)
 	if m, ok := session.ReadMeta(name); ok && claudeNeedsPaste(m.Kind, text) && os.Getenv("AGENT_INPUT_SUBMIT_DELAY_MS") == "" {
-		// Give the composer time to take in a long paste before the Enter, as the paste kinds get.
+		// The paste path waits the 200 ms the other paste kinds get, not claude's 20 ms
+		// (a guess at what the composer needs; unverified live).
 		delay = 200 * time.Millisecond
 	}
 	time.Sleep(delay)
@@ -885,16 +886,17 @@ func typeLineAndSubmit(name, pane, text string) error {
 }
 
 // claudePasteMinBytes is the length from which claude gets its prompt as a bracketed paste
-// even when it has no line break. A literal-key stream this long is read as paste-sized
-// chunks; one paste is the unit claude's composer is built to take. Unverified against a live
-// TUI: it is cheap insurance, and short single-line prompts keep the literal-key path.
+// even when it has no line break. claude's own notes treat a long literal-key chunk as a
+// paste (agents/claude/image_paste.go), so one explicit paste is the predictable form. The
+// threshold is a guess, unverified against a live TUI; short single-line prompts keep the
+// literal-key path.
 const claudePasteMinBytes = 2048
 
 // claudeNeedsPaste reports whether a prompt must reach claude's composer as a bracketed paste
 // rather than literal keys. A line break in a literal stream is an Enter (docs/build/92), so a
-// multi-line prompt would be submitted line by line, and mid-turn each submit is queued
-// separately: the transcript then holds only the last line (issue #2195 — a peer message's
-// envelope is its first line). A paste carries the breaks as text and ends in one submit.
+// multi-line prompt is submitted line by line. Suspected, not confirmed on a live TUI, to be
+// what left a busy session with only the tail of a peer message (issue #2195); a paste carries
+// the breaks as text and ends in one submit either way.
 func claudeNeedsPaste(kind, text string) bool {
 	return kind == session.KindClaude &&
 		(len(text) >= claudePasteMinBytes || strings.ContainsAny(text, "\r\n"))
@@ -926,6 +928,11 @@ func typePromptText(name, pane, text string) error {
 		return nil
 	}
 
+	if kind == session.KindClaude {
+		// tmux turns each LF of a paste into CR, so a CRLF arrives as CR CR and claude reads two
+		// line breaks (measured on a raw tty: "a\r\nb" → ESC[200~a\r\rb). Send one LF per break.
+		text = strings.ReplaceAll(text, "\r\n", "\n")
+	}
 	buffer := fmt.Sprintf("af-prompt-%s-%d", name, time.Now().UnixNano())
 	load := tmuxx.Cmd("load-buffer", "-b", buffer, "-")
 	load.Stdin = strings.NewReader(text)

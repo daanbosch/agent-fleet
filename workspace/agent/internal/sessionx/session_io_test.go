@@ -572,21 +572,21 @@ func TestTypePromptTextSendsLeadingDashLiterally(t *testing.T) {
 }
 
 // A line break in a literal send-keys stream is an Enter, so a multi-line (or long) claude
-// prompt used to be submitted line by line; mid-turn only the last line survived and a peer
-// message lost its envelope (issue #2195). Such prompts must go in as one bracketed paste
-// carrying the whole text, while a short single-line prompt keeps the literal-key path.
+// prompt would be submitted line by line (suspected cause of issue #2195, unconfirmed live).
+// Such prompts must go in as one bracketed paste carrying the whole text, while a short
+// single-line prompt keeps the literal-key path.
 func TestTypeLineAndSubmitClaudePastesMultilineAndLongPrompts(t *testing.T) {
 	envelope := "[agent-fleet:peer from=child intent=report reply=when-needed] "
-	long := envelope + strings.Repeat("レビュー結果: bundle には問題あり\n", 400)
 	cases := []struct {
-		name, text string
-		paste      bool
+		name, text, want string // want = what must reach load-buffer; "" = literal keys
 	}{
-		{"short single line", "こんにちは", false},
-		{"multi line", envelope + "1行目\n2行目", true},
-		{"crlf", "a\r\nb", true},
-		{"long single line", strings.Repeat("あ", claudePasteMinBytes), true},
-		{"long multi line", long, true},
+		{"short single line", "こんにちは", ""},
+		{"multi line", envelope + "1行目\n2行目", envelope + "1行目\n2行目"},
+		{"crlf becomes one LF", "a\r\nb", "a\nb"},
+		{"just under the threshold", strings.Repeat("a", claudePasteMinBytes-1), ""},
+		{"at the threshold", strings.Repeat("a", claudePasteMinBytes), strings.Repeat("a", claudePasteMinBytes)},
+		{"long multi line", envelope + strings.Repeat("レビュー結果: bundle には問題あり\n", 400),
+			envelope + strings.Repeat("レビュー結果: bundle には問題あり\n", 400)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -615,20 +615,30 @@ esac
 				t.Fatal(err)
 			}
 			b, _ := os.ReadFile(logPath)
-			log := string(b)
-			got, _ := os.ReadFile(stdinPath)
-			if tc.paste {
-				if !strings.Contains(log, "paste-buffer -p") || strings.Contains(log, "send-keys -t %7 -l") {
-					t.Fatalf("want one bracketed paste and no literal keys; tmux = %s", log)
+			lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+			if tc.want == "" {
+				// The text may itself hold no newline here, so the log is exactly two lines.
+				want := []string{"send-keys -t %7 -l -- " + tc.text, "send-keys -t %7 Enter"}
+				if strings.Join(lines, "\n") != strings.Join(want, "\n") {
+					t.Fatalf("tmux = %q, want %q", lines, want)
 				}
-				if string(got) != tc.text {
-					t.Fatalf("pasted %d bytes, want the whole %d-byte prompt (head %.40q)", len(got), len(tc.text), got)
-				}
-			} else if !strings.Contains(log, "send-keys -t %7 -l -- "+tc.text) || strings.Contains(log, "paste-buffer") {
-				t.Fatalf("want the literal-key path; tmux = %s", log)
+				return
 			}
-			if strings.Count(log, "send-keys -t %7 Enter") != 1 {
-				t.Fatalf("want exactly one submit Enter; tmux = %s", log)
+			if len(lines) != 3 {
+				t.Fatalf("want load-buffer, paste-buffer, Enter; tmux = %q", lines)
+			}
+			load := strings.Fields(lines[0])
+			if len(load) != 4 || load[0] != "load-buffer" || load[1] != "-b" || load[3] != "-" {
+				t.Fatalf("load-buffer argv = %q", lines[0])
+			}
+			if want := "paste-buffer -p -d -b " + load[2] + " -t %7"; lines[1] != want {
+				t.Fatalf("paste argv = %q, want %q", lines[1], want)
+			}
+			if lines[2] != "send-keys -t %7 Enter" {
+				t.Fatalf("submit = %q", lines[2])
+			}
+			if got, _ := os.ReadFile(stdinPath); string(got) != tc.want {
+				t.Fatalf("pasted %d bytes, want %d (head %.40q)", len(got), len(tc.want), got)
 			}
 		})
 	}
