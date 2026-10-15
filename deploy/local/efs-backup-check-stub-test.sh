@@ -51,7 +51,7 @@ case "$*" in
   "backup list-backup-selections --backup-plan-id plan-1 $Q BackupSelectionsList[].SelectionId --output text")
     [ -z "${STUB_BACKUP_DENIED:-}" ] || { echo "AccessDenied" >&2; exit 254; }
     echo "${STUB_SELECTIONS:-None}" ;;
-  "backup get-backup-selection --backup-plan-id plan-1 --selection-id sel-1 $Q BackupSelection.[length(NotResources||\`[]\`),length(Conditions||\`{}\`),length(ListOfTags||\`[]\`)] --output text")
+  "backup get-backup-selection --backup-plan-id plan-1 --selection-id sel-1 $Q BackupSelection.[length(NotResources||\`[]\`),length(Conditions.*[]||\`[]\`),length(ListOfTags||\`[]\`)] --output text")
     [ -z "${STUB_BACKUP_DENIED:-}" ] || { echo "AccessDenied" >&2; exit 254; }
     printf '%b\n' "${STUB_EXTRA:-0\t0\t0}" ;;
   "backup get-backup-selection --backup-plan-id plan-1 --selection-id sel-1 $Q BackupSelection.Resources --output text")
