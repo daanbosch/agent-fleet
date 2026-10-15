@@ -137,7 +137,7 @@ export function ProviderCard({
 }) {
   const brand = badgeBrand(id);
   return (
-    <div className="p-card">
+    <div className="p-card" data-settings-target={id}>
       <div className="p-head">
         <span className={"p-badge pb-" + id}>
           {brand ? <Icon name={brand} /> : BADGE_SHORT[id]}

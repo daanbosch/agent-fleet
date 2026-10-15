@@ -40,6 +40,7 @@ describe("toastSendFailure", () => {
     const s = useSettingsUI.getState();
     expect(s.settingsOpen).toBe(true);
     expect(s.settingsSection).toBe("agents");
+    expect(s.settingsTarget).toBe("claude");
   });
 
   it("keeps any other failure a plain toast", () => {
