@@ -239,6 +239,48 @@ replies.) The password goes to `psql` over the pod's terminal only: it is in no 
 line, pod spec or API object. The pod is removed on exit (`--rm`); if the session dropped, delete
 it with `kubectl -n default delete pod psql-grant`.
 
+**Without a tty (a script, CI, an agent's shell).** `-it` and `-W` need a terminal, so the
+command above cannot run there. The alternative keeps the password out of argv and out of the
+pod spec by reading it from a Secret: store the password in a temporary Secret, run a
+non-interactive pod that takes `PGPASSWORD` from it and the statements from `-c`, then delete
+both. The variant below is **not verified as written**; only the interactive pod above has been
+run.
+
+```bash
+PWDIR="$(mktemp -d)"; chmod 700 "$PWDIR"
+cleanup() {
+  rm -rf "$PWDIR"                                   # the local copy first: it needs no API
+  kubectl -n default delete pod psql-grant --ignore-not-found --wait=false --request-timeout=30s \
+    || echo "could not delete pod psql-grant: delete it by hand"
+  kubectl -n default delete secret psql-grant-pw --ignore-not-found --request-timeout=30s \
+    || echo "WARNING: secret psql-grant-pw may remain (it holds the postgres password): delete it by hand"
+}
+trap cleanup EXIT                                   # runs under `set -e` too
+read -rs -p 'postgres password: ' PGPW; echo        # or read it from your vault
+printf '%s' "$PGPW" > "$PWDIR/PGPASSWORD"; unset PGPW   # printf is a builtin: not in any argv
+kubectl -n default create secret generic psql-grant-pw --from-file=PGPASSWORD="$PWDIR/PGPASSWORD"
+kubectl -n default run psql-grant --restart=Never --image=postgres:17-alpine \
+  --override-type=strategic \
+  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":70,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"psql-grant","securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},"env":[{"name":"PGPASSWORD","valueFrom":{"secretKeyRef":{"name":"psql-grant-pw","key":"PGPASSWORD"}}}]}]}}' \
+  -- psql -v ON_ERROR_STOP=1 "host=$DBHOST user=postgres dbname=agentfleet sslmode=require" \
+  -c "GRANT \"$DBUSER\" TO postgres; ALTER DATABASE agentfleet OWNER TO \"$DBUSER\"; ALTER SCHEMA public OWNER TO \"$DBUSER\";"
+kubectl -n default wait --for=jsonpath='{.status.phase}'=Succeeded pod/psql-grant --timeout=120s \
+  || echo "grant pod did not succeed"
+kubectl -n default logs psql-grant        # expect GRANT ROLE, ALTER DATABASE, ALTER SCHEMA
+```
+
+The `EXIT` trap removes the password file first, then tries each delete on its own, so one
+failing `kubectl delete` (expired login, no connection) does not skip the rest; if the Secret
+could not be deleted it says so and you delete it by hand. It runs even when `wait` times out
+or a command fails under `set -e`; the `|| echo` keeps `logs` reachable so the `ERROR` can be
+read before the trap fires. (The password file is a mode-700 directory's file on your machine
+for the length of the run; use a FIFO or your vault's own file mechanism if that is not
+acceptable.)
+
+If the pod ends `Failed`, `logs` shows the `ERROR` and the grant is not done. Afterwards set a
+new `postgres` password (`gcloud sql users set-password … --prompt-for-password`, or a random
+value you do not keep): the old one was in a Secret object for the length of the run.
+
 The instance has a private IP only, a workspace is outside the VPC, and `cloud-sql-proxy` is not
 installed there, so the grant runs from a pod on the cluster's nodes (a short-lived pod with a
 restricted security context, `postgres:17-alpine`). Keep the `postgres` password in your
@@ -261,7 +303,20 @@ Then edit, in the copy:
 - `base/cp-data.yaml` asks 20 GiB for the CP's own disk; patch it in the copy if the internal
   git provider will hold more.
 
-Keep this copy in your own repository or vault, not in a working copy of this one.
+Keep this copy in your own repository or vault, not in a working copy of this one. Moved
+out of the clone, two things in `kustomization.yaml` must change:
+
+- **The paths.** `resources: ../../base` and `components: ../../components/gke` and
+  `../../components/params` are relative to `deploy/kubernetes/overlays/<name>/` inside this
+  repository and resolve to nothing elsewhere. Point them at the clone's `deploy/kubernetes/base`
+  and `deploy/kubernetes/components/…` with **relative** paths from your overlay: `kubectl
+  kustomize` rejects an absolute directory reference (`new root '…' cannot be absolute`). Check
+  with `kubectl kustomize <your overlay>` before applying. Rewriting them by hand is what a
+  stand-up outside the clone needed.
+- **`newName`.** The copied `images:` entry carries a placeholder `newName` (an Artifact
+  Registry path). With the public images (`ghcr.io/k-k1/agent-fleet/…`, step 1) delete the
+  `newName` line and keep `newTag`, so the name stays the public one; with your own Artifact
+  Registry repository set `newName` to it.
 
 ### 6. Secrets
 
@@ -279,8 +334,11 @@ kubectl -n "$PREFIX-cp" create secret generic af-cp-secrets \
 
 Until it exists the CP pod waits in `CreateContainerConfigError` and starts by itself once it
 does. Generate `AF_MASTER_KEY` with `head -c 32 /dev/urandom | base64`, as for compose
-([deploy/compose/README.md](../compose/README.md)), and keep its only other copy in your vault
-(P14). Other sign-in secrets (`AF_OIDC_<ID>_CLIENT_SECRET`, `GITHUB_OAUTH_CLIENT_SECRET`) go in
+([deploy/compose/README.md](../compose/README.md)), and keep it somewhere durable that
+outlives this cluster (for example Secret Manager or your vault), not only in the Kubernetes
+Secret or a file on your machine (P14). It is needed again whenever the CP is recreated — a
+new cluster, or `af-cp-secrets` deleted — and a different key cannot read what the old one
+encrypted. Other sign-in secrets (`AF_OIDC_<ID>_CLIENT_SECRET`, `GITHUB_OAUTH_CLIENT_SECRET`) go in
 the same Secret; rotate one with `kubectl create secret … --dry-run=client -o yaml | kubectl
 apply -f -` and `kubectl -n "$PREFIX-cp" rollout restart deployment/af-cp`.
 
@@ -324,6 +382,19 @@ kubectl -n "$PREFIX-cp" get pvc af-cp-data    # Bound
 kubectl -n "$PREFIX-cp" get gateway af-cp     # PROGRAMMED True, ADDRESS = lb_address
 curl -sS https://<fqdn>/readyz
 ```
+
+**Wait for the Gateway to be `PROGRAMMED True` before judging `/readyz`.** A rollout that is
+done does not mean the load balancer is: on a second stand-up it took about 5 more minutes
+after the CP was ready before `/readyz` returned 200, and `curl` printed `000` (no connection)
+in the meantime, although DNS already pointed at the new address. Poll the Gateway, then
+retry the request:
+
+```bash
+kubectl -n "$PREFIX-cp" wait --for=condition=Programmed gateway/af-cp --timeout=15m
+```
+
+The `wait` command is **not verified as written** (the observation above is from the
+`get gateway` column); `kubectl -n "$PREFIX-cp" get gateway af-cp -w` shows the same state.
 
 What the CP's account may do — every line must answer as shown:
 
