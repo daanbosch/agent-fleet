@@ -344,7 +344,7 @@ RUN if [ "${BAKE_RTK}" = "1" ] && [ "${BAKE_AGENT_CLIS}" = "1" ]; then set -eux;
 ARG CLAUDE_CODE_VERSION=2.1.300
 ARG OPENCODE_VERSION=1.19.0
 ARG CODEX_VERSION=0.162.1
-ARG COPILOT_VERSION=1.0.97
+ARG COPILOT_VERSION=1.0.98
 # opencode's npm package follows the pin's major: `opencode-ai` for 1.x, `@opencode/cli` for
 # 2.x (which also installs an `opencode2` bin). The pin stays 1.x until the v2 cut-over (#2101);
 # changing OPENCODE_VERSION across the major is the whole switch. entrypoint.sh,
