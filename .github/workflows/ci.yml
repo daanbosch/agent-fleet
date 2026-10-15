@@ -286,6 +286,13 @@ jobs:
         run: |
           bash -n workspace/bkt-auth-wrapper.sh
           ./workspace/bkt-auth-wrapper-test.sh
+      # Same for the jira wrapper, which also decides whose config file it is looking at: a config
+      # for another Jira must never receive this connection's token.
+      - name: jira auth wrapper (real script, stub workspace-agent / jira)
+        working-directory: .
+        run: |
+          bash -n workspace/jira-auth-wrapper.sh
+          ./workspace/jira-auth-wrapper-test.sh
 
   # The deployment scripts (deploy/aws/ecs) only run in full against real AWS, but if that
   # is taken as a reason to check nothing, a break is discovered on the day the stack

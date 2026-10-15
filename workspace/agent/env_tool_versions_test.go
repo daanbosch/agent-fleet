@@ -257,3 +257,71 @@ func TestBktWrapperVersionSkipsCredentialHelper(t *testing.T) {
 		t.Errorf("probe through wrapper = %+v, want 0.33.1", got)
 	}
 }
+
+// jira is wrapped like bkt: Baked is the libexec binary, the pin follows bkt's in the
+// positional versions.json printf, and the probe asks `jira version` (jira-cli has no
+// --version).
+func TestJiraRowAndPin(t *testing.T) {
+	var spec *toolSpec
+	for i := range toolSpecs {
+		if toolSpecs[i].Name == "jira" {
+			spec = &toolSpecs[i]
+		}
+	}
+	if spec == nil {
+		t.Fatal("toolSpecs has no jira row")
+	}
+	if spec.Cmd != "jira" || spec.Baked != "/usr/local/libexec/jira" || spec.Pin != "jira" ||
+		len(spec.Args) != 1 || spec.Args[0] != "version" {
+		t.Errorf("jira row = %+v", *spec)
+	}
+	df, err := os.ReadFile("../Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(df)
+	if !strings.Contains(s, `"bkt":"%s","jira":"%s"`) || !strings.Contains(s, `"$BKT_VERSION" "$JIRA_CLI_VERSION"`) {
+		t.Error("jira key and JIRA_CLI_VERSION must directly follow bkt in the versions.json printf")
+	}
+	if got := extractVer(`(Version="1.7.0", GitCommit="79067e2", CommitDate="2025-08-30T08:30:25+00:00", GoVersion="go1.24.6")`); got != "1.7.0" {
+		t.Errorf("extractVer(jira) = %q, want 1.7.0", got)
+	}
+}
+
+// The Toolchains probe runs the wrapper. `jira version` must not reach jira-cred, which takes
+// the store lock and may renew an OAuth token over the network (see the bkt test above).
+func TestJiraWrapperVersionSkipsCredentialHelper(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real-jira")
+	if err := os.WriteFile(real, []byte("#!/bin/sh\necho '(Version=\"1.7.0\", GitCommit=\"x\")'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	calls := filepath.Join(dir, "agent-calls")
+	agentStub := "#!/bin/sh\necho called >> " + calls + "\nsleep 3\n" +
+		"printf 'site=https://a.atlassian.net\\nserver=https://a.atlassian.net\\nauth=basic\\ntoken=fake-tok\\n'\n"
+	if err := os.WriteFile(filepath.Join(bin, "workspace-agent"), []byte(agentStub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "cfg"))
+	t.Setenv("JIRA_API_TOKEN", "")
+	t.Setenv("JIRA_CONFIG_FILE", "")
+	t.Setenv("AF_JIRA_REAL", real)
+
+	start := time.Now()
+	got := probeVersion(context.Background(), "../jira-auth-wrapper.sh", []string{"version"}, nil)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("wrapper version took %v, want no credential round trip", d)
+	}
+	if _, err := os.Stat(calls); err == nil {
+		t.Error("wrapper version called workspace-agent jira-cred")
+	}
+	if got == nil || got.Version != "1.7.0" {
+		t.Errorf("probe through wrapper = %+v, want 1.7.0", got)
+	}
+}
