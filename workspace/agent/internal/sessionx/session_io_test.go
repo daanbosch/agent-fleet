@@ -570,3 +570,66 @@ func TestTypePromptTextSendsLeadingDashLiterally(t *testing.T) {
 		}
 	}
 }
+
+// A line break in a literal send-keys stream is an Enter, so a multi-line (or long) claude
+// prompt used to be submitted line by line; mid-turn only the last line survived and a peer
+// message lost its envelope (issue #2195). Such prompts must go in as one bracketed paste
+// carrying the whole text, while a short single-line prompt keeps the literal-key path.
+func TestTypeLineAndSubmitClaudePastesMultilineAndLongPrompts(t *testing.T) {
+	envelope := "[agent-fleet:peer from=child intent=report reply=when-needed] "
+	long := envelope + strings.Repeat("レビュー結果: bundle には問題あり\n", 400)
+	cases := []struct {
+		name, text string
+		paste      bool
+	}{
+		{"short single line", "こんにちは", false},
+		{"multi line", envelope + "1行目\n2行目", true},
+		{"crlf", "a\r\nb", true},
+		{"long single line", strings.Repeat("あ", claudePasteMinBytes), true},
+		{"long multi line", long, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withTempHome(t)
+			bin := t.TempDir()
+			logPath := filepath.Join(bin, "tmux.log")
+			stdinPath := filepath.Join(bin, "tmux.stdin")
+			script := `#!/bin/sh
+printf '%s\n' "$*" >> "$TMUX_TEST_LOG"
+case "$1" in
+  load-buffer) /bin/cat > "$TMUX_TEST_STDIN" ;;
+esac
+`
+			if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin)
+			t.Setenv("TMUX_TEST_LOG", logPath)
+			t.Setenv("TMUX_TEST_STDIN", stdinPath)
+			t.Setenv("AGENT_INPUT_SUBMIT_DELAY_MS", "0")
+			t.Setenv("AF_SESSIONS_DIR", filepath.Join(t.TempDir(), "sessions"))
+			const name = "claude_paste"
+			session.WriteMeta(session.Meta{Name: name, Dir: t.TempDir(), Kind: session.KindClaude})
+
+			if err := typeLineAndSubmit(name, "%7", tc.text); err != nil {
+				t.Fatal(err)
+			}
+			b, _ := os.ReadFile(logPath)
+			log := string(b)
+			got, _ := os.ReadFile(stdinPath)
+			if tc.paste {
+				if !strings.Contains(log, "paste-buffer -p") || strings.Contains(log, "send-keys -t %7 -l") {
+					t.Fatalf("want one bracketed paste and no literal keys; tmux = %s", log)
+				}
+				if string(got) != tc.text {
+					t.Fatalf("pasted %d bytes, want the whole %d-byte prompt (head %.40q)", len(got), len(tc.text), got)
+				}
+			} else if !strings.Contains(log, "send-keys -t %7 -l -- "+tc.text) || strings.Contains(log, "paste-buffer") {
+				t.Fatalf("want the literal-key path; tmux = %s", log)
+			}
+			if strings.Count(log, "send-keys -t %7 Enter") != 1 {
+				t.Fatalf("want exactly one submit Enter; tmux = %s", log)
+			}
+		})
+	}
+}
