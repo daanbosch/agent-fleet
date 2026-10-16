@@ -181,6 +181,10 @@ func listCleanupArchives() []cleanupManifest {
 	return out
 }
 
+// maxCleanupEntryBytes is the largest payload a restore will read. Archiving must not write
+// an entry above it: such an archive would delete the original and then refuse to restore.
+const maxCleanupEntryBytes = 64 << 20
+
 // readCleanupArchive loads a manifest and the tar payloads for restore.
 func readCleanupArchive(id string) (cleanupManifest, map[string][]byte, error) {
 	var m cleanupManifest
@@ -205,7 +209,6 @@ func readCleanupArchive(id string) (cleanupManifest, map[string][]byte, error) {
 		}
 		// Cap the per-entry allocation: h.Size comes straight from the (possibly
 		// corrupt) tar header, and a huge value would OOM this memory-constrained host.
-		const maxCleanupEntryBytes = 64 << 20
 		if h.Size < 0 || h.Size > maxCleanupEntryBytes {
 			return m, nil, fmt.Errorf("archive %s: entry %s too large (%d bytes)", id, h.Name, h.Size)
 		}

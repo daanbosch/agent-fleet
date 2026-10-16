@@ -185,3 +185,40 @@ func TestTrashWithoutHandoverFilesIsUnchanged(t *testing.T) {
 		t.Fatal("the work directory should still be removed")
 	}
 }
+
+func TestTrashRefusesAHandoverFileTooBigToRestore(t *testing.T) {
+	home := handoverEnv(t)
+	m := shellSession(t, home, "tgt0005")
+	p := writeHandover(t, m.Name, "srca001", "")
+	write := func(n int) {
+		if err := os.WriteFile(p, make([]byte, n), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write(maxCleanupEntryBytes + 1)
+	if _, code, err := trashSession(m, false); err == nil || code != sessionx.TrashErrArchive {
+		t.Fatalf("oversized handover file: code=%q err=%v, want an archive error", code, err)
+	}
+	if _, ok := session.ReadMeta(m.Name); !ok {
+		t.Fatal("the meta was removed although nothing reached the trash")
+	}
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("the original handover file was removed: %v", err)
+	}
+	if len(listCleanupArchives()) != 0 {
+		t.Fatal("a refused delete left an archive")
+	}
+
+	write(maxCleanupEntryBytes)
+	arch, _, err := trashSession(m, false)
+	if err != nil {
+		t.Fatalf("a file exactly at the limit must be accepted: %v", err)
+	}
+	if _, err := restoreCleanupArchive(arch); err != nil {
+		t.Fatalf("an accepted archive must restore: %v", err)
+	}
+	if fi, err := os.Stat(p); err != nil || fi.Size() != maxCleanupEntryBytes {
+		t.Fatalf("restored file: %v %v", fi, err)
+	}
+}

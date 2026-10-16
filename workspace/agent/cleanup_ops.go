@@ -367,6 +367,24 @@ func archiveSessionForDelete(m session.Meta) (string, error) {
 	return man.ID, nil
 }
 
+// readHandoverBounded reads p, refusing a file a restore could not read back
+// (maxCleanupEntryBytes). It never allocates more than the limit plus one byte.
+func readHandoverBounded(p string) ([]byte, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxCleanupEntryBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxCleanupEntryBytes {
+		return nil, fmt.Errorf("%s is larger than the %d bytes a trash archive can hold; delete or shrink it first", p, maxCleanupEntryBytes)
+	}
+	return b, nil
+}
+
 // addHandoverPayloads adds the session's handover-*.md files to the archive with their
 // absolute destinations. A file that vanished since it was listed is skipped; one that cannot
 // be read is not, because the delete would then destroy the only copy.
@@ -378,7 +396,7 @@ func addHandoverPayloads(name string, as *cleanupArchivedSession, payloads map[s
 	dir := paths.SessionWorkDir(name)
 	for _, n := range names {
 		src := filepath.Join(dir, n)
-		b, err := os.ReadFile(src)
+		b, err := readHandoverBounded(src)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
