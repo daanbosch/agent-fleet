@@ -194,3 +194,78 @@ func TestAuthResumeIgnoresRetryable(t *testing.T) {
 		t.Error("opened a login episode for a cut-off that has nothing to do with the login")
 	}
 }
+
+const refreshStuckMsg = "Could not refresh your login because another Claude Code process is refreshing it (or exited mid-refresh) · Try again in a minute; if it keeps happening, close other Claude Code windows or sign in again with /login"
+
+func refreshAbort(at time.Time) claude.Abort {
+	return claude.Abort{Msg: refreshStuckMsg, Auth: true, At: at}
+}
+
+// noFastWatch keeps the real poller out of the state-machine tests, and records the episodes it
+// would have been started for.
+func noFastWatch(t *testing.T) *[]string {
+	t.Helper()
+	var started []string
+	orig := authResumeFastWatch
+	authResumeFastWatch = func(m session.Meta, st authResumeState) { started = append(started, m.Name) }
+	t.Cleanup(func() { authResumeFastWatch = orig })
+	return &started
+}
+
+// TestAuthResumeRefreshLockResumesQuickly: a refresh the lock holder finished is not a person's
+// sign-in, so it does not wait the 15s settle — and the quick watch is started for it, once.
+func TestAuthResumeRefreshLockResumesQuickly(t *testing.T) {
+	f := newAbortFixture(t)
+	started := noFastWatch(t)
+	m := arMeta()
+	cut := time.Now()
+	a := refreshAbort(cut)
+
+	authResumeAttempt(m, arState(t, m.Name), a, cut.Add(time.Second)) // opens the episode
+	authResumeAttempt(m, arState(t, m.Name), a, cut.Add(2*time.Second))
+	if len(*started) != 1 {
+		t.Fatalf("fast watch started %d times, want once per episode", len(*started))
+	}
+
+	renewed := cut.Add(19 * time.Second)
+	setLoginAt(t, renewed)
+	authResumeAttempt(m, arState(t, m.Name), a, renewed.Add(authResumeRefreshSettle-time.Second))
+	if len(f.sent) != 0 {
+		t.Fatalf("sent before the refreshed credential settled: %v", f.sent)
+	}
+	authResumeAttempt(m, arState(t, m.Name), a, renewed.Add(authResumeRefreshSettle+time.Second))
+	if len(f.sent) != 1 {
+		t.Fatalf("resume prompts = %d, want 1 (a refresh needs far less settling than %v)", len(f.sent), authResumeSettle)
+	}
+}
+
+// TestAuthResumeRefreshLockForcedWhenNothingRefreshes: a holder that died leaves a lock claude
+// only abandons after 60s, and claude does not retry by itself. Past that point the resume goes
+// out without a renewed credential — and never earlier, and never for a revoked login.
+func TestAuthResumeRefreshLockForcedWhenNothingRefreshes(t *testing.T) {
+	f := newAbortFixture(t)
+	noFastWatch(t)
+	m := arMeta()
+	cut := time.Now()
+	setLoginAt(t, cut.Add(-time.Hour)) // never renewed
+
+	a := refreshAbort(cut)
+	authResumeAttempt(m, arState(t, m.Name), a, cut)
+	authResumeAttempt(m, arState(t, m.Name), a, cut.Add(authResumeRefreshForceAfter-time.Second))
+	if len(f.sent) != 0 {
+		t.Fatalf("forced before claude's 60s lock staleness could have passed: %v", f.sent)
+	}
+	authResumeAttempt(m, arState(t, m.Name), a, cut.Add(authResumeRefreshForceAfter))
+	if len(f.sent) != 1 {
+		t.Fatalf("resume prompts = %d, want 1 once the force point passed", len(f.sent))
+	}
+
+	// A revoked login is not that case: no amount of waiting makes a resume useful.
+	f2 := newAbortFixture(t)
+	m2 := session.Meta{Name: "ar2", Dir: "/tmp/ar2", Kind: session.KindClaude}
+	authResumeAttempt(m2, arState(t, m2.Name), authAbort(cut), cut)
+	authResumeAttempt(m2, arState(t, m2.Name), authAbort(cut), cut.Add(time.Hour))
+	if len(f2.sent) != 0 {
+		t.Fatalf("a non-refresh login failure was forced: %v", f2.sent)
+	}
+}
