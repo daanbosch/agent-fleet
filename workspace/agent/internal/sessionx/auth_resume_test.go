@@ -344,3 +344,80 @@ func TestAuthResumeForcedDoesNotCarryOverToARevokedLogin(t *testing.T) {
 		t.Fatalf("a credential newer than the revoked failure did not release it: %v", f.sent)
 	}
 }
+
+// TestAuthResumeForcedClockFollowsTheLatestRefreshFailure: a second refresh-lock failure inside the
+// same episode (a manual retry the sweep never saw between) is a new lock to wait out. The 90s
+// does not run from the episode's first failure, or it would resume into a lock that is seconds old.
+func TestAuthResumeForcedClockFollowsTheLatestRefreshFailure(t *testing.T) {
+	f := newAbortFixture(t)
+	noFastWatch(t)
+	m := arMeta()
+	cut := time.Now()
+	setLoginAt(t, cut.Add(-time.Hour))
+	authResumeAttempt(m, arState(t, m.Name), refreshAbort(cut), cut)
+	authResumeAttempt(m, arState(t, m.Name), refreshAbort(cut), cut.Add(authResumeRefreshForceAfter))
+	if len(f.sent) != 1 {
+		t.Fatalf("the first forced resume did not go out: %v", f.sent)
+	}
+
+	again := cut.Add(10 * time.Minute) // past the backoff
+	a2 := refreshAbort(again)
+	authResumeAttempt(m, arState(t, m.Name), a2, again.Add(time.Second))
+	if len(f.sent) != 1 {
+		t.Fatalf("forced a second resume one second after a new lock failure: %v", f.sent)
+	}
+	if st := arState(t, m.Name); st.Attempts != 1 {
+		t.Errorf("attempts = %d, want the spent one kept", st.Attempts)
+	}
+	authResumeAttempt(m, arState(t, m.Name), a2, again.Add(authResumeRefreshForceAfter))
+	if len(f.sent) != 2 {
+		t.Fatalf("resume prompts = %d, want the second once its own 90s passed", len(f.sent))
+	}
+}
+
+// TestRefreshWatchFollowsARestartedEpisode: the poller reads the current episode every time, so a
+// refresh-lock episode that went through a revoked-login failure and back is watched against its
+// latest failure — and the poller steps aside while the episode is not a refresh-lock one.
+func TestRefreshWatchFollowsARestartedEpisode(t *testing.T) {
+	newAbortFixture(t)
+	noFastWatch(t)
+	m := arMeta()
+	cut := time.Now()
+	setLoginAt(t, cut.Add(-time.Hour))
+
+	if !refreshWatchStep(m, cut) {
+		t.Fatal("watching an episode that does not exist")
+	}
+	authResumeAttempt(m, arState(t, m.Name), refreshAbort(cut), cut)
+	if refreshWatchStep(m, cut.Add(time.Second)) {
+		t.Fatal("the watch ended while the refresh was still pending")
+	}
+
+	revoked := cut.Add(time.Minute)
+	authResumeAttempt(m, arState(t, m.Name), authAbort(revoked), revoked)
+	if !refreshWatchStep(m, revoked.Add(time.Second)) {
+		t.Fatal("kept polling an episode that is now a revoked login")
+	}
+
+	again := cut.Add(2 * time.Minute)
+	latest := refreshAbort(again)
+	authResumeAttempt(m, arState(t, m.Name), latest, again)
+	origTail, origHand := refreshWatchTail, refreshWatchHandOver
+	refreshWatchTail = func(session.Meta) (claude.Abort, bool) { return latest, true }
+	handed := 0
+	refreshWatchHandOver = func(session.Meta, claude.Abort, bool, time.Time) { handed++ }
+	t.Cleanup(func() { refreshWatchTail, refreshWatchHandOver = origTail, origHand })
+	renewed := again.Add(19 * time.Second)
+	setLoginAt(t, renewed)
+	// The reviewed case: judged against the ORIGINAL failure this credential is long "renewed";
+	// against the latest one it is exactly the refresh that landed after it.
+	if refreshWatchStep(m, renewed.Add(time.Second)) {
+		t.Fatal("resumed or ended before the new credential settled")
+	}
+	if !refreshWatchStep(m, renewed.Add(authResumeRefreshSettle)) {
+		t.Fatal("the watch did not finish after handing over")
+	}
+	if handed != 1 {
+		t.Fatalf("handed the session back %d times, want once on the latest failure's refresh", handed)
+	}
+}
