@@ -337,7 +337,11 @@ func refreshWatchStep(m session.Meta, now time.Time) (done bool) {
 	}
 	a, ok := refreshWatchTail(m)
 	refreshWatchHandOver(m, a, ok, now)
-	return true
+	// The tail read just now can be a newer failure than the episode this poll judged; the hand
+	// over then restarted the episode, and its own watcher request was refused because this one
+	// holds the key. Carry on for that episode instead of leaving it to the 30s sweep.
+	next, has := authResumeStates.Read(m.Name)
+	return !(has && next.GaveUp == "" && claude.RefreshStuck(next.Msg) && next.At != st.At)
 }
 
 // authResumeDue applies the backoff between attempts. The FIRST attempt has no delay of its

@@ -421,3 +421,34 @@ func TestRefreshWatchFollowsARestartedEpisode(t *testing.T) {
 		t.Fatalf("handed the session back %d times, want once on the latest failure's refresh", handed)
 	}
 }
+
+// TestRefreshWatchContinuesWhenTheHandOverRestartsTheEpisode: the poll judged the old failure
+// (credential rewritten after it), but the tail read inside the hand over is a newer refresh-lock
+// failure that restarts the episode. The watcher holds the key, so the restart's own request to
+// start one is refused; it must keep watching rather than end.
+func TestRefreshWatchContinuesWhenTheHandOverRestartsTheEpisode(t *testing.T) {
+	newAbortFixture(t)
+	noFastWatch(t)
+	m := arMeta()
+	cut := time.Now()
+	authResumeAttempt(m, arState(t, m.Name), refreshAbort(cut), cut)
+	renewed := cut.Add(19 * time.Second)
+	setLoginAt(t, renewed)
+
+	newer := refreshAbort(cut.Add(21 * time.Second)) // a manual retry failed again
+	origTail, origHand := refreshWatchTail, refreshWatchHandOver
+	refreshWatchTail = func(session.Meta) (claude.Abort, bool) { return newer, true }
+	// authResumeAttempt is authResumeStep minus the live-session and preference gates (no tmux here).
+	refreshWatchHandOver = func(m session.Meta, a claude.Abort, _ bool, now time.Time) {
+		st, _ := authResumeStates.Read(m.Name)
+		authResumeAttempt(m, st, a, now)
+	}
+	t.Cleanup(func() { refreshWatchTail, refreshWatchHandOver = origTail, origHand })
+
+	if done := refreshWatchStep(m, renewed.Add(authResumeRefreshSettle)); done {
+		t.Fatal("the watch ended although the hand over restarted the episode on a newer failure")
+	}
+	if st := arState(t, m.Name); st.At != newer.At.Format(time.RFC3339) {
+		t.Fatalf("episode At = %q, want the newer failure %q", st.At, newer.At.Format(time.RFC3339))
+	}
+}
