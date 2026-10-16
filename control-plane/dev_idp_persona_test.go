@@ -360,8 +360,9 @@ func TestDevIdPConsentGetIsNotAHandler(t *testing.T) {
 func TestDevIdPConsentCannotChooseAnotherWorkspacesPersona(t *testing.T) {
 	d := newDevIdPTestEnv(t)
 	d.addPersona(t, "admin", "")
-	other := store.DevIdPPersona{ID: "foreign-persona", WorkspaceID: "some-other-workspace", Handle: "root", CreatedAt: time.Now().Unix()}
-	if err := d.mgr.store.CreateDevIdPPersona(context.Background(), other); err != nil {
+	otherWS := d.addViewer(t, "persona-other")
+	other := store.DevIdPPersona{ID: "foreign-persona", WorkspaceID: "ws-" + otherWS.userKey, Handle: "root", CreatedAt: time.Now().Unix()}
+	if err := d.mgr.store.CreateDevIdPPersona(context.Background(), other, 20); err != nil {
 		t.Fatal(err)
 	}
 	redirect := d.ownHost(3000) + "/cb"
@@ -527,5 +528,31 @@ func TestDevIdPPersonaCollisionAfterTheCodeWasIssuedIsRefusedAtToken(t *testing.
 	}
 	if userinfo() != http.StatusUnauthorized {
 		t.Error("userinfo kept serving a persona that now collides with a real member")
+	}
+}
+
+func TestDevIdPConsentPageFollowsAcceptLanguage(t *testing.T) {
+	d := newDevIdPTestEnv(t)
+	d.addPersona(t, "admin", "Admin User")
+	redirect := d.ownHost(3000) + "/cb"
+	_, challenge := pkcePair()
+	for _, c := range []struct{ header, lang, want, absent string }{
+		{"en-US,en;q=0.9", "en", "Development sign-in", "開発用"},
+		{"ja,en;q=0.8", "ja", "開発用サインイン", "Development sign-in"},
+		{"", "ja", "開発用サインイン", "Development sign-in"},
+	} {
+		var rec *httptest.ResponseRecorder
+		d.asUser("preview-user", func() {
+			req := httptest.NewRequest(http.MethodGet, "https://af.example.com"+devIdPAuthorizePath+"?"+d.authQuery(redirect, challenge).Encode(), nil)
+			if c.header != "" {
+				req.Header.Set("Accept-Language", c.header)
+			}
+			rec = httptest.NewRecorder()
+			d.mux.ServeHTTP(rec, req)
+		})
+		page := rec.Body.String()
+		if !strings.Contains(page, `<html lang="`+c.lang+`">`) || !strings.Contains(page, c.want) || strings.Contains(page, c.absent) {
+			t.Errorf("Accept-Language %q: want only %q text, got %s", c.header, c.lang, page)
+		}
 	}
 }

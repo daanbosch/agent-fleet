@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -155,17 +157,17 @@ func TestDevIdPPersonasAndConsentTickets(t *testing.T) {
 	for name, st := range homeOpStores(t) {
 		ws := homeOpWorkspace(t, st)
 		p := DevIdPPersona{ID: "p1", WorkspaceID: ws.ID, Handle: "admin", Name: "Admin", CreatedAt: 1}
-		if err := st.CreateDevIdPPersona(ctx, p); err != nil {
+		if err := st.CreateDevIdPPersona(ctx, p, 20); err != nil {
 			t.Fatalf("%s: create: %v", name, err)
 		}
 		dup := p
 		dup.ID = "p2"
-		if err := st.CreateDevIdPPersona(ctx, dup); err != ErrDevIdPPersonaExists {
+		if err := st.CreateDevIdPPersona(ctx, dup, 20); err != ErrDevIdPPersonaExists {
 			t.Fatalf("%s: duplicate handle: %v", name, err)
 		}
 		other := p
-		other.ID, other.WorkspaceID = "p3", "elsewhere"
-		if err := st.CreateDevIdPPersona(ctx, other); err != nil {
+		other.ID, other.WorkspaceID = "p3", homeOpWorkspace(t, st).ID
+		if err := st.CreateDevIdPPersona(ctx, other, 20); err != nil {
 			t.Fatalf("%s: the same handle in another workspace: %v", name, err)
 		}
 		if _, ok, _ := st.GetDevIdPPersona(ctx, ws.ID, "p3"); ok {
@@ -262,6 +264,55 @@ func TestDevIdPClientCountAndSwitchRow(t *testing.T) {
 		}
 		if n, _ := st.CountDevIdPClients(ctx); n != 1 {
 			t.Errorf("%s: count after a delete = %d, want 1", name, n)
+		}
+	}
+}
+
+// Both dialects: the per-workspace limit holds when many creates race, because the count and
+// the insert share one transaction.
+func TestDevIdPPersonaLimitHoldsUnderConcurrency(t *testing.T) {
+	ctx := context.Background()
+	const max, racers = 5, 16
+	for name, st := range homeOpStores(t) {
+		ws := homeOpWorkspace(t, st)
+		var ok, limit, other atomic.Int32
+		var wg sync.WaitGroup
+		for i := 0; i < racers; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				err := st.CreateDevIdPPersona(ctx, DevIdPPersona{ID: fmt.Sprintf("p%d", i), WorkspaceID: ws.ID,
+					Handle: fmt.Sprintf("h%d", i), Name: "n", CreatedAt: 1}, max)
+				switch {
+				case err == nil:
+					ok.Add(1)
+				case errors.Is(err, ErrDevIdPPersonaLimit):
+					limit.Add(1)
+				default:
+					t.Errorf("%s: create: %v", name, err)
+					other.Add(1)
+				}
+			}(i)
+		}
+		wg.Wait()
+		list, _ := st.ListDevIdPPersonas(ctx, ws.ID)
+		if len(list) != max || ok.Load() != max || limit.Load() != racers-max {
+			t.Errorf("%s: rows=%d ok=%d limit=%d, want %d/%d/%d", name, len(list), ok.Load(), limit.Load(), max, max, racers-max)
+		}
+	}
+}
+
+// Both dialects: a workspace that does not exist (or was deleted first) takes no persona, so
+// the limit cannot be bypassed by racing against a row that holds no lock.
+func TestDevIdPPersonaRefusedForMissingWorkspace(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range homeOpStores(t) {
+		err := st.CreateDevIdPPersona(ctx, DevIdPPersona{ID: "p1", WorkspaceID: "no-such-ws", Handle: "a", CreatedAt: 1}, 5)
+		if !errors.Is(err, ErrDevIdPWorkspaceGone) {
+			t.Errorf("%s: missing workspace: %v, want ErrDevIdPWorkspaceGone", name, err)
+		}
+		if list, _ := st.ListDevIdPPersonas(ctx, "no-such-ws"); len(list) != 0 {
+			t.Errorf("%s: %d orphan personas", name, len(list))
 		}
 	}
 }
