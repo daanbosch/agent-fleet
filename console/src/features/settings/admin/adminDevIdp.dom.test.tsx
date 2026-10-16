@@ -116,4 +116,18 @@ describe("DevIdpAdminView", () => {
     expect(host!.querySelectorAll(".form-err").length).toBeGreaterThan(1); // warning + the error
     expect(box().disabled).toBe(false); // not stuck busy
   });
+
+  it("does not show a stale state when the PUT and the re-read both fail", async () => {
+    api.mockResolvedValueOnce(status()).mockRejectedValueOnce(new TypeError("network"));
+    apiJSON.mockRejectedValue(new TypeError("network"));
+    await mount();
+    await act(async () => {
+      box().click();
+    });
+    expect(box().disabled).toBe(true); // nothing to toggle: the state is unknown
+    expect(box().checked).toBe(false);
+    expect(text()).not.toContain("https://af.example.com/dev-idp");
+    expect(text()).not.toContain("3");
+    expect(host!.querySelectorAll(".form-err").length).toBeGreaterThan(1);
+  });
 });

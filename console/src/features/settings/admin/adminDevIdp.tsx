@@ -24,17 +24,20 @@ export function DevIdpAdminView() {
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const load = useCallback(async () => {
+  // Resolves true only when the server's current state was read and is now on screen.
+  const load = useCallback(async (): Promise<boolean> => {
     try {
       const d = await api("api/admin/dev-idp");
       if (d?.error) {
         setErr(errText(d.error));
-        return;
+        return false;
       }
       setErr("");
       setData(d as DevIdpStatus);
+      return true;
     } catch {
       setErr(tr("admin.load_error"));
+      return false;
     }
   }, [tr]);
   useEffect(() => {
@@ -53,8 +56,14 @@ export function DevIdpAdminView() {
       setData(d as DevIdpStatus);
     } catch {
       // A lost response may still have applied the change: say so, then show the real state.
-      await load();
-      setErr(tr("admin.devidp_save_error"));
+      if (await load()) {
+        setErr(tr("admin.devidp_save_error"));
+      } else {
+        // Neither the change nor the state is known: do not leave the old value on screen as
+        // if it were current.
+        setData(null);
+        setErr(tr("admin.devidp_unknown"));
+      }
     } finally {
       setBusy(false);
     }
