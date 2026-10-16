@@ -7,6 +7,7 @@ package cursor
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,7 +20,10 @@ func TestPumpCommitsBeforeAMoveOrLeavesTheEntryQueued(t *testing.T) {
 	h.name = "cursor-move-1"
 	t.Cleanup(func() { lifegate.Reopen(h.name) }) // the gate's memory is process-wide
 
-	taken, release := holdAtCommit(h)
+	taken, rel := holdAtCommit(h)
+	var once sync.Once
+	release := func() { once.Do(rel) }
+	t.Cleanup(release) // a failed assertion must not leave the pump parked before its commit
 	mustSend(t, h, member("m1", "one"))
 	<-taken // taken, not committed: the pump holds its lease
 
@@ -32,14 +36,16 @@ func TestPumpCommitsBeforeAMoveOrLeavesTheEntryQueued(t *testing.T) {
 		locked <- x
 	}()
 	deadline := time.Now().Add(hangGuard)
-	for lifegate.WritersWaiting(h.name) == 0 {
+	// Or the move already has the gate, which the select below reports.
+	for lifegate.WritersWaiting(h.name) == 0 && len(locked) == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("the move never started waiting")
 		}
 		time.Sleep(time.Millisecond)
 	}
 	select {
-	case <-locked:
+	case x := <-locked:
+		x.Unlock() // or the pump waits on the gate and the cleanup hangs
 		t.Fatal("the move got the gate while the pump was about to commit an entry")
 	case <-time.After(50 * time.Millisecond):
 	}
@@ -49,7 +55,8 @@ func TestPumpCommitsBeforeAMoveOrLeavesTheEntryQueued(t *testing.T) {
 	release()
 	waitState(t, h, agents.TurnRunning)
 	select {
-	case <-locked:
+	case x := <-locked:
+		x.Unlock()
 		f.writes.release() // or the cleanup waits on the held write forever
 		t.Fatal("the move got the gate before session/prompt reached the runtime")
 	case <-time.After(50 * time.Millisecond):

@@ -55,6 +55,10 @@ func (h *moveFakeHandle) Steer(in agents.TurnInput) error { return h.Send(in) }
 func (h *moveFakeHandle) Interrupt(agents.InterruptOpts) (agents.InterruptResult, error) {
 	return agents.InterruptResult{}, nil
 }
+func (h *moveFakeHandle) UpdateSettings(agents.ThreadSettings) error { return nil }
+func (h *moveFakeHandle) Snapshot() (agents.ThreadSnapshot, error) {
+	return agents.ThreadSnapshot{}, nil
+}
 func (h *moveFakeHandle) Respond(agents.InteractionReply) error {
 	h.sent <- agents.TurnInput{Prompt: "(respond)"}
 	return nil
@@ -65,6 +69,10 @@ type moveFakeDriver struct {
 	h        *moveFakeHandle
 	inResume func()
 	resumed  chan string
+}
+
+func (d *moveFakeDriver) Capabilities() agents.Capabilities {
+	return agents.Capabilities{DynamicModel: true}
 }
 
 func (d *moveFakeDriver) Resume(m session.Meta) (agents.ThreadHandle, error) {
@@ -286,7 +294,9 @@ func TestEveryInputPathRefusesAMovedSource(t *testing.T) {
 		}
 		t.Run(label, func(t *testing.T) {
 			const name, target = "mvrefuse", "mvrefuse-target"
-			d, _ := moveEnv(t, name)
+			d, m := moveEnv(t, name)
+			m.Model = "mv-model"
+			session.WriteMeta(m)
 			session.WriteMeta(session.Meta{Name: "mvrefuse-peer", Dir: t.TempDir(), Kind: session.KindClaude})
 			mv := mustBegin(t, beginAsync(name, target))
 			if done {
@@ -324,10 +334,24 @@ func TestEveryInputPathRefusesAMovedSource(t *testing.T) {
 				{"/answer-question", `{"choices":[1]}`, HandleSessionAnswerQuestion},
 				{"/plan-respond", `{"decision":"approve"}`, HandleSessionPlanRespond},
 				{"/carried-answer", `{"decision":"continue"}`, HandleSessionCarriedAnswer},
+				{"/settings", `{"model":"gpt-x"}`, HandleSessionSettings},
 			} {
 				t.Run(tc.path+" "+tc.body, func(t *testing.T) {
 					assertMovedRefusal(t, http1(tc.h, tc.path, tc.body), target)
 				})
+			}
+			// The settings read starts no runtime: it answers from the meta.
+			req := httptest.NewRequest(http.MethodGet, "/sessions/"+name+"/settings", nil)
+			req.SetPathValue("name", name)
+			rec := httptest.NewRecorder()
+			HandleSessionSettingsGet(rec, req)
+			var got managedThreadSettingsWire
+			_ = json.Unmarshal(rec.Body.Bytes(), &got)
+			if rec.Code != http.StatusOK || got.Model != "mv-model" || !got.DynamicModel {
+				t.Errorf("GET /settings = %d %s, want 200 with the stored model", rec.Code, rec.Body.String())
+			}
+			if cur, _ := session.ReadMeta(name); cur.Model != "mv-model" {
+				t.Errorf("model after the refused POST = %q, want it unchanged", cur.Model)
 			}
 			var moved *lifegate.MovedError
 			if err := injectSessionPrompt(name, "from discord", agents.Origin{Kind: agents.OriginDiscord}); !errors.As(err, &moved) || moved.Target != target {
