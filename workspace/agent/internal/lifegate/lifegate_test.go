@@ -3,6 +3,7 @@ package lifegate
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -190,4 +191,22 @@ func TestCheckNeedsALiveLeaseOnTheSession(t *testing.T) {
 	if l.Check("s") == nil {
 		t.Fatal("a released lease passed Check")
 	}
+}
+
+// After a restart the meta is the only record of a move, so one that exists but cannot be read
+// refuses rather than admits.
+func TestEnterRefusesAnUnreadableMeta(t *testing.T) {
+	isolate(t)
+	session.WriteMeta(session.Meta{Name: "torn"})
+	if err := os.WriteFile(session.MetaPath("torn"), []byte(`{"name":"torn","mov`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Enter(context.Background(), "torn"); !errors.Is(err, ErrMetaUnreadable) {
+		t.Fatalf("Enter = %v, want ErrMetaUnreadable", err)
+	}
+	if !Closed("torn") {
+		t.Fatal("Closed = false for an unreadable meta")
+	}
+	// No meta at all is "no session": the caller answers that itself.
+	mustEnter(t, context.Background(), "absent").Release()
 }

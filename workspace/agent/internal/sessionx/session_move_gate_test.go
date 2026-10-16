@@ -559,3 +559,164 @@ func TestReopenMovedSessionOpensInput(t *testing.T) {
 		t.Fatalf("after reopen = %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+// scheduleRefusal is the source's own booking firing into a closed source.
+func scheduleRefusal(id string) string {
+	return `{"prompt":"` + rateLimitResumePrompt() + `","source":"schedule","schedule_id":"` + id + `"}`
+}
+
+func spentEpisode(t *testing.T, name string, now time.Time) {
+	t.Helper()
+	if err := RateLimitStates.Write(name, rateLimitState{At: now.Add(-time.Hour).Format(time.RFC3339),
+		ResumeAt: now.Add(-time.Minute).Format(time.RFC3339), ScheduleID: "sch_spent", ScheduleTries: 1}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func useSeam(t *testing.T, seam *func(), fn func()) {
+	t.Helper()
+	*seam = fn
+	t.Cleanup(func() { *seam = nil })
+}
+
+// A refusal that reaches its record while a rollback is between its repair and the reopening
+// waits for the rollback, and then repairs the booking itself: recorded in that gap, it would
+// be lost, the rollback having already repaired.
+func TestRefusalDuringTheRollbackIsRepaired(t *testing.T) {
+	f := newRateLimitFixture(t)
+	now := time.Now()
+	_, m := moveEnv(t, "mvgap1")
+	setRateLimitPref(t, true)
+	spentEpisode(t, m.Name, now)
+	mv := mustBegin(t, beginAsync(m.Name, "mvgap1-target"))
+	atNote := make(chan struct{}, 1)
+	useSeam(t, &beforeNoteRefusal, func() { atNote <- struct{}{} })
+	var refused <-chan *httptest.ResponseRecorder
+	useSeam(t, &afterMoveRepair, func() {
+		refused = inputAsync(m.Name, scheduleRefusal("sch_spent"))
+		<-atNote
+		time.Sleep(50 * time.Millisecond) // let it reach the episode lock, or record without it
+	})
+	if err := mv.rollback(now); err != nil {
+		t.Fatal(err)
+	}
+	assertMovedRefusal(t, recvRec(t, refused, "the refused booking"), "mvgap1-target")
+	if st := stateOf(t, m.Name); f.scheduled != 1 || st.ScheduleID != "sch_test" || st.FiredDuringMove != "" {
+		t.Fatalf("booked %d, episode %+v; want the spent booking replaced", f.scheduled, st)
+	}
+}
+
+// A refused request that stalls between its refusal and its record until the rollback is over
+// repairs the booking itself, since no rollback will come for it.
+func TestRefusalRecordedAfterTheRollbackIsRepaired(t *testing.T) {
+	f := newRateLimitFixture(t)
+	now := time.Now()
+	_, m := moveEnv(t, "mvgap2")
+	setRateLimitPref(t, true)
+	spentEpisode(t, m.Name, now)
+	mv := mustBegin(t, beginAsync(m.Name, "mvgap2-target"))
+	atNote, goOn := make(chan struct{}), make(chan struct{})
+	useSeam(t, &beforeNoteRefusal, func() {
+		close(atNote)
+		<-goOn
+	})
+	refused := inputAsync(m.Name, scheduleRefusal("sch_spent"))
+	<-atNote
+	if err := mv.rollback(now); err != nil {
+		t.Fatal(err)
+	}
+	if f.scheduled != 0 {
+		t.Fatalf("the rollback booked with nothing recorded (%d)", f.scheduled)
+	}
+	close(goOn)
+	assertMovedRefusal(t, recvRec(t, refused, "the refused booking"), "mvgap2-target")
+	if st := stateOf(t, m.Name); f.scheduled != 1 || st.ScheduleID != "sch_test" {
+		t.Fatalf("booked %d, episode %+v; want the spent booking replaced", f.scheduled, st)
+	}
+}
+
+// The commit records the booking for cancellation before the episode lets go of it, so an
+// Agent that stops while the CP call is in flight still finds the id after the restart.
+func TestCommitKeepsTheBookingAcrossARestartMidCancel(t *testing.T) {
+	f := newRateLimitFixture(t)
+	now := time.Now()
+	_, m := moveEnv(t, "mvmid")
+	setRateLimitPref(t, true)
+	if err := RateLimitStates.Write(m.Name, rateLimitState{At: now.Format(time.RFC3339),
+		ResumeAt: now.Add(time.Hour).Format(time.RFC3339), ScheduleID: "sch_live"}); err != nil {
+		t.Fatal(err)
+	}
+	mv := mustBegin(t, beginAsync(m.Name, "mvmid-target"))
+	inFlight := false
+	dropRateLimitSchedule = func(id string) error {
+		f.deleted = append(f.deleted, id)
+		if !inFlight {
+			inFlight = true
+			// What a restart right now would find on disk.
+			all, _ := rateLimitCleanups.Read(rateLimitCleanupKey)
+			if _, ok := all[id]; !ok {
+				t.Errorf("the CP is being called for %s with no durable record of it", id)
+			}
+			if _, has := RateLimitStates.Read(m.Name); has {
+				t.Error("the episode is still open while the cancellation is in flight")
+			}
+			return errors.New("agent stopped mid-call")
+		}
+		return f.dropErr
+	}
+	if err := mv.commit(); err != nil {
+		t.Fatal(err)
+	}
+	lifegate.ResetForTest()
+	rateLimitTick(now.Add(time.Minute))
+	if p := pendingRateLimitCleanups(); len(p) != 0 {
+		t.Fatalf("pending after the restart's sweep = %v", p)
+	}
+	if len(f.deleted) != 2 || f.deleted[1] != "sch_live" {
+		t.Errorf("deletes = %v", f.deleted)
+	}
+}
+
+// A cancellation that cannot be recorded fails the commit with nothing changed: closing the
+// episode then would leave the booking in no store at all.
+func TestCommitFailsWhenTheCancellationCannotBeRecorded(t *testing.T) {
+	f := newRateLimitFixture(t)
+	now := time.Now()
+	_, m := moveEnv(t, "mvnorec")
+	if err := RateLimitStates.Write(m.Name, rateLimitState{At: now.Format(time.RFC3339), ScheduleID: "sch_live"}); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, rateLimitCleanups.Dir(), "not a directory")
+	mv := mustBegin(t, beginAsync(m.Name, "mvnorec-target"))
+	if err := mv.commit(); err == nil {
+		t.Fatal("commit succeeded with no record of the cancellation")
+	}
+	if st, has := RateLimitStates.Read(m.Name); !has || st.ScheduleID != "sch_live" {
+		t.Errorf("episode = %+v, %v; want it kept with its id", st, has)
+	}
+	if cur, _ := session.ReadMeta(m.Name); cur.Moving != "mvnorec-target" || cur.MovedTo != "" {
+		t.Errorf("meta = moving %q movedTo %q; want still moving", cur.Moving, cur.MovedTo)
+	}
+	if len(f.deleted) != 0 {
+		t.Errorf("deletes = %v, want none before the record", f.deleted)
+	}
+}
+
+// A stopped Managed cursor source is refused with a reason: its conversation lived only in the
+// handle. Read through the real liveness check, not the test's state stand-in.
+func TestStoppedManagedCursorSourceIsRefused(t *testing.T) {
+	moveEnv(t, "mvcursor-unused")
+	session.WriteMeta(session.Meta{Name: "mvcursor", Dir: t.TempDir(), Kind: session.KindCursor, Driver: session.DriverManaged})
+	if _, err := beginSessionMove(context.Background(), "mvcursor", "mvcursor-target"); !errors.Is(err, errMoveCursorStopped) {
+		t.Fatalf("begin = %v, want errMoveCursorStopped", err)
+	}
+	if cur, _ := session.ReadMeta("mvcursor"); cur.Moving != "" {
+		t.Fatalf("moving = %q after a refused begin", cur.Moving)
+	}
+	// A stopped Terminal cursor keeps its transcript file, so it may move.
+	session.WriteMeta(session.Meta{Name: "mvcursor2", Dir: t.TempDir(), Kind: session.KindCursor})
+	t.Cleanup(func() { lifegate.Reopen("mvcursor2") })
+	if _, err := beginSessionMove(context.Background(), "mvcursor2", "mvcursor2-target"); err != nil {
+		t.Fatalf("Terminal cursor: %v", err)
+	}
+}

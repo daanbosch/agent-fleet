@@ -304,7 +304,7 @@ func HandleSessionInput(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var moved *lifegate.MovedError
 		if errors.As(err, &moved) {
-			noteBookingRefusedDuringMove(name, body.Source, body.ScheduleID)
+			noteBookingRefusedDuringMove(name, body.Source, body.ScheduleID, time.Now())
 		}
 		writeGateErr(w, err)
 		return

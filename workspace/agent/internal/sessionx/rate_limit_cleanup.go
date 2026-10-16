@@ -38,32 +38,79 @@ const rateLimitCleanupKey = "pending"
 // deleting the same id at once.
 var rateLimitCleanupMu sync.Mutex
 
-// cancelRateLimitSchedule deletes the booking id of session name, and keeps the id for the
-// sweep to retry when the CP does not confirm it.
-func cancelRateLimitSchedule(name, id string) {
+// cancelRateLimitSchedule cancels the booking id of session name. The id is recorded before the
+// CP is called and dropped only once the CP confirms, so an Agent that stops at any point in
+// between leaves it where the sweep retries it. An error means the record could not be written:
+// the delete is still attempted, but a failure of that one is then lost, and a caller that is
+// about to forget the id must not.
+func cancelRateLimitSchedule(name, id string) error {
 	if id == "" {
-		return
+		return nil
 	}
-	err := dropRateLimitSchedule(id)
-	if err == nil {
-		return
+	if err := recordRateLimitCancel(name, id); err != nil {
+		log.Printf("rate-limit: could not record the cancellation of %s (%s): %v", id, name, err)
+		if derr := dropRateLimitSchedule(id); derr != nil {
+			log.Printf("rate-limit: could not cancel the schedule %s of %s either: %v", id, name, derr)
+		}
+		return err
 	}
-	log.Printf("rate-limit: could not cancel the schedule %s of %s, keeping it to retry: %v", id, name, err)
+	finishRateLimitCancel(id)
+	return nil
+}
+
+// recordRateLimitCancel durably notes that id is to be cancelled.
+func recordRateLimitCancel(name, id string) error {
 	rateLimitCleanupMu.Lock()
 	defer rateLimitCleanupMu.Unlock()
 	all, _ := rateLimitCleanups.Read(rateLimitCleanupKey)
 	if all == nil {
 		all = map[string]rateLimitScheduleCleanup{}
 	}
+	if _, ok := all[id]; ok {
+		return nil
+	}
+	all[id] = rateLimitScheduleCleanup{Session: name, Since: time.Now().Format(time.RFC3339)}
+	return rateLimitCleanups.Write(rateLimitCleanupKey, all)
+}
+
+// finishRateLimitCancel deletes a recorded id at the CP and forgets it once confirmed.
+func finishRateLimitCancel(id string) {
+	rateLimitCleanupMu.Lock()
+	defer rateLimitCleanupMu.Unlock()
+	all, ok := rateLimitCleanups.Read(rateLimitCleanupKey)
+	if !ok {
+		return
+	}
 	c, ok := all[id]
 	if !ok {
-		c = rateLimitScheduleCleanup{Session: name, Since: time.Now().Format(time.RFC3339)}
+		return
 	}
-	c.Tries++
-	c.LastErr = err.Error()
-	all[id] = c
-	if werr := rateLimitCleanups.Write(rateLimitCleanupKey, all); werr != nil {
-		log.Printf("rate-limit: could not record the pending cancellation of %s: %v", id, werr)
+	settleRateLimitCancel(all, id, c)
+	writeRateLimitCleanups(all)
+}
+
+// settleRateLimitCancel tries one delete and updates all in place.
+func settleRateLimitCancel(all map[string]rateLimitScheduleCleanup, id string, c rateLimitScheduleCleanup) {
+	if err := dropRateLimitSchedule(id); err != nil {
+		c.Tries++
+		c.LastErr = err.Error()
+		all[id] = c
+		log.Printf("rate-limit: could not cancel the schedule %s of %s, keeping it to retry: %v", id, c.Session, err)
+		return
+	}
+	if c.Tries > 0 {
+		log.Printf("rate-limit: cancelled the schedule %s of %s after %d failed attempt(s)", id, c.Session, c.Tries)
+	}
+	delete(all, id)
+}
+
+func writeRateLimitCleanups(all map[string]rateLimitScheduleCleanup) {
+	if len(all) == 0 {
+		rateLimitCleanups.Remove(rateLimitCleanupKey)
+		return
+	}
+	if err := rateLimitCleanups.Write(rateLimitCleanupKey, all); err != nil {
+		log.Printf("rate-limit: could not update the pending cancellations: %v", err)
 	}
 }
 
@@ -75,29 +122,10 @@ func retryRateLimitScheduleCleanups() {
 	if !ok || len(all) == 0 {
 		return
 	}
-	changed := false
 	for id, c := range all {
-		if err := dropRateLimitSchedule(id); err != nil {
-			c.Tries++
-			c.LastErr = err.Error()
-			all[id] = c
-			changed = true
-			continue
-		}
-		log.Printf("rate-limit: cancelled the schedule %s of %s after %d failed attempt(s)", id, c.Session, c.Tries)
-		delete(all, id)
-		changed = true
+		settleRateLimitCancel(all, id, c)
 	}
-	if !changed {
-		return
-	}
-	if len(all) == 0 {
-		rateLimitCleanups.Remove(rateLimitCleanupKey)
-		return
-	}
-	if err := rateLimitCleanups.Write(rateLimitCleanupKey, all); err != nil {
-		log.Printf("rate-limit: could not update the pending cancellations: %v", err)
-	}
+	writeRateLimitCleanups(all)
 }
 
 // pendingRateLimitCleanups lists the ids still waiting for a confirmed cancellation.

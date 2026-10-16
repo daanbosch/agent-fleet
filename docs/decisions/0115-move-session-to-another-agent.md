@@ -294,7 +294,10 @@ it is not yet.
   The public entry takes the lease once; an inner step takes a `*lifegate.Lease` parameter and
   checks it (`Check`), and a lease carried on a request's context is borrowed by `Enter`
   (`deliverPendingPeer` → `/input`). The closed state is kept in memory as well as on the meta,
-  because a meta read that lands inside an unrelated rewrite of the file does not parse.
+  because a meta read that lands inside an unrelated rewrite of the file does not parse; a meta
+  that exists and still cannot be read after retrying refuses (`ErrMetaUnreadable`) rather than
+  admits, since after a restart it is the only record of a move. The cursor pump releases its
+  lease once `session/prompt` is on the child's stdin.
 - **Gated paths:** `/input` (every body form, peer messages included), `/turn` (every op: on
   Managed each one resumes the runtime), `/start`, `/recreate`, `/driver`, `/respond`,
   `/answer-question`, `/plan-respond`, `/carried-answer`, the chat bridge's inbound text and
@@ -304,13 +307,18 @@ it is not yet.
   session_moved` with the target in `error.target`.
 - **Start states:** `stopped` is accepted next to idle, `limited` and `spendLimit`. A source
   parked at a weekly limit is usually stopped by the idle reaper long before anyone moves it,
-  and a stopped session can start nothing either. A pending interaction is still refused.
+  and a stopped session can start nothing either. A pending interaction is still refused, and
+  so is a stopped **Managed cursor** source, whose conversation lived only in its handle.
 - **The sweep** holds the session's lease for its whole step, not only around
   `putRateLimitSchedule`: the episode file that records a booking is then written before a
   move can close input, so a commit always finds the id to cancel.
-- **Cancellations** go through `cancelRateLimitSchedule`; an id the CP has not confirmed (a 404
-  counts as confirmed) is kept in `session-rate-limit-cleanup` and retried at the start of
-  every sweep, with no expiry.
+- **Cancellations** go through `cancelRateLimitSchedule`: the id is written to
+  `session-rate-limit-cleanup` before the CP is called and dropped only when the CP confirms (a
+  404 counts), retried at the start of every sweep, with no expiry. Commit records the id before
+  it closes the episode, and fails with nothing changed if the record cannot be written.
+- **A refused booking and a rollback** are ordered by one lock: a rollback repairs, clears
+  `moving` and reopens under it. A refusal that reaches its record after the rollback (the
+  request stalled in between) finds the source open and books the resume again itself.
 - **The move's primitives** are `beginSessionMove`, `rollback` and `commit` (sessionx,
   `session_move_gate.go`) plus `reopenMovedSession` for decision 11.6. Commit changes the meta,
   closes the episode and cancels its booking; stopping the source and taking its spooled peer

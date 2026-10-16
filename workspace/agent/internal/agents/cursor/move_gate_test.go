@@ -43,7 +43,18 @@ func TestPumpCommitsBeforeAMoveOrLeavesTheEntryQueued(t *testing.T) {
 		t.Fatal("the move got the gate while the pump was about to commit an entry")
 	case <-time.After(50 * time.Millisecond):
 	}
+	// Committed but not yet on the child's stdin: the runtime does not have it, so the move
+	// still waits.
+	f.writes.hold()
 	release()
+	waitState(t, h, agents.TurnRunning)
+	select {
+	case <-locked:
+		f.writes.release() // or the cleanup waits on the held write forever
+		t.Fatal("the move got the gate before session/prompt reached the runtime")
+	case <-time.After(50 * time.Millisecond):
+	}
+	f.writes.release()
 	first := expectPrompt(t, f, "one")
 	var x *lifegate.Exclusive
 	select {

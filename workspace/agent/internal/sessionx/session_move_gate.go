@@ -66,27 +66,49 @@ func writeGateErr(w http.ResponseWriter, err error) {
 	}
 }
 
-// noteBookingRefusedDuringMove records, when the gate refused a scheduled send, that it was the
-// session's own usage-limit booking. That once-schedule is spent, and only a rollback can know
-// to book it again (repairRateLimitBookingAfterMove).
-func noteBookingRefusedDuringMove(name, source, scheduleID string) {
+// noteBookingRefusedDuringMove handles a scheduled send the gate refused because a move closed
+// input, when it was the session's own usage-limit booking: that once-schedule is spent, and the
+// watch never replaces an id the episode still holds. While the move runs, the refusal is
+// recorded for its rollback to repair; if the move has rolled back by the time this runs (the
+// request stalled between its refusal and here), nobody else will repair it, so it is repaired
+// here. A committed move cancelled the booking and closed the episode, and needs nothing.
+func noteBookingRefusedDuringMove(name, source, scheduleID string, now time.Time) {
 	if scheduleID == "" || injectionSource(source) != TurnSourceSchedule {
 		return
+	}
+	if beforeNoteRefusal != nil {
+		beforeNoteRefusal()
 	}
 	moveEpisodeMu.Lock()
 	defer moveEpisodeMu.Unlock()
 	st, ok := RateLimitStates.Read(name)
-	if !ok || st.ScheduleID != scheduleID || st.FiredDuringMove == scheduleID {
+	if !ok || st.ScheduleID != scheduleID {
 		return
 	}
-	st.FiredDuringMove = scheduleID
-	_ = RateLimitStates.Write(name, st)
-	log.Printf("move: %s: its usage-limit resume %s fired while its input was closed", name, scheduleID)
+	m, ok := session.ReadMeta(name)
+	switch {
+	case !ok || m.MovedTo != "":
+		return
+	case m.Moving != "":
+		if st.FiredDuringMove != scheduleID {
+			st.FiredDuringMove = scheduleID
+			_ = RateLimitStates.Write(name, st)
+			log.Printf("move: %s: its usage-limit resume %s fired while its input was closed", name, scheduleID)
+		}
+	default:
+		log.Printf("move: %s: its usage-limit resume %s was refused by a move that has rolled back since", name, scheduleID)
+		rebookSpentRateLimitBooking(m, st, now)
+	}
 }
 
-// moveEpisodeMu orders the move's edits of the usage-limit episode. The refusal is recorded by
-// an input path that holds no lease, so without it a refusal read before a commit closed the
-// episode could write the episode back after it.
+// Test seams: beforeNoteRefusal runs between a refusal and its record, afterMoveRepair inside a
+// rollback between the repair and the reopening.
+var beforeNoteRefusal, afterMoveRepair func()
+
+// moveEpisodeMu makes a move's settlement of the usage-limit episode one step against the
+// refusals recorded by input paths, which hold no lease: a rollback repairs, clears moving and
+// reopens under it, and a commit records the cancellation, writes movedTo and closes the episode
+// under it. A refusal therefore sees the move either still running or fully settled.
 var moveEpisodeMu sync.Mutex
 
 // moveSourceState is the source's state and its pending interaction ("" for none), as the move
@@ -97,7 +119,8 @@ var moveSourceState = func(m session.Meta) (state, blocker string) {
 
 // movableSourceState lists the states a move may start from. idle, limited and spendLimit are
 // ADR 0115's; stopped is added because a source parked at its limit for days is usually stopped
-// by the idle reaper by then, and a stopped session can start nothing either. Everything else
+// by the idle reaper by then, and a stopped session can start nothing either (a stopped Managed
+// cursor is the exception, refused by beginSessionMove: errMoveCursorStopped). Everything else
 // is refused: a working source is mid-turn, and a pending question, plan or permission would be
 // silently abandoned.
 func movableSourceState(st string) bool {
@@ -119,6 +142,12 @@ func (e *moveStateError) Error() string {
 }
 
 var errMoveSourceGone = errors.New("the session to move does not exist")
+
+// errMoveCursorStopped refuses a stopped Managed cursor source, the one exception to moving a
+// stopped session: its conversation lived only in the runtime handle, which is gone, so there
+// is nothing to write the handover from (ADR 0115, "What each kind's transcript yields").
+var errMoveCursorStopped = errors.New("a stopped Managed cursor session has no conversation left to move; " +
+	"its history lived only in the running agent")
 
 // sourceMove is one move of a source, from begin until commit or rollback.
 type sourceMove struct {
@@ -149,6 +178,9 @@ func beginSessionMove(ctx context.Context, source, target string) (*sourceMove, 
 	if m.Moving != "" {
 		return nil, &lifegate.MovedError{Session: source, Target: m.Moving}
 	}
+	if m.Kind == session.KindCursor && m.DriverKind() == session.DriverManaged && !ManagedAlive(m) {
+		return nil, errMoveCursorStopped
+	}
 	state, blocker := moveSourceState(m)
 	if blocker != "" {
 		return nil, &moveStateError{Session: source, State: blocker}
@@ -174,7 +206,12 @@ func beginSessionMove(ctx context.Context, source, target string) (*sourceMove, 
 // decision 11.4). The usage-limit booking is repaired first, while input is still closed, so a
 // sweep that runs as soon as it opens finds the episode already settled and books nothing twice.
 func (mv *sourceMove) rollback(now time.Time) error {
+	moveEpisodeMu.Lock()
+	defer moveEpisodeMu.Unlock()
 	repairRateLimitBookingAfterMove(mv.source, now)
+	if afterMoveRepair != nil {
+		afterMoveRepair()
+	}
 	if _, ok := UpdateSessionMeta(mv.source, func(cur *session.Meta) bool {
 		if cur.Moving != mv.target {
 			return false
@@ -193,7 +230,24 @@ func (mv *sourceMove) rollback(now time.Time) error {
 
 // commit records that the target exists (ADR 0115 decision 11.5): moving becomes movedTo, which
 // keeps the source closed until its user reopens it, and the usage-limit watch is settled.
+//
+// The booking's id is recorded for cancellation before anything else changes, and the episode
+// lets go of it only after that: an Agent that stops at any point leaves the id in one store
+// or the other. A record that cannot be written fails the commit with nothing changed.
 func (mv *sourceMove) commit() error {
+	moveEpisodeMu.Lock()
+	m, ok := session.ReadMeta(mv.source)
+	if !ok || m.Moving != mv.target {
+		moveEpisodeMu.Unlock()
+		return fmt.Errorf("session %s is not moving to %s", mv.source, mv.target)
+	}
+	st, hasEpisode := RateLimitStates.Read(mv.source)
+	if hasEpisode && st.ScheduleID != "" {
+		if err := recordRateLimitCancel(mv.source, st.ScheduleID); err != nil {
+			moveEpisodeMu.Unlock()
+			return fmt.Errorf("recording the cancellation of the usage-limit resume: %w", err)
+		}
+	}
 	if _, ok := UpdateSessionMeta(mv.source, func(cur *session.Meta) bool {
 		if cur.Moving != mv.target {
 			return false
@@ -201,11 +255,20 @@ func (mv *sourceMove) commit() error {
 		cur.Moving, cur.MovedTo = "", mv.target
 		return true
 	}); !ok {
+		moveEpisodeMu.Unlock()
 		return fmt.Errorf("session %s is not moving to %s", mv.source, mv.target)
 	}
 	lifegate.SetClosed(mv.source, mv.target, true)
 	lifegate.DropReopen(mv.source)
-	settleRateLimitAfterMove(mv.source)
+	if hasEpisode {
+		RateLimitStates.Remove(mv.source) // nothing shows the source as waiting for a reset
+	}
+	moveEpisodeMu.Unlock()
+	if hasEpisode && st.ScheduleID != "" {
+		// Outside the lock: the CP may take its timeout. A failure stays recorded for the sweep,
+		// and a booking that fires before then is refused by the gate.
+		finishRateLimitCancel(st.ScheduleID)
+	}
 	log.Printf("move: %s: moved to %s", mv.source, mv.target)
 	return nil
 }
@@ -226,36 +289,34 @@ func reopenMovedSession(name string) error {
 	return nil
 }
 
-// settleRateLimitAfterMove closes the moved source's usage-limit episode and cancels its
-// booking. The episode goes at once, so nothing shows the source as waiting for a reset; a
-// cancellation the CP does not confirm is kept and retried by the sweep (rate_limit_cleanup.go).
-// A booking that fires before that is refused by the gate.
-func settleRateLimitAfterMove(name string) {
-	moveEpisodeMu.Lock()
-	defer moveEpisodeMu.Unlock()
+// repairRateLimitBookingAfterMove books the resume again when the source's booking is spent:
+// it fired during the move and the gate refused it, or its cancellation is pending (a commit
+// that recorded it and then failed). The watch would never replace it: scheduleRateLimitResume
+// declines while the episode holds an id. Called with moveEpisodeMu held.
+func repairRateLimitBookingAfterMove(name string, now time.Time) {
 	st, ok := RateLimitStates.Read(name)
+	if !ok || st.ScheduleID == "" {
+		return
+	}
+	_, cancelling := pendingRateLimitCleanups()[st.ScheduleID]
+	if st.FiredDuringMove != st.ScheduleID && !cancelling {
+		return
+	}
+	m, ok := session.ReadMeta(name)
 	if !ok {
 		return
 	}
-	RateLimitStates.Remove(name)
-	cancelRateLimitSchedule(name, st.ScheduleID)
+	rebookSpentRateLimitBooking(m, st, now)
 }
 
-// repairRateLimitBookingAfterMove books the resume again when the source's booking fired during
-// the move and the gate refused it. That once-schedule is spent, and the watch would never
-// replace it: scheduleRateLimitResume declines while the episode holds an id. The new booking
-// is at the original instant, or as soon as the scheduler allows when that has passed.
-func repairRateLimitBookingAfterMove(name string, now time.Time) {
-	moveEpisodeMu.Lock()
-	defer moveEpisodeMu.Unlock()
-	st, ok := RateLimitStates.Read(name)
-	if !ok || st.FiredDuringMove == "" || st.FiredDuringMove != st.ScheduleID {
-		return
-	}
-	cancelRateLimitSchedule(name, st.ScheduleID) // the spent row, or it stays in the Console's list
+// rebookSpentRateLimitBooking cancels the spent row (or it stays in the Console's list) and books
+// the resume again, at the original instant or as soon as the scheduler allows when that has
+// passed. Called with moveEpisodeMu held.
+func rebookSpentRateLimitBooking(m session.Meta, st rateLimitState, now time.Time) {
+	name := m.Name
+	_ = cancelRateLimitSchedule(name, st.ScheduleID)
 	st.ScheduleID, st.FiredDuringMove = "", ""
-	m, ok := session.ReadMeta(name)
-	if !ok || !uiprefs.RateLimitAutoResume() {
+	if !uiprefs.RateLimitAutoResume() {
 		_ = RateLimitStates.Write(name, st)
 		return
 	}

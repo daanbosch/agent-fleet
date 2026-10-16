@@ -679,7 +679,7 @@ func (h *threadHandle) pump() {
 		// h.mu while it holds the gate.
 		lease, err := lifegate.Enter(context.Background(), h.name)
 		if err != nil {
-			h.parkForMove()
+			h.parkForMove(err)
 			return
 		}
 		h.mu.Lock()
@@ -716,7 +716,17 @@ func (h *threadHandle) pump() {
 // snapshot. If the move rolls back, the gate reopens and the pump starts again. The second look
 // covers a reopen that ran before the callback was registered or while pumping was still set,
 // when resumePump would have found nothing to do.
-func (h *threadHandle) parkForMove() {
+//
+// A meta the gate could not read is not a move: nothing will reopen it, so the pump looks again
+// after a pause instead.
+func (h *threadHandle) parkForMove(err error) {
+	if errors.Is(err, lifegate.ErrMetaUnreadable) {
+		h.mu.Lock()
+		h.pumping = false
+		h.mu.Unlock()
+		time.AfterFunc(time.Second, h.resumePump)
+		return
+	}
 	lifegate.WhenReopened(h.name, h.resumePump)
 	h.mu.Lock()
 	h.pumping = false
@@ -744,8 +754,8 @@ func (h *threadHandle) resumePump() {
 // The turn-boundary MarkTurnStart/End drive the status store and the docs/log/30 completion
 // report (the notify seam).
 //
-// lease is the entry's hold on the lifecycle gate (pump), released once the runtime has the
-// input and the transcript shows it; a turn can run for hours and must not hold a move off.
+// lease is the entry's hold on the lifecycle gate (pump), released once session/prompt is on the
+// child's stdin; a turn can run for hours and must not hold a move off.
 func (h *threadHandle) runTurn(t *agents.Taken, lease *lifegate.Lease) {
 	defer lease.Release()
 	agents.MarkTurnStartRun(h.slotSid, t.In)
@@ -776,12 +786,17 @@ func (h *threadHandle) runTurn(t *agents.Taken, lease *lifegate.Lease) {
 	// user_message_chunk. Only after Commit: a cancelled entry never became a turn.
 	h.buf.addUserTurn(t.In.Prompt)
 	h.emit(agents.Event{Kind: "turn_state", TurnState: agents.TurnRunning})
-	lease.Release()
 	written := false
 	res, err := cl.callWritten("session/prompt", map[string]any{
 		"sessionId": sid,
 		"prompt":    []map[string]any{{"type": "text", "text": t.In.Prompt}},
-	}, 0, func() { written = true; h.received(t, cl, sid) }) // no timeout — a turn runs as long as it runs
+	}, 0, func() {
+		written = true
+		// The runtime has the input now. A write that fails keeps the lease (the deferred release)
+		// until the entry is requeued below, so a move never snapshots it in neither place.
+		lease.Release()
+		h.received(t, cl, sid)
+	}) // no timeout — a turn runs as long as it runs
 	h.buf.flushAsst() // close the open assistant turn: ACP has no turn_ended notification
 	h.mu.Lock()
 	interrupted := h.stopping

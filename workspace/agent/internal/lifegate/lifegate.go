@@ -21,8 +21,10 @@ package lifegate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"sync"
 	"time"
@@ -178,7 +180,11 @@ func Enter(ctx context.Context, name string) (*Lease, error) {
 	g.mu.Unlock()
 	l := &Lease{name: name, g: g}
 	if closed == nil {
-		closed = closedByMeta(name)
+		var err error
+		if closed, err = closedByMeta(name); err != nil {
+			l.Release()
+			return nil, err
+		}
 	}
 	if closed != nil {
 		l.Release()
@@ -188,20 +194,35 @@ func Enter(ctx context.Context, name string) (*Lease, error) {
 	return l, nil
 }
 
-// closedByMeta reads the durable side of the closed state. A meta that exists but does not
-// parse is being rewritten (session.WriteMeta truncates first), so it is read again rather
-// than taken as "no session", which would admit the input.
-func closedByMeta(name string) *MovedError {
-	for i := 0; ; i++ {
-		m, ok := session.ReadMeta(name)
-		if ok {
-			return movedErrorOf(m)
+// ErrMetaUnreadable refuses a session whose meta exists but cannot be read or parsed. After a
+// restart the meta is the only record of moving / movedTo, so a lease issued on a meta that
+// could not be read could start a moved source. The caller may try again later.
+var ErrMetaUnreadable = errors.New("lifegate: the session's meta cannot be read; refusing until it can")
+
+// closedByMeta reads the durable side of the closed state. Only a meta that does not exist
+// admits the input as "no session". One that does not parse is usually being rewritten
+// (session.WriteMeta truncates first), so it is read again for a while; if it still cannot be
+// read, the answer is ErrMetaUnreadable, never "open".
+func closedByMeta(name string) (*MovedError, error) {
+	var lastErr error
+	for i := 0; i < 20; i++ {
+		if i > 0 {
+			time.Sleep(5 * time.Millisecond)
 		}
-		if _, err := os.Stat(session.MetaPath(name)); err != nil || i >= 20 {
-			return nil
+		b, err := os.ReadFile(session.MetaPath(name))
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
 		}
-		time.Sleep(5 * time.Millisecond)
+		if err == nil {
+			var m session.Meta
+			if err = json.Unmarshal(b, &m); err == nil {
+				m.Name = name
+				return movedErrorOf(m), nil
+			}
+		}
+		lastErr = err
 	}
+	return nil, fmt.Errorf("%w: %v", ErrMetaUnreadable, lastErr)
 }
 
 func movedErrorOf(m session.Meta) *MovedError {
@@ -214,14 +235,19 @@ func movedErrorOf(m session.Meta) *MovedError {
 	return nil
 }
 
-// Closed reports whether name's input is closed now, without taking the gate. For a caller
-// that must not wait, such as a refused pump checking whether it missed the reopen.
+// Closed reports whether name's input is closed now, without taking the gate; an unreadable
+// meta counts as closed. For a caller that must not wait, such as a refused pump checking
+// whether it missed the reopen.
 func Closed(name string) bool {
 	g := gateOf(name)
 	g.mu.Lock()
 	closed := g.closed
 	g.mu.Unlock()
-	return closed != nil || closedByMeta(name) != nil
+	if closed != nil {
+		return true
+	}
+	byMeta, err := closedByMeta(name)
+	return byMeta != nil || err != nil
 }
 
 // Exclusive is a move's hold on one session's gate: no lease is held while it is, and none is

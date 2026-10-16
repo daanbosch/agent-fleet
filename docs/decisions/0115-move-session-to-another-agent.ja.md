@@ -267,7 +267,9 @@ develop（2026-10-15）の `Agent.Transcript`／`claude.CollectAllTurns` を読�
   続けない。その代わり入れ子の取得はデッドロックになる。公開の入口が一度だけリースを取り、内側の手順は
   `*lifegate.Lease` を引数で受けて確かめる（`Check`）。リクエストのコンテキストに載ったリースは
   `Enter` が借りる（`deliverPendingPeer` → `/input`）。閉じた状態はメタに加えてメモリにも持つ。
-  無関係な書き換えの最中に読んだメタはパースできないからだ。
+  無関係な書き換えの最中に読んだメタはパースできないからだ。存在するのに読み直しても読めないメタは、
+  受け入れずに拒否する（`ErrMetaUnreadable`）。再起動後は移動の唯一の記録だからだ。cursor のポンプは
+  `session/prompt` が子プロセスの stdin に書かれた時点でリースを返す。
 - **ゲートを通る経路:** `/input`（peer を含むすべての形）、`/turn`（すべての op。Managed ではどれも
   ランタイムを再開する）、`/start`、`/recreate`、`/driver`、`/respond`、`/answer-question`、
   `/plan-respond`、`/carried-answer`、チャットブリッジの受信テキストとボタン回答、中断・認証の自動再開
@@ -276,11 +278,16 @@ develop（2026-10-15）の `Agent.Transcript`／`claude.CollectAllTurns` を読�
   `409 session_moved` で、`error.target` に移動先が入る。
 - **開始できる状態:** idle・`limited`・`spendLimit` に加えて `stopped` も受ける。週の上限で止まった
   元セッションは、移動される頃にはたいてい idle reaper に停止されている。停止中のセッションも何も
-  始められない。保留中の対話は従来どおり拒否する。
+  始められない。保留中の対話は従来どおり拒否する。会話がハンドルの中にしか無かった停止中の
+  **Managed の cursor** も拒否する。
 - **巡回**は `putRateLimitSchedule` の前後だけでなく、そのセッションの一歩全体でリースを持つ。予約を
   記録したエピソードファイルが、移動が入力を閉じる前に書かれ、確定時に必ず取り消す id が見つかる。
-- **取り消し**は `cancelRateLimitSchedule` を通る。CP が確認していない id（404 は確認とみなす）は
-  `session-rate-limit-cleanup` に残し、巡回のたびに再試行する。期限は無い。
+- **取り消し**は `cancelRateLimitSchedule` を通る。id は CP を呼ぶ前に `session-rate-limit-cleanup`
+  に書き、CP が確認したとき（404 も確認とみなす）だけ消す。巡回のたびに再試行し、期限は無い。確定は
+  エピソードを閉じる前に id を記録し、記録が書けなければ何も変えずに失敗する。
+- **拒否された予約とロールバック**は一つのロックで順序付ける。ロールバックは修復・`moving` の消去・
+  再開をその中で行う。ロールバックの後で記録に来た拒否（その間に止まっていた要求）は、元が開いて
+  いるのを見て自分で予約し直す。
 - **移動の基本操作**は `beginSessionMove`・`rollback`・`commit`（sessionx の `session_move_gate.go`）と、
   決定 11.6 のための `reopenMovedSession`。確定はメタを変え、エピソードを閉じ、その予約を取り消す。
   元セッションの停止と spool の peer メッセージの取り出しは、順序を持つ移動の側に残した。
