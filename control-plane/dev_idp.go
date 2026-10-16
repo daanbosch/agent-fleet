@@ -44,11 +44,13 @@ type devIdPAPI struct {
 	mgr  *manager
 	keys *devIdPKeyring
 	now  func() time.Time
+	// brand colours and labels the consent page; nil answers the shipped look.
+	brand *brandResolver
 }
 
 func newDevIdPAPI(cfg config) devIdPAPI {
 	m := cfg.mgr
-	return devIdPAPI{mgr: m, keys: newDevIdPKeyring(m.store, m, time.Now), now: time.Now}
+	return devIdPAPI{mgr: m, keys: newDevIdPKeyring(m.store, m, time.Now), now: time.Now, brand: cfg.brand}
 }
 
 // registerDevIdPRoutes mounts the endpoints. authorize is deliberately NOT exempt from
