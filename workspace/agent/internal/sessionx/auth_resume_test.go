@@ -269,3 +269,78 @@ func TestAuthResumeRefreshLockForcedWhenNothingRefreshes(t *testing.T) {
 		t.Fatalf("a non-refresh login failure was forced: %v", f2.sent)
 	}
 }
+
+// TestAuthResumeForcedStillSettles: the force point replaces "no credential written since the
+// failure", not the settle. A credential written one second ago may be a sign-in still being
+// wired up, so even past 90s the resume waits for it to settle.
+func TestAuthResumeForcedStillSettles(t *testing.T) {
+	f := newAbortFixture(t)
+	noFastWatch(t)
+	m := arMeta()
+	cut := time.Now()
+	a := refreshAbort(cut)
+	authResumeAttempt(m, arState(t, m.Name), a, cut)
+
+	now := cut.Add(authResumeRefreshForceAfter + 10*time.Second)
+	setLoginAt(t, now.Add(-time.Second))
+	authResumeAttempt(m, arState(t, m.Name), a, now)
+	if len(f.sent) != 0 {
+		t.Fatalf("resumed on a credential written one second ago: %v", f.sent)
+	}
+	authResumeAttempt(m, arState(t, m.Name), a, now.Add(authResumeRefreshSettle))
+	if len(f.sent) != 1 {
+		t.Fatalf("resume prompts = %d, want 1 once that credential settled", len(f.sent))
+	}
+}
+
+// TestAuthResumeForcedNeedsAJudgeableLogin: no readable credential (logged out, a half-written
+// file, an environment token, a dead login) gives no moment, and forcing a resume onto it would
+// only spend an attempt.
+func TestAuthResumeForcedNeedsAJudgeableLogin(t *testing.T) {
+	f := newAbortFixture(t)
+	noFastWatch(t)
+	m := arMeta()
+	cut := time.Now()
+	a := refreshAbort(cut)
+	setLoginAt(t, time.Time{})
+	authResumeAttempt(m, arState(t, m.Name), a, cut)
+	authResumeAttempt(m, arState(t, m.Name), a, cut.Add(time.Hour))
+	if len(f.sent) != 0 {
+		t.Fatalf("forced a resume with no credential to judge: %v", f.sent)
+	}
+}
+
+// TestAuthResumeForcedDoesNotCarryOverToARevokedLogin: refresh-lock error, forced resume, and the
+// resumed turn then dies on a revoked login. Nothing may be forced from then on — only a credential
+// newer than that failure releases it — and the spent attempt still counts.
+func TestAuthResumeForcedDoesNotCarryOverToARevokedLogin(t *testing.T) {
+	f := newAbortFixture(t)
+	noFastWatch(t)
+	m := arMeta()
+	cut := time.Now()
+	setLoginAt(t, cut.Add(-time.Hour))
+	authResumeAttempt(m, arState(t, m.Name), refreshAbort(cut), cut)
+	forcedAt := cut.Add(authResumeRefreshForceAfter)
+	authResumeAttempt(m, arState(t, m.Name), refreshAbort(cut), forcedAt)
+	if len(f.sent) != 1 {
+		t.Fatalf("the first forced resume did not go out: %v", f.sent)
+	}
+
+	revoked := forcedAt.Add(time.Minute)
+	for _, d := range []time.Duration{0, authResumeBackoff + time.Minute, time.Hour} {
+		authResumeAttempt(m, arState(t, m.Name), authAbort(revoked), revoked.Add(d))
+	}
+	if len(f.sent) != 1 {
+		t.Fatalf("forced a resume onto a revoked login: %v", f.sent)
+	}
+	if st := arState(t, m.Name); st.Attempts != 1 {
+		t.Errorf("attempts = %d, want the spent one kept", st.Attempts)
+	}
+
+	renewed := revoked.Add(2 * time.Hour)
+	setLoginAt(t, renewed)
+	authResumeAttempt(m, arState(t, m.Name), authAbort(revoked), renewed.Add(authResumeSettle+time.Second))
+	if len(f.sent) != 2 {
+		t.Fatalf("a credential newer than the revoked failure did not release it: %v", f.sent)
+	}
+}

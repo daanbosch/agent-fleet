@@ -157,6 +157,19 @@ func authResumeAttempt(m session.Meta, st authResumeState, a claude.Abort, now t
 	if st.GaveUp != "" {
 		return
 	}
+	if claude.RefreshStuck(st.Msg) != claude.RefreshStuck(a.Msg) {
+		// The failure changed kind inside one episode (a forced resume after a refresh-lock
+		// error that then died on a revoked login, or the reverse). The old kind's shortcuts must
+		// not carry over: restart the clock at the new failure and wait for a credential newer
+		// than it. Attempts are kept, so the cap still counts the resumes already spent.
+		st.Msg = a.Msg
+		st.At = abortEpisodeStart(a, now)
+		_ = authResumeStates.Write(m.Name, st)
+		log.Printf("auth-resume: the failure of %s changed to (%s)", m.Name, a.Msg)
+		if claude.RefreshStuck(a.Msg) {
+			authResumeFastWatch(m, st)
+		}
+	}
 	if authEpisodeStale(st, now) {
 		st.GaveUp = authGaveUpStale
 		log.Printf("auth-resume: giving up on %s (%s)", m.Name, st.GaveUp)
@@ -238,15 +251,27 @@ func authResumeRenewed(st authResumeState, now time.Time) bool {
 }
 
 // authResumeForced reports that a refresh-lock episode has outlived any lock claude could still
-// be waiting on, so the resume goes out without a rewritten credential (see
-// authResumeRefreshForceAfter). The attempt cap and backoff still bound it, and a login that is
-// really dead is refused earlier by the send guard.
+// be waiting on, so the resume goes out without a credential rewritten after the failure (see
+// authResumeRefreshForceAfter). The attempt cap and backoff still bound it.
+//
+// It stands in for ONE missing fact only, "nothing was written since the failure". It still needs
+// a login that can be judged (a readable OAuth record whose refresh half is alive: no file, an
+// unparsable file, an environment token or a dead login give no moment, and nothing is forced
+// onto them), and a credential written moments ago must settle first, as authResumeRenewed
+// demands, since that write may be a sign-in still being wired up.
 func authResumeForced(st authResumeState, now time.Time) bool {
 	if !claude.RefreshStuck(st.Msg) {
 		return false
 	}
 	at, err := time.Parse(time.RFC3339, st.At)
-	return err == nil && !now.Before(at.Add(authResumeRefreshForceAfter))
+	if err != nil || now.Before(at.Add(authResumeRefreshForceAfter)) {
+		return false
+	}
+	ok := authResumeNow()
+	if ok.IsZero() {
+		return false
+	}
+	return !ok.After(at) || !now.Before(ok.Add(authResumeRefreshSettle))
 }
 
 // startRefreshWatch polls the credentials file for one refresh-lock episode and hands the
