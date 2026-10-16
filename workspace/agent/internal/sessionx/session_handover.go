@@ -233,13 +233,25 @@ func isPersonTurn(t transcript.Turn) bool {
 	return t.Role == "user" && !t.Sidechain && !t.CostOnly && !t.Compact && (len(t.Parts) > 0 || strings.TrimSpace(t.Text) != "")
 }
 
-// isAgentPrompt reports whether a user turn is a prompt the Agent itself injected. Only the
-// text decides: Turn.Source is "schedule" for the Agent's resume and for a user's own
-// schedule alike, and the tag ledger forgets old bodies, so provenance would both drop
-// real instructions and miss old nudges.
+// isAgentPrompt reports whether a user turn is nothing but a prompt the Agent itself
+// injected. The text decides, not Turn.Source: Source is "schedule" for the Agent's resume and
+// for a user's own schedule alike, and the tag ledger forgets old bodies. But the whole turn
+// must be that text: any other part (a file, a tool, an unknown kind) or an explicit origin
+// that is not the Agent's (peer, operator, chat bridge, spawn) keeps the turn, since the data
+// then cannot show that dropping it is safe.
 func isAgentPrompt(t transcript.Turn) bool {
-	if t.Role != "user" || t.Compact {
+	if t.Role != "user" || t.Compact || t.PeerFrom != "" {
 		return false
+	}
+	switch t.Source {
+	case "", TurnSourceSchedule, TurnSourceAutoResume:
+	default:
+		return false
+	}
+	for _, p := range t.Parts {
+		if p.Kind != "text" {
+			return false
+		}
 	}
 	s := turnText(t)
 	return isRateLimitResumePrompt(s) || isAbortResumePrompt(s)
@@ -335,15 +347,26 @@ func RenderHandover(h Handover, lang string) (string, Handover) {
 		return md, h
 	}
 	h.Turns = slices.Clone(h.Turns)
+	// open is the code fence left open by the assistant texts before this one. A fence can
+	// span the text parts of one answer and the rows of one reply, so a text is cut only when
+	// it neither starts nor ends inside a fence: cutting one half would swallow the rest of
+	// the conversation into a code block.
+	open := ""
 	for i := 0; i < h.RecentFrom && len(md) > handoverSizeTarget; i++ {
 		t := h.Turns[i]
 		if t.Role != "assistant" || t.Compact {
+			open = ""
 			continue
 		}
 		parts := slices.Clone(t.Parts)
 		cut := 0
 		for j, p := range parts {
 			if p.Kind != "text" {
+				continue
+			}
+			before := open
+			open = fenceAfter(open, strings.TrimSpace(p.Text))
+			if before != "" || open != "" {
 				continue
 			}
 			if short, ok := firstParagraph(p.Text); ok {
@@ -362,6 +385,30 @@ func RenderHandover(h Handover, lang string) (string, Handover) {
 	return md, h
 }
 
+// fenceStep advances the code-fence state over one line: open is the fence string currently
+// open ("" = none).
+func fenceStep(open, line string) string {
+	tl := strings.TrimSpace(line)
+	if open != "" {
+		if strings.HasPrefix(tl, open) && strings.Trim(tl, open[:1]) == "" {
+			return ""
+		}
+		return open
+	}
+	if strings.HasPrefix(tl, "```") || strings.HasPrefix(tl, "~~~") {
+		return strings.Repeat(tl[:1], len(tl)-len(strings.TrimLeft(tl, tl[:1])))
+	}
+	return ""
+}
+
+// fenceAfter is the fence state at the end of s, given the state before it.
+func fenceAfter(open, s string) string {
+	for _, l := range strings.Split(s, "\n") {
+		open = fenceStep(open, l)
+	}
+	return open
+}
+
 // firstParagraph returns s up to its first blank line outside a code fence; ok is false when
 // there is nothing after it to cut. A fence the paragraph opens is carried to its close, so
 // the cut never leaves one open.
@@ -369,18 +416,11 @@ func firstParagraph(s string) (string, bool) {
 	lines := strings.Split(strings.TrimSpace(s), "\n")
 	fence := ""
 	for i, l := range lines {
-		tl := strings.TrimSpace(l)
-		switch {
-		case fence != "":
-			if strings.HasPrefix(tl, fence) && strings.Trim(tl, fence[:1]) == "" {
-				fence = ""
-			}
-		case strings.HasPrefix(tl, "```") || strings.HasPrefix(tl, "~~~"):
-			fence = strings.Repeat(tl[:1], len(tl)-len(strings.TrimLeft(tl, tl[:1])))
-		case tl == "" && i > 0:
+		if fence == "" && strings.TrimSpace(l) == "" && i > 0 {
 			rest := strings.TrimSpace(strings.Join(lines[i:], "\n"))
 			return strings.TrimSpace(strings.Join(lines[:i], "\n")), rest != ""
 		}
+		fence = fenceStep(fence, l)
 	}
 	return "", false
 }

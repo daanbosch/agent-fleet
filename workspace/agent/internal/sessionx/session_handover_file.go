@@ -3,6 +3,7 @@ package sessionx
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -39,13 +40,24 @@ func WriteHandoverFile(target, source, md string) (string, error) {
 }
 
 // ListHandoverFiles names the handover files in a session's own directory, sorted. Those are
-// the earlier records the session itself depends on (decision 9's chain).
-func ListHandoverFiles(name string) []string {
+// the earlier records the session itself depends on (decision 9's chain). A directory that does
+// not exist is an empty history; any other failure is an error, because reading it as empty
+// would let a move succeed and lose the chain when the source is later deleted.
+func ListHandoverFiles(name string) ([]string, error) {
 	dir := paths.SessionWorkDir(name)
 	if dir == "" {
-		return nil
+		return nil, fmt.Errorf("handover: bad session name %q", name)
 	}
-	ents, _ := os.ReadDir(dir)
+	if err := requireRealDir(dir); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
 	var out []string
 	for _, e := range ents {
 		m := handoverNameRe.FindStringSubmatch(e.Name())
@@ -55,7 +67,21 @@ func ListHandoverFiles(name string) []string {
 		out = append(out, e.Name())
 	}
 	sort.Strings(out)
-	return out
+	return out, nil
+}
+
+// requireRealDir fails unless dir is a directory and not a symlink: a session directory that
+// points elsewhere (a working copy, say) would make the file land, or the chain be read, outside
+// the throwaway directory decision 9 puts it in.
+func requireRealDir(dir string) error {
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("handover: %s is not a plain directory", dir)
+	}
+	return nil
 }
 
 // CopyHandoverChain copies source's own handover files into target's directory and returns
@@ -70,8 +96,12 @@ func CopyHandoverChain(source, target string) ([]string, error) {
 	if srcDir == "" || dstDir == "" {
 		return nil, errors.New("handover: bad session name")
 	}
+	names, err := ListHandoverFiles(source)
+	if err != nil {
+		return nil, err
+	}
 	var copied []string
-	for _, n := range ListHandoverFiles(source) {
+	for _, n := range names {
 		if n == HandoverFileName(target) || n == HandoverFileName(source) {
 			continue
 		}
@@ -88,10 +118,18 @@ func CopyHandoverChain(source, target string) ([]string, error) {
 }
 
 // writeFileSynced replaces dest atomically: temp file in the same directory, fsync, rename,
-// fsync of the directory.
+// fsync of the directory (and of its parent when this call created it). Every step's failure
+// is returned: a failed directory sync means the new name may not survive a crash.
 func writeFileSynced(dest string, b []byte) error {
 	dir := filepath.Dir(dest)
+	created := false
+	if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
+		created = true
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := requireRealDir(dir); err != nil {
 		return err
 	}
 	f, err := os.CreateTemp(dir, ".handover-*.tmp")
@@ -118,9 +156,23 @@ func writeFileSynced(dest string, b []byte) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
+	if err := syncDir(dir); err != nil {
+		return err
+	}
+	if created {
+		return syncDir(filepath.Dir(dir))
 	}
 	return nil
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		_ = d.Close()
+		return err
+	}
+	return d.Close()
 }

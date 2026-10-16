@@ -424,7 +424,7 @@ func TestWriteHandoverFileAndChain(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(paths.SessionWorkDir("b"), "notes.txt"), []byte("scratch"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := ListHandoverFiles("b"); len(got) != 1 || got[0] != "handover-a.md" {
+	if got, err := ListHandoverFiles("b"); err != nil || len(got) != 1 || got[0] != "handover-a.md" {
 		t.Fatalf("list = %v", got)
 	}
 	copied, err := CopyHandoverChain("b", "c")
@@ -447,8 +447,8 @@ func TestWriteHandoverFileAndChain(t *testing.T) {
 			t.Errorf("%s = %q, %v", n, b, err)
 		}
 	}
-	if got := ListHandoverFiles("c"); len(got) != 2 {
-		t.Errorf("c's files = %v", got)
+	if got, err := ListHandoverFiles("c"); err != nil || len(got) != 2 {
+		t.Errorf("c's files = %v, %v", got, err)
 	}
 	// No temp file is left behind.
 	ents, _ := os.ReadDir(paths.SessionWorkDir("c"))
@@ -479,5 +479,106 @@ func TestWriteHandoverFileReplacesInPlace(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(p); string(b) != "second" {
 		t.Errorf("content = %q", b)
+	}
+}
+
+func TestHandoverKeepsATurnThatIsMoreThanTheNudge(t *testing.T) {
+	nudge := rateLimitResumePromptFor("en")
+	for name, tr := range map[string]transcript.Turn{
+		"with a file": {Role: "user", Parts: []transcript.Part{hoText(nudge),
+			{Kind: "userfile", Tool: "SendUserFile", Files: []string{"image.png"}, Caption: "check this"}}},
+		"with an unknown part": {Role: "user", Parts: []transcript.Part{hoText(nudge), {Kind: "mystery", Text: "M"}}},
+		"explicit peer":        {Role: "user", Source: transcript.SourcePeer, PeerFrom: "boss", Text: nudge, Parts: []transcript.Part{hoText(nudge)}},
+		"peer without a name":  {Role: "user", Source: transcript.SourcePeer, Text: nudge, Parts: []transcript.Part{hoText(nudge)}},
+		"operator":             {Role: "user", Source: "operator", Text: nudge, Parts: []transcript.Part{hoText(nudge)}},
+	} {
+		h := hoBuild(t, []transcript.Turn{hoUser("real"), tr, hoAsst(hoText("a"))}, nil)
+		if len(h.Turns) != 3 {
+			t.Errorf("%s: the turn was dropped: %+v", name, h.Turns)
+		}
+	}
+	// The Agent's own nudge, tagged as a schedule or not at all, still goes.
+	for _, src := range []string{"", TurnSourceSchedule, TurnSourceAutoResume} {
+		h := hoBuild(t, []transcript.Turn{hoUser("real"), {Role: "user", Source: src, Text: nudge, Parts: []transcript.Part{hoText(nudge)}}, hoAsst(hoText("a"))}, nil)
+		if len(h.Turns) != 2 {
+			t.Errorf("source %q: nudge kept", src)
+		}
+	}
+}
+
+func TestHandoverSizeCutKeepsFencesBalancedAcrossParts(t *testing.T) {
+	var turns []transcript.Turn
+	// The old answer's fence spans two text parts; cutting either half would break it.
+	turns = append(turns, hoUser("ask"), hoAsst(hoText("```go\nalpha"), hoText("beta\n\ngamma\n```\n\nend")))
+	for i := 0; i < 6; i++ {
+		turns = append(turns, hoUser("u"+string(rune('a'+i))), hoAsst(hoText(longText("FILL", 50<<10))))
+	}
+	h := hoBuild(t, turns, nil)
+	md, cut := RenderHandover(h, "en")
+	if cut.Cut == 0 {
+		t.Fatal("setup: nothing was cut")
+	}
+	if !strings.Contains(md, "```go\nalpha") || !strings.Contains(md, "beta\n\ngamma\n```") {
+		t.Error("a fence spanning two parts of one answer was cut")
+	}
+	if strings.Count(md, "```")%2 != 0 {
+		t.Error("unbalanced fences in the output")
+	}
+}
+
+func TestListHandoverFilesReportsAReadFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if _, err := WriteHandoverFile("b", "a", "A"); err != nil {
+		t.Fatal(err)
+	}
+	dir := paths.SessionWorkDir("b")
+	if err := os.Chmod(dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o700)
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-000 directory")
+	}
+	if _, err := ListHandoverFiles("b"); err == nil {
+		t.Error("an unreadable directory listed as empty")
+	}
+	if copied, err := CopyHandoverChain("b", "c"); err == nil {
+		t.Errorf("the move would succeed without the chain: %v", copied)
+	}
+	if got, err := ListHandoverFiles("never-existed"); err != nil || got != nil {
+		t.Errorf("a missing directory is an empty history: %v, %v", got, err)
+	}
+}
+
+func TestHandoverFilesRefuseASymlinkedSessionDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := filepath.Join(home, "repos", "r")
+	if err := os.MkdirAll(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".af-work"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(repo, paths.SessionWorkDir("t")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteHandoverFile("t", "s", "x"); err == nil {
+		t.Error("wrote through a symlinked target directory")
+	}
+	if ents, _ := os.ReadDir(repo); len(ents) != 0 {
+		t.Errorf("the working copy got files: %v", ents)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "handover-z.md"), []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(repo, paths.SessionWorkDir("src")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ListHandoverFiles("src"); err == nil {
+		t.Errorf("listed through a symlinked source directory: %v", got)
+	}
+	if _, err := CopyHandoverChain("src", "t2"); err == nil {
+		t.Error("copied from a symlinked source directory")
 	}
 }
