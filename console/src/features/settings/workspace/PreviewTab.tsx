@@ -130,7 +130,9 @@ export function PreviewTab() {
     });
     if (res === CANCELLED) return;
     if (res && !res.error) {
-      setAu(res);
+      // The reissue answer carries the preview block only (no dev IdP fields), so it is merged
+      // over what is shown instead of replacing it, or the IdP switch would vanish.
+      setAu((prev: any) => ({ ...prev, ...res }));
       // While stopped there are no issued URLs to throw away, so a successful reissue
       // changes nothing on screen. Always say which of the two happened, or the button
       // looks dead.
@@ -285,9 +287,16 @@ function DevIdpSection({ au, save }: { au: any; save: (patch: Record<string, unk
   const tr = useT();
   const toast = useToast();
   const on = !!au.devIdp;
-  const copy = (text: string) => {
-    void navigator.clipboard?.writeText(text);
-    toast(tr("env.devidp_copied"));
+  // "Copied" only after the clipboard accepted it: the API is absent outside secure contexts
+  // and writeText rejects when permission is denied.
+  const copy = async (text: string) => {
+    try {
+      if (!navigator.clipboard) throw new Error("no clipboard");
+      await navigator.clipboard.writeText(text);
+      toast(tr("env.devidp_copied"));
+    } catch {
+      toast(tr("common.copy_failed"));
+    }
   };
   const issuer: string = au.devIdpIssuer || "";
   const values: Array<[string, string]> = [

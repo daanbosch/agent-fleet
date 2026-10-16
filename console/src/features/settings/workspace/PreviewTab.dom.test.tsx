@@ -347,6 +347,54 @@ describe("development OIDC IdP switch", () => {
     expect(text()).not.toContain("afdev_");
   });
 
+  it("keeps the switch and credentials after a reissue answer without IdP fields", async () => {
+    api.mockResolvedValue(idp());
+    apiJSON.mockResolvedValue(wsSettings({ previewReissued: true })); // as the real reissue answer: no devIdp*
+    const { PreviewTab } = await freshModule();
+    const { t } = await import("../../../lib/i18n/index.ts");
+    await mount(<PreviewTab />);
+    const b = [...host!.querySelectorAll("button")].find((x) => x.textContent === t("env.preview_reissue"))!;
+    await act(async () => b.click());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(apiJSON).toHaveBeenCalledWith("api/env/ws-settings/preview/reissue", "POST", {});
+    expect(text()).toContain(t("env.devidp_label"));
+    expect(text()).toContain("afdev_abc");
+  });
+
+  const copyBtn = async () => {
+    const { t } = await import("../../../lib/i18n/index.ts");
+    return { t, btn: [...host!.querySelectorAll("button")].find((b) => b.textContent === t("env.devidp_copy"))! };
+  };
+
+  it("does not claim a copy when the Clipboard API is missing", async () => {
+    api.mockResolvedValue(idp());
+    const { PreviewTab } = await freshModule();
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+    await mount(<PreviewTab />);
+    const { t, btn } = await copyBtn();
+    await act(async () => btn.click());
+    expect(toastSpy).toHaveBeenCalledWith(t("common.copy_failed"));
+    expect(toastSpy).not.toHaveBeenCalledWith(t("env.devidp_copied"));
+  });
+
+  it("reports a denied write without an unhandled rejection", async () => {
+    api.mockResolvedValue(idp());
+    const { PreviewTab } = await freshModule();
+    Object.defineProperty(navigator, "clipboard", { value: { writeText: () => Promise.reject(new Error("denied")) }, configurable: true });
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    await mount(<PreviewTab />);
+    const { t, btn } = await copyBtn();
+    await act(async () => btn.click());
+    await new Promise((r) => setTimeout(r, 0));
+    process.off("unhandledRejection", unhandled);
+    expect(toastSpy).toHaveBeenCalledWith(t("common.copy_failed"));
+    expect(toastSpy).not.toHaveBeenCalledWith(t("env.devidp_copied"));
+    expect(unhandled).not.toHaveBeenCalled();
+  });
+
   it("overlapping saves: a switch click behind a ports save ends on the last answer", async () => {
     api.mockResolvedValue(idp({ devIdp: false, devIdpIssuer: undefined, devIdpClientId: undefined }));
     const { PreviewTab } = await freshModule();
