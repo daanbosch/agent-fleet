@@ -426,3 +426,45 @@ func TestDevIdPAdminRoutesAreSuperAdminOnly(t *testing.T) {
 		t.Errorf("no dev_idp.set audit row among %+v", rows)
 	}
 }
+
+// A deployment with no master key and no preview domain (a dev setup) starts workspaces from
+// the memoized runtime. The switch must still be read at every start, in both directions.
+func TestStartFollowsTheDevIdPSwitchFromAMemoWithoutKeys(t *testing.T) {
+	ctx := context.Background()
+	f := &envRecordingFactory{}
+	st, mgr, victim, tn := destroyFixture(t, f)
+	mgr.publicBaseURL = "https://af.example.com"
+	memID := membershipIDOf(t, st, victim, tn)
+	ws, _, _ := st.GetWorkspaceByMembership(ctx, memID)
+	if err := st.SetWorkspaceSettings(ctx, ws.ID, `{"devIdp":true}`); err != nil {
+		t.Fatal(err)
+	}
+	mv, _, _ := st.GetMembershipByID(ctx, memID)
+	api := newWorkspaceAPI(mgr, false)
+	started := func() string {
+		t.Helper()
+		res, aerr := mgr.buildResolved(ctx, victim, mv)
+		if aerr != nil {
+			t.Fatal(aerr)
+		}
+		if aerr := api.ensureWorkspaceStarted(ctx, res); aerr != nil {
+			t.Fatalf("start: %v", aerr)
+		}
+		_ = st.SetWorkspaceState(ctx, ws.ID, "stopped")
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.started[len(f.started)-1]
+	}
+	setDevIdPDeployment(t, mgr, false)
+	if got := started(); strings.Contains(got, "AF_DEV_IDP_ISSUER") { // also memoizes the runtime
+		t.Fatalf("env injected while the switch is off: %q", got)
+	}
+	setDevIdPDeployment(t, mgr, true)
+	if got := started(); !strings.Contains(got, "AF_DEV_IDP_ISSUER=https://af.example.com/dev-idp") {
+		t.Fatalf("switch turned on but the start from the memo has no IdP env: %q", got)
+	}
+	setDevIdPDeployment(t, mgr, false)
+	if got := started(); strings.Contains(got, "AF_DEV_IDP_") {
+		t.Fatalf("switch turned off but the start still injects the IdP env: %q", got)
+	}
+}
