@@ -207,6 +207,11 @@ func HandleSessionCarriedAnswer(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_name", "invalid session name")
 		return
 	}
+	lease, ok := enterSessionGate(w, r, name)
+	if !ok {
+		return
+	}
+	defer lease.Release()
 	var req struct {
 		Decision string          `json:"decision"` // answer | approve | reject | continue | discard
 		Answers  []CarriedAnswer `json:"answers"`
@@ -261,7 +266,7 @@ func HandleSessionCarriedAnswer(w http.ResponseWriter, r *http.Request) {
 			writeBlockedErr(w, blocked)
 			return
 		}
-	} else if err := ensureSessionTmux(name, false); err != nil {
+	} else if err := ensureSessionTmux(lease, name, false); err != nil {
 		if !writeCodexReleasingErr(w, err) {
 			httpx.WriteErr(w, http.StatusInternalServerError, "start_failed", err.Error())
 		}

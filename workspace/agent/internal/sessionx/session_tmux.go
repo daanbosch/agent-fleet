@@ -14,6 +14,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/afdb"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/fleetgraph"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/lifegate"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/mcpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
@@ -95,7 +96,12 @@ func startSessionTmux(m session.Meta, ssmForce bool) error {
 // Every failure is REPORTED, never swallowed: /start answering {"ok":true} for a
 // launch that never happened is worse than a plain error, because the Console then
 // waits for a session that is not coming and offers the user no way to retry.
-func ensureSessionTmux(name string, ssmForce bool) error {
+//
+// The caller holds the session's lease (ADR 0115 decision 11.1): this starts a process.
+func ensureSessionTmux(lease *lifegate.Lease, name string, ssmForce bool) error {
+	if err := lease.Check(name); err != nil {
+		return err
+	}
 	m, ok := session.ReadMeta(name)
 	if ok && m.DriverKind() == session.DriverManaged {
 		if ManagedAlive(m) {

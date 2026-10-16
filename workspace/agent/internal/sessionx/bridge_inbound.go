@@ -8,12 +8,14 @@ package sessionx
 // notification back to the same thread (P1 send path) — no extra wiring.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/bridge"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/lifegate"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/tmuxx"
 )
@@ -43,6 +45,14 @@ func injectSessionPrompt(name, prompt string, origin agents.Origin) error {
 	if !session.ValidName(name) {
 		return fmt.Errorf("invalid session name %q", name)
 	}
+	// Held from the checks below through the send (ADR 0115 decision 11.1). A moved session
+	// refuses with a *lifegate.MovedError, which the chat bridge and the auto-resume watches
+	// report like any other refusal.
+	lease, err := lifegate.Enter(context.Background(), name)
+	if err != nil {
+		return err
+	}
+	defer lease.Release()
 	if st := promptBlocker(name); st != "" {
 		if st == "question" {
 			return errInjectQuestionPending
@@ -50,7 +60,7 @@ func injectSessionPrompt(name, prompt string, origin agents.Origin) error {
 		return errInjectDecisionPending
 	}
 	if meta, ok := session.ReadMeta(name); ok && meta.DriverKind() == session.DriverManaged {
-		return injectManagedPrompt(meta, prompt, origin)
+		return injectManagedPrompt(lease, meta, prompt, origin)
 	}
 	tn := session.TmuxName(name)
 	if !tmuxx.HasSession(tn) {
@@ -74,7 +84,10 @@ func injectSessionPrompt(name, prompt string, origin agents.Origin) error {
 
 // injectManagedPrompt is the managed-session (no tmux pane) counterpart — the non-HTTP core
 // of handleManagedInputPrompt (session_io.go).
-func injectManagedPrompt(meta session.Meta, prompt string, origin agents.Origin) error {
+func injectManagedPrompt(lease *lifegate.Lease, meta session.Meta, prompt string, origin agents.Origin) error {
+	if err := lease.Check(meta.Name); err != nil {
+		return err
+	}
 	d, ok := driverOf(meta)
 	if !ok {
 		return fmt.Errorf("managed driver unavailable for kind %s", meta.Kind)
@@ -119,7 +132,11 @@ func StartBridgeReceiver() {
 // error text leaks to chat. Locale follows the connection's notification language.
 func injectFailureReason(err error) string {
 	en := BridgeAnswerEN()
+	var moved *lifegate.MovedError
 	switch {
+	case errors.As(err, &moved):
+		return Fb(en, "⚠️ このセッションは "+moved.Target+" に移動しました。返信は移動先のセッションへ送ってください",
+			"⚠️ This session moved to "+moved.Target+" — reply in that session instead")
 	case errors.Is(err, errInjectQuestionPending):
 		return Fb(en, "⚠️ 質問への回答待ちです。テキストではなくボタン（または Console）で回答してください",
 			"⚠️ A question is awaiting an answer — reply with the buttons (or the Console), not free text")
