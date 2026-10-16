@@ -1924,6 +1924,11 @@ func HandleRecreateSession(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_name", "invalid session name")
 		return
 	}
+	lease, ok := enterSessionGate(w, r, name)
+	if !ok {
+		return
+	}
+	defer lease.Release()
 	m, ok := session.ReadMeta(name)
 	if !ok {
 		httpx.WriteErr(w, http.StatusNotFound, "not_found", "no such session: "+name)
