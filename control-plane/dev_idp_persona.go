@@ -189,6 +189,10 @@ func (a wsSettingsAPI) createPersona(w http.ResponseWriter, r *http.Request, res
 		return
 	}
 	if err := a.mgr.store.CreateDevIdPPersona(ctx, p, devIdPPersonaMax); err != nil {
+		if errors.Is(err, store.ErrDevIdPWorkspaceGone) {
+			writeAPIErr(w, &apiError{http.StatusNotFound, "not_found", "no such workspace"})
+			return
+		}
 		if errors.Is(err, store.ErrDevIdPPersonaLimit) {
 			writeAPIErr(w, &apiError{http.StatusConflict, "persona_limit", "at most " + strconv.Itoa(devIdPPersonaMax) + " personas per workspace"})
 			return

@@ -360,7 +360,8 @@ func TestDevIdPConsentGetIsNotAHandler(t *testing.T) {
 func TestDevIdPConsentCannotChooseAnotherWorkspacesPersona(t *testing.T) {
 	d := newDevIdPTestEnv(t)
 	d.addPersona(t, "admin", "")
-	other := store.DevIdPPersona{ID: "foreign-persona", WorkspaceID: "some-other-workspace", Handle: "root", CreatedAt: time.Now().Unix()}
+	otherWS := d.addViewer(t, "persona-other")
+	other := store.DevIdPPersona{ID: "foreign-persona", WorkspaceID: "ws-" + otherWS.userKey, Handle: "root", CreatedAt: time.Now().Unix()}
 	if err := d.mgr.store.CreateDevIdPPersona(context.Background(), other, 20); err != nil {
 		t.Fatal(err)
 	}
