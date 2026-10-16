@@ -59,18 +59,26 @@ func TestDevIdPCodeIsSpentExactlyOnce(t *testing.T) {
 		if _, ok, _ := st.GetDevIdPAccess(ctx, "t1", 1010); !ok {
 			t.Errorf("%s: the access token is missing", name)
 		}
-		if err := st.DeleteDevIdPGrantsByParent(ctx, "h1"); err != nil {
+		if err := st.RevokeDevIdPCode(ctx, "h1", 5000); err != nil {
 			t.Fatal(err)
 		}
 		if _, ok, _ := st.GetDevIdPAccess(ctx, "t1", 1010); ok {
 			t.Errorf("%s: the access token survived its code's revocation", name)
+		}
+		// The revoked code stays as the mark, and a token issued from it afterwards is refused.
+		if err := st.InsertDevIdPGrant(ctx, DevIdPGrant{Hash: "t2", Kind: DevIdPGrantAccess, Parent: "h1", ClientID: "c",
+			WorkspaceID: "w", MembershipID: "m", ExpiresAt: 6000}, 1020); err != ErrDevIdPCodeRevoked {
+			t.Errorf("%s: a token issued from a revoked code: %v", name, err)
+		}
+		if _, ok, _ := st.GetDevIdPAccess(ctx, "t2", 1020); ok {
+			t.Errorf("%s: that token is readable", name)
 		}
 		// Inserting purges what has expired.
 		if err := st.InsertDevIdPGrant(ctx, DevIdPGrant{Hash: "h3", Kind: DevIdPGrantCode, ClientID: "c",
 			WorkspaceID: "w", MembershipID: "m", ExpiresAt: 5000}, 3000); err != nil {
 			t.Fatal(err)
 		}
-		if _, state, _ := st.ConsumeDevIdPCode(ctx, "h1", 1010); state != DevIdPCodeUnknown {
+		if _, state, _ := st.ConsumeDevIdPCode(ctx, "h2", 1010); state != DevIdPCodeUnknown {
 			t.Errorf("%s: an expired grant was not purged by a later insert: %v", name, state)
 		}
 	}

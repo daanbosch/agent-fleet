@@ -194,7 +194,7 @@ OIDC プロバイダーに `issuer` と同じ 2 つの値を渡す方法でも�
 **Spring Boot**：登録名は `google` のまま、プロバイダー側を差し替えます。
 
 ```yaml
-# application-devidp.yml  （SPRING_PROFILES_ACTIVE=devidp で有効化。ワークスペースの中だけ）
+# application-devidp.yml  (activate with SPRING_PROFILES_ACTIVE=devidp, in the workspace only)
 spring:
   security:
     oauth2:
@@ -209,7 +209,7 @@ spring:
             issuer-uri: ${AF_DEV_IDP_ISSUER}
       resourceserver:
         jwt:
-          issuer-uri: ${AF_DEV_IDP_ISSUER}   # ID トークンを自分で検証するバックエンドだけ
+          issuer-uri: ${AF_DEV_IDP_ISSUER}   # only for a backend that verifies the ID token itself
 ```
 
 `server.forward-headers-strategy=framework`（上記）を付けておくと、Spring はコールバックをプレビューのホストから

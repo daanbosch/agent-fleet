@@ -17,6 +17,7 @@ package main
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"errors"
 	"log"
 	"net/http"
 	"net/url"
@@ -214,6 +215,17 @@ func (a devIdPAPI) authorize(w http.ResponseWriter, r *http.Request) {
 		fail("invalid_request", "only response_mode=query is supported")
 		return
 	}
+	// Re-authentication cannot be honoured: the Console session is the only authentication
+	// there is, and its age is not carried into the ID token (no auth_time). Say so rather
+	// than let a max_age / prompt=login test in the app pass by accident.
+	if prompt := q.Get("prompt"); prompt != "" && prompt != "none" {
+		fail("invalid_request", "prompt="+prompt+" is not supported")
+		return
+	}
+	if q.Has("max_age") {
+		fail("invalid_request", "max_age is not supported")
+		return
+	}
 	scope := q.Get("scope")
 	if !strings.Contains(" "+scope+" ", " openid ") {
 		fail("invalid_scope", "the openid scope is required")
@@ -383,7 +395,7 @@ func (a devIdPAPI) token(w http.ResponseWriter, r *http.Request) {
 	case store.DevIdPCodeReplayed:
 		// A spent code presented again: whoever holds the tokens it produced may not be who
 		// was meant to (RFC 6749 §4.1.2), so take them down.
-		_ = a.mgr.store.DeleteDevIdPGrantsByParent(ctx, grant.Hash)
+		_ = a.mgr.store.RevokeDevIdPCode(ctx, grant.Hash, now.Add(devIdPTokenTTL).Unix())
 		tokenError(w, http.StatusBadRequest, "invalid_grant", "the code was already used")
 		return
 	}
@@ -427,7 +439,7 @@ func (a devIdPAPI) token(w http.ResponseWriter, r *http.Request) {
 	idToken, err := signer.sign(devIdPIDToken{
 		devIdPProfile: profile,
 		Iss:           a.mgr.devIdPIssuer(), Aud: cc.row.ClientID, Azp: cc.row.ClientID,
-		Iat: now.Unix(), AuthTime: now.Unix(), Exp: now.Add(devIdPTokenTTL).Unix(),
+		Iat: now.Unix(), Exp: now.Add(devIdPTokenTTL).Unix(),
 		AtHash: devIdPB64.EncodeToString(atHash[:16]), Nonce: grant.Nonce, AfDev: true,
 	})
 	if err != nil {
@@ -452,6 +464,10 @@ func (a devIdPAPI) token(w http.ResponseWriter, r *http.Request) {
 		IdentityID: grant.IdentityID, Scope: grant.Scope, Claims: grant.Claims,
 		ExpiresAt: now.Add(devIdPTokenTTL).Unix(),
 	}, now.Unix()); err != nil {
+		if errors.Is(err, store.ErrDevIdPCodeRevoked) {
+			tokenError(w, http.StatusBadRequest, "invalid_grant", "the code was already used")
+			return
+		}
 		log.Printf("dev idp: store access token: %v", err)
 		tokenError(w, http.StatusInternalServerError, "server_error", "could not issue a token")
 		return
@@ -466,15 +482,14 @@ func (a devIdPAPI) token(w http.ResponseWriter, r *http.Request) {
 // devIdPIDToken is the ID token payload: the profile claims plus the registered ones.
 type devIdPIDToken struct {
 	devIdPProfile
-	Iss      string `json:"iss"`
-	Aud      string `json:"aud"`
-	Azp      string `json:"azp"`
-	Iat      int64  `json:"iat"`
-	AuthTime int64  `json:"auth_time"`
-	Exp      int64  `json:"exp"`
-	AtHash   string `json:"at_hash"`
-	Nonce    string `json:"nonce,omitempty"`
-	AfDev    bool   `json:"af_dev"`
+	Iss    string `json:"iss"`
+	Aud    string `json:"aud"`
+	Azp    string `json:"azp"`
+	Iat    int64  `json:"iat"`
+	Exp    int64  `json:"exp"`
+	AtHash string `json:"at_hash"`
+	Nonce  string `json:"nonce,omitempty"`
+	AfDev  bool   `json:"af_dev"`
 }
 
 type devIdPTokenResponse struct {

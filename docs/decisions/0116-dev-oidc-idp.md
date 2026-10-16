@@ -66,7 +66,7 @@ offered. 2048-bit keys, `kid` is a thumbprint of the public key.
 
 `AF_DEV_IDP=1` makes the deployment serve it (it also needs `PUBLIC_BASE_URL`, the issuer's
 origin; without it the IdP stays off and the CP says so at start). Until then **every endpoint
-answers 404**, whatever the method. Then each workspace opts in with the `devIdp` workspace
+answers 404**, whatever the method and whether or not the caller is signed in (`authGate` lets `/dev-idp/authorize` through to that 404 while the IdP is off, instead of redirecting to the login page). Then each workspace opts in with the `devIdp` workspace
 setting (`PUT /api/env/ws-settings`); for a workspace that has not, `authorize` refuses and
 `token` answers `invalid_client`. The setting cannot be stored on a deployment that does not serve
 the IdP (409): a stored "on" would light up the day the flag is set, decided by nobody that day.
@@ -142,6 +142,8 @@ a redirect** (the open redirect this endpoint exists not to be), with one messag
 Only after the redirect is trusted do protocol errors go back to it, with `state`. The response
 carries `iss` (RFC 9207) so a client can reject a code from another issuer.
 
+Re-authentication requests are refused, not ignored: `prompt` other than `none` and any `max_age` come back to the (vetted) `redirect_uri` as `invalid_request`, and the ID token carries no `auth_time`, because the Console session is the only authentication there is and its age is not kept. An app that tests its `max_age` handling would otherwise pass by accident.
+
 At the `token` step `redirect_uri` must equal what `authorize` carried, byte for byte, and the whole
 permission is decided again then: a restart in the minute between moves the slug and the code dies.
 
@@ -152,7 +154,7 @@ permission is decided again then: a restart in the minute between moves the slug
   an unknown client and a wrong secret are the same answer.
 - A code lives **60 seconds**, is stored as a hash, and is spent by one conditional `UPDATE` so
   concurrent redemptions yield exactly one winner. A second presentation is `invalid_grant` and
-  also deletes the access tokens that code produced (RFC 6749 §4.1.2). A code presented by another
+  also revokes the tokens that code produced (RFC 6749 §4.1.2). The revocation is a persistent mark on the code (kept until any token it could have produced has expired), written before the tokens are deleted; a token stored by a redemption that was still in flight is refused at insert or at `userinfo`, so no interleaving of the two leaves a live token. A code presented by another
   client is refused and, being spent, is gone for the rightful one too.
 - **PKCE: S256 only; enforced whenever the request carried a challenge; optional otherwise.**
   Spring Security sends no challenge for a confidential client by default, and this client is

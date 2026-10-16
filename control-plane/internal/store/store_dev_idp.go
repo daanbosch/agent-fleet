@@ -72,8 +72,10 @@ type DevIdPStore interface {
 	// ConsumeDevIdPCode spends a code exactly once, however many callers race for it.
 	ConsumeDevIdPCode(ctx context.Context, hash string, now int64) (DevIdPGrant, DevIdPCodeState, error)
 	GetDevIdPAccess(ctx context.Context, hash string, now int64) (DevIdPGrant, bool, error)
-	// DeleteDevIdPGrantsByParent removes the tokens issued from one code.
-	DeleteDevIdPGrantsByParent(ctx context.Context, parent string) error
+	// RevokeDevIdPCode records that a spent code was presented again: the code stays (until
+	// `until`, so the mark outlives every token it could have produced), is marked revoked, and
+	// the tokens already issued from it are deleted.
+	RevokeDevIdPCode(ctx context.Context, hash string, until int64) error
 }
 
 func (s *SQL) ListDevIdPKeys(ctx context.Context) ([]DevIdPKey, error) {
@@ -157,14 +159,33 @@ func (s *SQL) InsertDevIdPGrant(ctx context.Context, g DevIdPGrant, now int64) e
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM dev_idp_grant WHERE expires_at<=?`, now); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx,
+	if _, err := s.db.ExecContext(ctx,
 		`INSERT INTO dev_idp_grant(hash, kind, parent, client_id, workspace_id, membership_id,
 		   identity_id, redirect_uri, challenge, nonce, scope, claims, expires_at, used_at)
 		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
 		g.Hash, g.Kind, g.Parent, g.ClientID, g.WorkspaceID, g.MembershipID,
-		g.IdentityID, g.RedirectURI, g.Challenge, g.Nonce, g.Scope, g.Claims, g.ExpiresAt)
-	return err
+		g.IdentityID, g.RedirectURI, g.Challenge, g.Nonce, g.Scope, g.Claims, g.ExpiresAt); err != nil {
+		return err
+	}
+	if g.Parent == "" {
+		return nil
+	}
+	// Insert first, look second: a replay that revoked the parent before this point is seen
+	// here, and one that revokes after it deletes this row. Neither order leaves a live token.
+	var revoked int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT revoked FROM dev_idp_grant WHERE hash=?`, g.Parent).Scan(&revoked); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if revoked != 0 {
+		_, _ = s.db.ExecContext(ctx, `DELETE FROM dev_idp_grant WHERE hash=?`, g.Hash)
+		return ErrDevIdPCodeRevoked
+	}
+	return nil
 }
+
+// ErrDevIdPCodeRevoked is returned when a token is issued from a code that was replayed.
+var ErrDevIdPCodeRevoked = errors.New("dev idp: the code was replayed")
 
 const devIdPGrantCols = `hash, kind, parent, client_id, workspace_id, membership_id, identity_id,
 	redirect_uri, challenge, nonce, scope, claims, expires_at, used_at`
@@ -206,7 +227,8 @@ func (s *SQL) ConsumeDevIdPCode(ctx context.Context, hash string, now int64) (De
 
 func (s *SQL) GetDevIdPAccess(ctx context.Context, hash string, now int64) (DevIdPGrant, bool, error) {
 	g, err := scanDevIdPGrant(s.db.QueryRowContext(ctx,
-		`SELECT `+devIdPGrantCols+` FROM dev_idp_grant WHERE hash=? AND kind=? AND expires_at>?`,
+		`SELECT `+devIdPGrantCols+` FROM dev_idp_grant WHERE hash=? AND kind=? AND expires_at>?
+		 AND NOT EXISTS (SELECT 1 FROM dev_idp_grant p WHERE p.hash=dev_idp_grant.parent AND p.revoked<>0)`,
 		hash, DevIdPGrantAccess, now))
 	if errors.Is(err, sql.ErrNoRows) {
 		return DevIdPGrant{}, false, nil
@@ -214,7 +236,12 @@ func (s *SQL) GetDevIdPAccess(ctx context.Context, hash string, now int64) (DevI
 	return g, err == nil, err
 }
 
-func (s *SQL) DeleteDevIdPGrantsByParent(ctx context.Context, parent string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM dev_idp_grant WHERE parent=?`, parent)
+func (s *SQL) RevokeDevIdPCode(ctx context.Context, hash string, until int64) error {
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE dev_idp_grant SET revoked=1, expires_at=CASE WHEN expires_at>? THEN expires_at ELSE ? END
+		 WHERE hash=? AND kind=?`, until, until, hash, DevIdPGrantCode); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM dev_idp_grant WHERE parent=?`, hash)
 	return err
 }

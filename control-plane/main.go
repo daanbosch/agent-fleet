@@ -654,13 +654,44 @@ func logRequests(next http.Handler) http.Handler {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w}
 		next.ServeHTTP(sw, r)
-		uri := r.URL.RequestURI()
-		// The query on an OAuth path carries the authorization code and similar secrets.
-		if r.URL.RawQuery != "" && strings.Contains(r.URL.Path, "oauth") {
-			uri = r.URL.Path + "?<redacted>"
-		}
-		log.Printf("%s %s %d %s", r.Method, uri, sw.code(), time.Since(start).Round(time.Millisecond))
+		log.Printf("%s %s %d %s", r.Method, loggedURI(r.URL), sw.code(), time.Since(start).Round(time.Millisecond))
 	})
+}
+
+// secretQueryKeys are query parameters that carry a credential wherever they appear: an
+// authorization code, a state, a client secret or a token. An app on a preview host receives
+// its OAuth callback (?code=…&state=…) on a path nobody here can predict, so the redaction is by
+// parameter name and not only by path.
+var secretQueryKeys = map[string]bool{
+	"code": true, "state": true, "client_secret": true, "client_assertion": true,
+	"access_token": true, "id_token": true, "refresh_token": true, "token": true, "t": true,
+	"code_verifier": true, "session_state": true,
+}
+
+// loggedURI is the request URI as the access log may record it. The whole query goes on an
+// OAuth or dev-IdP path; elsewhere only the credential-bearing parameters.
+func loggedURI(u *url.URL) string {
+	if u.RawQuery == "" {
+		return u.RequestURI()
+	}
+	if strings.Contains(u.Path, "oauth") || u.Path == devIdPPath || strings.HasPrefix(u.Path, devIdPPath+"/") {
+		return u.Path + "?<redacted>"
+	}
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return u.Path + "?<redacted>"
+	}
+	hit := false
+	for k := range q {
+		if secretQueryKeys[strings.ToLower(k)] {
+			q.Set(k, "<redacted>")
+			hit = true
+		}
+	}
+	if !hit {
+		return u.RequestURI()
+	}
+	return u.Path + "?" + q.Encode()
 }
 
 // statusWriter captures the response status for the access log.

@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS dev_idp_grant(
   scope         TEXT NOT NULL DEFAULT '',
   claims        TEXT NOT NULL DEFAULT '',
   expires_at    BIGINT NOT NULL,
-  used_at       BIGINT NOT NULL DEFAULT 0
+  used_at       BIGINT NOT NULL DEFAULT 0,
+  revoked       BIGINT NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS dev_idp_grant_parent ON dev_idp_grant(parent);
 CREATE INDEX IF NOT EXISTS dev_idp_grant_expires ON dev_idp_grant(expires_at);

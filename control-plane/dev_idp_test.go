@@ -941,3 +941,134 @@ func TestDevIdPKeyRotation(t *testing.T) {
 		t.Errorf("the retired key was not dropped: %d keys", len(keys))
 	}
 }
+
+// --- review round 1 ------------------------------------------------------------------------
+
+// auditHold blocks the token endpoint between "code spent" and "token stored" by parking the
+// audit write, so a replay can land inside that window.
+type auditHold struct {
+	store.Store
+	reached chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (h *auditHold) InsertAudit(ctx context.Context, a store.AuditLog) error {
+	if a.Action == "workspace.dev_idp_token" {
+		h.once.Do(func() {
+			close(h.reached)
+			<-h.release
+		})
+	}
+	return h.Store.InsertAudit(ctx, a)
+}
+
+// A replay that lands while the first redemption is still between consuming the code and
+// storing its token must still leave no live token.
+func TestDevIdPReplayDuringTheFirstRedemptionLeavesNoLiveToken(t *testing.T) {
+	d := newDevIdPTestEnv(t)
+	hold := &auditHold{Store: d.mgr.store, reached: make(chan struct{}), release: make(chan struct{})}
+	d.mgr.store = hold
+	redirect := d.ownHost(3000) + "/cb"
+	code := codeFrom(t, d.authorizeAs(t, "preview-user", d.authQuery(redirect, "")))
+
+	first := make(chan *httptest.ResponseRecorder, 1)
+	go func() { first <- d.exchange(code, redirect, "") }()
+	<-hold.reached
+	if rec := d.exchange(code, redirect, ""); rec.Code != http.StatusBadRequest {
+		t.Fatalf("the replay: %d %s", rec.Code, rec.Body)
+	}
+	close(hold.release)
+	rec := <-first
+	if rec.Code == http.StatusOK {
+		req := httptest.NewRequest(http.MethodGet, "https://af.example.com"+devIdPUserinfoPath, nil)
+		req.Header.Set("Authorization", "Bearer "+idpJSON(t, rec)["access_token"].(string))
+		ui := httptest.NewRecorder()
+		d.mux.ServeHTTP(ui, req)
+		if ui.Code == http.StatusOK {
+			t.Fatal("a token issued by the first redemption is live after the code was replayed")
+		}
+	}
+}
+
+func TestDevIdPDisabledIsA404BehindTheAuthGateToo(t *testing.T) {
+	cfg := oauthTestConfig(t)
+	cfg.mgr.publicBaseURL = "https://af.example.com"
+	mux := http.NewServeMux()
+	newDevIdPAPI(cfg).mount(mux)
+	gate := cfg.authGate(mux)
+	for _, m := range []string{http.MethodGet, http.MethodPost, http.MethodPut} {
+		for _, accept := range []string{"text/html", "application/json"} {
+			req := httptest.NewRequest(m, "https://af.example.com"+devIdPAuthorizePath+"?client_id=x", nil)
+			req.Header.Set("Accept", accept)
+			rec := httptest.NewRecorder()
+			gate.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNotFound {
+				t.Errorf("signed-out %s authorize (%s) with the IdP off: %d, want 404", m, accept, rec.Code)
+			}
+		}
+	}
+	// Switched on, a signed-out visitor meets the login as before.
+	cfg.mgr.devIdPOn = true
+	req := httptest.NewRequest(http.MethodGet, "https://af.example.com"+devIdPAuthorizePath, nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	cfg.authGate(mux).ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound || !strings.HasPrefix(rec.Header().Get("Location"), "/login") {
+		t.Errorf("signed-out authorize with the IdP on: %d %q, want a redirect to /login", rec.Code, rec.Header().Get("Location"))
+	}
+}
+
+func TestAccessLogRedactsCredentialsInTheQuery(t *testing.T) {
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	h := logRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
+	for _, target := range []string{
+		devIdPTokenPath + "?client_secret=SENTINEL-SECRET&grant_type=authorization_code",
+		devIdPAuthorizePath + "?code=SENTINEL-SECRET",
+		"/api/auth/callback/google?code=SENTINEL-SECRET&state=SENTINEL-SECRET&scope=openid",
+		"/__af/preview-auth?t=SENTINEL-SECRET&next=/",
+		"/x?Access_Token=SENTINEL-SECRET&id_token=SENTINEL-SECRET",
+	} {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, target, nil))
+	}
+	if strings.Contains(logs.String(), "SENTINEL-SECRET") {
+		t.Errorf("the access log kept a credential:\n%s", logs.String())
+	}
+	// An ordinary query is still logged.
+	logs.Reset()
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/audit?limit=5", nil))
+	if !strings.Contains(logs.String(), "/api/audit?limit=5") {
+		t.Errorf("an ordinary query was not logged: %s", logs.String())
+	}
+}
+
+func TestDevIdPRefusesReauthenticationItCannotDo(t *testing.T) {
+	d := newDevIdPTestEnv(t)
+	redirect := d.ownHost(3000) + "/cb"
+	for name, kv := range map[string][2]string{
+		"prompt=login": {"prompt", "login"}, "prompt=consent": {"prompt", "consent"},
+		"max_age=0": {"max_age", "0"}, "max_age=300": {"max_age", "300"},
+	} {
+		q := d.authQuery(redirect, "")
+		q.Set(kv[0], kv[1])
+		rec := d.authorizeAs(t, "preview-user", q)
+		loc, _ := url.Parse(rec.Header().Get("Location"))
+		if rec.Code != http.StatusFound || loc.Query().Get("error") != "invalid_request" || loc.Query().Get("code") != "" {
+			t.Errorf("%s: %d %s", name, rec.Code, rec.Header().Get("Location"))
+		}
+	}
+	q := d.authQuery(redirect, "")
+	q.Set("prompt", "none")
+	codeFrom(t, d.authorizeAs(t, "preview-user", q)) // already signed in: fine
+	// The ID token does not claim a re-authentication that did not happen.
+	tok := d.exchange(codeFrom(t, d.authorizeAs(t, "preview-user", d.authQuery(redirect, ""))), redirect, "")
+	c, err := verifyIDToken(idpJSON(t, tok)["id_token"].(string), d.jwks(t), "https://af.example.com/dev-idp", d.clientID, d.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, has := c["auth_time"]; has {
+		t.Errorf("auth_time is present: %v", c)
+	}
+}
