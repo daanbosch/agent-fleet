@@ -12,15 +12,16 @@ import { createRoot, type Root } from "react-dom/client";
 const api = vi.fn();
 const apiJSON = vi.fn();
 const tenantNow = { v: "default" };
-vi.mock("../../../core/api/client.ts", () => ({
+vi.mock("../../../core/api/client.ts", async (orig) => ({
+  errText: ((await orig()) as { errText: unknown }).errText, // real: the catalogue lookup is under test
   api: (...args: unknown[]) => api(...args),
   apiJSON: (...args: unknown[]) => apiJSON(...args),
   getTenant: () => tenantNow.v,
-  errText: (e: { message?: string }) => e?.message || "",
   isTransientErr: () => false,
   raw: () => Promise.resolve(new Response("")),
 }));
-vi.mock("../../../ui/ToastProvider.tsx", () => ({ useToast: () => () => {} }));
+const toastSpy = vi.fn();
+vi.mock("../../../ui/ToastProvider.tsx", () => ({ useToast: () => (m: string) => toastSpy(m) }));
 vi.mock("../../../ui/ConfirmProvider.tsx", () => ({ useConfirm: () => async () => true }));
 
 const wsSettings = (extra: Record<string, unknown> = {}) => ({
@@ -62,6 +63,7 @@ beforeEach(() => {
   g.IS_REACT_ACT_ENVIRONMENT = true;
   api.mockReset();
   apiJSON.mockReset();
+  toastSpy.mockReset();
 });
 
 afterEach(() => {
@@ -260,5 +262,156 @@ describe("Expose this port… strip", () => {
     await mount(<full.PreviewTab />);
     expect(addStrip()?.textContent).toContain("2");
     expect([...host!.querySelectorAll("button")].some((b) => b.textContent === "追加")).toBe(false);
+  });
+});
+
+describe("development OIDC IdP switch", () => {
+  const idp = (extra: Record<string, unknown> = {}) =>
+    wsSettings({
+      devIdpAvailable: true,
+      devIdp: true,
+      devIdpIssuer: "https://af.example.invalid/dev-idp",
+      devIdpClientId: "afdev_abc",
+      ...extra,
+    });
+  const text = () => host!.textContent || "";
+  const switchOn = async (on: boolean) => {
+    const { t } = await import("../../../lib/i18n/index.ts");
+    const label = [...host!.querySelectorAll("*")].find((e) => e.children.length === 0 && e.textContent === t("env.devidp_label"))!;
+    const b = [...label.parentElement!.querySelectorAll("button")].find((x) => x.textContent === t(on ? "common.on" : "common.off"))!;
+    await act(async () => b.click());
+  };
+
+  it("is hidden where the deployment does not serve the IdP", async () => {
+    api.mockResolvedValue(wsSettings({ devIdpAvailable: false, devIdp: false }));
+    const { PreviewTab } = await freshModule();
+    await mount(<PreviewTab />);
+    const { t } = await import("../../../lib/i18n/index.ts");
+    expect(text()).not.toContain(t("env.devidp_title"));
+    expect(text()).not.toContain("AF_DEV_IDP");
+  });
+
+  it("is hidden when the field is absent (older control plane)", async () => {
+    api.mockResolvedValue(wsSettings());
+    const { PreviewTab } = await freshModule();
+    await mount(<PreviewTab />);
+    const { t } = await import("../../../lib/i18n/index.ts");
+    expect(text()).not.toContain(t("env.devidp_title"));
+  });
+
+  it("shows issuer, discovery URL and client id with copy buttons, and never a secret", async () => {
+    api.mockResolvedValue(idp());
+    const { PreviewTab } = await freshModule();
+    const write = vi.fn();
+    Object.defineProperty(navigator, "clipboard", { value: { writeText: write }, configurable: true });
+    await mount(<PreviewTab />);
+    expect(text()).toContain("https://af.example.invalid/dev-idp/.well-known/openid-configuration");
+    expect(text()).toContain("afdev_abc");
+    expect(text()).toContain("AF_DEV_IDP_CLIENT_SECRET");
+    const { t } = await import("../../../lib/i18n/index.ts");
+    const copies = [...host!.querySelectorAll("button")].filter((b) => b.textContent === t("env.devidp_copy"));
+    expect(copies).toHaveLength(3);
+    await act(async () => copies[2].click());
+    expect(write).toHaveBeenCalledWith("afdev_abc");
+  });
+
+  it("shows no credentials while off, but still the warnings", async () => {
+    api.mockResolvedValue(idp({ devIdp: false, devIdpIssuer: undefined, devIdpClientId: undefined }));
+    const { PreviewTab } = await freshModule();
+    await mount(<PreviewTab />);
+    const { t } = await import("../../../lib/i18n/index.ts");
+    expect(text()).not.toContain("afdev_abc");
+    expect(text()).toContain(t("env.devidp_warn_prod"));
+    expect(text()).toContain(t("env.devidp_warn_rotate"));
+    expect(text()).toContain(t("env.devidp_warn_env"));
+  });
+
+  it("PUTs devIdp and renders the answer", async () => {
+    api.mockResolvedValue(idp({ devIdp: false, devIdpIssuer: undefined, devIdpClientId: undefined }));
+    apiJSON.mockResolvedValue(idp({ devIdpClientId: "afdev_new" }));
+    const { PreviewTab } = await freshModule();
+    await mount(<PreviewTab />);
+    await switchOn(true);
+    expect(apiJSON).toHaveBeenCalledWith("api/env/ws-settings", "PUT", { devIdp: true });
+    expect(text()).toContain("afdev_new");
+  });
+
+  it("shows why a refused PUT was refused and keeps the switch off", async () => {
+    api.mockResolvedValue(idp({ devIdp: false, devIdpIssuer: undefined, devIdpClientId: undefined }));
+    apiJSON.mockResolvedValue({ error: { code: "not_configured", message: "dev" } });
+    const { PreviewTab } = await freshModule();
+    const { t } = await import("../../../lib/i18n/index.ts");
+    await mount(<PreviewTab />);
+    await switchOn(true);
+    expect(toastSpy).toHaveBeenCalledWith(`${t("common.save_failed")}: ${t("err.not_configured")}`);
+    expect(text()).not.toContain("afdev_");
+  });
+
+  it("keeps the switch and credentials after a reissue answer without IdP fields", async () => {
+    api.mockResolvedValue(idp());
+    apiJSON.mockResolvedValue(wsSettings({ previewReissued: true })); // as the real reissue answer: no devIdp*
+    const { PreviewTab } = await freshModule();
+    const { t } = await import("../../../lib/i18n/index.ts");
+    await mount(<PreviewTab />);
+    const b = [...host!.querySelectorAll("button")].find((x) => x.textContent === t("env.preview_reissue"))!;
+    await act(async () => b.click());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(apiJSON).toHaveBeenCalledWith("api/env/ws-settings/preview/reissue", "POST", {});
+    expect(text()).toContain(t("env.devidp_label"));
+    expect(text()).toContain("afdev_abc");
+  });
+
+  const copyBtn = async () => {
+    const { t } = await import("../../../lib/i18n/index.ts");
+    return { t, btn: [...host!.querySelectorAll("button")].find((b) => b.textContent === t("env.devidp_copy"))! };
+  };
+
+  it("does not claim a copy when the Clipboard API is missing", async () => {
+    api.mockResolvedValue(idp());
+    const { PreviewTab } = await freshModule();
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+    await mount(<PreviewTab />);
+    const { t, btn } = await copyBtn();
+    await act(async () => btn.click());
+    expect(toastSpy).toHaveBeenCalledWith(t("common.copy_failed"));
+    expect(toastSpy).not.toHaveBeenCalledWith(t("env.devidp_copied"));
+  });
+
+  it("reports a denied write without an unhandled rejection", async () => {
+    api.mockResolvedValue(idp());
+    const { PreviewTab } = await freshModule();
+    Object.defineProperty(navigator, "clipboard", { value: { writeText: () => Promise.reject(new Error("denied")) }, configurable: true });
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    await mount(<PreviewTab />);
+    const { t, btn } = await copyBtn();
+    await act(async () => btn.click());
+    await new Promise((r) => setTimeout(r, 0));
+    process.off("unhandledRejection", unhandled);
+    expect(toastSpy).toHaveBeenCalledWith(t("common.copy_failed"));
+    expect(toastSpy).not.toHaveBeenCalledWith(t("env.devidp_copied"));
+    expect(unhandled).not.toHaveBeenCalled();
+  });
+
+  it("overlapping saves: a switch click behind a ports save ends on the last answer", async () => {
+    api.mockResolvedValue(idp({ devIdp: false, devIdpIssuer: undefined, devIdpClientId: undefined }));
+    const { PreviewTab } = await freshModule();
+    const pending: Array<(v: unknown) => void> = [];
+    apiJSON.mockImplementation(() => new Promise((r) => pending.push(r)));
+    await mount(<PreviewTab />);
+    const input = document.querySelector<HTMLInputElement>(".ds-select")!;
+    await act(async () => input.dispatchEvent(new FocusEvent("focusout", { bubbles: true })));
+    await switchOn(true);
+    expect(apiJSON).toHaveBeenCalledTimes(1);
+    await act(async () => pending[0](idp({ devIdp: false, devIdpIssuer: undefined })));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(apiJSON).toHaveBeenCalledTimes(2);
+    expect(apiJSON).toHaveBeenLastCalledWith("api/env/ws-settings", "PUT", { devIdp: true });
+    await act(async () => pending[1](idp({ devIdpClientId: "afdev_last" })));
+    expect(text()).toContain("afdev_last");
   });
 });

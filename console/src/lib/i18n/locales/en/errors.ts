@@ -8,6 +8,7 @@ import type { errors as jaErrors } from "../ja/errors.ts";
 
 export const errors: Record<keyof typeof jaErrors, string> = {
   // --- API errors (mirror of ERR_TEXT + inline fallbacks) ---
+  "err.not_configured": "That feature is not enabled on this deployment. Ask your operator.",
   "err.tts_engine_off":
     "An administrator has switched the read-aloud engine (Zundamon) off for this deployment. Ask them to enable it.",
   "err.tts_engine_unmanaged":

@@ -17,7 +17,7 @@
 import { useEffect, useState } from "react";
 import { useToast } from "../../../ui/ToastProvider.tsx";
 import { useConfirm } from "../../../ui/ConfirmProvider.tsx";
-import { api, apiJSON } from "../../../core/api/client.ts";
+import { api, apiJSON, errText } from "../../../core/api/client.ts";
 import { OnOff, Row } from "../parts/controls.tsx";
 import { useT } from "../../../lib/i18n/index.ts";
 import { Button } from "../../../ui/Button.tsx";
@@ -102,7 +102,12 @@ export function PreviewTab() {
     if (res === CANCELLED) return;
     if (res && !res.error) {
       setAu(res);
-    } else toast(tr("common.save_failed"));
+    } else {
+      // A refusal carries its reason (e.g. the dev IdP is not enabled on this deployment);
+      // a bare "save failed" would leave the person guessing.
+      const why = res?.error ? errText(res.error) : "";
+      toast(why ? `${tr("common.save_failed")}: ${why}` : tr("common.save_failed"));
+    }
   };
 
   // Reissue (docs/log/81 §4.1) throws away URLs that have already been handed out. It
@@ -125,7 +130,9 @@ export function PreviewTab() {
     });
     if (res === CANCELLED) return;
     if (res && !res.error) {
-      setAu(res);
+      // The reissue answer carries the preview block only (no dev IdP fields), so it is merged
+      // over what is shown instead of replacing it, or the IdP switch would vanish.
+      setAu((prev: any) => ({ ...prev, ...res }));
       // While stopped there are no issued URLs to throw away, so a successful reissue
       // changes nothing on screen. Always say which of the two happened, or the button
       // looks dead.
@@ -267,6 +274,58 @@ function PreviewSection({
         </button>
       </Row>
       <p className="muted ds-note">{tr("env.preview_reissue_note")}</p>
+      {/* Only where the operator turned the IdP on: a switch that every PUT would refuse
+          must not be offered. */}
+      {au.devIdpAvailable && <DevIdpSection au={au} save={save} />}
     </section>
+  );
+}
+
+// The dev OIDC IdP opt-in (ADR 0116). It lives here because its whole purpose is signing in on
+// a preview URL. The client secret is deliberately absent: the API never returns it.
+function DevIdpSection({ au, save }: { au: any; save: (patch: Record<string, unknown>) => void }) {
+  const tr = useT();
+  const toast = useToast();
+  const on = !!au.devIdp;
+  // "Copied" only after the clipboard accepted it: the API is absent outside secure contexts
+  // and writeText rejects when permission is denied.
+  const copy = async (text: string) => {
+    try {
+      if (!navigator.clipboard) throw new Error("no clipboard");
+      await navigator.clipboard.writeText(text);
+      toast(tr("env.devidp_copied"));
+    } catch {
+      toast(tr("common.copy_failed"));
+    }
+  };
+  const issuer: string = au.devIdpIssuer || "";
+  const values: Array<[string, string]> = [
+    [tr("env.devidp_issuer"), issuer],
+    [tr("env.devidp_discovery"), issuer ? `${issuer}/.well-known/openid-configuration` : ""],
+    [tr("env.devidp_client_id"), au.devIdpClientId || ""],
+  ];
+  return (
+    <>
+      <h4 className="ds-title">{tr("env.devidp_title")}</h4>
+      <Row label={tr("env.devidp_label")}>
+        <OnOff value={on} onChange={(v) => save({ devIdp: v })} />
+      </Row>
+      <p className="muted ds-note">{tr("env.devidp_note")}</p>
+      {on &&
+        values
+          .filter(([, v]) => v)
+          .map(([label, v]) => (
+            <Row key={label} label={label}>
+              <code className="ds-note">{v}</code>{" "}
+              <button className="ghost" onClick={() => copy(v)} aria-label={`${tr("env.devidp_copy")}: ${label}`}>
+                {tr("env.devidp_copy")}
+              </button>
+            </Row>
+          ))}
+      {on && <p className="muted ds-note">{tr("env.devidp_secret_note")}</p>}
+      <p className="muted ds-note">{tr("env.devidp_warn_prod")}</p>
+      <p className="muted ds-note">{tr("env.devidp_warn_rotate")}</p>
+      <p className="muted ds-note">{tr("env.devidp_warn_env")}</p>
+    </>
   );
 }

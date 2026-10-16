@@ -146,13 +146,11 @@ Google は OAuth クライアントに登録したリダイレクト URI しか�
 client id、client secret）。コードは変えず、Google Cloud コンソールでの登録も要りません。
 
 - **使える条件**：運用者が Control Plane に `AF_DEV_IDP=1` を設定していること（ADR 0116）。それまで
-  `/dev-idp/…` は全部 404 です。**ワークスペースごとにも既定は off** で、Console にはまだスイッチがありません
-  （#2222）。Console のタブのブラウザコンソールから on にして、下の値がコンテナに届くよう**ワークスペースを
-  停止→起動**してください。
-
-  ```js
-  await fetch('/api/env/ws-settings', {method: 'PUT', body: JSON.stringify({devIdp: true})})
-  ```
+  `/dev-idp/…` は全部 404 で、下のスイッチも出ません。**ワークスペースごとにも既定は off** です。設定 ›
+  プレビュー用サブドメイン › 「開発用 OIDC IdP を使う」をオンにし、下の値がコンテナに届くよう**ワークスペースを
+  停止→起動**してください。同じ画面に issuer、discovery URL、client id がコピーボタン付きで出ます。client
+  secret は表示しません。コンテナ内の `AF_DEV_IDP_CLIENT_SECRET` を読んでください。スイッチをオフ→オンにすると
+  新しい client id と secret が発行されます。本番の設定がこの issuer を信頼することは絶対にしないでください。
 
 - **渡される値**：コンテナ内の `AF_DEV_IDP_ISSUER`、`AF_DEV_IDP_WELL_KNOWN`（discovery の URL）、
   `AF_DEV_IDP_CLIENT_ID`、`AF_DEV_IDP_CLIENT_SECRET`（`AF_PREVIEW_URL_*` の隣）。クライアントは**自分専用**で、
