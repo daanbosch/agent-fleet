@@ -28,6 +28,7 @@ export const admin: Record<keyof typeof jaAdmin, string> = {
   "admin.devidp_label": "Serve the development OIDC IdP",
   "admin.devidp_locked": "Locked off by AF_DEV_IDP=0 in the Control Plane's environment. Remove that setting to manage it here.",
   "admin.devidp_no_base_url": "PUBLIC_BASE_URL is not set, so there is no Console address to serve the IdP from. Set it and restart the Control Plane.",
+  "admin.devidp_no_preview_domain": "No preview domain is configured, so members cannot use this IdP. Workspace opt-ins are refused until preview subdomains are set up (the switch itself stays operable).",
   "admin.devidp_issuer": "Issuer",
   "admin.devidp_opted_in": "Workspaces opted in: {n}",
   "admin.devidp_save_error": "Could not confirm the change. The state shown is what the server reports now.",

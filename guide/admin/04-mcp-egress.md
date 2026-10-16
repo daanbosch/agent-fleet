@@ -418,6 +418,9 @@ yes or no.
 - Turning it off takes effect without a restart (another Control Plane replica follows within a few
   seconds): every `/dev-idp/…` URL answers 404. **Workspace opt-ins are kept**, so turning it on
   again hands the same client ids and secrets back.
+- **Members can use it only with preview subdomains.** Without a preview domain
+  (`AF_PREVIEW_DOMAIN`) the section says so, workspaces report it unavailable and a new opt-in is
+  refused (409); turning an earlier opt-in off still works. The switch itself stays operable.
 - It shows as locked when the operator set `AF_DEV_IDP=0`, and cannot be on without
   `PUBLIC_BASE_URL`; the section says which one applies. Every change is audited (`dev_idp.set`).
 

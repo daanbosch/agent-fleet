@@ -39,6 +39,14 @@ func (m *manager) devIdPIssuer(ctx context.Context) string {
 	return base + devIdPPath
 }
 
+// devIdPOfferedToMembers is false on a deployment without a preview domain. Without preview
+// hosts the only redirect target is localhost, which only the workspace's browser pane can
+// reach, and that pane would itself need a Console session to pass authGate. The endpoints
+// keep answering and existing opt-ins stay stored; only new opt-ins are refused.
+func (m *manager) devIdPOfferedToMembers() bool {
+	return m.previewDomain != ""
+}
+
 func devIdPRandom(n int) string {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
@@ -255,9 +263,11 @@ func (a wsSettingsAPI) setDevIdP(w http.ResponseWriter, r *http.Request, res *re
 // put it in one more place for no gain.
 func (a wsSettingsAPI) addDevIdP(r *http.Request, res *resolved, st wsSettings, out map[string]any) {
 	issuer := a.mgr.devIdPIssuer(r.Context())
-	out["devIdpAvailable"] = issuer != ""
-	out["devIdp"] = st.DevIdP && issuer != ""
-	if issuer == "" || !st.DevIdP {
+	// Members are offered the IdP only with preview subdomains; see devIdPOfferedToMembers.
+	offered := issuer != "" && a.mgr.devIdPOfferedToMembers()
+	out["devIdpAvailable"] = offered
+	out["devIdp"] = st.DevIdP && offered
+	if !offered || !st.DevIdP {
 		return
 	}
 	out["devIdpIssuer"] = issuer

@@ -8,6 +8,7 @@ export const errors = {
   // --- API エラー（core/api/client.ts の ERR_TEXT ＋ インライン fallback）---
   // Go 側の安定コード（control-plane/errcodes.go, workspace/agent/errcodes.go）と対。
   "err.not_configured": "この環境ではその機能が有効になっていません。運用者に確認してください。",
+  "err.no_preview_domain": "開発用 OIDC IdP にはプレビューのサブドメインが必要ですが、この環境にはプレビュー用ドメインがありません。運用者に確認してください。",
   "err.tts_engine_off":
     "この配備では読み上げエンジン（ずんだもん）が管理者によって無効化されています。有効化は管理者に依頼してください。",
   "err.tts_engine_unmanaged":
