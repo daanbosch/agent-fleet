@@ -4,6 +4,7 @@ import type { Session } from "../../../types/session.ts";
 import { t as tr } from "../../../lib/i18n/index.ts";
 import type { useLayoutStore } from "../../../layout/store.ts";
 import type { useToast } from "../../../ui/ToastProvider.tsx";
+import { dismissToast } from "../../../ui/toast.ts";
 import { useSessionsStore } from "../../sessions/store.ts";
 import { useLaunchSeed, useLaunchTarget, useReposStore } from "../../repos/store.ts";
 import { handoffLaunchTarget } from "../handoffLaunch.ts";
@@ -126,6 +127,7 @@ export function usePlanActions({
   // The path is fetched BEFORE anything is rejected: a launch with no plan to review is
   // worse than no launch, and this way a failure leaves the plan exactly as it was.
   const reviewPlanElsewhere = async (plan: string) => {
+    retireRetry(); // a different review starts: an older "send again" must not fire after it
     if (planSendBlocked) {
       toast(planSendBlocked);
       return;
@@ -164,8 +166,22 @@ export function usePlanActions({
   const [rereviewing, setRereviewing] = useState(false);
   const latest = useRef({ pending: "", carried: "" });
   latest.current = { pending: pendingPlan || "", carried: carried?.kind === "plan" ? carried.plan || "" : "" };
+  // Bumped by anything that makes an outstanding "send again" toast stale: a new review-again or
+  // launch, a new plan presented, leaving the card. The toast's retry refuses on a mismatch.
+  const retryEpoch = useRef(0);
+  const retryKey = `plan-rereview:${session}`;
+  const retireRetry = () => {
+    retryEpoch.current++;
+    dismissToast(retryKey);
+  };
+  useEffect(() => retireRetry, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (pendingPlan) retireRetry();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingPlan]);
   const exclusive = async (fn: () => Promise<unknown>) => {
     if (rereviewLock.current.held) return;
+    retireRetry();
     rereviewLock.current.held = true;
     setRereviewing(true);
     try {
@@ -191,7 +207,7 @@ export function usePlanActions({
         createElement("span", { className: "update-toast-txt" }, msg),
         createElement("button", { type: "button", className: "update-toast-btn", onClick: () => void retry() }, tr("plan.review_again_retry")),
       ),
-      { kind: "error", duration: 0 },
+      { kind: "error", duration: 0, key: retryKey }, // same key: a failed retry replaces this toast
     );
   };
 
@@ -224,6 +240,8 @@ export function usePlanActions({
           return ok;
         },
         onFail: (err, retry) => rereviewFailed(hit.reviewer, err, retry),
+        retryValid: ((epoch) => () => retryEpoch.current === epoch && !latest.current.pending)(retryEpoch.current),
+        onRetryDone: () => dismissToast(retryKey),
       });
     });
 
@@ -255,6 +273,7 @@ export function usePlanActions({
   // server-side state, so no pane or reload can approve a plan whose review is under way,
   // and discard does not wake the session.
   const reviewCarriedPlan = async (plan: string) => {
+    retireRetry();
     const res = await sessionPlanFile(session);
     if (!res.ok || !res.path) {
       toast(tr("plan.review_launch_failed", { err: res.message || "" }));

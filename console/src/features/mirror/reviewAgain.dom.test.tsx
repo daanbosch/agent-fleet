@@ -186,7 +186,68 @@ describe("runRereview", () => {
     expect(log).toEqual(["prepare", "reject", "send", "fail:rate"]);
     ok = true;
     expect(await retry!()).toBe(true);
-    expect(log.slice(4)).toEqual(["send", "sent"]); // no second prepare / reject
+    expect(log.slice(4)).toEqual(["prepare", "send", "sent"]); // re-readied, but not rejected again
+  });
+  describe("the retry", () => {
+    const failing = () => {
+      const t = base();
+      let retry!: () => Promise<boolean>;
+      let ok = false;
+      const sends: string[] = [];
+      let gate: Promise<void> | null = null;
+      t.o.send = (async () => {
+        sends.push("send");
+        if (gate) await gate;
+        return ok ? { ok: true } : { ok: false, message: "rate" };
+      }) as any;
+      (t.o as any).onFail = (m: string, r?: () => Promise<boolean>) => {
+        t.log.push("fail:" + m);
+        if (r) retry = r;
+      };
+      (t.o as any).onRetryDone = () => t.log.push("done");
+      return { ...t, sends, get retry() { return retry; }, succeed: () => (ok = true), hold: (g: Promise<void>) => (gate = g) };
+    };
+    it("is single-use: after one success a second press sends nothing", async () => {
+      const t = failing();
+      await runRereview(t.o);
+      t.succeed();
+      expect(await t.retry()).toBe(true);
+      expect(await t.retry()).toBe(false);
+      expect(t.sends).toHaveLength(2);
+      expect(t.log).toContain("done");
+    });
+    it("is single-flight: a double click posts once", async () => {
+      const t = failing();
+      await runRereview(t.o);
+      t.succeed();
+      let open!: () => void;
+      t.hold(new Promise<void>((r) => (open = r)));
+      const first = t.retry();
+      expect(await t.retry()).toBe(false);
+      open();
+      expect(await first).toBe(true);
+      expect(t.sends).toHaveLength(2); // original + one retry
+    });
+    it("re-resumes a reviewer that stopped again, and offers the same retry on another failure", async () => {
+      const t = failing();
+      await runRereview(t.o);
+      const prepares = t.log.filter((l) => l === "prepare").length;
+      expect(await t.retry()).toBe(false); // still failing
+      expect(t.log.filter((l) => l === "prepare").length).toBe(prepares + 1);
+      t.succeed();
+      expect(await t.retry()).toBe(true);
+    });
+    it("refuses once the world moved on (a new plan), withdrawing the offer", async () => {
+      const t = failing();
+      let valid = true;
+      (t.o as any).retryValid = () => valid;
+      await runRereview(t.o);
+      valid = false;
+      t.succeed();
+      expect(await t.retry()).toBe(false);
+      expect(t.sends).toHaveLength(1);
+      expect(t.log).toContain("done");
+    });
   });
   it("does not offer a retry when nothing was rejected (the card is still there)", async () => {
     const { o, log } = base();

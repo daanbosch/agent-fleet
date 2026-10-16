@@ -191,6 +191,10 @@ export async function runRereview(o: {
   beforeSend?: () => Promise<boolean>;
   onSent?: () => void;
   onFail: (message: string, retry?: () => Promise<boolean>) => void;
+  /** False once a retry must not send any more (see the retry below). */
+  retryValid?: () => boolean;
+  /** A retry ended for good (sent, or refused as stale): withdraw whatever offered it. */
+  onRetryDone?: () => void;
   prepare?: typeof prepareReviewer;
   send?: typeof sessionPeerSend;
 }): Promise<boolean> {
@@ -204,16 +208,48 @@ export async function runRereview(o: {
     }
     if (o.stillCurrent && !o.stillCurrent()) return false;
     if (o.beforeSend && !(await o.beforeSend())) return false;
-    const attempt = async (): Promise<boolean> => {
+    // The retry handed to onFail after a reject. It is single-use (spent by the first success),
+    // single-flight, re-resumes a reviewer that stopped again, and refuses once `retryValid`
+    // says the world moved on (a new plan, another review): it would otherwise send a stale
+    // revision id for whatever plan the file holds now.
+    let spent = false;
+    let flying = false;
+    const retry = async (): Promise<boolean> => {
+      if (spent || flying) return false;
+      flying = true;
+      try {
+        const stale = () => {
+          if (o.retryValid && !o.retryValid()) {
+            spent = true;
+            o.onRetryDone?.();
+            return true;
+          }
+          return false;
+        };
+        if (stale()) return false;
+        const again = await (o.prepare ?? prepareReviewer)(o.reviewer);
+        if (!again.ok) {
+          if (!again.silent) o.onFail(again.message, retry);
+          return false;
+        }
+        if (stale()) return false;
+        return await attempt(true);
+      } finally {
+        flying = false;
+      }
+    };
+    const attempt = async (isRetry: boolean): Promise<boolean> => {
       const sent = await sendRereview(o.planner, o.path, o.reviewer, o.plan, o.send);
       if (!sent.ok) {
-        o.onFail(sent.message, o.beforeSend ? attempt : undefined);
+        o.onFail(sent.message, o.beforeSend ? retry : undefined);
         return false;
       }
+      spent = true;
+      if (isRetry) o.onRetryDone?.();
       o.onSent?.();
       return true;
     };
-    return await attempt();
+    return await attempt(false);
   } finally {
     o.lock.held = false;
   }
