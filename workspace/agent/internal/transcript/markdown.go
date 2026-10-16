@@ -356,6 +356,14 @@ func writeFenced(b *strings.Builder, lang, s string) {
 	fmt.Fprintf(b, "%s%s\n%s\n%s\n\n", fence, lang, strings.TrimRight(s, "\n"), fence)
 }
 
+// Fenced is s as a code block, for a caller that lays out its own sections around Markdown's
+// turns and needs the same fence rule; "" when s is blank.
+func Fenced(lang, s string) string {
+	var b strings.Builder
+	writeFenced(&b, lang, s)
+	return b.String()
+}
+
 func longestRun(s string, c byte) int {
 	best, cur := 0, 0
 	for i := 0; i < len(s); i++ {

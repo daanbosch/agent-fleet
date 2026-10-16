@@ -32,6 +32,7 @@ package sessionx
 
 import (
 	"log"
+	"strings"
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
@@ -336,4 +337,13 @@ func abortResumePromptFor(locale string) string {
 		return "continue (auto-resume)"
 	}
 	return "続けて（自動再開）"
+}
+
+// isAbortResumePrompt reports whether prompt is the nudge abortResumePromptFor writes, in
+// either language. Matching on the exact text, not on the injection ledger: the ledger keeps
+// only recent bodies, and the move must still recognise an old one.
+func isAbortResumePrompt(prompt string) bool {
+	prompt = strings.TrimSpace(prompt)
+	return prompt == strings.TrimSpace(abortResumePromptFor("ja")) ||
+		prompt == strings.TrimSpace(abortResumePromptFor("en"))
 }
