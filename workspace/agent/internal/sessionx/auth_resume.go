@@ -28,6 +28,7 @@ package sessionx
 
 import (
 	"log"
+	"sync"
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
@@ -57,6 +58,20 @@ const (
 	// is a person's: a login that expires on Friday evening is renewed on Monday, and giving
 	// up over the weekend would leave precisely the case this feature exists for unresumed.
 	authResumeEpisodeTTL = 14 * 24 * time.Hour
+	// The three below apply only to claude giving up on its token-refresh lock
+	// (claude.RefreshStuck), where nobody has to sign in: the holder of the lock finishes the
+	// refresh by itself, measured 19s after the failed turn. Waiting for a person's pace (the
+	// 15s settle and a 30s sweep) would turn that into a minute of dead session.
+	//
+	// authResumeRefreshSettle is the settle for that case: the pane is not in a /login flow.
+	authResumeRefreshSettle = 3 * time.Second
+	// authResumeFastPoll is how often the credentials file is stat'ed while such an episode is
+	// open. One stat of one file, not a sweep over every session's transcript.
+	authResumeFastPoll = 3 * time.Second
+	// authResumeRefreshForceAfter is when to resume WITHOUT a rewritten credential. A holder
+	// that really died leaves a lock that goes stale after 60s, and claude does not retry a
+	// refresh on its own, so the session would wait forever; a resume makes it try again.
+	authResumeRefreshForceAfter = 90 * time.Second
 )
 
 // Reasons for giving up (GaveUp). Empty = still waiting for, or acting on, the renewal.
@@ -83,10 +98,32 @@ var authResumeStates = fstore.JSON[authResumeState](paths.AgentStateDir, "sessio
 // authResumeNow is the login moment, replaceable so tests need no credentials file.
 var authResumeNow = claude.AuthOKAt
 
+// authResumeMu serializes authResumeStep: the sweep and the fast watch below both call it, and
+// the attempt count they read-modify-write must not be lost between them.
+var authResumeMu sync.Mutex
+
+// authResumeFastWatch starts the quick poll for a refresh-lock episode; a var so tests do not
+// spawn it. Assigned in init because startRefreshWatch leads back here (an initialization cycle).
+var authResumeFastWatch func(session.Meta, authResumeState)
+
+func init() { authResumeFastWatch = startRefreshWatch }
+
+// refreshWatchTail reads the transcript tail for the watcher, and refreshWatchHandOver is what it
+// hands the session to; vars so a test can stand in for the transcript and the live session.
+var (
+	refreshWatchTail     = abortInfoFor
+	refreshWatchHandOver = authResumeStep
+)
+
+// refreshWatching holds the sessions that already have a fast watch running.
+var refreshWatching sync.Map
+
 // authResumeStep advances the login-failure episode of one session. It is driven from
 // abortResumeTick rather than from a loop of its own so that the transcript tail is read once
 // per session per sweep; `a`/`ok` are that read's verdict.
 func authResumeStep(m session.Meta, a claude.Abort, ok bool, now time.Time) {
+	authResumeMu.Lock()
+	defer authResumeMu.Unlock()
 	if !ok || !a.Auth {
 		// The tail is no longer a login failure: it was resumed (by us or by the user), or
 		// the session moved on. Nothing left to wait for.
@@ -117,9 +154,30 @@ func authResumeAttempt(m session.Meta, st authResumeState, a claude.Abort, now t
 		// attempt count would never survive.
 		_ = authResumeStates.Write(m.Name, st)
 		log.Printf("auth-resume: the turn of %s died on the login (%s) — waiting for it to be renewed", m.Name, a.Msg)
+		if claude.RefreshStuck(a.Msg) {
+			// claude does not say why the lock was contended, so record what can be seen from
+			// outside while it is still fresh.
+			log.Printf("auth-resume: %s refresh lock state: %s", m.Name, claude.RefreshLockSnapshot(now))
+			authResumeFastWatch(m, st)
+		}
 	}
 	if st.GaveUp != "" {
 		return
+	}
+	if refreshEpisodeRestarted(st, a) {
+		// A new failure inside one episode that the refresh-lock shortcuts must not inherit: the
+		// kind changed (a forced resume after a refresh-lock error that then died on a revoked
+		// login, or the reverse), or another refresh-lock failure landed after the episode's
+		// clock (a manual retry that the sweep never saw between). Restart the clock at the new
+		// failure and wait for a credential newer than it. Attempts and LastTry are kept, so the
+		// cap and the backoff still count the resumes already spent.
+		st.Msg = a.Msg
+		st.At = abortEpisodeStart(a, now)
+		_ = authResumeStates.Write(m.Name, st)
+		log.Printf("auth-resume: a new failure of %s restarted the episode (%s)", m.Name, a.Msg)
+		if claude.RefreshStuck(a.Msg) {
+			authResumeFastWatch(m, st)
+		}
 	}
 	if authEpisodeStale(st, now) {
 		st.GaveUp = authGaveUpStale
@@ -137,7 +195,7 @@ func authResumeAttempt(m session.Meta, st authResumeState, a claude.Abort, now t
 		_ = authResumeStates.Write(m.Name, st)
 		return
 	}
-	if !authResumeRenewed(st, now) {
+	if !authResumeRenewed(st, now) && !authResumeForced(st, now) {
 		return // still the login that failed — there is nothing to resume onto yet
 	}
 	if !authResumeDue(st, now) {
@@ -194,7 +252,96 @@ func authResumeRenewed(st authResumeState, now time.Time) bool {
 	if ok.IsZero() {
 		return false // nothing to judge on (no credentials file, an environment token)
 	}
-	return ok.After(at) && !now.Before(ok.Add(authResumeSettle))
+	settle := authResumeSettle
+	if claude.RefreshStuck(st.Msg) {
+		settle = authResumeRefreshSettle
+	}
+	return ok.After(at) && !now.Before(ok.Add(settle))
+}
+
+// refreshEpisodeRestarted reports that a, the failure now at the tail, is not the one this open
+// episode was started for, in a way that matters to the refresh-lock shortcuts.
+func refreshEpisodeRestarted(st authResumeState, a claude.Abort) bool {
+	if claude.RefreshStuck(st.Msg) != claude.RefreshStuck(a.Msg) {
+		return true
+	}
+	if !claude.RefreshStuck(a.Msg) || a.At.IsZero() {
+		return false
+	}
+	at, err := time.Parse(time.RFC3339, st.At)
+	// st.At was stored with its fraction dropped, so compare at the same precision.
+	return err == nil && a.At.Truncate(time.Second).After(at)
+}
+
+// authResumeForced reports that a refresh-lock episode has outlived any lock claude could still
+// be waiting on, so the resume goes out without a credential rewritten after the failure (see
+// authResumeRefreshForceAfter). The attempt cap and backoff still bound it.
+//
+// It stands in for ONE missing fact only, "nothing was written since the failure". It still needs
+// a login that can be judged (a readable OAuth record whose refresh half is alive: no file, an
+// unparsable file, an environment token or a dead login give no moment, and nothing is forced
+// onto them), and a credential written moments ago must settle first, as authResumeRenewed
+// demands, since that write may be a sign-in still being wired up.
+func authResumeForced(st authResumeState, now time.Time) bool {
+	if !claude.RefreshStuck(st.Msg) {
+		return false
+	}
+	at, err := time.Parse(time.RFC3339, st.At)
+	if err != nil || now.Before(at.Add(authResumeRefreshForceAfter)) {
+		return false
+	}
+	ok := authResumeNow()
+	if ok.IsZero() {
+		return false
+	}
+	return !ok.After(at) || !now.Before(ok.Add(authResumeRefreshSettle))
+}
+
+// startRefreshWatch polls the credentials file for a refresh-lock episode and hands the session
+// back to authResumeStep the moment the refresh lands (or the force point passes). The loop
+// re-reads the episode on every poll, so a restarted episode (refreshEpisodeRestarted) is followed
+// rather than abandoned, and it ends when the episode is gone, is no longer a refresh-lock one,
+// or is past the force point by a minute; the 30s sweep stays the fallback.
+func startRefreshWatch(m session.Meta, _ authResumeState) {
+	if _, busy := refreshWatching.LoadOrStore(m.Name, struct{}{}); busy {
+		return // the running watcher reads the current episode itself
+	}
+	go func() {
+		defer refreshWatching.Delete(m.Name)
+		for {
+			time.Sleep(authResumeFastPoll)
+			if done := refreshWatchStep(m, time.Now()); done {
+				return
+			}
+		}
+	}()
+}
+
+// refreshWatchStep is one poll of startRefreshWatch; done ends the watch.
+func refreshWatchStep(m session.Meta, now time.Time) (done bool) {
+	st, has := authResumeStates.Read(m.Name)
+	if !has || st.GaveUp != "" || !claude.RefreshStuck(st.Msg) {
+		return true
+	}
+	at, err := time.Parse(time.RFC3339, st.At)
+	if err != nil || now.After(at.Add(authResumeRefreshForceAfter+time.Minute)) {
+		return true
+	}
+	renewed := authResumeRenewed(st, now)
+	if !renewed && !authResumeForced(st, now) {
+		return false
+	}
+	if renewed {
+		log.Printf("auth-resume: %s refresh finished %s after the failed turn",
+			m.Name, authResumeNow().Sub(at).Round(time.Second))
+	}
+	a, ok := refreshWatchTail(m)
+	refreshWatchHandOver(m, a, ok, now)
+	// The tail read just now can be a newer failure than the episode this poll judged; the hand
+	// over then restarted the episode, and its own watcher request was refused because this one
+	// holds the key. Carry on for that episode instead of leaving it to the 30s sweep.
+	next, has := authResumeStates.Read(m.Name)
+	return !(has && next.GaveUp == "" && claude.RefreshStuck(next.Msg) && next.At != st.At)
 }
 
 // authResumeDue applies the backoff between attempts. The FIRST attempt has no delay of its
