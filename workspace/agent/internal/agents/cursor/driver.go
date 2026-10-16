@@ -25,6 +25,7 @@ package cursor
 // cannot happen" (the agy df996e4 lesson): always map it to an Interaction(question).
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +38,7 @@ import (
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/lifegate"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/status"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/transcript"
@@ -669,6 +671,17 @@ func (h *threadHandle) accept(in agents.TurnInput) (queued bool, err error) {
 // pump processes the queue serially (the child is exclusive, so no waitIdle is needed).
 func (h *threadHandle) pump() {
 	for {
+		// Each entry gets a lease of its own on the session's lifecycle gate (ADR 0115 decision
+		// 11.1), taken before it leaves the queue and held until the runtime has it. The input
+		// path that queued it released its lease at the accept and does not wait for this, so a
+		// move finds every accepted entry either handed over (and in the transcript) or still
+		// queued, where its snapshot reads it. Taken without h.mu: a move reads the queue under
+		// h.mu while it holds the gate.
+		lease, err := lifegate.Enter(context.Background(), h.name)
+		if err != nil {
+			h.parkForMove()
+			return
+		}
 		h.mu.Lock()
 		// A closed client counts as gone before watch marks the handle: the failed turn wakes
 		// this loop first, and the next input would be taken, recorded in the ledger and lost
@@ -677,23 +690,39 @@ func (h *threadHandle) pump() {
 		if !h.alive || h.cl == nil || h.cl.dead() {
 			h.pumping = false
 			h.mu.Unlock()
+			lease.Release()
 			return
 		}
 		t := h.q.Take()
 		if t == nil {
 			h.pumping = false
 			h.mu.Unlock()
+			lease.Release()
 			return
 		}
 		h.running = true
 		h.mu.Unlock()
 
-		h.runTurn(t)
+		h.runTurn(t, lease)
 
 		h.mu.Lock()
 		h.q.Settle(t)
 		h.running = false
 		h.mu.Unlock()
+	}
+}
+
+// parkForMove stops a pump that a move refused, leaving its input queued for the move's
+// snapshot. If the move rolls back, the gate reopens and the pump starts again. The second look
+// covers a reopen that ran before the callback was registered or while pumping was still set,
+// when resumePump would have found nothing to do.
+func (h *threadHandle) parkForMove() {
+	lifegate.WhenReopened(h.name, h.resumePump)
+	h.mu.Lock()
+	h.pumping = false
+	h.mu.Unlock()
+	if !lifegate.Closed(h.name) {
+		h.resumePump()
 	}
 }
 
@@ -714,7 +743,11 @@ func (h *threadHandle) resumePump() {
 // runTurn executes ONE blocking session/prompt and lands the terminal state.
 // The turn-boundary MarkTurnStart/End drive the status store and the docs/log/30 completion
 // report (the notify seam).
-func (h *threadHandle) runTurn(t *agents.Taken) {
+//
+// lease is the entry's hold on the lifecycle gate (pump), released once the runtime has the
+// input and the transcript shows it; a turn can run for hours and must not hold a move off.
+func (h *threadHandle) runTurn(t *agents.Taken, lease *lifegate.Lease) {
+	defer lease.Release()
 	agents.MarkTurnStartRun(h.slotSid, t.In)
 	defer func() { agents.MarkTurnEnd(h.slotSid, h.currentState()) }()
 	h.setState(agents.TurnStarting)
@@ -743,6 +776,7 @@ func (h *threadHandle) runTurn(t *agents.Taken) {
 	// user_message_chunk. Only after Commit: a cancelled entry never became a turn.
 	h.buf.addUserTurn(t.In.Prompt)
 	h.emit(agents.Event{Kind: "turn_state", TurnState: agents.TurnRunning})
+	lease.Release()
 	written := false
 	res, err := cl.callWritten("session/prompt", map[string]any{
 		"sessionId": sid,

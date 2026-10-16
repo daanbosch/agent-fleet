@@ -1,6 +1,7 @@
 package sessionx
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/chatx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/fleetgraph"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/lifegate"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/status"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/tmuxx"
@@ -295,6 +297,19 @@ func HandleSessionInput(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("keys/seq must have at most %d elements", maxInputSteps))
 		return
 	}
+	// The lifecycle gate (ADR 0115 decision 11.1), held from every check below through the
+	// commit: typed and confirmed, accepted by the driver, or spooled as a pending peer
+	// message. A delivery that already holds the lease passes it on the request's context.
+	lease, err := lifegate.Enter(r.Context(), name)
+	if err != nil {
+		var moved *lifegate.MovedError
+		if errors.As(err, &moved) {
+			noteBookingRefusedDuringMove(name, body.Source, body.ScheduleID)
+		}
+		writeGateErr(w, err)
+		return
+	}
+	defer lease.Release()
 	// Peer send (docs/log/58 / ADR 0041). Every invariant is satisfied here before the
 	// request joins the ordinary injection path. It sits BEFORE the managed/tui split for
 	// the same reason as the self-report hint line: otherwise one of the two paths slips
@@ -402,7 +417,7 @@ func HandleSessionInput(w http.ResponseWriter, r *http.Request) {
 	// reason as /turn's handleManagedTurn. {keys}/{seq} (raw TUI driving) stays tui-only.
 	if len(body.Keys) == 0 && len(body.Seq) == 0 {
 		if meta, ok := session.ReadMeta(name); ok && meta.DriverKind() == session.DriverManaged {
-			handleManagedInputPrompt(w, meta, body.Prompt, body.ReportTo, body.Source, body.PeerFrom,
+			handleManagedInputPrompt(lease, w, meta, body.Prompt, body.ReportTo, body.Source, body.PeerFrom,
 				scheduleRefOf(body.Source, body.ScheduleID, body.ScheduleSlot), delivery)
 			return
 		}
@@ -593,7 +608,7 @@ func HandleSessionInput(w http.ResponseWriter, r *http.Request) {
 			recordFleetGraphInstruct(name, src, body.ReportTo, "", body.Prompt)
 		}
 	}
-	if !submitPromptTUI(w, name, pane, body.Prompt) {
+	if !submitPromptTUI(lease, w, name, pane, body.Prompt) {
 		return
 	}
 	rememberCodexTUIMode(name, body.Prompt, nil)
@@ -693,7 +708,11 @@ func writePeerErr(w http.ResponseWriter, err error) {
 // start op (session_turn.go) — same ThreadHandle.Send delivery, but keeps /input's
 // report_to contract (addInstruction / recordOperatorInjection) that /turn doesn't
 // carry, so send_to_session's docs/log/30 auto-report keeps working for managed sessions.
-func handleManagedInputPrompt(w http.ResponseWriter, meta session.Meta, prompt, reportTo, source, peerFrom string, sched agents.ScheduleRef, delivery *chatx.ScheduleDelivery) {
+func handleManagedInputPrompt(lease *lifegate.Lease, w http.ResponseWriter, meta session.Meta, prompt, reportTo, source, peerFrom string, sched agents.ScheduleRef, delivery *chatx.ScheduleDelivery) {
+	if err := lease.Check(meta.Name); err != nil {
+		writeGateErr(w, err)
+		return
+	}
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		httpx.WriteErr(w, http.StatusBadRequest, "empty_prompt", "prompt, keys or seq is required")
@@ -782,8 +801,13 @@ func handleManagedInputPrompt(w http.ResponseWriter, meta session.Meta, prompt, 
 
 // submitPromptTUI is the shared {prompt}→TUI delivery behind /input's {prompt} path
 // and /turn's tui start/steer route. Guards, types + submits, and marks working;
-// on failure the HTTP error is already written and false is returned.
-func submitPromptTUI(w http.ResponseWriter, name, pane, prompt string) bool {
+// on failure the HTTP error is already written and false is returned. The caller holds the
+// session's lease (ADR 0115 decision 11.1).
+func submitPromptTUI(lease *lifegate.Lease, w http.ResponseWriter, name, pane, prompt string) bool {
+	if err := lease.Check(name); err != nil {
+		writeGateErr(w, err)
+		return false
+	}
 	// While ANY interaction is pending (question / plan approval / permission), the TUI
 	// is showing a modal that swallows typed text and lets the trailing Enter confirm
 	// its highlighted row — a wrong answer, a silent plan approval, or a silent allow.
@@ -970,6 +994,12 @@ func deliverInitialPrompt(name, prompt string) {
 // InitialPromptState: failed when nothing could be typed, delivered when a turn was seen to
 // start, unknown when it was typed and no evidence came either way.
 func typeInitialPrompt(name, prompt string) string {
+	// A closed session fails at once rather than after the boot waits below; the lease taken
+	// before typing is what actually keeps the prompt out (ADR 0115 decision 11.1).
+	if lifegate.Closed(name) {
+		log.Printf("initial prompt NOT typed for %s: its input is closed by a move", name)
+		return session.InitialPromptFailed
+	}
 	// An expired claude login makes the TUI accept the characters and start no turn, so the
 	// task would be eaten and the member would learn why only from their next, refused send.
 	// Settling failed instead keeps the loss visible (the same refusal promptBlocker gives).
@@ -1022,6 +1052,15 @@ func typeInitialPrompt(name, prompt string) string {
 	if !ready {
 		time.Sleep(2500 * time.Millisecond) // composer never detected — best-effort send anyway
 	}
+	// Only from here: the waits above can take a minute, and a move must not wait behind a
+	// boot. This runs detached from whatever request started it, so it takes its own lease
+	// rather than borrowing one (ADR 0115 decision 11.1).
+	lease, err := lifegate.Enter(context.Background(), name)
+	if err != nil {
+		log.Printf("initial prompt NOT typed for %s: %v", name, err)
+		return session.InitialPromptFailed
+	}
+	defer lease.Release()
 	var base deliverySnapshot
 	if metaOK {
 		base = deliveryBaseline(meta)

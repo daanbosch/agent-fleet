@@ -3,6 +3,7 @@
 [English](0115-move-session-to-another-agent.md) | 日本語
 
 - Status: **proposed**（2026-10-15）。未実装。
+  Follow-ups: #2236
 - Tracking: #2182。#2183（共通の Markdown レンダラー `transcript.Markdown`）の上に作る。
 - See also: [0039](0039-fork-at-message.ja.md)（分岐）／
   [0049](0049-session-changed-files.ja.md)（変更ファイル一覧）／
@@ -256,3 +257,31 @@ develop（2026-10-15）の `Agent.Transcript`／`claude.CollectAllTurns` を読�
   読み直す。作業コピーは同じだ。
 - 移動済みの元セッションは、その利用者以外の何ものにも起こされない。ほかのどの停止セッションより
   厳しいが、それが作業コピーごとに書き手を一人に保つ。
+
+## 追記（2026-10-16）— 実装した元セッション側のゲート（P2a ステップ 2、#2182）
+
+決定 11 が元セッションに求めるものは Agent に入った。それを動かす `/move` はまだ無い。
+
+- **ゲート**は `internal/lifegate`。セッションごとに一つで、入力操作ごとの共有の `Lease` と、移動の
+  ための排他の `Lock` を持つ。待っている書き手を優先するので、入力が途切れなく来ても移動は待たされ
+  続けない。その代わり入れ子の取得はデッドロックになる。公開の入口が一度だけリースを取り、内側の手順は
+  `*lifegate.Lease` を引数で受けて確かめる（`Check`）。リクエストのコンテキストに載ったリースは
+  `Enter` が借りる（`deliverPendingPeer` → `/input`）。閉じた状態はメタに加えてメモリにも持つ。
+  無関係な書き換えの最中に読んだメタはパースできないからだ。
+- **ゲートを通る経路:** `/input`（peer を含むすべての形）、`/turn`（すべての op。Managed ではどれも
+  ランタイムを再開する）、`/start`、`/recreate`、`/driver`、`/respond`、`/answer-question`、
+  `/plan-respond`、`/carried-answer`、チャットブリッジの受信テキストとボタン回答、中断・認証の自動再開
+  （`injectSessionPrompt` 経由）、起動タスクの投入（`typeInitialPrompt`）、`deliverPendingPeer`
+  （メッセージを spool から出す前にリースを取る）、利用上限の巡回、cursor のキューポンプ。拒否は
+  `409 session_moved` で、`error.target` に移動先が入る。
+- **開始できる状態:** idle・`limited`・`spendLimit` に加えて `stopped` も受ける。週の上限で止まった
+  元セッションは、移動される頃にはたいてい idle reaper に停止されている。停止中のセッションも何も
+  始められない。保留中の対話は従来どおり拒否する。
+- **巡回**は `putRateLimitSchedule` の前後だけでなく、そのセッションの一歩全体でリースを持つ。予約を
+  記録したエピソードファイルが、移動が入力を閉じる前に書かれ、確定時に必ず取り消す id が見つかる。
+- **取り消し**は `cancelRateLimitSchedule` を通る。CP が確認していない id（404 は確認とみなす）は
+  `session-rate-limit-cleanup` に残し、巡回のたびに再試行する。期限は無い。
+- **移動の基本操作**は `beginSessionMove`・`rollback`・`commit`（sessionx の `session_move_gate.go`）と、
+  決定 11.6 のための `reopenMovedSession`。確定はメタを変え、エピソードを閉じ、その予約を取り消す。
+  元セッションの停止と spool の peer メッセージの取り出しは、順序を持つ移動の側に残した。
+- 自前のリースを取るのは cursor のポンプだけだ。ほかの Managed ドライバのポンプは後続の作業。

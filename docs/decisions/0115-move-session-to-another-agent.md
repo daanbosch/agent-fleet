@@ -3,6 +3,7 @@
 English | [日本語](0115-move-session-to-another-agent.ja.md)
 
 - Status: **proposed** (2026-10-15). Nothing is implemented.
+  Follow-ups: #2236
 - Tracking: #2182. Builds on #2183 (the shared Markdown renderer, `transcript.Markdown`).
 - See also: [0039](0039-fork-at-message.md) (fork) /
   [0049](0049-session-changed-files.md) (the changed-files list) /
@@ -281,3 +282,38 @@ than write an empty file (decision 6).
   that needs a file the source read reads it again; the working copy is the same.
 - A moved source cannot be woken by anything but its user. That is stricter than any other
   stopped session, and it is what keeps one writer per working copy.
+
+## Addendum (2026-10-16) — the source gate as built (P2a step 2, #2182)
+
+What decision 11 asks of the source is in place on the Agent; the `/move` endpoint that drives
+it is not yet.
+
+- **The gate** is `internal/lifegate`: one gate per session, with a shared `Lease` per input
+  operation and an exclusive `Lock` for the move. It prefers a waiting writer, so a steady
+  trickle of inputs cannot hold a move off, which is also what makes a nested take a deadlock.
+  The public entry takes the lease once; an inner step takes a `*lifegate.Lease` parameter and
+  checks it (`Check`), and a lease carried on a request's context is borrowed by `Enter`
+  (`deliverPendingPeer` → `/input`). The closed state is kept in memory as well as on the meta,
+  because a meta read that lands inside an unrelated rewrite of the file does not parse.
+- **Gated paths:** `/input` (every body form, peer messages included), `/turn` (every op: on
+  Managed each one resumes the runtime), `/start`, `/recreate`, `/driver`, `/respond`,
+  `/answer-question`, `/plan-respond`, `/carried-answer`, the chat bridge's inbound text and
+  button answers, the abort / auth auto-resumes (through `injectSessionPrompt`), the launch-task
+  delivery (`typeInitialPrompt`), `deliverPendingPeer` (the lease is taken before the message
+  leaves the spool), the usage-limit sweep, and the cursor queue pump. A refusal is `409
+  session_moved` with the target in `error.target`.
+- **Start states:** `stopped` is accepted next to idle, `limited` and `spendLimit`. A source
+  parked at a weekly limit is usually stopped by the idle reaper long before anyone moves it,
+  and a stopped session can start nothing either. A pending interaction is still refused.
+- **The sweep** holds the session's lease for its whole step, not only around
+  `putRateLimitSchedule`: the episode file that records a booking is then written before a
+  move can close input, so a commit always finds the id to cancel.
+- **Cancellations** go through `cancelRateLimitSchedule`; an id the CP has not confirmed (a 404
+  counts as confirmed) is kept in `session-rate-limit-cleanup` and retried at the start of
+  every sweep, with no expiry.
+- **The move's primitives** are `beginSessionMove`, `rollback` and `commit` (sessionx,
+  `session_move_gate.go`) plus `reopenMovedSession` for decision 11.6. Commit changes the meta,
+  closes the episode and cancels its booking; stopping the source and taking its spooled peer
+  messages are left to the move, which owns their order.
+- Only the cursor pump takes a lease of its own; the other Managed drivers' pumps are a
+  follow-up.
