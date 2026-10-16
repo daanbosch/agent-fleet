@@ -1342,6 +1342,13 @@ export async function sessionPeerSend(
   return { ok: true, queued: !!r?.queued };
 }
 
+/** sessionAlive reads whether the session is running NOW (null = the read failed). The session
+ *  list lags by seconds and a held Session snapshot lags by as long as a card sits on screen. */
+export async function sessionAlive(session: string): Promise<boolean | null> {
+  const r = await apiJSON(`api/sessions/${encodeURIComponent(session)}/status`, "GET").catch(() => null);
+  return !r || r.error ? null : !!r.alive;
+}
+
 /** sessionReady reports whether a session's agent can take input right now (alive and its
  *  composer is up). A failed read is "not ready", so polling callers simply try again. */
 export async function sessionReady(session: string): Promise<boolean> {

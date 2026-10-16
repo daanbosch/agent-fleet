@@ -13,7 +13,7 @@
 // each render, so a renamed reviewer shows its new title and a deleted one is not offered
 // (names are immutable slugs, never reused).
 import { useSyncExternalStore } from "react";
-import { sessionPeerSend, sessionReady } from "../../core/api/client.ts";
+import { sessionAlive, sessionPeerSend, sessionReady } from "../../core/api/client.ts";
 import { useSessionsStore } from "../sessions/store.ts";
 import type { Session } from "../../types/session.ts";
 import { planFingerprint } from "./planComments.ts";
@@ -138,9 +138,12 @@ const READY_POLL_MS = 500;
  *  leaves the plan exactly as it was. `silent` = start() already toasted the reason. */
 export async function prepareReviewer(
   reviewer: Session,
-  deps = { start: (n: string) => useSessionsStore.getState().start(n), ready: sessionReady, sleep: (ms: number) => new Promise<void>((r) => setTimeout(r, ms)) },
+  deps = { alive: sessionAlive, start: (n: string) => useSessionsStore.getState().start(n), ready: sessionReady, sleep: (ms: number) => new Promise<void>((r) => setTimeout(r, ms)) },
 ): Promise<RereviewResult> {
-  if (reviewer.alive) return { ok: true };
+  // Ask the Agent, not the Session snapshot taken at press time: a retry minutes later must see
+  // a reviewer that has stopped since. A failed read falls back to the snapshot.
+  const alive = (await deps.alive(reviewer.name)) ?? !!reviewer.alive;
+  if (alive) return { ok: true };
   if (!(await deps.start(reviewer.name))) return { ok: false, message: "", silent: true };
   for (let waited = 0; waited < READY_TIMEOUT_MS; waited += READY_POLL_MS) {
     if (await deps.ready(reviewer.name)) return { ok: true };

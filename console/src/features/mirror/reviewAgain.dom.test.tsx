@@ -63,22 +63,33 @@ describe("prepareReviewer", () => {
   const sleep = async () => {};
   it("does nothing for a running reviewer", async () => {
     const start = vi.fn();
-    expect(await prepareReviewer(sess({ name: "r" }), { start, ready: vi.fn(), sleep })).toEqual({ ok: true });
+    expect(await prepareReviewer(sess({ name: "r" }), { alive: async () => null, start, ready: vi.fn(), sleep })).toEqual({ ok: true });
     expect(start).not.toHaveBeenCalled();
   });
   it("resumes a stopped reviewer and waits until it is ready", async () => {
     const start = vi.fn().mockResolvedValue(true);
     const ready = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
-    expect(await prepareReviewer(sess({ name: "r", alive: false }), { start, ready, sleep })).toEqual({ ok: true });
+    expect(await prepareReviewer(sess({ name: "r", alive: false }), { alive: async () => null, start, ready, sleep })).toEqual({ ok: true });
     expect(start).toHaveBeenCalledWith("r");
     expect(ready).toHaveBeenCalledTimes(2);
   });
   it("is silent when start() already told the user why it failed", async () => {
-    const r = await prepareReviewer(sess({ name: "r", alive: false }), { start: async () => false, ready: vi.fn(), sleep });
+    const r = await prepareReviewer(sess({ name: "r", alive: false }), { alive: async () => null, start: async () => false, ready: vi.fn(), sleep });
     expect(r).toEqual({ ok: false, message: "", silent: true });
   });
+  it("resumes a reviewer the snapshot calls alive but the Agent now reports stopped (stale retry)", async () => {
+    const start = vi.fn().mockResolvedValue(true);
+    const r = await prepareReviewer(sess({ name: "r", alive: true }), { alive: async () => false, start, ready: async () => true, sleep });
+    expect(r).toEqual({ ok: true });
+    expect(start).toHaveBeenCalledWith("r");
+  });
+  it("trusts the Agent over a stale stopped snapshot too", async () => {
+    const start = vi.fn();
+    await prepareReviewer(sess({ name: "r", alive: false }), { alive: async () => true, start, ready: vi.fn(), sleep });
+    expect(start).not.toHaveBeenCalled();
+  });
   it("gives up when the reviewer never becomes ready", async () => {
-    const r = await prepareReviewer(sess({ name: "r", alive: false }), { start: async () => true, ready: async () => false, sleep });
+    const r = await prepareReviewer(sess({ name: "r", alive: false }), { alive: async () => null, start: async () => true, ready: async () => false, sleep });
     expect(r.ok).toBe(false);
   });
 });
