@@ -258,3 +258,11 @@ Agent Fleet のデプロイは開発環境であり、環境変数と再起動�
   ロックする（`UPDATE workspace SET id=id`）。sqlite でも Postgres でも並行作成で 20 件を超えない。実測：ロックを
   外すと、上限 5 に対し 16 並行の作成で Postgres に 7〜9 行残った。ハンドラの事前チェックと `persona_limit` の
   エラーは変えていない。
+
+## 追記（2026-10-16）：同意ページの Referrer-Policy は `same-origin`（#2243）
+
+上のペルソナの追記は同意ページを `no-referrer` で返すとしている。この値だとブラウザがページ自身のフォーム POST に
+`Origin: null` を付け、厳格な `sameOrigin` が拒否するため、実環境では送信のたびに 403 になった（Go のテストは
+`Origin` を手で付けるので気づけなかった）。ページは `Referrer-Policy: same-origin` で返すようにした：同一オリジンの
+POST には本物の Console オリジンが付き、リダイレクト先のアプリには `Referer` が渡らない。`sameOrigin` は変えない
+（`Origin: null` は今も拒否）。認可のリダイレクトは `no-referrer` のまま（フォームを持たない）。

@@ -291,3 +291,12 @@ Two limits of the personas note are closed; nothing about the security propertie
   the workspace (`UPDATE workspace SET id=id`), so concurrent creates cannot leave more than 20 rows on
   sqlite or Postgres. Measured: without the lock, 16 racing creates against a limit of 5 left 7 to 9 rows
   on Postgres. The handler keeps its early check and the same `persona_limit` error.
+
+## Note (2026-10-16): the consent page's referrer policy is `same-origin` (#2243)
+
+The personas note above says the consent page is sent with `no-referrer`. That value makes a browser send
+`Origin: null` on the page's own form POST, which the strict `sameOrigin` check refuses, so every submit
+got 403 on a deployment (the Go tests set `Origin` by hand and never saw it). The page now sends
+`Referrer-Policy: same-origin`: the same-origin POST carries the real Console origin, and no `Referer`
+reaches the app it redirects to. `sameOrigin` is unchanged (`Origin: null` is still refused). The
+authorization redirect keeps `no-referrer`; it hosts no form.

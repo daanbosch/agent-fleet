@@ -421,8 +421,13 @@ func TestDevIdPConsentPageEscapesAndRefusesFraming(t *testing.T) {
 	}
 	h := rec.Header()
 	if h.Get("X-Frame-Options") != "DENY" || !strings.Contains(h.Get("Content-Security-Policy"), "frame-ancestors 'none'") ||
-		h.Get("Cache-Control") != "no-store" || h.Get("Referrer-Policy") != "no-referrer" {
+		h.Get("Cache-Control") != "no-store" || h.Get("Referrer-Policy") != "same-origin" {
 		t.Errorf("consent page headers: %v", h)
+	}
+	// A policy that sends no Origin on the same-origin form POST (no-referrer makes it "null") is
+	// refused by sameOrigin, so every submit would 403.
+	if got := h.Get("Referrer-Policy"); got != "same-origin" {
+		t.Errorf("Referrer-Policy = %q, want same-origin", got)
 	}
 	// Chromium applies form-action to the redirect after the POST, so any value here that does not
 	// list the app's origin blocks the return to the app (measured in headless Chromium).
