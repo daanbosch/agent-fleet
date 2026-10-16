@@ -452,6 +452,10 @@ type CreateReq struct {
 	// initial_prompt carrying its id (instr) (#1257). False on the Terminal route.
 	managed bool
 	instr   string
+	// name is the slug a move booked for its target before writing the handover file there
+	// (ADR 0115 decision 9). Unexported, so no client can name a session: every other create
+	// allocates a fresh slug.
+	name string
 	// Origin / OriginConv record who STARTED this session (docs/log/46 §2-c, ADR 0029 §6) —
 	// a different axis from Source (which attributes one injected prompt). The MCP
 	// create_session sends "operator" plus its own conversation slug; the Console sends
@@ -759,6 +763,12 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSON(w, r, &req) {
 		return
 	}
+	createSession(w, r, req)
+}
+
+// createSession is the create after its body is decoded, so a move can create its target
+// in-process with the name it booked (CreateReq.name).
+func createSession(w http.ResponseWriter, r *http.Request, req CreateReq) {
 	// A create raised by another SESSION (ADR 0073) carries the parent's name, and the whole
 	// spawn regime hangs off it. Resolved here; the refusals run further down.
 	spawnParent := ""
@@ -1155,7 +1165,10 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 	// Identity is a freshly allocated random slug — NOT the client's name. It (and the
 	// sid it derives) can't collide with an archived/pruned session's jsonl, so a new
 	// session never accidentally --resumes a past conversation.
-	name := allocSessionName(req.Dir)
+	name := req.name
+	if name == "" {
+		name = allocSessionName(req.Dir)
+	}
 
 	kind := NormalizeKind(req.Kind)
 	// An SSM session with no client title defaults to "{host alias} @MMDD-HHMM" — a

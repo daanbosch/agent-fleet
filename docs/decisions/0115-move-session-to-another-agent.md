@@ -3,7 +3,7 @@
 English | [日本語](0115-move-session-to-another-agent.ja.md)
 
 - Status: **proposed** (2026-10-15). Nothing is implemented.
-  Follow-ups: #2236
+  Follow-ups: #2236, #2252, #2254
 - Tracking: #2182. Builds on #2183 (the shared Markdown renderer, `transcript.Markdown`).
 - See also: [0039](0039-fork-at-message.md) (fork) /
   [0049](0049-session-changed-files.md) (the changed-files list) /
@@ -373,3 +373,32 @@ it is not yet.
   `session_moved`: the change would land on a session whose conversation has gone. `GET` holds
   the lease through `Resume` on an open session, and on a moving or moved one answers from the
   meta's model, effort and mode without starting a runtime.
+
+## Addendum (2026-10-17) — the move endpoint as built (P2a step 3a, #2182)
+
+- **Routes** (Agent, and the same paths in the CP allow-list): `POST /sessions/{name}/move
+  {kind, model?, driver?}`, `GET …/move/preview`, `POST …/move/retry`, `POST …/move/cancel`,
+  and `POST …/move/reopen` for decision 11.6's "resume here anyway". The move and the retry
+  create a session, so the CP sends them through fork's quota check. All but the preview are
+  audited as `session.move[.retry|.cancel|.reopen]`.
+- **The target's name is booked before begin**, so that `moving` can name it and the file can be
+  written into `~/.af-work/<target>` before the create. The create runs in-process through the
+  same path as `POST /sessions`, with the booked name in an unexported field that no client can
+  set.
+- **Targets:** claude, codex, opencode, copilot, agy and muse. lcpp is left out (decision 9). cursor
+  and kiro stay off behind `moveUnmeasuredAllowed` until the decision 9 measurement is done
+  (#2252). A request for the source's own kind is refused with `move_same_kind`, and `canFork`
+  says whether to offer fork instead.
+- **Uncertain create:** a create is rolled back only when it answered and left nothing under the
+  target's name (no meta, no pane). An unknown outcome, or a failure after the target's meta was
+  written, keeps `moving` and the file. The move is recorded in the state dir (`session-move`)
+  with the request, the file and the spooled peer ids, so retry and cancel work after an Agent
+  restart. Retry commits when the target exists, and otherwise creates it again under the same
+  name from the same file. Cancel refuses while the target exists.
+- **Decision 14's header:** each kind's project instruction files are a fixed table
+  (`projectInstructionFiles`). It lists only files a kind is known to load, so a target is never
+  wrongly assumed to have read one. The header names those of the source's files that exist in
+  the working folder and that the target's kind does not load.
+- **Not built here:** archiving the handover files with a trashed target, and putting them back
+  on restore (P2a step 3b). Also not built: the Console dialog, and `moving` / `movedTo` on the
+  session row (#2254).

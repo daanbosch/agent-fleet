@@ -181,24 +181,8 @@ func beginSessionMove(ctx context.Context, source, target string) (*sourceMove, 
 	if !ok {
 		return nil, errMoveSourceGone
 	}
-	if m.MovedTo != "" {
-		return nil, &lifegate.MovedError{Session: source, Target: m.MovedTo, Done: true}
-	}
-	if m.Moving != "" {
-		return nil, &lifegate.MovedError{Session: source, Target: m.Moving}
-	}
-	if m.Kind == session.KindCursor && m.DriverKind() == session.DriverManaged && !ManagedAlive(m) {
-		return nil, errMoveCursorStopped
-	}
-	state, blocker := moveSourceState(m)
-	if blocker != "" {
-		return nil, &moveStateError{Session: source, State: blocker}
-	}
-	if !movableSourceState(state) {
-		return nil, &moveStateError{Session: source, State: state}
-	}
-	if moveSourceInFlight(m) {
-		return nil, &moveStateError{Session: source, State: "working"}
+	if err := checkMoveSource(m); err != nil {
+		return nil, err
 	}
 	// Checked and atomic: after a restart the meta is the only record that input is closed, so the
 	// in-memory mirror is closed, and success returned, only once moving is on disk. The same holds
@@ -217,6 +201,32 @@ func beginSessionMove(ctx context.Context, source, target string) (*sourceMove, 
 	x.SetClosed(target, false)
 	log.Printf("move: %s: input closed for the move to %s", source, target)
 	return &sourceMove{source: source, target: target}, nil
+}
+
+// checkMoveSource is the state check of decision 11.2: nil when a move may start from m. The
+// move runs it under the exclusive gate; the preview runs it without, as an answer that can be
+// stale by the time the user confirms.
+func checkMoveSource(m session.Meta) error {
+	if m.MovedTo != "" {
+		return &lifegate.MovedError{Session: m.Name, Target: m.MovedTo, Done: true}
+	}
+	if m.Moving != "" {
+		return &lifegate.MovedError{Session: m.Name, Target: m.Moving}
+	}
+	if m.Kind == session.KindCursor && m.DriverKind() == session.DriverManaged && !ManagedAlive(m) {
+		return errMoveCursorStopped
+	}
+	state, blocker := moveSourceState(m)
+	if blocker != "" {
+		return &moveStateError{Session: m.Name, State: blocker}
+	}
+	if !movableSourceState(state) {
+		return &moveStateError{Session: m.Name, State: state}
+	}
+	if moveSourceInFlight(m) {
+		return &moveStateError{Session: m.Name, State: "working"}
+	}
+	return nil
 }
 
 // rollback opens the source's input again after a move that created no target (ADR 0115

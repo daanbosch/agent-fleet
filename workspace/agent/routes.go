@@ -77,6 +77,14 @@ func buildMux() *http.ServeMux {
 	mux.HandleFunc("POST /sessions-idempotency/{key}/reserve", sessionx.HandleIdempotencyReserve)
 	mux.HandleFunc("GET /share-operations/{key}", handleShareOperationLookup)
 	mux.HandleFunc("POST /sessions/{name}/fork", sessionx.HandleForkSession)
+	// Move to another agent kind (ADR 0115): the move, its dialog's preview, and the pending
+	// move's retry / cancel, plus "resume here anyway" on a moved source. control-plane/routes.go
+	// needs the same paths registered (the CP proxies by allowlist).
+	mux.HandleFunc("POST /sessions/{name}/move", sessionx.HandleSessionMove)
+	mux.HandleFunc("GET /sessions/{name}/move/preview", sessionx.HandleSessionMovePreview)
+	mux.HandleFunc("POST /sessions/{name}/move/retry", sessionx.HandleSessionMoveRetry)
+	mux.HandleFunc("POST /sessions/{name}/move/cancel", sessionx.HandleSessionMoveCancel)
+	mux.HandleFunc("POST /sessions/{name}/move/reopen", sessionx.HandleSessionMoveReopen)
 	mux.HandleFunc("POST /sessions/{name}/stop", sessionx.HandleStopSession)
 	mux.HandleFunc("POST /sessions/{name}/halt", sessionx.HandleHaltSession)
 	mux.HandleFunc("POST /sessions/{name}/recreate", sessionx.HandleRecreateSession)

@@ -3,7 +3,7 @@
 [English](0115-move-session-to-another-agent.md) | 日本語
 
 - Status: **proposed**（2026-10-15）。未実装。
-  Follow-ups: #2236
+  Follow-ups: #2236, #2252, #2254
 - Tracking: #2182。#2183（共通の Markdown レンダラー `transcript.Markdown`）の上に作る。
 - See also: [0039](0039-fork-at-message.ja.md)（分岐）／
   [0049](0049-session-changed-files.ja.md)（変更ファイル一覧）／
@@ -330,3 +330,29 @@ develop（2026-10-15）の `Agent.Transcript`／`claude.CollectAllTurns` を読�
   会話がすでに移動先へ移ったセッションに変更が残るためだ。`GET` は開いたセッションでは `Resume` の間
   リースを持ち、移動中・移動済みのセッションではランタイムを起こさずメタのモデル・effort・モードで
   答える。
+
+## 追記（2026-10-17）— 移動エンドポイントの実装（P2a ステップ 3a、#2182）
+
+- **ルート**（Agent と、CP の許可リストに同じパス）: `POST /sessions/{name}/move
+  {kind, model?, driver?}`、`GET …/move/preview`、`POST …/move/retry`、`POST …/move/cancel`、
+  決定 11.6 の「それでもここで再開」にあたる `POST …/move/reopen`。移動と再試行はセッションを作るので、
+  CP では fork と同じ割り当て上限の確認を通す。プレビュー以外は `session.move[.retry|.cancel|.reopen]`
+  として監査に記録する。
+- **移動先の名前は begin の前に確保する**。`moving` にその名前を書き、作成の前にファイルを
+  `~/.af-work/<target>` に書くためだ。作成は `POST /sessions` と同じ経路をプロセス内で通る。確保した
+  名前は、クライアントからは設定できない非公開のフィールドで渡す。
+- **移動先:** claude・codex・opencode・copilot・agy・muse。lcpp は除く（決定 9）。cursor と kiro は、
+  決定 9 の実測が済むまで `moveUnmeasuredAllowed` の後ろで無効のままにする（#2252）。元と同じ種別への
+  要求は `move_same_kind` で拒否し、代わりに fork を示すかどうかを `canFork` で返す。
+- **作成の結果が分からないとき:** ロールバックするのは、作成が応答を返し、かつ移動先の名前で何も
+  残っていない（メタもペインも無い）場合だけ。結果が分からないときや、移動先のメタを書いた後の失敗では
+  `moving` とファイルを残す。移動の内容（要求・ファイル・spool の peer の id）は状態ディレクトリ
+  （`session-move`）に記録するので、Agent が再起動しても再試行と取り消しができる。再試行は、移動先が
+  あれば確定し、無ければ同じファイルから同じ名前でもう一度作成する。取り消しは、移動先がある間は
+  拒否する。
+- **決定 14 のヘッダー:** 種別ごとのプロジェクト指示ファイルは固定の表（`projectInstructionFiles`）に
+  した。その種別が読むと分かっているファイルだけを載せるので、移動先が実際には読んでいないファイルを
+  読んだことにはならない。ヘッダーには、元の種別のファイルのうち作業フォルダに実在し、移動先の種別が
+  読まないものを挙げる。
+- **ここで作っていないもの:** ゴミ箱に入れた移動先と一緒に引き継ぎファイルを保管し、復元で戻す処理
+  （P2a ステップ 3b）。Console のダイアログと、セッション行の `moving` / `movedTo`（#2254）もまだ無い。

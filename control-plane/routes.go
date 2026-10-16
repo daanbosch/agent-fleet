@@ -359,6 +359,13 @@ func registerSessionRoutes(mux *http.ServeMux, cfg config) {
 	mux.HandleFunc("GET /api/sessions", ws.withResolved(ws.sessionsList))
 	mux.HandleFunc("POST /api/sessions", ws.withResolved(ws.sessionCreate))
 	mux.HandleFunc("POST /api/sessions/{name}/fork", ws.withResolved(ws.sessionFork))
+	// Move to another agent kind (ADR 0115). The move and its retry create a session, so they
+	// take fork's route through the quota check; the rest are relayed as they are.
+	mux.HandleFunc("POST /api/sessions/{name}/move", ws.withResolved(ws.sessionFork))
+	mux.HandleFunc("POST /api/sessions/{name}/move/retry", ws.withResolved(ws.sessionFork))
+	mux.HandleFunc("GET /api/sessions/{name}/move/preview", rest)
+	mux.HandleFunc("POST /api/sessions/{name}/move/cancel", rest)
+	mux.HandleFunc("POST /api/sessions/{name}/move/reopen", rest)
 	mux.HandleFunc("POST /api/sessions/{name}/stop", rest)
 	mux.HandleFunc("POST /api/sessions/{name}/halt", rest)
 	mux.HandleFunc("POST /api/sessions/{name}/recreate", rest)
