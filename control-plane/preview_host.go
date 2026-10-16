@@ -66,15 +66,14 @@ type previewHost struct {
 	port int
 }
 
-// parsePreviewHost reads a Host header as {slug}-{port}.{domain}. An empty domain
-// (AF_PREVIEW_DOMAIN unset) never matches — the host form simply does not exist then.
-//
-// A near miss is not reported as one: callers use this as a pass-through test, so the
-// ALB health check (Host is the task IP) and the Console's own host both come back
-// false here and continue to the normal mux.
-func parsePreviewHost(host, domain string) (previewHost, bool) {
+// previewHostLabel reports whether host sits under the preview domain, and if so what
+// precedes it. The domain itself (no label at all) counts as under it, with an empty
+// label: it is the wildcard's apex and no Console host. Normalisation (port, trailing
+// dot, case) lives only here, so parsePreviewHost and the dispatch pass-through test
+// cannot disagree about which hosts are in the preview namespace.
+func previewHostLabel(host, domain string) (label string, under bool) {
 	if domain == "" || host == "" {
-		return previewHost{}, false
+		return "", false
 	}
 	// Host may carry a port (127.0.0.1:8080 in development, or a non-standard
 	// public port).
@@ -82,11 +81,27 @@ func parsePreviewHost(host, domain string) (previewHost, bool) {
 		host = host[:i]
 	}
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	suffix := "." + strings.ToLower(strings.TrimPrefix(domain, "."))
+	apex := strings.ToLower(strings.TrimPrefix(domain, "."))
+	if host == apex {
+		return "", true
+	}
+	suffix := "." + apex
 	if !strings.HasSuffix(host, suffix) {
+		return "", false
+	}
+	return host[:len(host)-len(suffix)], true
+}
+
+// parsePreviewHost reads a Host header as {slug}-{port}.{domain}. An empty domain
+// (AF_PREVIEW_DOMAIN unset) never matches — the host form simply does not exist then.
+//
+// false does not mean "not a preview request": a malformed label under the domain also
+// returns false. Callers that must tell the two apart use previewHostLabel.
+func parsePreviewHost(host, domain string) (previewHost, bool) {
+	label, under := previewHostLabel(host, domain)
+	if !under {
 		return previewHost{}, false
 	}
-	label := host[:len(host)-len(suffix)]
 	if label == "" || strings.Contains(label, ".") {
 		return previewHost{}, false // one label only — the certificate covers no more
 	}
