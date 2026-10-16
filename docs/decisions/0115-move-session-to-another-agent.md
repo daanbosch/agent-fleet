@@ -346,3 +346,30 @@ it is not yet.
   the resume again, so a record the rollback missed is not a dead id for good.
 - **Amendment to decision 11.2** (2026-10-16): the user accepted the start states above — a move
   may also start from `stopped`, except a stopped Managed cursor source.
+
+## Addendum (2026-10-17) — every Managed pump takes its own lease (#2236)
+
+- Every Managed driver's queue pump now takes a lease of its own per entry, before the entry
+  leaves the queue, and releases it where the runtime holds the input:
+  - cursor, kiro, copilot: `session/prompt` is on the child's stdin.
+  - codex: `turn/start` is answered.
+  - opencode: the request carrying the input (`/message`, or `/prompt` on 2.x) is written to
+    serve. The lease spans `waitIdle`, so a move waits out another client's turn for at most the
+    60 s drain rather than snapshot an entry the pump is about to send.
+  - lcpp: the user turn is appended to the store, which is this kind's transcript.
+  - muse: `turn/start` is answered. A `queued` disposition means the host holds the input behind
+    a running turn, and a source with a running turn cannot be moved (11.2). `accept` no longer
+    runs the pump on the caller's goroutine, since the caller holds a lease and a second one
+    taken there would be a nested take.
+- Releasing the lease there is early for the state check: the runtime's own record (copilot's
+  `events.jsonl`, opencode's store, muse's `turn/started`) can still show the previous turn's idle
+  when the queue no longer holds the entry. So `beginSessionMove` also asks the Managed handle,
+  under the exclusive gate, whether it holds an entry it took and has not settled
+  (`ManagedInFlight`; entries still queued do not count), and refuses the source as `working`
+  if so.
+- A pump the gate refuses leaves its entry queued and starts again on `lifegate.Reopen`; a meta
+  it cannot read makes it look again after a second.
+- `POST /sessions/{name}/settings` holds the lease and refuses a moving or moved source with
+  `session_moved`: the change would land on a session whose conversation has gone. `GET` holds
+  the lease through `Resume` on an open session, and on a moving or moved one answers from the
+  meta's model, effort and mode without starting a runtime.

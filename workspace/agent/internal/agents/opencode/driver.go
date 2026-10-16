@@ -34,6 +34,7 @@ package opencode
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -42,6 +43,7 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -49,6 +51,7 @@ import (
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/lifegate"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/status"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/transcript"
@@ -326,6 +329,21 @@ func ManagedBusy(name string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.running || h.tq().Len() > 0
+}
+
+// ManagedInFlight reports that the handle holds an entry it took from the queue and has not
+// settled. The pump gives its move-gate lease back once the runtime has the input, which can be
+// before the runtime's own record (and so DriveState) shows the turn; a move asks this, under the
+// exclusive gate, so it never starts in that window (ADR 0115 decision 11.2). Entries still
+// queued do not count: the move carries them.
+func ManagedInFlight(name string) bool {
+	h := handleFor(name)
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.running || h.tq().Head() != nil
 }
 
 // AbortManaged interrupts every running managed turn — the managed counterpart of
@@ -606,6 +624,18 @@ func ErrQuestionPending(err error) bool { return errors.Is(err, errQuestionPendi
 // serialize), run the blocking turn, repeat.
 func (h *threadHandle) pump() {
 	for {
+		// Each entry gets a lease of its own on the session's lifecycle gate (ADR 0115 decision
+		// 11.1), taken before it leaves the queue and held until /message is written to serve.
+		// The input path that queued it released its lease at the accept, so a move finds every
+		// accepted entry either with serve or still queued, where its snapshot reads it. The hold
+		// spans waitIdle: a move waits out another client's turn (at most its 60s) rather than
+		// snapshot an entry the pump is about to send. Taken without h.mu: a move reads the
+		// queue under h.mu while it holds the gate.
+		lease, err := lifegate.Enter(context.Background(), h.name)
+		if err != nil {
+			h.parkForMove(err)
+			return
+		}
 		h.mu.Lock()
 		var t *agents.Taken
 		if h.alive {
@@ -617,6 +647,7 @@ func (h *threadHandle) pump() {
 			// sees pumping=true and starts no pump.
 			h.pumping = false
 			h.mu.Unlock()
+			lease.Release()
 			return
 		}
 		addr, ses, dir := h.addr, h.ses, h.dir
@@ -637,10 +668,11 @@ func (h *threadHandle) pump() {
 			waitIdle(addr, ses, dir, 60*time.Second)
 		}
 		if h.commit(t) {
-			h.runTurn(t)
+			h.runTurn(t, lease)
 		} else {
 			h.setState(agents.TurnCancelled) // stopped before it was sent: it never becomes a turn
 		}
+		lease.Release()
 		if !h.awaitRetryAbort() {
 			// The abort may still be executed later and would cut the next input's turn short:
 			// send nothing more until a resume re-reads the session (queued inputs stay queued).
@@ -654,6 +686,43 @@ func (h *threadHandle) pump() {
 		h.turnSent = false
 		h.retry = nil
 		h.mu.Unlock()
+	}
+}
+
+// parkForMove stops a pump that a move refused, leaving its input queued for the move's
+// snapshot. If the move rolls back, the gate reopens and the pump starts again. The second look
+// covers a reopen that ran before the callback was registered or while pumping was still set,
+// when resumePump would have found nothing to do.
+//
+// A meta the gate could not read is not a move: nothing will reopen it, so the pump looks again
+// after a pause instead.
+func (h *threadHandle) parkForMove(err error) {
+	if errors.Is(err, lifegate.ErrMetaUnreadable) {
+		h.mu.Lock()
+		h.pumping = false
+		h.mu.Unlock()
+		time.AfterFunc(time.Second, h.resumePump)
+		return
+	}
+	lifegate.WhenReopened(h.name, h.resumePump)
+	h.mu.Lock()
+	h.pumping = false
+	h.mu.Unlock()
+	if !lifegate.Closed(h.name) {
+		h.resumePump()
+	}
+}
+
+// resumePump starts the pump for what is queued, unless one runs.
+func (h *threadHandle) resumePump() {
+	h.mu.Lock()
+	start := !h.pumping && h.alive && h.tq().Len() > 0
+	if start {
+		h.pumping = true
+	}
+	h.mu.Unlock()
+	if start {
+		go h.pump()
 	}
 }
 
@@ -678,7 +747,11 @@ func (h *threadHandle) commit(t *agents.Taken) bool {
 // db-derived LiveState, but the fallback and anySessionWorking (graceful shutdown's wait
 // condition) read this. Without returning to idle at the end of a turn, the session
 // sticks on "in progress".
-func (h *threadHandle) runTurn(t *agents.Taken) {
+//
+// lease is the entry's hold on the lifecycle gate (pump), released once the request carrying the
+// input is written to serve; a turn can run for hours and must not hold a move off.
+func (h *threadHandle) runTurn(t *agents.Taken, lease *lifegate.Lease) {
+	defer lease.Release()
 	in := t.In
 	agents.MarkTurnStartRun(h.ocSid, in)
 	// Stamp idle with the terminal turn state (and emit the docs/log/30 report on
@@ -722,6 +795,15 @@ func (h *threadHandle) runTurn(t *agents.Taken) {
 		return
 	}
 	h.emit(agents.Event{Kind: "turn_state", TurnState: agents.TurnRunning})
+	// /message blocks for the whole turn, so the request's write is the moment serve has the
+	// input; a send that fails before it keeps the lease until runTurn returns.
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				lease.Release()
+			}
+		},
+	}))
 	res, err := sendTurn(addr, ses, h.dir, req, st)
 	if err != nil {
 		// A transport break means the daemon is gone or the turn was interrupted: fall

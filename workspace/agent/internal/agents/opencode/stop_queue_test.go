@@ -271,7 +271,7 @@ func TestStopBetweenCommitAndSendIsNotSent(t *testing.T) {
 	if aborts != 0 {
 		t.Fatalf("the stop aborted serve %d times before the input was sent", aborts)
 	}
-	h.runTurn(tk)
+	h.runTurn(tk, pumpLease(t, h))
 	h.mu.Lock()
 	h.tq().Settle(tk)
 	h.running = false

@@ -55,6 +55,10 @@ func (h *moveFakeHandle) Steer(in agents.TurnInput) error { return h.Send(in) }
 func (h *moveFakeHandle) Interrupt(agents.InterruptOpts) (agents.InterruptResult, error) {
 	return agents.InterruptResult{}, nil
 }
+func (h *moveFakeHandle) UpdateSettings(agents.ThreadSettings) error { return nil }
+func (h *moveFakeHandle) Snapshot() (agents.ThreadSnapshot, error) {
+	return agents.ThreadSnapshot{}, nil
+}
 func (h *moveFakeHandle) Respond(agents.InteractionReply) error {
 	h.sent <- agents.TurnInput{Prompt: "(respond)"}
 	return nil
@@ -65,6 +69,10 @@ type moveFakeDriver struct {
 	h        *moveFakeHandle
 	inResume func()
 	resumed  chan string
+}
+
+func (d *moveFakeDriver) Capabilities() agents.Capabilities {
+	return agents.Capabilities{DynamicModel: true}
 }
 
 func (d *moveFakeDriver) Resume(m session.Meta) (agents.ThreadHandle, error) {
@@ -286,7 +294,9 @@ func TestEveryInputPathRefusesAMovedSource(t *testing.T) {
 		}
 		t.Run(label, func(t *testing.T) {
 			const name, target = "mvrefuse", "mvrefuse-target"
-			d, _ := moveEnv(t, name)
+			d, m := moveEnv(t, name)
+			m.Model = "mv-model"
+			session.WriteMeta(m)
 			session.WriteMeta(session.Meta{Name: "mvrefuse-peer", Dir: t.TempDir(), Kind: session.KindClaude})
 			mv := mustBegin(t, beginAsync(name, target))
 			if done {
@@ -324,10 +334,24 @@ func TestEveryInputPathRefusesAMovedSource(t *testing.T) {
 				{"/answer-question", `{"choices":[1]}`, HandleSessionAnswerQuestion},
 				{"/plan-respond", `{"decision":"approve"}`, HandleSessionPlanRespond},
 				{"/carried-answer", `{"decision":"continue"}`, HandleSessionCarriedAnswer},
+				{"/settings", `{"model":"gpt-x"}`, HandleSessionSettings},
 			} {
 				t.Run(tc.path+" "+tc.body, func(t *testing.T) {
 					assertMovedRefusal(t, http1(tc.h, tc.path, tc.body), target)
 				})
+			}
+			// The settings read starts no runtime: it answers from the meta.
+			req := httptest.NewRequest(http.MethodGet, "/sessions/"+name+"/settings", nil)
+			req.SetPathValue("name", name)
+			rec := httptest.NewRecorder()
+			HandleSessionSettingsGet(rec, req)
+			var got managedThreadSettingsWire
+			_ = json.Unmarshal(rec.Body.Bytes(), &got)
+			if rec.Code != http.StatusOK || got.Model != "mv-model" || !got.DynamicModel {
+				t.Errorf("GET /settings = %d %s, want 200 with the stored model", rec.Code, rec.Body.String())
+			}
+			if cur, _ := session.ReadMeta(name); cur.Model != "mv-model" {
+				t.Errorf("model after the refused POST = %q, want it unchanged", cur.Model)
 			}
 			var moved *lifegate.MovedError
 			if err := injectSessionPrompt(name, "from discord", agents.Origin{Kind: agents.OriginDiscord}); !errors.As(err, &moved) || moved.Target != target {
@@ -385,6 +409,38 @@ func TestBeginRefusesWhatCannotMove(t *testing.T) {
 	}
 	if rec := postInput(t, m.Name, `{"prompt":"back"}`); rec.Code != http.StatusOK {
 		t.Fatalf("input after rollback = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A source whose state still reads idle while its handle has an entry in flight (the pump gave
+// its lease back once the runtime had the input, before the runtime's own record shows the turn)
+// is refused as working, and the refusal changes nothing. What the drivers report in that window
+// is pinned by each driver's TestPump...BeforeAMove.
+func TestBeginRefusesASourceWithAnEntryInFlight(t *testing.T) {
+	_, m := moveEnv(t, "mvinflight")
+	prev := moveSourceInFlight
+	t.Cleanup(func() { moveSourceInFlight = prev })
+	inFlight := true
+	moveSourceInFlight = func(got session.Meta) bool { return got.Name == m.Name && inFlight }
+
+	var se *moveStateError
+	if _, err := beginSessionMove(context.Background(), m.Name, "mvinflight-t"); !errors.As(err, &se) || se.State != "working" {
+		t.Fatalf("source with an entry in flight: %v, want refused as working", err)
+	}
+	if cur, _ := session.ReadMeta(m.Name); cur.Moving != "" || cur.MovedTo != "" {
+		t.Fatalf("meta after the refusal = moving %q movedTo %q, want neither", cur.Moving, cur.MovedTo)
+	}
+	if lifegate.Closed(m.Name) {
+		t.Fatal("the refused move left input closed")
+	}
+
+	inFlight = false // the turn settled: the same source can move now
+	mv, err := beginSessionMove(context.Background(), m.Name, "mvinflight-t")
+	if err != nil {
+		t.Fatalf("source with nothing in flight: %v", err)
+	}
+	if err := mv.rollback(time.Now()); err != nil {
+		t.Fatal(err)
 	}
 }
 

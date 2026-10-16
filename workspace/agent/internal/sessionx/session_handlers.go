@@ -95,6 +95,29 @@ func managedBusy(m session.Meta) bool {
 	return false
 }
 
+// managedInFlight reports that a managed session's handle holds an entry it took from its queue
+// and has not settled (the drivers' ManagedInFlight). Unlike managedBusy, input still queued
+// does not count.
+func managedInFlight(m session.Meta) bool {
+	switch m.Kind {
+	case session.KindOpencode:
+		return opencode.ManagedInFlight(m.Name)
+	case session.KindCodex:
+		return codex.ManagedInFlight(m.Name)
+	case session.KindCopilot:
+		return copilot.ManagedInFlight(m.Name)
+	case session.KindCursor:
+		return cursor.ManagedInFlight(m.Name)
+	case session.KindKiro:
+		return kiro.ManagedInFlight(m.Name)
+	case session.KindLcpp:
+		return lcpp.ManagedInFlight(m.Name)
+	case session.KindMuse:
+		return muse.ManagedInFlight(m.Name)
+	}
+	return false
+}
+
 // dropManagedRuntime detaches a managed session from its runtime — the equivalent of the
 // tmux kill-session that stop / halt / archive / recreate do: abort the running turn and
 // forget the handle. The conversation's source of truth (SQLite / rollout) stays intact,

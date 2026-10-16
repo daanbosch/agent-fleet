@@ -365,11 +365,26 @@ type settingsReq struct {
 // HandleSessionSettingsGet reports the settings that the managed driver will use
 // for the next turn. Reading the latest transcript turn is insufficient: it is stale
 // immediately after a settings change and empty before the first prompt.
+//
+// Resume starts the runtime of a stopped session, so the read holds the session's lease (ADR
+// 0115 decision 11.1). A moving or moved source answers from its meta instead, without a
+// runtime: the meta is where POST persists the next turn's settings, and such a source runs no
+// turn that could make the driver's copy differ.
 func HandleSessionSettingsGet(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !session.ValidName(name) {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_name", "invalid session name")
 		return
+	}
+	lease, err := lifegate.Enter(r.Context(), name)
+	var moved *lifegate.MovedError
+	switch {
+	case errors.As(err, &moved):
+	case err != nil:
+		writeGateErr(w, err)
+		return
+	default:
+		defer lease.Release()
 	}
 	meta, ok := session.ReadMeta(name)
 	if !ok {
@@ -387,6 +402,14 @@ func HandleSessionSettingsGet(w http.ResponseWriter, r *http.Request) {
 			"managed driver はこの kind ではまだ利用できません")
 		return
 	}
+	caps := d.Capabilities()
+	if moved != nil {
+		httpx.WriteJSON(w, http.StatusOK, managedThreadSettingsWire{
+			Model: meta.Model, Effort: meta.Effort, Mode: meta.Mode,
+			DynamicModel: caps.DynamicModel, DynamicEffort: caps.DynamicEffort, DynamicMode: caps.DynamicMode,
+		})
+		return
+	}
 	h, err := d.Resume(meta)
 	if err != nil {
 		writeRuntimeErr(w, err)
@@ -397,7 +420,6 @@ func HandleSessionSettingsGet(w http.ResponseWriter, r *http.Request) {
 		writeRuntimeErr(w, err)
 		return
 	}
-	caps := d.Capabilities()
 	httpx.WriteJSON(w, http.StatusOK, managedThreadSettingsWire{
 		Model: snap.Settings.Model, Effort: snap.Settings.Effort, Mode: snap.Settings.Mode,
 		DynamicModel: caps.DynamicModel, DynamicEffort: caps.DynamicEffort, DynamicMode: caps.DynamicMode,
@@ -426,6 +448,13 @@ func HandleSessionSettings(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusBadRequest, "empty_settings", "nothing to update")
 		return
 	}
+	// Refused on a moving or moved source, not only because Resume starts its runtime: the
+	// change would land on a session whose conversation has gone to the target.
+	lease, ok := enterSessionGate(w, r, name)
+	if !ok {
+		return
+	}
+	defer lease.Release()
 	meta, ok := session.ReadMeta(name)
 	if !ok {
 		httpx.WriteErr(w, http.StatusNotFound, "not_found", "no such session: "+name)
