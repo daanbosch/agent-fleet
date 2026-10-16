@@ -16,7 +16,7 @@ interface DevIdpStatus {
   missing_base_url: boolean;
   missing_preview_domain: boolean;
   issuer: string;
-  opted_in: number;
+  clients: number;
 }
 
 export function DevIdpAdminView() {
@@ -106,7 +106,7 @@ export function DevIdpAdminView() {
             {tr("admin.devidp_issuer")}: <span className="mono">{data.issuer}</span>
           </p>
         )}
-        {data && <p className="muted">{tr("admin.devidp_opted_in", { n: data.opted_in })}</p>}
+        {data && <p className="muted">{tr("admin.devidp_clients", { n: data.clients })}</p>}
         {err && <p className="form-err">{err}</p>}
       </section>
     </div>

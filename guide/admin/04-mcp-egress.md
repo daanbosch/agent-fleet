@@ -412,7 +412,7 @@ The **Dev sign-in** section of the Admin modal switches the Control Plane's deve
 appear in your tenant settings. Members still opt in per workspace; this is only the deployment's
 yes or no.
 
-- The section shows the issuer, how many workspaces have opted in, and the one rule that matters:
+- The section shows the issuer, how many workspaces hold a client (one is created at every workspace start, opted in or not), and the one rule that matters:
   **a production app must never trust this issuer**, because it signs in as any member without a
   password.
 - Turning it off takes effect without a restart (another Control Plane replica follows within a few

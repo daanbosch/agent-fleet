@@ -336,7 +336,7 @@ func TestDevIdPDisabledIsA404Everywhere(t *testing.T) {
 		}
 	}
 	// And no env reaches the container.
-	if env := d.mgr.devIdPEnv(context.Background(), d.ws, parseWSSettings(mustSettings(context.Background(), d.mgr, d.ws.ID))); len(env) != 0 {
+	if env := d.mgr.devIdPEnv(context.Background(), d.ws); len(env) != 0 {
 		t.Errorf("env injected while disabled: %v", env)
 	}
 }
@@ -353,12 +353,11 @@ func TestDevIdPNeedsTheWorkspaceToOptIn(t *testing.T) {
 	if rec := d.exchange(code, redirect, ""); rec.Code != http.StatusUnauthorized {
 		t.Errorf("token after opting out: %d %s, want 401 invalid_client", rec.Code, rec.Body)
 	}
-	// Opting back in is a NEW registration: the old secret is gone.
+	// Opting back in keeps the registration: the credentials in the container still work.
 	oldID, oldSecret := d.clientID, d.secret
 	d.setDevIdP(t, true)
-	d.clientID, d.secret = d.registration(t)
-	if d.clientID == oldID || d.secret == oldSecret {
-		t.Errorf("re-enabling kept the old registration")
+	if id, secret := d.registration(t); id != oldID || secret != oldSecret {
+		t.Errorf("re-enabling replaced the registration")
 	}
 }
 
@@ -384,7 +383,7 @@ func TestDevIdPOptInRefusedWhereTheDeploymentDoesNotServeIt(t *testing.T) {
 
 func TestDevIdPEnvInjection(t *testing.T) {
 	d := newDevIdPTestEnv(t)
-	env := d.mgr.devIdPEnv(context.Background(), d.ws, wsSettings{DevIdP: true})
+	env := d.mgr.devIdPEnv(context.Background(), d.ws)
 	got := map[string]string{}
 	for _, kv := range env {
 		k, v, _ := strings.Cut(kv, "=")
@@ -394,10 +393,6 @@ func TestDevIdPEnvInjection(t *testing.T) {
 		got["AF_DEV_IDP_WELL_KNOWN"] != "https://af.example.com/dev-idp/.well-known/openid-configuration" ||
 		got["AF_DEV_IDP_CLIENT_ID"] != d.clientID || got["AF_DEV_IDP_CLIENT_SECRET"] != d.secret {
 		t.Errorf("env = %v", got)
-	}
-	// A workspace that did not opt in gets nothing, even though a registration exists.
-	if env := d.mgr.devIdPEnv(context.Background(), d.ws, wsSettings{}); len(env) != 0 {
-		t.Errorf("env without opt-in: %v", env)
 	}
 	// The ws-settings answer names the client but never the secret.
 	rec := httptest.NewRecorder()

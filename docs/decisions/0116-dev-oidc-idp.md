@@ -308,3 +308,25 @@ deployment, so the option would also have been unreachable. Showing the switch e
 - Unchanged: the `/dev-idp/*` endpoints, stored opt-ins, the redirect allow-list (localhost stays
   allowed) and personas.
 - Not verified: a live run on a deployment without a preview domain.
+
+## Note (2026-10-16): the client exists before the opt-in, so opting in needs no restart (#2242)
+
+This supersedes decision 5's "created at opt-in; off then on rotates". Turning the IdP on cost a
+workspace restart because the client's values reached the container only as env at start, and each
+off and on issued a new secret, so every toggle cost another restart.
+
+- While the deployment offers the IdP (enabled, `PUBLIC_BASE_URL`, preview domain), every workspace has a
+  client, created lazily at start if missing (`CreateDevIdPClient` is insert-or-keep, so concurrent
+  starts settle on one row), and `AF_DEV_IDP_*` is injected at every start whether or not the
+  workspace opted in. Where the deployment does not offer it, nothing is injected.
+- The workspace `devIdp` switch gates only `authorize` / `token` / `userinfo`, which already re-check it
+  per request: turning it on works in a running workspace, turning it off refuses at once, and a client
+  that has not opted in still gets `invalid_client`. Toggling never deletes or rotates the client.
+- `POST /api/env/ws-settings/dev-idp/rotate` issues a new client id and secret in one upsert
+  (`ReplaceDevIdPClient`), audited as `workspace.dev_idp_rotate`; the old pair stops working at once and
+  the container gets the new one at its next start, which the Console says.
+- The admin status field `opted_in` is now `clients`: it counts registrations, which exist for every
+  started workspace, not opt-ins.
+- Consequence for apps: the variables exist while the switch is off, so an app that selects the dev
+  issuer whenever `AF_DEV_IDP_ISSUER` is set fails to sign in until the switch is on.
+- Not verified: a live run on a deployment.

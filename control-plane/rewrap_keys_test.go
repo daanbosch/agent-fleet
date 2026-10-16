@@ -458,6 +458,7 @@ var rewrapSealSites = map[string]string{
 	"tenant_git_oauth_api.go:save":              "tenant_git_oauth",
 	"dev_idp_keys.go:mint":                      "dev_idp_key",
 	"dev_idp_client.go:ensureDevIdPClient":      "dev_idp_client",
+	"dev_idp_client.go:rotateDevIdPSecret":      "dev_idp_client",
 	"engine_hf_token.go:set":                    engineHfTokenSetting,
 	"engine_civitai_token.go:set":               engineCivitaiTokenSetting,
 	"engine_comfy_panel.go:seal":                engineComfySetting,

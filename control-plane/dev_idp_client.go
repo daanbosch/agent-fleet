@@ -96,11 +96,13 @@ func (m *manager) ensureDevIdPClient(ctx context.Context, ws store.Workspace) (c
 	return row.ClientID, secret, nil
 }
 
-// devIdPEnv is the configuration an app switches its sign-in to, as container env. Nothing
-// here is injected unless the deployment serves the IdP and this workspace opted in.
-func (m *manager) devIdPEnv(ctx context.Context, ws store.Workspace, st wsSettings) []string {
+// devIdPEnv is the configuration an app switches its sign-in to, as container env. It is
+// injected at every start while the deployment offers the IdP, whether or not the workspace
+// has opted in: the opt-in only gates authorize / token / userinfo, so turning it on in a
+// running workspace needs no restart. Nothing is injected when the deployment does not offer it.
+func (m *manager) devIdPEnv(ctx context.Context, ws store.Workspace) []string {
 	issuer := m.devIdPIssuer(ctx)
-	if issuer == "" || !st.DevIdP {
+	if issuer == "" || !m.devIdPOfferedToMembers() {
 		return nil
 	}
 	clientID, secret, err := m.ensureDevIdPClient(ctx, ws)
@@ -228,9 +230,9 @@ func devIdPParseProfile(s string) devIdPProfile {
 	return p
 }
 
-// setDevIdP flips the workspace opt-in and keeps the registration in step: turning it on
-// registers the client, turning it off deletes it (so the next "on" is a new client id and
-// secret). The change is audited before it is applied. It writes the response itself and
+// setDevIdP flips the workspace opt-in. The registration is left alone in both directions, so
+// the credentials already in the container keep working after an off and on; only
+// rotateDevIdPSecret replaces them. The change is audited before it is applied. It writes the response itself and
 // returns false on failure.
 func (a wsSettingsAPI) setDevIdP(w http.ResponseWriter, r *http.Request, res *resolved, st *wsSettings, on bool) bool {
 	ctx := r.Context()
@@ -250,12 +252,55 @@ func (a wsSettingsAPI) setDevIdP(w http.ResponseWriter, r *http.Request, res *re
 			writeAPIErr(w, internalErr(err))
 			return false
 		}
-	} else if err := a.mgr.store.DeleteDevIdPClient(ctx, res.ws.ID); err != nil {
-		writeAPIErr(w, internalErr(err))
-		return false
 	}
 	st.DevIdP = on
 	return true
+}
+
+// devIdPRotated is the answer to a rotation. The secret is not in it, as in addDevIdP.
+type devIdPRotated struct {
+	ClientID        string `json:"devIdpClientId"`
+	RestartRequired bool   `json:"restartRequired"`
+}
+
+// rotateDevIdPSecret (POST /api/env/ws-settings/dev-idp/rotate) issues the workspace a new
+// client id and secret and invalidates the old ones at once. The container keeps the old values
+// until its next start, which is why the Console says a restart is needed. It is audited before
+// it is applied, and refused where the deployment does not offer the IdP.
+func (a wsSettingsAPI) rotateDevIdPSecret(w http.ResponseWriter, r *http.Request, res *resolved) {
+	ctx := r.Context()
+	if a.mgr.devIdPIssuer(ctx) == "" {
+		writeAPIErr(w, &apiError{http.StatusConflict, "not_configured", "the development OIDC IdP is not enabled on this deployment"})
+		return
+	}
+	if !a.mgr.devIdPOfferedToMembers() {
+		writeAPIErr(w, &apiError{http.StatusConflict, "no_preview_domain", "the development OIDC IdP needs preview subdomains, and this deployment has no preview domain"})
+		return
+	}
+	if err := a.mgr.store.InsertAudit(ctx, store.AuditLog{
+		ID: store.NewID(), TenantID: res.ws.TenantID, ActorKind: "user", ActorID: res.ident.ID,
+		Action: "workspace.dev_idp_rotate", Target: res.ws.ID, At: store.NowTS(),
+	}); err != nil {
+		writeAPIErr(w, &apiError{http.StatusServiceUnavailable, errCodeAuditUnavailable, "nothing was changed: " + err.Error()})
+		return
+	}
+	secret := "afdevsec-" + devIdPRandom(32)
+	enc, ref, err := a.mgr.sealTenantSecret(ctx, res.ws.TenantID, secret)
+	if err != nil {
+		writeAPIErr(w, internalErr(err))
+		return
+	}
+	fresh := store.DevIdPClient{
+		WorkspaceID: res.ws.ID, MembershipID: res.ws.MembershipID, ClientID: "afdev-" + strings.ToLower(devIdPRandom(12)),
+		SecretEnc: enc, KeyRef: ref, CreatedAt: time.Now().Unix(),
+	}
+	if err := a.mgr.store.ReplaceDevIdPClient(ctx, fresh); err != nil {
+		writeAPIErr(w, internalErr(err))
+		return
+	}
+	// The cached runtime holds the env of the old registration.
+	a.mgr.evictMembershipCache(res.ws.MembershipID)
+	writeJSON(w, http.StatusOK, devIdPRotated{ClientID: fresh.ClientID, RestartRequired: true})
 }
 
 // addDevIdP appends the dev IdP block to the ws-settings answer. The secret is not in it: the
@@ -267,7 +312,7 @@ func (a wsSettingsAPI) addDevIdP(r *http.Request, res *resolved, st wsSettings, 
 	offered := issuer != "" && a.mgr.devIdPOfferedToMembers()
 	out["devIdpAvailable"] = offered
 	out["devIdp"] = st.DevIdP && offered
-	if !offered || !st.DevIdP {
+	if !offered {
 		return
 	}
 	out["devIdpIssuer"] = issuer

@@ -26,7 +26,7 @@ const status = (over: Record<string, unknown> = {}) => ({
   missing_base_url: false,
   missing_preview_domain: false,
   issuer: "https://af.example.com/dev-idp",
-  opted_in: 3,
+  clients: 3,
   ...over,
 });
 

@@ -122,8 +122,9 @@ type devIdPAdminStatus struct {
 	// MissingPreviewDomain: no preview domain, so members cannot opt in (devIdPOfferedToMembers).
 	MissingPreviewDomain bool   `json:"missing_preview_domain"`
 	Issuer               string `json:"issuer"`
-	// OptedIn counts the workspaces registered with the IdP; they survive the switch.
-	OptedIn int `json:"opted_in"`
+	// Clients counts the workspaces holding a registration (created at start, opted in or not);
+	// they survive the switch.
+	Clients int `json:"clients"`
 }
 
 func (a devIdPAdminAPI) devIdpNow(ctx context.Context) (devIdPAdminStatus, error) {
@@ -137,7 +138,7 @@ func (a devIdPAdminAPI) devIdpNow(ctx context.Context) (devIdPAdminStatus, error
 	}
 	base := strings.TrimRight(a.mgr.publicBaseURL, "/")
 	s := devIdPAdminStatus{
-		Setting: setting, Locked: a.mgr.devIdPEnvOff, MissingBaseURL: base == "", MissingPreviewDomain: !a.mgr.devIdPOfferedToMembers(), OptedIn: n,
+		Setting: setting, Locked: a.mgr.devIdPEnvOff, MissingBaseURL: base == "", MissingPreviewDomain: !a.mgr.devIdPOfferedToMembers(), Clients: n,
 		Enabled: a.mgr.devIdPIssuer(ctx) != "",
 	}
 	if base != "" {

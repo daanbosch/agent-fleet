@@ -60,7 +60,7 @@ func TestDevIdPIsServedOnAFreshDeployment(t *testing.T) {
 	a.get(rec, httptest.NewRequest(http.MethodGet, "/api/admin/dev-idp", nil), store.Identity{ID: "u1"})
 	var s devIdPAdminStatus
 	_ = json.Unmarshal(rec.Body.Bytes(), &s)
-	if !s.Enabled || !s.Setting || s.Locked || s.MissingBaseURL || s.OptedIn != 1 || s.Issuer != "https://af.example.com/dev-idp" {
+	if !s.Enabled || !s.Setting || s.Locked || s.MissingBaseURL || s.Clients != 1 || s.Issuer != "https://af.example.com/dev-idp" {
 		t.Errorf("status = %+v", s)
 	}
 }
@@ -80,7 +80,7 @@ func TestDevIdPToggleIsFollowedEverywhereAndKeepsTheOptIns(t *testing.T) {
 	if rec.Code != http.StatusOK || s.Enabled || s.Setting {
 		t.Fatalf("PUT off = %d %+v", rec.Code, s)
 	}
-	if s.OptedIn != 1 {
+	if s.Clients != 1 {
 		t.Errorf("turning it off dropped the opt-in count: %+v", s)
 	}
 	for _, p := range []string{devIdPDiscoveryPath, devIdPJWKSPath, devIdPAuthorizePath, devIdPTokenPath, devIdPUserinfoPath} {
@@ -92,7 +92,7 @@ func TestDevIdPToggleIsFollowedEverywhereAndKeepsTheOptIns(t *testing.T) {
 	if !st.DevIdP {
 		t.Error("the workspace's opt-in was cleared")
 	}
-	if env := d.mgr.devIdPEnv(ctx, d.ws, st); len(env) != 0 {
+	if env := d.mgr.devIdPEnv(ctx, d.ws); len(env) != 0 {
 		t.Errorf("env still injected while off: %v", env)
 	}
 	// ws-settings reports it unavailable, and storing an opt-in is the same 409 as before.
@@ -427,13 +427,13 @@ func TestDevIdPAdminRoutesAreSuperAdminOnly(t *testing.T) {
 	}
 }
 
-// A deployment with no master key and no preview domain (a dev setup) starts workspaces from
-// the memoized runtime. The switch must still be read at every start, in both directions.
+// A deployment with no master key (a dev setup) starts workspaces from the memoized runtime. The switch must still be read at every start, in both directions.
 func TestStartFollowsTheDevIdPSwitchFromAMemoWithoutKeys(t *testing.T) {
 	ctx := context.Background()
 	f := &envRecordingFactory{}
 	st, mgr, victim, tn := destroyFixture(t, f)
 	mgr.publicBaseURL = "https://af.example.com"
+	mgr.previewDomain = "pv.example.com" // the IdP is offered only with preview subdomains
 	memID := membershipIDOf(t, st, victim, tn)
 	ws, _, _ := st.GetWorkspaceByMembership(ctx, memID)
 	if err := st.SetWorkspaceSettings(ctx, ws.ID, `{"devIdp":true}`); err != nil {

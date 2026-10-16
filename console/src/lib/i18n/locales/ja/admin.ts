@@ -28,7 +28,7 @@ export const admin = {
   "admin.devidp_no_base_url": "PUBLIC_BASE_URL が未設定のため、IdP を置く Console のアドレスがありません。設定して Control Plane を再起動してください。",
   "admin.devidp_no_preview_domain": "プレビュー用ドメインが未設定のため、メンバーはこの IdP を使えません。プレビューのサブドメインを設定するまで、ワークスペースのオプトインは断られます（スイッチ自体はそのまま操作できます）。",
   "admin.devidp_issuer": "Issuer",
-  "admin.devidp_opted_in": "オプトイン中のワークスペース: {n}",
+  "admin.devidp_clients": "登録済みのワークスペース: {n}",
   "admin.devidp_save_error": "変更を確認できませんでした。表示しているのは、いまサーバーが返した状態です。",
   "admin.devidp_unknown": "変更が反映されたかどうか不明で、現在の状態も読み込めませんでした。再読み込みして確認してください。",
   "admin.brand_title": "この配備の色と名前",

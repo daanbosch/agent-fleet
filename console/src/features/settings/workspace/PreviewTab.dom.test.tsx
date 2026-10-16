@@ -315,15 +315,29 @@ describe("development OIDC IdP switch", () => {
     expect(write).toHaveBeenCalledWith("afdev_abc");
   });
 
-  it("shows no credentials while off, but still the warnings", async () => {
-    api.mockResolvedValue(idp({ devIdp: false, devIdpIssuer: undefined, devIdpClientId: undefined }));
+  it("shows the credentials and the warnings while off too: the env is injected either way", async () => {
+    api.mockResolvedValue(idp({ devIdp: false }));
     const { PreviewTab } = await freshModule();
     await mount(<PreviewTab />);
     const { t } = await import("../../../lib/i18n/index.ts");
-    expect(text()).not.toContain("afdev_abc");
+    expect(text()).toContain("afdev_abc");
     expect(text()).toContain(t("env.devidp_warn_prod"));
     expect(text()).toContain(t("env.devidp_warn_rotate"));
     expect(text()).toContain(t("env.devidp_warn_env"));
+  });
+
+  it("rotates the secret on request, shows the new client id and says a restart is needed", async () => {
+    api.mockResolvedValue(idp());
+    apiJSON.mockResolvedValue({ devIdpClientId: "afdev_rot", restartRequired: true });
+    const { PreviewTab } = await freshModule();
+    const { t } = await import("../../../lib/i18n/index.ts");
+    await mount(<PreviewTab />);
+    const b = [...host!.querySelectorAll("button")].find((x) => x.textContent === t("env.devidp_rotate"))!;
+    await act(async () => b.click());
+    expect(apiJSON).toHaveBeenCalledWith("api/env/ws-settings/dev-idp/rotate", "POST", {});
+    expect(text()).toContain("afdev_rot");
+    expect(toastSpy).toHaveBeenCalledWith(t("env.devidp_rotated"));
+    expect(t("env.devidp_rotated")).toMatch(/再起動/);
   });
 
   it("PUTs devIdp and renders the answer", async () => {
