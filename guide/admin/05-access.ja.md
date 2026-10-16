@@ -96,10 +96,23 @@ device flow には secret が無く、トークンはメンバー自身のワー
 
 > **Jira のボード・スプリント・エピックにはスコープの追加が要ります。** メンバーのセッションの
 > Jira CLI は、ボード・スプリント・エピックを Jira Software 経由で扱います。Jira Software は
-> 上のスコープを一切受け付けません。まずアプリの **Permissions** に
-> `read:board-scope:jira-software`・`read:sprint:jira-software`・`write:sprint:jira-software`・
-> `read:epic:jira-software`・`write:epic:jira-software`・`read:project:jira`・
-> `read:issue-details:jira`・`read:jql:jira` を追加してください。**そのあとで** Jira のカードの
+> 上のスコープを一切受け付けません。Developer Console でアプリの **Permissions → Jira API →
+> Configure → Granular scopes → Edit Scopes** を開き、次の 8 つを選んでください。同じアプリの
+> クラシックスコープと並べて持てるので、そちらはそのまま残します。
+>
+> | 画面での名前 | コード |
+> |---|---|
+> | View boards, backlogs, and related items | `read:board-scope:jira-software` |
+> | View sprints | `read:sprint:jira-software` |
+> | Update and delete sprints | `write:sprint:jira-software` |
+> | View epics and related issues | `read:epic:jira-software` |
+> | Update epics | `write:epic:jira-software` |
+> | View projects | `read:project:jira` |
+> | View issue details | `read:issue-details:jira` |
+> | View JQL | `read:jql:jira` |
+>
+> コードの列で確かめてください。*View board configuration*（`read:board-scope.admin:jira-software`）は
+> 1 行目と似ていますが別のスコープで、af は求めません。**そのあとで** Jira のカードの
 > 「このアプリに Jira Software のスコープ（ボード・スプリント・エピック）も許可済み」に
 > チェックを入れて保存します。順番が大事です。アプリにないスコープを求める認可は Atlassian に
 > 拒否されるので、先にチェックを入れると全メンバーが接続できなくなります。接続済みのメンバーは、
