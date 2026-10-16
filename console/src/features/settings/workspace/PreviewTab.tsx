@@ -354,12 +354,14 @@ function PersonaEditor() {
   // first load answering after an add must not wipe what the add just showed.
   const latest = useRef(0);
   const alive = useRef(true);
-  useEffect(
-    () => () => {
+  // Set in setup as well as cleared in cleanup: StrictMode runs setup, cleanup, setup, and a flag
+  // that only ever turns false would drop every later answer.
+  useEffect(() => {
+    alive.current = true;
+    return () => {
       alive.current = false;
-    },
-    [],
-  );
+    };
+  }, []);
 
   // run sends one request and applies its answer if no newer request was started meanwhile.
   // Returns whether the server accepted it. Failure of any kind clears busy and says why.

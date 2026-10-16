@@ -529,4 +529,20 @@ describe("test personas editor", () => {
     expect(toastSpy).toHaveBeenCalled();
     expect((await btn("env.persona_add")).disabled).toBe(false);
   });
+
+  it("loads and stays usable under StrictMode (setup, cleanup, setup)", async () => {
+    serve([persona("admin")]);
+    apiJSON.mockResolvedValue({ personas: [persona("admin"), persona("viewer")], domain: "example.test" });
+    const { PreviewTab } = await freshModule();
+    const { StrictMode } = await import("react");
+    await mount(
+      <StrictMode>
+        <PreviewTab />
+      </StrictMode>,
+    );
+    expect(host!.textContent).toContain("admin@example.test");
+    await type(await inputByLabel("env.persona_handle"), "viewer");
+    await act(async () => (await btn("env.persona_add")).click());
+    expect(host!.textContent).toContain("viewer@example.test");
+  });
 });
