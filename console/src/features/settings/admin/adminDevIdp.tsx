@@ -14,6 +14,7 @@ interface DevIdpStatus {
   setting: boolean;
   locked: boolean;
   missing_base_url: boolean;
+  missing_preview_domain: boolean;
   issuer: string;
   opted_in: number;
 }
@@ -96,6 +97,9 @@ export function DevIdpAdminView() {
         {data?.locked && <p className="muted">{tr("admin.devidp_locked")}</p>}
         {data && !data.locked && data.missing_base_url && (
           <p className="muted">{tr("admin.devidp_no_base_url")}</p>
+        )}
+        {data && !data.locked && data.missing_preview_domain && (
+          <p className="muted">{tr("admin.devidp_no_preview_domain")}</p>
         )}
         {data?.enabled && data.issuer && (
           <p className="muted">

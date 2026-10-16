@@ -341,6 +341,11 @@ func (a wsSettingsAPI) put(w http.ResponseWriter, r *http.Request, res *resolved
 			writeAPIErr(w, &apiError{http.StatusConflict, "not_configured", "the development OIDC IdP is not enabled on this deployment"})
 			return
 		}
+		// Turning it off stays possible without a preview domain, so an earlier opt-in can be undone.
+		if v && !a.mgr.devIdPOfferedToMembers() {
+			writeAPIErr(w, &apiError{http.StatusConflict, "no_preview_domain", "the development OIDC IdP needs preview subdomains, and this deployment has no preview domain"})
+			return
+		}
 		if !a.setDevIdP(w, r, res, &st, v) {
 			return
 		}
