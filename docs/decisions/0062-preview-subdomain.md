@@ -289,3 +289,11 @@ it goes stale as a 404 — the least legible failure there is**.
   the relay is not in the path; when a pane navigation to a loopback URL fails, the Agent probes the port once
   (`internal/portprobe`, one bounded `HEAD /`) and, for `preview_not_http` / `preview_tls`, adds `reason` next to the
   unchanged `target-unreachable` state. The classifier moved to `internal/portprobe`; `/proxy/{port}` behaviour is unchanged.
+- 2026-10-16: decision 8 now holds for malformed labels too (#2240). The wildcard DNS and certificate send any
+  `*.{PreviewDomain}` host to the CP, and `dispatch` used to pass every host that did not parse as
+  `{slug}-{port}` to the full mux, so `x-3000.pv.<console-domain>` reached the CP API, `/healthz` and the dev IdP.
+  The rule is now: a Host outside the preview domain passes through unchanged (the Console host, the ALB health
+  check's IP Host, a host that only ends with the domain string without a dot boundary); a Host under it — the bare
+  domain included — that is not a valid preview host answers the same bare `404` as an unknown slug, before the
+  mux. Both tests share one normalisation (`previewHostLabel`: port, trailing dot, case), so they cannot disagree.
+  The slug format, the handshake and the proxy are unchanged.

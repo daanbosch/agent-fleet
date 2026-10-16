@@ -23,6 +23,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/muse"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/opencode"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/lifegate"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/tmuxx"
 )
@@ -91,6 +92,13 @@ func HandleSessionTurn(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_op", "op must be start, steer, interrupt, remove or dismiss_discard")
 		return
 	}
+	// Every op, not only start and steer: on Managed each one Resumes the runtime, which starts
+	// a process on a stopped session (ADR 0115 decision 11.1).
+	lease, ok := enterSessionGate(w, r, name)
+	if !ok {
+		return
+	}
+	defer lease.Release()
 	meta, ok := session.ReadMeta(name)
 	if !ok {
 		httpx.WriteErr(w, http.StatusNotFound, "not_found", "no such session: "+name)
@@ -105,7 +113,7 @@ func HandleSessionTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if meta.DriverKind() == session.DriverManaged {
-		handleManagedTurn(w, meta, req)
+		handleManagedTurn(lease, w, meta, req)
 		return
 	}
 	// tui route: delegate to the existing tmux path. The guards (not_running / no_pane /
@@ -143,7 +151,7 @@ func HandleSessionTurn(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusBadRequest, "empty_prompt", "prompt is required for start/steer")
 		return
 	}
-	if !submitPromptTUI(w, name, pane, req.Prompt) {
+	if !submitPromptTUI(lease, w, name, pane, req.Prompt) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"sent": name, "op": req.Op})
@@ -152,7 +160,11 @@ func HandleSessionTurn(w http.ResponseWriter, r *http.Request) {
 // handleManagedTurn routes a turn op to the session's ThreadHandle (docs/log/27 P2).
 // Resume is idempotent — it returns the live handle if there is one — so calling it every
 // time is safe, and it also brings the runtime back up on a halted → send sequence.
-func handleManagedTurn(w http.ResponseWriter, meta session.Meta, req turnReq) {
+func handleManagedTurn(lease *lifegate.Lease, w http.ResponseWriter, meta session.Meta, req turnReq) {
+	if err := lease.Check(meta.Name); err != nil {
+		writeGateErr(w, err)
+		return
+	}
 	d, ok := driverOf(meta)
 	if !ok {
 		httpx.WriteErr(w, http.StatusNotImplemented, "driver_unavailable",
@@ -275,6 +287,11 @@ func HandleSessionRespond(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_name", "invalid session name")
 		return
 	}
+	lease, ok := enterSessionGate(w, r, name)
+	if !ok {
+		return
+	}
+	defer lease.Release()
 	var reply agents.InteractionReply
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&reply); err != nil {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_body", "invalid JSON body")

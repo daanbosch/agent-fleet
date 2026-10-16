@@ -3,6 +3,7 @@
 English | [日本語](0115-move-session-to-another-agent.ja.md)
 
 - Status: **proposed** (2026-10-15). Nothing is implemented.
+  Follow-ups: #2236
 - Tracking: #2182. Builds on #2183 (the shared Markdown renderer, `transcript.Markdown`).
 - See also: [0039](0039-fork-at-message.md) (fork) /
   [0049](0049-session-changed-files.md) (the changed-files list) /
@@ -288,3 +289,60 @@ than write an empty file (decision 6).
   `Tools ToolDetail`. Where decision 8 says `ToolOutput: true`, read `Tools: ToolsFull`: any
   lesser level still drops compaction summaries, delegation prompts and results and option
   previews. The builder is `sessionx.BuildHandover` / `RenderHandover` (#2182, P2a step 1).
+
+## Addendum (2026-10-16) — the source gate as built (P2a step 2, #2182)
+
+What decision 11 asks of the source is in place on the Agent; the `/move` endpoint that drives
+it is not yet.
+
+- **The gate** is `internal/lifegate`: one gate per session, with a shared `Lease` per input
+  operation and an exclusive `Lock` for the move. It prefers a waiting writer, so a steady
+  trickle of inputs cannot hold a move off, which is also what makes a nested take a deadlock.
+  The public entry takes the lease once; an inner step takes a `*lifegate.Lease` parameter and
+  checks it (`Check`), and a lease carried on a request's context is borrowed by `Enter`
+  (`deliverPendingPeer` → `/input`). The closed state is kept in memory as well as on the meta,
+  because a meta read that lands inside an unrelated rewrite of the file does not parse; a meta
+  that exists and still cannot be read after retrying refuses (`ErrMetaUnreadable`) rather than
+  admits, since after a restart it is the only record of a move. The cursor pump releases its
+  lease once `session/prompt` is on the child's stdin.
+- **Gated paths:** `/input` (every body form, peer messages included), `/turn` (every op: on
+  Managed each one resumes the runtime), `/start`, `/recreate`, `/driver`, `/respond`,
+  `/answer-question`, `/plan-respond`, `/carried-answer`, the chat bridge's inbound text and
+  button answers, the abort / auth auto-resumes (through `injectSessionPrompt`), the launch-task
+  delivery (`typeInitialPrompt`), `deliverPendingPeer` (the lease is taken before the message
+  leaves the spool), the usage-limit sweep, and the cursor queue pump. A refusal is `409
+  session_moved` with the target in `error.target`.
+- **Start states:** `stopped` is accepted next to idle, `limited` and `spendLimit`. A source
+  parked at a weekly limit is usually stopped by the idle reaper long before anyone moves it,
+  and a stopped session can start nothing either. A pending interaction is still refused, and
+  so is a stopped **Managed cursor** source, whose conversation lived only in its handle.
+- **The sweep** holds the session's lease for its whole step, not only around
+  `putRateLimitSchedule`: the episode file that records a booking is then written before a
+  move can close input, so a commit always finds the id to cancel.
+- **Cancellations** go through `cancelRateLimitSchedule`: the id is written to
+  `session-rate-limit-cleanup` before the CP is called and dropped only when the CP confirms (a
+  404 counts), retried at the start of every sweep, with no expiry. Commit records the id before
+  it closes the episode, and fails with nothing changed if the record cannot be written.
+- **A refused booking and a rollback** are ordered by one lock: a rollback repairs, clears
+  `moving` and reopens under it. A refusal that reaches its record after the rollback (the
+  request stalled in between) finds the source open and books the resume again itself. The
+  sweep's step takes the same per-session episode lock (after its lease), because shared leases
+  do not exclude each other and the repair holds none.
+- A confirmed cancellation stays in the record, marked done, while the session's episode still
+  names the id: a commit that recorded it and stopped leaves a moving source whose rollback must
+  still see that id as dead after the sweep cancelled it.
+- **Every transition is on disk before it returns**: `moving`, `movedTo` and their clearing go
+  through `session.WriteMetaChecked` (a temporary file renamed over the meta, every error
+  returned). The in-memory mirror changes, and the episode closes, only after that write
+  succeeded; a failed write leaves the move where it was.
+- **The move's primitives** are `beginSessionMove`, `rollback` and `commit` (sessionx,
+  `session_move_gate.go`) plus `reopenMovedSession` for decision 11.6. Commit changes the meta,
+  closes the episode and cancels its booking; stopping the source and taking its spooled peer
+  messages are left to the move, which owns their order.
+- Only the cursor pump takes a lease of its own; the other Managed drivers' pumps are a
+  follow-up.
+- A refused booking is recorded even when the meta cannot be read at that moment (it is read
+  under the meta lock first), and a sweep that finds a recorded refusal on an open session books
+  the resume again, so a record the rollback missed is not a dead id for good.
+- **Amendment to decision 11.2** (2026-10-16): the user accepted the start states above — a move
+  may also start from `stopped`, except a stopped Managed cursor source.

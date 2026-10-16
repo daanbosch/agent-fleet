@@ -468,3 +468,58 @@ func TestStartFollowsTheDevIdPSwitchFromAMemoWithoutKeys(t *testing.T) {
 		t.Fatalf("switch turned off but the start still injects the IdP env: %q", got)
 	}
 }
+
+// Members are offered the IdP only with preview subdomains. Without a preview domain the
+// ws-settings answer says unavailable, a new opt-in is the 409 no_preview_domain, and an
+// earlier opt-in can still be turned off; with one, everything works as before.
+func TestDevIdPNeedsAPreviewDomainForMembers(t *testing.T) {
+	d := newDevIdPTestEnv(t) // opted in, preview domain set
+	a := devIdPAdminAPI{memberAuth{d.mgr}}
+	ctx := context.Background()
+	wsReq := func(method, body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		d.mux.ServeHTTP(rec, httptest.NewRequest(method, "https://af.example.com/api/env/ws-settings", strings.NewReader(body)))
+		return rec
+	}
+	adminGet := func() devIdPAdminStatus {
+		rec := httptest.NewRecorder()
+		a.get(rec, httptest.NewRequest(http.MethodGet, "/api/admin/dev-idp", nil), store.Identity{ID: "u1"})
+		var s devIdPAdminStatus
+		_ = json.Unmarshal(rec.Body.Bytes(), &s)
+		return s
+	}
+	if s := adminGet(); s.MissingPreviewDomain {
+		t.Errorf("admin status with a preview domain = %+v", s)
+	}
+	if b := idpJSON(t, wsReq(http.MethodGet, "")); b["devIdpAvailable"] != true || b["devIdp"] != true {
+		t.Fatalf("with a preview domain: %v", b)
+	}
+
+	domain := d.mgr.previewDomain
+	d.mgr.previewDomain = ""
+	if s := adminGet(); !s.MissingPreviewDomain || s.MissingBaseURL || !s.Enabled {
+		t.Errorf("admin status without a preview domain = %+v", s)
+	}
+	if b := idpJSON(t, wsReq(http.MethodGet, "")); b["devIdpAvailable"] != false || b["devIdp"] != false {
+		t.Errorf("without a preview domain: %v", b)
+	}
+	// The earlier opt-in can be undone.
+	if rec := wsReq(http.MethodPut, `{"devIdp":false}`); rec.Code != http.StatusOK {
+		t.Fatalf("opt-out without a preview domain = %d %s", rec.Code, rec.Body)
+	}
+	if parseWSSettings(mustSettings(ctx, d.mgr, d.ws.ID)).DevIdP {
+		t.Error("opt-out was not stored")
+	}
+	rec := wsReq(http.MethodPut, `{"devIdp":true}`)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"no_preview_domain"`) {
+		t.Fatalf("opt-in without a preview domain = %d %s, want 409 no_preview_domain", rec.Code, rec.Body)
+	}
+	if parseWSSettings(mustSettings(ctx, d.mgr, d.ws.ID)).DevIdP {
+		t.Error("the refused opt-in was stored")
+	}
+
+	d.mgr.previewDomain = domain
+	if rec := wsReq(http.MethodPut, `{"devIdp":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("opt-in with a preview domain = %d %s", rec.Code, rec.Body)
+	}
+}

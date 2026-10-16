@@ -643,6 +643,13 @@ type Meta struct {
 	// rename through POST /repos/{name}/branch-name keeps {ref} and the kind. nil for every
 	// other launch.
 	WorkItem *WorkItemRef `json:"workItem,omitempty"`
+	// Moving names the session this one is being moved to (ADR 0115 decision 11), MovedTo the
+	// session it was moved to once that exists. Either closes the session's input: every path
+	// that can start a turn or a process on it refuses through internal/lifegate. They are on
+	// the meta, not in memory, so a moved source stays closed across an Agent restart. Only
+	// the move primitives in sessionx and the user's explicit reopen write them.
+	Moving  string `json:"moving,omitempty"`
+	MovedTo string `json:"movedTo,omitempty"`
 }
 
 // WorkItemRef is the part of a work item the branch-name resolver renders from.

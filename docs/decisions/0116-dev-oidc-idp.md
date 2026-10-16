@@ -292,6 +292,23 @@ Two limits of the personas note are closed; nothing about the security propertie
   sqlite or Postgres. Measured: without the lock, 16 racing creates against a limit of 5 left 7 to 9 rows
   on Postgres. The handler keeps its early check and the same `persona_limit` error.
 
+## Note (2026-10-16): members are offered the IdP only with preview subdomains (#2238)
+
+The IdP is offered to members only on a deployment with a preview domain. Without preview hosts the
+only redirect target is `http://localhost:<port>` (decision 7), which only the browser pane's
+Chromium inside the workspace can follow, and `authorize` sits behind `authGate`, so that Chromium
+would itself need a Console session. The Preview tab, where the switch lives, is hidden on such a
+deployment, so the option would also have been unreachable. Showing the switch elsewhere was rejected.
+
+- `GET /api/env/ws-settings` reports `devIdpAvailable: false` without a preview domain, and
+  `PUT devIdp: true` is a 409 `no_preview_domain`. Turning it off stays accepted, so an earlier
+  opt-in can be undone.
+- The admin status gains `missing_preview_domain`, and the modal says members cannot use the IdP
+  until preview subdomains are configured. The deployment switch stays operable.
+- Unchanged: the `/dev-idp/*` endpoints, stored opt-ins, the redirect allow-list (localhost stays
+  allowed) and personas.
+- Not verified: a live run on a deployment without a preview domain.
+
 ## Note (2026-10-16): the consent page's referrer policy is `same-origin` (#2243)
 
 The personas note above says the consent page is sent with `no-referrer`. That value makes a browser send

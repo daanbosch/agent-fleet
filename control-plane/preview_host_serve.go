@@ -72,9 +72,11 @@ type previewHostAPI struct {
 
 func newPreviewHostAPI(cfg config) previewHostAPI { return previewHostAPI{cfg: cfg, mgr: cfg.mgr} }
 
-// dispatch wraps the whole CP handler chain. A request whose Host does not parse as a
-// preview hostname passes through untouched — including the ALB health check (whose
-// Host is the task IP) and every Console request.
+// dispatch wraps the whole CP handler chain. A request whose Host is outside the preview
+// domain passes through untouched — including the ALB health check (whose Host is the
+// task IP) and every Console request. A Host under the domain that is not a valid preview
+// hostname gets the same bare 404 as an unknown slug: the wildcard DNS and certificate
+// send any label here, and letting one reach the mux would serve the CP API (decision 8).
 func (a previewHostAPI) dispatch(next http.Handler) http.Handler {
 	if a.mgr == nil || a.mgr.previewDomain == "" {
 		return next // host-mode preview not configured: nothing changes
@@ -82,6 +84,10 @@ func (a previewHostAPI) dispatch(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ph, ok := parsePreviewHost(r.Host, a.mgr.previewDomain)
 		if !ok {
+			if _, under := previewHostLabel(r.Host, a.mgr.previewDomain); under {
+				previewNotFound(w)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}

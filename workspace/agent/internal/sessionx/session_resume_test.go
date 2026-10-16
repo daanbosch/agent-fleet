@@ -20,7 +20,7 @@ func TestEnsureSessionTmuxReportsFailures(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 
 	t.Run("no meta", func(t *testing.T) {
-		if err := ensureSessionTmux("afnosuchsession", false); err == nil {
+		if err := ensureSessionTmux(testLease(t, "afnosuchsession"), "afnosuchsession", false); err == nil {
 			t.Fatal("ensureSessionTmux = nil for a session with no meta")
 		}
 	})
@@ -29,7 +29,7 @@ func TestEnsureSessionTmuxReportsFailures(t *testing.T) {
 		// An ssm session with no target cannot produce a launch plan — a deterministic
 		// stand-in for every way a relaunch can fail before tmux is ever reached.
 		session.WriteMeta(session.Meta{Name: "aftestssm", Kind: session.KindSSM, Dir: home})
-		if err := ensureSessionTmux("aftestssm", false); err == nil {
+		if err := ensureSessionTmux(testLease(t, "aftestssm"), "aftestssm", false); err == nil {
 			t.Fatal("ensureSessionTmux = nil for a session that cannot launch; " +
 				"/start would answer ok:true for a session that never started")
 		}

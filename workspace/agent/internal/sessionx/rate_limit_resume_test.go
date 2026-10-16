@@ -33,6 +33,7 @@ type rateLimitFixture struct {
 	dismissOK   bool
 	scheduleAt  time.Time
 	scheduleErr error
+	dropErr     error // what the CP answers a delete (nil = confirmed)
 	resetAt     time.Time
 	resetOK     bool
 	resetSource string // evidence for the instant (banner / banner+capture / capture)
@@ -64,7 +65,10 @@ func newRateLimitFixture(t *testing.T) *rateLimitFixture {
 		}
 		return "sch_test", nil
 	}
-	dropRateLimitSchedule = func(id string) { f.deleted = append(f.deleted, id) }
+	dropRateLimitSchedule = func(id string) error {
+		f.deleted = append(f.deleted, id)
+		return f.dropErr
+	}
 	rateLimitResetAt = func(string, time.Time) (time.Time, string, bool) {
 		f.resetCalls++
 		return f.resetAt, f.resetSource, f.resetOK
