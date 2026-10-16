@@ -366,7 +366,7 @@ func RenderHandover(h Handover, lang string) (string, Handover) {
 			}
 			before := open
 			open = fenceAfter(open, strings.TrimSpace(p.Text))
-			if before != "" || open != "" {
+			if before != "" || open != "" || hasUnparsedFence(p.Text) {
 				continue
 			}
 			if short, ok := firstParagraph(p.Text); ok {
@@ -407,6 +407,23 @@ func fenceAfter(open, s string) string {
 		open = fenceStep(open, l)
 	}
 	return open
+}
+
+// hasUnparsedFence reports a fence marker somewhere fenceStep does not look: inside a list
+// item or a blockquote ("- ```go"), or inline. The state tracker would miscount it, so a text
+// holding one is not cut at all; the size target is soft and a kept paragraph costs less than a
+// broken block.
+func hasUnparsedFence(s string) bool {
+	for _, l := range strings.Split(s, "\n") {
+		tl := strings.TrimSpace(l)
+		if strings.HasPrefix(tl, "```") || strings.HasPrefix(tl, "~~~") {
+			continue
+		}
+		if strings.Contains(tl, "```") || strings.Contains(tl, "~~~") {
+			return true
+		}
+	}
+	return false
 }
 
 // firstParagraph returns s up to its first blank line outside a code fence; ok is false when

@@ -582,3 +582,18 @@ func TestHandoverFilesRefuseASymlinkedSessionDir(t *testing.T) {
 		t.Error("copied from a symlinked source directory")
 	}
 }
+
+func TestHandoverSizeCutSkipsFencesInsideLists(t *testing.T) {
+	listed := "- ```go\n  alpha\n\n  beta\n  ```\n- ```go\n  gamma\n  ```"
+	turns := []transcript.Turn{hoUser("ask"), hoAsst(hoText(listed))}
+	for i := 0; i < 6; i++ {
+		turns = append(turns, hoUser("u"+string(rune('a'+i))), hoAsst(hoText(longText("FILL", 50<<10))))
+	}
+	md, cut := RenderHandover(hoBuild(t, turns, nil), "en")
+	if cut.Cut == 0 {
+		t.Fatal("setup: nothing was cut")
+	}
+	if !strings.Contains(md, listed) {
+		t.Error("a text with fences inside a list was cut")
+	}
+}
