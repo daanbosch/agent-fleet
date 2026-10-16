@@ -59,6 +59,8 @@ export function usePreviewAvailable(): boolean | null {
 // save is the one the shared state ends on (a field blur and a toggle click can overlap).
 // What a queued write resolves to when its scope changed before it was sent.
 const CANCELLED = Symbol("cancelled");
+// What a queued request resolves to when it was sent and its answer was lost.
+const LOST = Symbol("lost");
 let writeChain: Promise<unknown> = Promise.resolve();
 function serialized<T>(fn: () => Promise<T>): Promise<T> {
   const run = writeChain.then(fn, fn);
@@ -110,6 +112,56 @@ export function PreviewTab() {
     }
   };
 
+  // Rotating the dev IdP client secret goes through the same queue and scope guard as every
+  // other write, so a slow earlier save cannot answer afterwards and bring the old client id
+  // back. The new secret reaches the container only at its next start, which the confirm text
+  // and the toast say. A lost answer may still have rotated: re-read the settings instead of
+  // retrying (a retry would rotate again), and when that fails too show no client id rather than
+  // an old one as if it were current.
+  const rotateDevIdp = async () => {
+    const ok = await askConfirm({
+      title: tr("env.devidp_rotate_confirm_title"),
+      body: tr("env.devidp_rotate_confirm_body"),
+      confirmLabel: tr("env.devidp_rotate_go"),
+      danger: true,
+    });
+    if (!ok) return;
+    const from = previewToken();
+    const res = await serialized(async () => {
+      if (!previewScopeUnchanged(from)) return CANCELLED;
+      try {
+        return await apiJSON("api/env/ws-settings/dev-idp/rotate", "POST", {});
+      } catch {
+        return LOST;
+      }
+    });
+    if (res === CANCELLED) return;
+    if (res === LOST) {
+      const fresh = await serialized(async () => {
+        try {
+          return await api("api/env/ws-settings");
+        } catch {
+          return null;
+        }
+      });
+      if (fresh && !fresh.error) {
+        setAu(fresh);
+        toast(tr("env.devidp_rotate_lost_reloaded"));
+      } else {
+        setAu((prev: any) => ({ ...prev, devIdpClientId: "" }));
+        toast(tr("env.devidp_rotate_lost_unknown"));
+      }
+      return;
+    }
+    if (res && !res.error) {
+      setAu((prev: any) => ({ ...prev, devIdpClientId: res.devIdpClientId }));
+      toast(tr("env.devidp_rotated"));
+    } else {
+      const why = res?.error ? errText(res.error) : "";
+      toast(why ? `${tr("common.save_failed")}: ${why}` : tr("common.save_failed"));
+    }
+  };
+
   // Reissue (docs/log/81 §4.1) throws away URLs that have already been handed out. It
   // cannot be undone, so confirm first and say what will happen (tabs open on the old URL
   // start returning 404).
@@ -150,7 +202,7 @@ export function PreviewTab() {
         // blank pane.
         <p className="muted pad">{tr("env.preview_unavailable")}</p>
       ) : (
-        <PreviewSection au={au} save={save} reissue={reissue} setAu={setAu} />
+        <PreviewSection au={au} save={save} reissue={reissue} rotateDevIdp={rotateDevIdp} />
       )}
     </div>
   );
@@ -160,12 +212,12 @@ function PreviewSection({
   au,
   save,
   reissue,
-  setAu,
+  rotateDevIdp,
 }: {
   au: any;
   save: (patch: Record<string, unknown>) => void;
   reissue: () => void;
-  setAu: (f: (prev: any) => any) => void;
+  rotateDevIdp: () => void;
 }) {
   const tr = useT();
   const [ports, setPorts] = useState((au.previewPorts || []).join(", "));
@@ -278,26 +330,17 @@ function PreviewSection({
       <p className="muted ds-note">{tr("env.preview_reissue_note")}</p>
       {/* Only where the operator turned the IdP on: a switch that every PUT would refuse
           must not be offered. */}
-      {au.devIdpAvailable && <DevIdpSection au={au} save={save} setAu={setAu} />}
+      {au.devIdpAvailable && <DevIdpSection au={au} rotate={rotateDevIdp} />}
     </section>
   );
 }
 
-// The dev OIDC IdP opt-in (ADR 0116). It lives here because its whole purpose is signing in on
+// The dev OIDC IdP (ADR 0116): the values the container gets, and the rotate action. There is no
+// per-workspace switch. It lives here because its whole purpose is signing in on
 // a preview URL. The client secret is deliberately absent: the API never returns it.
-function DevIdpSection({
-  au,
-  save,
-  setAu,
-}: {
-  au: any;
-  save: (patch: Record<string, unknown>) => void;
-  setAu: (f: (prev: any) => any) => void;
-}) {
+function DevIdpSection({ au, rotate }: { au: any; rotate: () => void }) {
   const tr = useT();
   const toast = useToast();
-  const askConfirm = useConfirm();
-  const on = !!au.devIdp;
   // "Copied" only after the clipboard accepted it: the API is absent outside secure contexts
   // and writeText rejects when permission is denied.
   const copy = async (text: string) => {
@@ -309,25 +352,6 @@ function DevIdpSection({
       toast(tr("common.copy_failed"));
     }
   };
-  // A new secret reaches the container only at its next start, hence the confirm text and the
-  // toast both say so.
-  const rotate = async () => {
-    const ok = await askConfirm({
-      title: tr("env.devidp_rotate_confirm_title"),
-      body: tr("env.devidp_rotate_confirm_body"),
-      confirmLabel: tr("env.devidp_rotate_go"),
-      danger: true,
-    });
-    if (!ok) return;
-    const res = await apiJSON("api/env/ws-settings/dev-idp/rotate", "POST", {});
-    if (res && !res.error) {
-      setAu((prev: any) => ({ ...prev, devIdpClientId: res.devIdpClientId }));
-      toast(tr("env.devidp_rotated"));
-    } else {
-      const why = res?.error ? errText(res.error) : "";
-      toast(why ? `${tr("common.save_failed")}: ${why}` : tr("common.save_failed"));
-    }
-  };
   const issuer: string = au.devIdpIssuer || "";
   const values: Array<[string, string]> = [
     [tr("env.devidp_issuer"), issuer],
@@ -337,9 +361,6 @@ function DevIdpSection({
   return (
     <>
       <h4 className="ds-title">{tr("env.devidp_title")}</h4>
-      <Row label={tr("env.devidp_label")}>
-        <OnOff value={on} onChange={(v) => save({ devIdp: v })} />
-      </Row>
       <p className="muted ds-note">{tr("env.devidp_note")}</p>
       {values
           .filter(([, v]) => v)

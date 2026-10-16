@@ -34,37 +34,27 @@ func (d *devIdPTestEnv) signInWith(t *testing.T, id, secret string) int {
 	return d.exchange(codeFrom(t, rec), redirect, "").Code
 }
 
-// The values injected at a workspace's start are the ones that keep working: opting in later,
-// in a running workspace, needs no restart, and off then on again hands back the same pair.
-func TestDevIdPOptInWorksInARunningWorkspaceWithoutARestart(t *testing.T) {
+// The values injected at a workspace's start keep working for the life of the registration,
+// across deployment-switch flips; there is nothing per workspace to turn on.
+func TestDevIdPEnvFromAnEarlierStartKeepsWorking(t *testing.T) {
 	d := newDevIdPTestEnv(t)
-	d.setDevIdP(t, false)
-	// "Start" while not opted in: the env is still injected.
 	id, secret, ok := envCreds(d)
 	if !ok {
-		t.Fatal("no AF_DEV_IDP_* injected for a workspace that has not opted in")
+		t.Fatal("no AF_DEV_IDP_* injected")
 	}
-	// Not opted in: the client is refused at token.
-	redirect := d.ownHost(3000) + "/cb"
-	if rec := d.authorizeAs(t, "preview-user", d.authQuery(redirect, "")); rec.Code != http.StatusBadRequest {
-		t.Fatalf("authorize before opting in = %d", rec.Code)
-	}
-	// Opt in with no restart: the env from the earlier start works.
-	d.setDevIdP(t, true)
 	if got := d.signInWith(t, id, secret); got != http.StatusOK {
-		t.Fatalf("sign-in after opting in without restart = %d", got)
+		t.Fatalf("sign-in = %d", got)
 	}
-	// Off refuses at once, on again keeps the same credentials.
-	d.setDevIdP(t, false)
-	if got := d.signInWith(t, id, secret); got != http.StatusBadRequest {
-		t.Errorf("authorize right after off = %d, want 400", got)
+	setDevIdPDeployment(t, d.mgr, false)
+	if got := d.signInWith(t, id, secret); got == http.StatusOK {
+		t.Error("sign-in worked while the deployment switch was off")
 	}
-	d.setDevIdP(t, true)
+	setDevIdPDeployment(t, d.mgr, true)
 	if id2, secret2, _ := envCreds(d); id2 != id || secret2 != secret {
-		t.Error("toggling changed the credentials")
+		t.Error("flipping the deployment switch changed the credentials")
 	}
 	if got := d.signInWith(t, id, secret); got != http.StatusOK {
-		t.Errorf("sign-in after on again = %d", got)
+		t.Errorf("sign-in after the switch came back = %d", got)
 	}
 }
 

@@ -265,25 +265,17 @@ describe("Expose this port… strip", () => {
   });
 });
 
-describe("development OIDC IdP switch", () => {
+describe("development OIDC IdP", () => {
   const idp = (extra: Record<string, unknown> = {}) =>
     wsSettings({
       devIdpAvailable: true,
-      devIdp: true,
       devIdpIssuer: "https://af.example.invalid/dev-idp",
       devIdpClientId: "afdev_abc",
       ...extra,
     });
   const text = () => host!.textContent || "";
-  const switchOn = async (on: boolean) => {
-    const { t } = await import("../../../lib/i18n/index.ts");
-    const label = [...host!.querySelectorAll("*")].find((e) => e.children.length === 0 && e.textContent === t("env.devidp_label"))!;
-    const b = [...label.parentElement!.querySelectorAll("button")].find((x) => x.textContent === t(on ? "common.on" : "common.off"))!;
-    await act(async () => b.click());
-  };
-
   it("is hidden where the deployment does not serve the IdP", async () => {
-    api.mockResolvedValue(wsSettings({ devIdpAvailable: false, devIdp: false }));
+    api.mockResolvedValue(wsSettings({ devIdpAvailable: false }));
     const { PreviewTab } = await freshModule();
     await mount(<PreviewTab />);
     const { t } = await import("../../../lib/i18n/index.ts");
@@ -340,28 +332,7 @@ describe("development OIDC IdP switch", () => {
     expect(t("env.devidp_rotated")).toMatch(/再起動/);
   });
 
-  it("PUTs devIdp and renders the answer", async () => {
-    api.mockResolvedValue(idp({ devIdp: false, devIdpIssuer: undefined, devIdpClientId: undefined }));
-    apiJSON.mockResolvedValue(idp({ devIdpClientId: "afdev_new" }));
-    const { PreviewTab } = await freshModule();
-    await mount(<PreviewTab />);
-    await switchOn(true);
-    expect(apiJSON).toHaveBeenCalledWith("api/env/ws-settings", "PUT", { devIdp: true });
-    expect(text()).toContain("afdev_new");
-  });
-
-  it("shows why a refused PUT was refused and keeps the switch off", async () => {
-    api.mockResolvedValue(idp({ devIdp: false, devIdpIssuer: undefined, devIdpClientId: undefined }));
-    apiJSON.mockResolvedValue({ error: { code: "not_configured", message: "dev" } });
-    const { PreviewTab } = await freshModule();
-    const { t } = await import("../../../lib/i18n/index.ts");
-    await mount(<PreviewTab />);
-    await switchOn(true);
-    expect(toastSpy).toHaveBeenCalledWith(`${t("common.save_failed")}: ${t("err.not_configured")}`);
-    expect(text()).not.toContain("afdev_");
-  });
-
-  it("keeps the switch and credentials after a reissue answer without IdP fields", async () => {
+  it("keeps the credentials after a reissue answer without IdP fields", async () => {
     api.mockResolvedValue(idp());
     apiJSON.mockResolvedValue(wsSettings({ previewReissued: true })); // as the real reissue answer: no devIdp*
     const { PreviewTab } = await freshModule();
@@ -373,7 +344,6 @@ describe("development OIDC IdP switch", () => {
       await Promise.resolve();
     });
     expect(apiJSON).toHaveBeenCalledWith("api/env/ws-settings/preview/reissue", "POST", {});
-    expect(text()).toContain(t("env.devidp_label"));
     expect(text()).toContain("afdev_abc");
   });
 
@@ -409,24 +379,77 @@ describe("development OIDC IdP switch", () => {
     expect(unhandled).not.toHaveBeenCalled();
   });
 
-  it("overlapping saves: a switch click behind a ports save ends on the last answer", async () => {
-    api.mockResolvedValue(idp({ devIdp: false, devIdpIssuer: undefined, devIdpClientId: undefined }));
+  const rotateBtn = async () => {
+    const { t } = await import("../../../lib/i18n/index.ts");
+    return { t, btn: [...host!.querySelectorAll("button")].find((x) => x.textContent === t("env.devidp_rotate"))! };
+  };
+  const settle = () =>
+    act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+  it("rotate queues behind a slow save: the late save answer cannot bring the old client id back", async () => {
+    api.mockResolvedValue(idp());
     const { PreviewTab } = await freshModule();
     const pending: Array<(v: unknown) => void> = [];
     apiJSON.mockImplementation(() => new Promise((r) => pending.push(r)));
     await mount(<PreviewTab />);
     const input = document.querySelector<HTMLInputElement>(".ds-select")!;
     await act(async () => input.dispatchEvent(new FocusEvent("focusout", { bubbles: true })));
-    await switchOn(true);
     expect(apiJSON).toHaveBeenCalledTimes(1);
-    await act(async () => pending[0](idp({ devIdp: false, devIdpIssuer: undefined })));
-    await act(async () => {
-      await Promise.resolve();
-    });
+    const { btn } = await rotateBtn();
+    await act(async () => btn.click());
+    await settle();
+    // Not sent while the save is in flight.
+    expect(apiJSON).toHaveBeenCalledTimes(1);
+    await act(async () => pending[0](idp({ devIdpClientId: "afdev_old" })));
+    await settle();
     expect(apiJSON).toHaveBeenCalledTimes(2);
-    expect(apiJSON).toHaveBeenLastCalledWith("api/env/ws-settings", "PUT", { devIdp: true });
-    await act(async () => pending[1](idp({ devIdpClientId: "afdev_last" })));
-    expect(text()).toContain("afdev_last");
+    expect(apiJSON).toHaveBeenLastCalledWith("api/env/ws-settings/dev-idp/rotate", "POST", {});
+    await act(async () => pending[1]({ devIdpClientId: "afdev_new", restartRequired: true }));
+    await settle();
+    expect(text()).toContain("afdev_new");
+    expect(text()).not.toContain("afdev_old");
+  });
+
+  it("a lost rotate answer re-reads the settings and says the secret may have changed", async () => {
+    let reads = 0; // the personas list is read from the same mock, so count ws-settings reads only
+    api.mockImplementation((path: string) =>
+      Promise.resolve(path === "api/env/ws-settings" ? idp(++reads > 1 ? { devIdpClientId: "afdev_after" } : {}) : { personas: [], max: 20, domain: "example.test" }),
+    );
+    apiJSON.mockRejectedValue(new Error("network"));
+    const { PreviewTab } = await freshModule();
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    await mount(<PreviewTab />);
+    const { t, btn } = await rotateBtn();
+    await act(async () => btn.click());
+    await settle();
+    await new Promise((r) => setTimeout(r, 0));
+    process.off("unhandledRejection", unhandled);
+    expect(apiJSON).toHaveBeenCalledTimes(1); // no automatic retry: that would rotate again
+    expect(toastSpy).toHaveBeenCalledWith(t("env.devidp_rotate_lost_reloaded"));
+    expect(text()).toContain("afdev_after");
+    expect(unhandled).not.toHaveBeenCalled();
+  });
+
+  it("when the re-read fails too, the old client id is not shown as current", async () => {
+    let reads = 0;
+    api.mockImplementation((path: string) =>
+      path !== "api/env/ws-settings"
+        ? Promise.resolve({ personas: [], max: 20, domain: "example.test" })
+        : ++reads > 1
+          ? Promise.reject(new Error("network"))
+          : Promise.resolve(idp()),
+    );
+    apiJSON.mockRejectedValue(new Error("network"));
+    const { PreviewTab } = await freshModule();
+    await mount(<PreviewTab />);
+    const { t, btn } = await rotateBtn();
+    await act(async () => btn.click());
+    await settle();
+    expect(toastSpy).toHaveBeenCalledWith(t("env.devidp_rotate_lost_unknown"));
+    expect(text()).not.toContain("afdev_abc");
   });
 });
 

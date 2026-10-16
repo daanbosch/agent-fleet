@@ -5,7 +5,7 @@ package main
 // locked it with AF_DEV_IDP=0. It lives in deployment_setting beside the egress mode, so a
 // toggle reaches every handler without a restart.
 //
-// Turning it off only stops the IdP being served. Workspace opt-ins and their client
+// Turning it off only stops the IdP being served. Workspaces' client
 // registrations stay, so turning it back on does not rotate anyone's secret.
 
 import (
@@ -119,10 +119,10 @@ type devIdPAdminStatus struct {
 	Locked bool `json:"locked"`
 	// MissingBaseURL: PUBLIC_BASE_URL is unset, so there is no origin for the issuer.
 	MissingBaseURL bool `json:"missing_base_url"`
-	// MissingPreviewDomain: no preview domain, so members cannot opt in (devIdPOfferedToMembers).
+	// MissingPreviewDomain: no preview domain, so nothing is served or injected (devIdPOfferedToMembers).
 	MissingPreviewDomain bool   `json:"missing_preview_domain"`
 	Issuer               string `json:"issuer"`
-	// Clients counts the workspaces holding a registration (created at start, opted in or not);
+	// Clients counts the workspaces holding a registration (created at start);
 	// they survive the switch.
 	Clients int `json:"clients"`
 }

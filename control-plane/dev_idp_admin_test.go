@@ -88,31 +88,20 @@ func TestDevIdPToggleIsFollowedEverywhereAndKeepsTheOptIns(t *testing.T) {
 			t.Errorf("%s right after PUT off = %d, want 404", p, got)
 		}
 	}
-	st := parseWSSettings(mustSettings(ctx, d.mgr, d.ws.ID))
-	if !st.DevIdP {
-		t.Error("the workspace's opt-in was cleared")
-	}
 	if env := d.mgr.devIdPEnv(ctx, d.ws); len(env) != 0 {
 		t.Errorf("env still injected while off: %v", env)
 	}
-	// ws-settings reports it unavailable, and storing an opt-in is the same 409 as before.
+	// ws-settings reports it unavailable, and the removed per-workspace field is ignored.
 	wsGet := httptest.NewRecorder()
 	d.mux.ServeHTTP(wsGet, httptest.NewRequest(http.MethodGet, "https://af.example.com/api/env/ws-settings", nil))
 	if !strings.Contains(wsGet.Body.String(), `"devIdpAvailable":false`) {
 		t.Errorf("ws-settings while off: %s", wsGet.Body)
 	}
-	other := httptest.NewRecorder()
-	d.mux.ServeHTTP(other, httptest.NewRequest(http.MethodPut, "https://af.example.com/api/env/ws-settings",
-		strings.NewReader(`{"devIdp":false}`)))
-	// Turning the workspace off first so the on-request below is a real change.
-	if other.Code != http.StatusOK {
-		t.Fatalf("workspace opt-out while the deployment is off: %d %s", other.Code, other.Body)
-	}
-	on := httptest.NewRecorder()
-	d.mux.ServeHTTP(on, httptest.NewRequest(http.MethodPut, "https://af.example.com/api/env/ws-settings",
+	ign := httptest.NewRecorder()
+	d.mux.ServeHTTP(ign, httptest.NewRequest(http.MethodPut, "https://af.example.com/api/env/ws-settings",
 		strings.NewReader(`{"devIdp":true}`)))
-	if on.Code != http.StatusConflict {
-		t.Errorf("opt-in while the deployment is off = %d, want 409", on.Code)
+	if ign.Code != http.StatusOK {
+		t.Errorf("PUT devIdp while the deployment is off = %d, want 200 (ignored)", ign.Code)
 	}
 
 	// Back on: the registration that existed before is the one in force.
@@ -284,14 +273,6 @@ func TestDevIdPFailsClosedWhenTheSwitchCannotBeRead(t *testing.T) {
 	if iss := d.mgr.devIdPIssuer(context.Background()); iss != "" {
 		t.Errorf("issuer = %q", iss)
 	}
-	wsPut := httptest.NewRecorder()
-	d.mux.ServeHTTP(wsPut, httptest.NewRequest(http.MethodPut, "https://af.example.com/api/env/ws-settings", strings.NewReader(`{"devIdp":false}`)))
-	// Turning the workspace off is allowed; turning it on is a 409.
-	on := httptest.NewRecorder()
-	d.mux.ServeHTTP(on, httptest.NewRequest(http.MethodPut, "https://af.example.com/api/env/ws-settings", strings.NewReader(`{"devIdp":true}`)))
-	if on.Code != http.StatusConflict {
-		t.Errorf("opt-in with an unreadable switch = %d, want 409", on.Code)
-	}
 }
 
 // The deployment goes off after the gate let a valid code in: no token may come out.
@@ -436,9 +417,6 @@ func TestStartFollowsTheDevIdPSwitchFromAMemoWithoutKeys(t *testing.T) {
 	mgr.previewDomain = "pv.example.com" // the IdP is offered only with preview subdomains
 	memID := membershipIDOf(t, st, victim, tn)
 	ws, _, _ := st.GetWorkspaceByMembership(ctx, memID)
-	if err := st.SetWorkspaceSettings(ctx, ws.ID, `{"devIdp":true}`); err != nil {
-		t.Fatal(err)
-	}
 	mv, _, _ := st.GetMembershipByID(ctx, memID)
 	api := newWorkspaceAPI(mgr, false)
 	started := func() string {
@@ -469,17 +447,16 @@ func TestStartFollowsTheDevIdPSwitchFromAMemoWithoutKeys(t *testing.T) {
 	}
 }
 
-// Members are offered the IdP only with preview subdomains. Without a preview domain the
-// ws-settings answer says unavailable, a new opt-in is the 409 no_preview_domain, and an
-// earlier opt-in can still be turned off; with one, everything works as before.
-func TestDevIdPNeedsAPreviewDomainForMembers(t *testing.T) {
-	d := newDevIdPTestEnv(t) // opted in, preview domain set
+// The IdP is offered only with preview subdomains. Without a preview domain nothing is served
+// or injected, ws-settings says unavailable, rotate is the 409 no_preview_domain, and the admin
+// status says why; with one, everything works.
+func TestDevIdPNeedsAPreviewDomain(t *testing.T) {
+	d := newDevIdPTestEnv(t)
 	a := devIdPAdminAPI{memberAuth{d.mgr}}
-	ctx := context.Background()
-	wsReq := func(method, body string) *httptest.ResponseRecorder {
+	wsGet := func() map[string]any {
 		rec := httptest.NewRecorder()
-		d.mux.ServeHTTP(rec, httptest.NewRequest(method, "https://af.example.com/api/env/ws-settings", strings.NewReader(body)))
-		return rec
+		d.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "https://af.example.com/api/env/ws-settings", nil))
+		return idpJSON(t, rec)
 	}
 	adminGet := func() devIdPAdminStatus {
 		rec := httptest.NewRecorder()
@@ -488,38 +465,37 @@ func TestDevIdPNeedsAPreviewDomainForMembers(t *testing.T) {
 		_ = json.Unmarshal(rec.Body.Bytes(), &s)
 		return s
 	}
-	if s := adminGet(); s.MissingPreviewDomain {
+	if s := adminGet(); s.MissingPreviewDomain || !s.Enabled {
 		t.Errorf("admin status with a preview domain = %+v", s)
 	}
-	if b := idpJSON(t, wsReq(http.MethodGet, "")); b["devIdpAvailable"] != true || b["devIdp"] != true {
+	if b := wsGet(); b["devIdpAvailable"] != true || b["devIdpClientId"] == nil {
 		t.Fatalf("with a preview domain: %v", b)
 	}
 
 	domain := d.mgr.previewDomain
 	d.mgr.previewDomain = ""
-	if s := adminGet(); !s.MissingPreviewDomain || s.MissingBaseURL || !s.Enabled {
+	if s := adminGet(); !s.MissingPreviewDomain || s.MissingBaseURL || s.Enabled || !s.Setting {
 		t.Errorf("admin status without a preview domain = %+v", s)
 	}
-	if b := idpJSON(t, wsReq(http.MethodGet, "")); b["devIdpAvailable"] != false || b["devIdp"] != false {
+	if b := wsGet(); b["devIdpAvailable"] != false {
 		t.Errorf("without a preview domain: %v", b)
 	}
-	// The earlier opt-in can be undone.
-	if rec := wsReq(http.MethodPut, `{"devIdp":false}`); rec.Code != http.StatusOK {
-		t.Fatalf("opt-out without a preview domain = %d %s", rec.Code, rec.Body)
+	if _, _, ok := envCreds(d); ok {
+		t.Error("env injected without a preview domain")
 	}
-	if parseWSSettings(mustSettings(ctx, d.mgr, d.ws.ID)).DevIdP {
-		t.Error("opt-out was not stored")
+	for _, p := range []string{devIdPDiscoveryPath, devIdPJWKSPath, devIdPAuthorizePath, devIdPTokenPath, devIdPUserinfoPath} {
+		if got := d.console(t, "https://af.example.com"+p).Code; got != http.StatusNotFound {
+			t.Errorf("%s without a preview domain = %d, want 404", p, got)
+		}
 	}
-	rec := wsReq(http.MethodPut, `{"devIdp":true}`)
+	rec := httptest.NewRecorder()
+	d.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "https://af.example.com/api/env/ws-settings/dev-idp/rotate", nil))
 	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"no_preview_domain"`) {
-		t.Fatalf("opt-in without a preview domain = %d %s, want 409 no_preview_domain", rec.Code, rec.Body)
-	}
-	if parseWSSettings(mustSettings(ctx, d.mgr, d.ws.ID)).DevIdP {
-		t.Error("the refused opt-in was stored")
+		t.Errorf("rotate without a preview domain = %d %s, want 409 no_preview_domain", rec.Code, rec.Body)
 	}
 
 	d.mgr.previewDomain = domain
-	if rec := wsReq(http.MethodPut, `{"devIdp":true}`); rec.Code != http.StatusOK {
-		t.Fatalf("opt-in with a preview domain = %d %s", rec.Code, rec.Body)
+	if _, _, ok := envCreds(d); !ok {
+		t.Error("no env once the preview domain is back")
 	}
 }

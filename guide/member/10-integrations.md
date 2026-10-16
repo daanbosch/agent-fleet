@@ -153,17 +153,14 @@ client secret); no code, and nothing to register in the Google Cloud console.
 
 - **Availability**: a deployment administrator can turn it off in the Admin modal, and the
   operator can lock it off with `AF_DEV_IDP=0` (ADR 0116). It is on by default; while off, every
-  `/dev-idp/…` URL is a 404 and the switch below does not appear. **It also needs preview subdomains**: on a
-  deployment without a preview domain the switch does not appear and turning it on is refused. **It is off per workspace too.** Turn it on
-  under Settings › Preview subdomains › "Use the development OIDC IdP". **No restart is needed**: the values
-  below reach the container at every start whether or not the switch is on, so a running workspace can turn it
-  on and off at will (off refuses sign-in at once). Because the variables exist while the switch is off, an app
-  that picks the dev issuer whenever `AF_DEV_IDP_ISSUER` is set will fail to sign in until you turn it on. The
-  same screen shows the issuer, the discovery URL and the client id with copy buttons. The client secret is not
-  shown there: read `AF_DEV_IDP_CLIENT_SECRET` inside the container. Turning the switch off and on keeps the
-  client id and secret; "Issue a new secret" replaces them (the old pair stops working at once, and the new one
-  reaches the container at its next start, so stop and start the workspace). A production configuration must
-  never trust this issuer.
+  `/dev-idp/…` URL is a 404 and nothing is injected. **It also needs preview subdomains**: on a deployment
+  without a preview domain the IdP is not served and the section below does not appear. There is **no
+  per-workspace switch**: wherever the IdP is offered, the values below reach every workspace at every start
+  and sign-in simply works. Settings › Preview subdomains shows the issuer, the discovery URL and the client id
+  with copy buttons. The client secret is not shown there: read `AF_DEV_IDP_CLIENT_SECRET` inside the
+  container. The client id and secret stay the same across restarts; "Issue a new secret" replaces them (the
+  old pair stops working at once, and the new one reaches the container at its next start, so stop and start the
+  workspace). A production configuration must never trust this issuer.
 
 - **What you get**: `AF_DEV_IDP_ISSUER`, `AF_DEV_IDP_WELL_KNOWN` (the discovery URL), `AF_DEV_IDP_CLIENT_ID` and
   `AF_DEV_IDP_CLIENT_SECRET` inside the container, next to `AF_PREVIEW_URL_*`. The client is **yours alone**: its
