@@ -42,6 +42,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
@@ -184,6 +185,9 @@ func rateLimitTickSession(m session.Meta, now time.Time) {
 		return
 	}
 	defer lease.Release()
+	episodeMu := rateLimitEpisodeLock(m.Name)
+	episodeMu.Lock()
+	defer episodeMu.Unlock()
 	st, has := RateLimitStates.Read(m.Name)
 	alive := SessionAlive(m)
 	if alive {
@@ -201,6 +205,18 @@ func rateLimitTickSession(m session.Meta, now time.Time) {
 		rateLimitFollowUp(m, st, now, alive)
 	}
 }
+
+// rateLimitEpisodeLock is the lock every read-modify-write of one session's episode by the sweep
+// or by a move holds (session_move_gate.go). The lease alone does not order them: the sweep's is
+// shared, and a refused booking that is repaired after a rollback holds none, so without it the
+// sweep's write of the episode it read earlier wipes the id the repair just booked. Order: a
+// lease, if any, before this lock; nothing takes the gate while holding it.
+func rateLimitEpisodeLock(name string) *sync.Mutex {
+	v, _ := rateLimitEpisodeLocks.LoadOrStore(name, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
+var rateLimitEpisodeLocks sync.Map
 
 // rateLimitWatched reports whether a usage limit can be SEEN for this session — which is what
 // decides whether waiting it out can be automated at all.

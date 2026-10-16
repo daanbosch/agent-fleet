@@ -10,6 +10,11 @@ package sessionx
 // An id leaves only when the CP confirms the delete or answers that the schedule is gone. There
 // is no expiry: a guess that the schedule must have fired by now is exactly what would leave a
 // live one behind.
+//
+// A confirmed id whose session's episode still names it stays as Done until the episode lets go
+// of it. That is a moving source whose commit recorded the id and then stopped: the sweep cancels
+// the booking, and a rollback must still learn that the id it finds in the episode is dead, or it
+// reopens a source whose resume nobody will book again.
 
 import (
 	"log"
@@ -26,6 +31,8 @@ type rateLimitScheduleCleanup struct {
 	Since   string `json:"since"` // first failed attempt (RFC3339)
 	Tries   int    `json:"tries"`
 	LastErr string `json:"lastErr,omitempty"`
+	// Done: the CP confirmed; kept only while the session's episode still names the id.
+	Done bool `json:"done,omitempty"`
 }
 
 // rateLimitCleanups holds every pending cancellation in one file, keyed by schedule id. One file
@@ -91,6 +98,10 @@ func finishRateLimitCancel(id string) {
 
 // settleRateLimitCancel tries one delete and updates all in place.
 func settleRateLimitCancel(all map[string]rateLimitScheduleCleanup, id string, c rateLimitScheduleCleanup) {
+	if c.Done {
+		forgetIfEpisodeLetGo(all, id, c)
+		return
+	}
 	if err := dropRateLimitSchedule(id); err != nil {
 		c.Tries++
 		c.LastErr = err.Error()
@@ -100,6 +111,16 @@ func settleRateLimitCancel(all map[string]rateLimitScheduleCleanup, id string, c
 	}
 	if c.Tries > 0 {
 		log.Printf("rate-limit: cancelled the schedule %s of %s after %d failed attempt(s)", id, c.Session, c.Tries)
+	}
+	c.Done, c.LastErr = true, ""
+	all[id] = c
+	forgetIfEpisodeLetGo(all, id, c)
+}
+
+// forgetIfEpisodeLetGo drops a confirmed id once its session's episode no longer names it.
+func forgetIfEpisodeLetGo(all map[string]rateLimitScheduleCleanup, id string, c rateLimitScheduleCleanup) {
+	if st, ok := RateLimitStates.Read(c.Session); ok && st.ScheduleID == id {
+		return
 	}
 	delete(all, id)
 }
@@ -133,5 +154,20 @@ func pendingRateLimitCleanups() map[string]rateLimitScheduleCleanup {
 	rateLimitCleanupMu.Lock()
 	defer rateLimitCleanupMu.Unlock()
 	all, _ := rateLimitCleanups.Read(rateLimitCleanupKey)
+	for id, c := range all {
+		if c.Done {
+			delete(all, id)
+		}
+	}
 	return all
+}
+
+// rateLimitCancelRecorded reports whether id was ever recorded for cancellation and not yet
+// forgotten — pending or confirmed. Either way the booking is not one to keep.
+func rateLimitCancelRecorded(id string) bool {
+	rateLimitCleanupMu.Lock()
+	defer rateLimitCleanupMu.Unlock()
+	all, _ := rateLimitCleanups.Read(rateLimitCleanupKey)
+	_, ok := all[id]
+	return ok
 }

@@ -318,7 +318,12 @@ it is not yet.
   it closes the episode, and fails with nothing changed if the record cannot be written.
 - **A refused booking and a rollback** are ordered by one lock: a rollback repairs, clears
   `moving` and reopens under it. A refusal that reaches its record after the rollback (the
-  request stalled in between) finds the source open and books the resume again itself.
+  request stalled in between) finds the source open and books the resume again itself. The
+  sweep's step takes the same per-session episode lock (after its lease), because shared leases
+  do not exclude each other and the repair holds none.
+- A confirmed cancellation stays in the record, marked done, while the session's episode still
+  names the id: a commit that recorded it and stopped leaves a moving source whose rollback must
+  still see that id as dead after the sweep cancelled it.
 - **The move's primitives** are `beginSessionMove`, `rollback` and `commit` (sessionx,
   `session_move_gate.go`) plus `reopenMovedSession` for decision 11.6. Commit changes the meta,
   closes the episode and cancels its booking; stopping the source and taking its spooled peer

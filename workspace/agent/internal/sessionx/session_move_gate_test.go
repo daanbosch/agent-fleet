@@ -720,3 +720,81 @@ func TestStoppedManagedCursorSourceIsRefused(t *testing.T) {
 		t.Fatalf("Terminal cursor: %v", err)
 	}
 }
+
+// A refusal repaired after a rollback and the sweep both rewrite the episode. The sweep's step
+// waits for the repair under the episode lock and then reads the episode the repair wrote; had
+// it read earlier, its write (here the stale episode's removal) would drop the new booking,
+// which would then fire with neither the episode nor a commit knowing its id.
+func TestSweepWaitsForARepairAfterTheRollback(t *testing.T) {
+	f := newRateLimitFixture(t)
+	now := time.Now()
+	_, m := moveEnv(t, "mvsweep")
+	setRateLimitPref(t, true)
+	spentEpisode(t, m.Name, now.Add(-time.Hour)) // stale by now: the sweep would retire it
+	mv := mustBegin(t, beginAsync(m.Name, "mvsweep-target"))
+	if err := mv.rollback(now); err != nil {
+		t.Fatal(err)
+	}
+	inPut, goOn := make(chan struct{}), make(chan struct{})
+	origPut := putRateLimitSchedule
+	putRateLimitSchedule = func(mm session.Meta, at time.Time) (string, error) {
+		close(inPut)
+		<-goOn
+		return origPut(mm, at)
+	}
+	noted := make(chan struct{})
+	go func() {
+		noteBookingRefusedDuringMove(m.Name, "schedule", "sch_spent", now)
+		close(noted)
+	}()
+	<-inPut
+	ticked := make(chan struct{})
+	go func() {
+		rateLimitTickSession(m, now)
+		close(ticked)
+	}()
+	select {
+	case <-ticked:
+		t.Fatal("the sweep's step ran while the repair was rewriting the episode")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(goOn)
+	<-noted
+	<-ticked
+	if st, ok := RateLimitStates.Read(m.Name); !ok || st.ScheduleID != "sch_test" {
+		t.Fatalf("after the sweep: has=%v %+v; want the repaired booking kept", ok, st)
+	}
+	if f.scheduled != 1 {
+		t.Errorf("booked %d, want 1", f.scheduled)
+	}
+}
+
+// A commit that recorded the cancellation and then stopped: after the restart the sweep cancels
+// the booking, and a rollback of that move must still see the id as dead and book again.
+func TestRollbackAfterARestartThatFinishedTheCancel(t *testing.T) {
+	f := newRateLimitFixture(t)
+	now := time.Now()
+	_, m := moveEnv(t, "mvhalf")
+	setRateLimitPref(t, true)
+	spentEpisode(t, m.Name, now)
+	mv := mustBegin(t, beginAsync(m.Name, "mvhalf-target"))
+	if err := recordRateLimitCancel(m.Name, "sch_spent"); err != nil { // commit's first step
+		t.Fatal(err)
+	}
+	lifegate.ResetForTest()
+	rateLimitTick(now.Add(time.Minute))
+	if len(f.deleted) != 1 || len(pendingRateLimitCleanups()) != 0 {
+		t.Fatalf("after the restart's sweep: deletes %v, pending %v", f.deleted, pendingRateLimitCleanups())
+	}
+	if err := mv.rollback(now); err != nil {
+		t.Fatal(err)
+	}
+	if st := stateOf(t, m.Name); st.ScheduleID != "sch_test" || f.scheduled != 1 {
+		t.Fatalf("after rollback: booked %d, episode %+v; want the dead id replaced", f.scheduled, st)
+	}
+	// The confirmed id is forgotten once nothing names it.
+	rateLimitTick(now.Add(2 * time.Minute))
+	if rateLimitCancelRecorded("sch_spent") {
+		t.Error("the confirmed cancellation outlived the episode that named it")
+	}
+}
