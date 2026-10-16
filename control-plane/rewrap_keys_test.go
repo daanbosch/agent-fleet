@@ -107,6 +107,11 @@ func seedLegacyRows(t *testing.T, st *store.SQL, local *localCustodian) (map[str
 	exec(`INSERT INTO inbox_attachment(id, item_id, kind, ciphertext, key_ref, created_at) VALUES('IA1', 'I1', 'recipe', ?, ?, ?)`,
 		put("inbox_attachment", "IA1", tn.ID, []byte(`{"prompt":"fix it"}`)), tn.ID, now)
 
+	exec(`INSERT INTO dev_idp_key(kid, private_enc, key_ref, public_key, state, created_at) VALUES('K1', ?, ?, 'pub', 'active', 1)`,
+		put("dev_idp_key", "K1", devIdPKeyRef, []byte("signing-key-der")), devIdPKeyRef)
+	exec(`INSERT INTO dev_idp_client(workspace_id, membership_id, client_id, secret_enc, key_ref, created_at) VALUES(?, ?, 'afdev-c1', ?, ?, 1)`,
+		ws.ID, owner, put("dev_idp_client", ws.ID, tn.ID, []byte("afdevsec-x")), tn.ID)
+
 	setting := func(k, v string) {
 		t.Helper()
 		if err := st.SetSetting(ctx, k, v); err != nil {
@@ -451,6 +456,8 @@ var rewrapSealSites = map[string]string{
 	"tenant_idp_secret.go:sealTenantSecret":     "",
 	"tenant_idp_api.go:upsert":                  "tenant_idp",
 	"tenant_git_oauth_api.go:save":              "tenant_git_oauth",
+	"dev_idp_keys.go:mint":                      "dev_idp_key",
+	"dev_idp_client.go:ensureDevIdPClient":      "dev_idp_client",
 	"engine_hf_token.go:set":                    engineHfTokenSetting,
 	"engine_civitai_token.go:set":               engineCivitaiTokenSetting,
 	"engine_comfy_panel.go:seal":                engineComfySetting,

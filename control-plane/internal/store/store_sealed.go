@@ -31,6 +31,8 @@ var sealedColumns = []SealedColumn{
 	{Table: "mcp_server", ID: "id", Value: "headers_enc", KeyRef: "key_ref"},
 	{Table: "tenant_idp", ID: "id", Value: "secret_enc", KeyRef: "key_ref"},
 	{Table: "tenant_git_oauth", ID: "id", Value: "secret_enc", KeyRef: "key_ref"},
+	{Table: "dev_idp_key", ID: "kid", Value: "private_enc", KeyRef: "key_ref"},
+	{Table: "dev_idp_client", ID: "workspace_id", Value: "secret_enc", KeyRef: "key_ref"},
 	{Table: "session_share_proposal", ID: "id", Value: "ciphertext", KeyRef: "key_ref"},
 	{Table: "session_handoff_offer", ID: "id", Value: "ciphertext", KeyRef: "key_ref"},
 	{Table: "inbox_item", ID: "id", Value: "ciphertext", KeyRef: "key_ref"},

@@ -1,7 +1,7 @@
 # Every (method, path) buildMux() registers. Generated - do not edit by hand.
 # Update: cd control-plane && go test -run TestRouteTableGolden -update-routes-golden ./...
 # ANY = registered without a method. Taken with every routeSwitch on (routes_golden_test.go).
-# count: 669
+# count: 674
 ANY /
 ANY /agent-fleet
 ANY /agent-fleet/
@@ -610,6 +610,11 @@ GET /brand/icon-192.png
 GET /brand/icon-512.png
 GET /brand/icon-maskable-192.png
 GET /brand/icon-maskable-512.png
+ANY /dev-idp/.well-known/openid-configuration
+ANY /dev-idp/authorize
+ANY /dev-idp/jwks
+ANY /dev-idp/token
+ANY /dev-idp/userinfo
 GET /engine/{key}/props
 ANY /engine/{key}/v1/{path...}
 ANY /git/{slug}/{repo...}

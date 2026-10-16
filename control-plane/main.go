@@ -281,6 +281,7 @@ func main() {
 	// mistyped setting charitably beats having the whole feature go dead.
 	mgr.githubBuiltinOff = githubBuiltinOffFromEnv(os.Getenv("AF_GITHUB_BUILTIN_APPS"))
 	mgr.previewDomain = strings.ToLower(strings.Trim(strings.TrimSpace(os.Getenv("AF_PREVIEW_DOMAIN")), "."))
+	mgr.devIdPOn = envBool("AF_DEV_IDP", false)
 	cfg := config{
 		addr:          envx.Or("CP_ADDR", ":8080"),
 		consoleDir:    envx.Or("CONSOLE_DIR", "./console"),
@@ -564,6 +565,15 @@ func main() {
 		}
 		log.Printf("preview subdomains: *.%s (ports are per-workspace; default %v)", cfg.previewDomain, defaultPreviewPorts)
 	}
+	// Development OIDC IdP (ADR 0116): say plainly what this deployment serves, because an
+	// identity provider that mints tokens for any signed-in member must never be on by accident.
+	if mgr.devIdPOn {
+		if iss := mgr.devIdPIssuer(); iss != "" {
+			log.Printf("WARNING: AF_DEV_IDP is on — serving a development OIDC IdP at %s (workspaces opt in individually; never trust this issuer in production)", iss)
+		} else {
+			log.Printf("WARNING: AF_DEV_IDP is set without PUBLIC_BASE_URL — the development OIDC IdP has no Console origin to live on and stays off")
+		}
+	}
 	// withClientIP is OUTERMOST on purpose: it is the only place the forwarding
 	// headers are read, so nothing downstream can be tempted to trust a client's own
 	// claim about where it is calling from (docs/log/66 §66.6) — the preview dispatcher
@@ -644,13 +654,44 @@ func logRequests(next http.Handler) http.Handler {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w}
 		next.ServeHTTP(sw, r)
-		uri := r.URL.RequestURI()
-		// The query on an OAuth path carries the authorization code and similar secrets.
-		if r.URL.RawQuery != "" && strings.Contains(r.URL.Path, "oauth") {
-			uri = r.URL.Path + "?<redacted>"
-		}
-		log.Printf("%s %s %d %s", r.Method, uri, sw.code(), time.Since(start).Round(time.Millisecond))
+		log.Printf("%s %s %d %s", r.Method, loggedURI(r.URL), sw.code(), time.Since(start).Round(time.Millisecond))
 	})
+}
+
+// secretQueryKeys are query parameters that carry a credential wherever they appear: an
+// authorization code, a state, a client secret or a token. An app on a preview host receives
+// its OAuth callback (?code=…&state=…) on a path nobody here can predict, so the redaction is by
+// parameter name and not only by path.
+var secretQueryKeys = map[string]bool{
+	"code": true, "state": true, "client_secret": true, "client_assertion": true,
+	"access_token": true, "id_token": true, "refresh_token": true, "token": true, "t": true,
+	"code_verifier": true, "session_state": true,
+}
+
+// loggedURI is the request URI as the access log may record it. The whole query goes on an
+// OAuth or dev-IdP path; elsewhere only the credential-bearing parameters.
+func loggedURI(u *url.URL) string {
+	if u.RawQuery == "" {
+		return u.RequestURI()
+	}
+	if strings.Contains(u.Path, "oauth") || u.Path == devIdPPath || strings.HasPrefix(u.Path, devIdPPath+"/") {
+		return u.Path + "?<redacted>"
+	}
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return u.Path + "?<redacted>"
+	}
+	hit := false
+	for k := range q {
+		if secretQueryKeys[strings.ToLower(k)] {
+			q.Set(k, "<redacted>")
+			hit = true
+		}
+	}
+	if !hit {
+		return u.RequestURI()
+	}
+	return u.Path + "?" + q.Encode()
 }
 
 // statusWriter captures the response status for the access log.

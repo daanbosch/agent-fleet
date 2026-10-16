@@ -986,6 +986,7 @@ type Store interface {
 	EngineAccessStore
 	TenantBranchRulesStore
 	PreviewTempPortStore
+	DevIdPStore
 	MemberUIStateStore
 	TenantMemberDefaultsStore
 	HomeOperationStore
