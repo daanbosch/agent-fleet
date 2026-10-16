@@ -408,7 +408,10 @@ it is not yet.
   before the create, and kept until the target's `InitialPromptState` says delivered. While it
   does not, the move's answer and the source's preview report it, and
   `POST /sessions/{target}/move/deliver` sends it again on the user's word. It is never resent
-  by itself, since an unknown delivery may have arrived.
+  by itself, since an unknown delivery may have arrived. On a Terminal target the resend runs
+  the create's own delivery in the background (readiness wait, Enter nudge, evidence of a started
+  turn), and typed keys without evidence stay unknown. While the source's move has not created
+  the target, the record is kept and deliver is refused.
 - **After the commit**, the record stays, marked `committed`, until the spooled peer messages are
   taken and the source is stopped. An Agent that stops in between finishes those steps at boot
   (`RecoverMoves`), on retry, or before a reopen. Reopen runs under the move's operation lock.

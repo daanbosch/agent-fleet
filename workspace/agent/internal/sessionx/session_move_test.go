@@ -1085,3 +1085,89 @@ func TestLostFirstPromptIsReportedAndDeliverable(t *testing.T) {
 		t.Fatalf("a second deliver: %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+// A Terminal target's redelivery is not a bare /input: typed keys are not a started turn. An
+// outcome without evidence stays unknown and keeps the record, so it can be delivered again.
+func TestTerminalRedeliveryNeedsEvidence(t *testing.T) {
+	moveRunEnv(t, "mvtdl-unused")
+	target := "mvtdl"
+	session.WriteMeta(session.Meta{Name: target, Dir: t.TempDir(), Kind: session.KindCodex,
+		InitialPromptState: session.InitialPromptUnknown})
+	if err := moveDeliveries.Write(target, moveDelivery{Source: "gone", File: "/f", Prompt: "read /f"}); err != nil {
+		t.Fatal(err)
+	}
+	outcome := make(chan string, 1)
+	typed := make(chan string, 1)
+	prev := typeMoveDelivery
+	typeMoveDelivery = func(name, prompt string) string { typed <- prompt; return <-outcome }
+	t.Cleanup(func() { typeMoveDelivery = prev })
+	settled := func() string {
+		t.Helper()
+		deadline := time.Now().Add(moveGuard)
+		for {
+			// Under the meta lock: settleInitialPrompt rewrites the file in place.
+			var m session.Meta
+			WithSessionMetaLock(func() { m, _ = session.ReadMeta(target) })
+			if st := m.InitialPromptState; st != session.InitialPromptPending {
+				return st
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the delivery never settled")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	rec := postMove(t, target, "/deliver", "")
+	if rec.Code != http.StatusAccepted || !strings.Contains(rec.Body.String(), `"initialPromptState":"pending"`) {
+		t.Fatalf("deliver: %d %s", rec.Code, rec.Body.String())
+	}
+	if p := <-typed; p != "read /f" {
+		t.Fatalf("typed %q", p)
+	}
+	outcome <- session.InitialPromptUnknown // typed, no turn seen
+	if st := settled(); st != session.InitialPromptUnknown {
+		t.Fatalf("state = %q, want unknown", st)
+	}
+	if d := moveDeliveryState(target); d == nil || !d.Deliverable {
+		t.Fatalf("delivery = %+v; the record must stay deliverable", d)
+	}
+	// With evidence it is delivered, and the record goes.
+	postMove(t, target, "/deliver", "")
+	<-typed
+	outcome <- session.InitialPromptDelivered
+	if st := settled(); st != session.InitialPromptDelivered {
+		t.Fatalf("state = %q", st)
+	}
+	if _, ok := moveDeliveries.Read(target); ok {
+		t.Fatal("the record outlived a confirmed delivery")
+	}
+}
+
+// The delivery record is written before the target exists. A deliver, or a read, in that window
+// must neither drop it nor deliver: the move from the source is still creating the target.
+func TestDeliveryRecordSurvivesBeforeTheTargetExists(t *testing.T) {
+	moveRunEnv(t, "mvpre-create")
+	target := bookMoveTarget(t.TempDir())
+	mustBegin(t, beginAsync("mvpre-create", target))
+	if err := moveDeliveries.Write(target, moveDelivery{Source: "mvpre-create", File: "/f", Prompt: "read /f"}); err != nil {
+		t.Fatal(err)
+	}
+	rec := postMove(t, target, "/deliver", "")
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "move_target_not_created") {
+		t.Fatalf("deliver before the create: %d %s", rec.Code, rec.Body.String())
+	}
+	if d := moveDeliveryState(target); d != nil {
+		t.Fatalf("delivery = %+v before the target exists", d)
+	}
+	if _, ok := moveDeliveries.Read(target); !ok {
+		t.Fatal("the record was dropped while the move was still creating its target")
+	}
+	// Once the move is gone (cancelled), a record for a target that never existed is dropped.
+	if rec := postMove(t, "mvpre-create", "/cancel", ""); rec.Code != http.StatusOK {
+		t.Fatalf("cancel: %d %s", rec.Code, rec.Body.String())
+	}
+	moveDeliveryState(target)
+	if _, ok := moveDeliveries.Read(target); ok {
+		t.Fatal("a record for a target that will never exist stayed")
+	}
+}

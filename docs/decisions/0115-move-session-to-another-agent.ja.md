@@ -360,7 +360,9 @@ develop（2026-10-15）の `Agent.Transcript`／`claude.CollectAllTurns` を読�
 - **最初のプロンプトも移動の一部。** 作成の前に移動先ごとに記録し（`session-move-delivery`）、移動先の
   `InitialPromptState` が delivered になるまで残す。それまでは移動の応答と元のプレビューがそれを示し、
   利用者の操作で `POST /sessions/{target}/move/deliver` がもう一度送る。届いたかもしれない unknown を
-  勝手に再送することはしない。
+  勝手に再送することはしない。Terminal の移動先への再送は、作成時と同じ配送（入力欄の準備待ち、Enter の
+  押し直し、ターン開始の確認）を裏で走らせ、確認の取れない打鍵は unknown のまま残す。元の移動が移動先を
+  まだ作っていない間は、記録を残したまま再送を拒否する。
 - **確定の後も**記録は `committed` として残り、spool の peer メッセージの取り出しと元の停止が済んでから
   消える。その間に Agent が止まったら、起動時（`RecoverMoves`）・再試行・再開の前に残りを済ませる。
   再開は移動と同じ操作ロックの下で行う。

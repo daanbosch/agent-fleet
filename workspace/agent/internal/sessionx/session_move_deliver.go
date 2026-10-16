@@ -56,7 +56,9 @@ func moveDeliveryState(target string) *moveDeliveryWire {
 	var m session.Meta
 	WithSessionMetaLock(func() { m, ok = session.ReadMeta(target) })
 	if !ok {
-		if _, err := os.Lstat(session.MetaPath(target)); errors.Is(err, fs.ErrNotExist) {
+		// No meta yet is not the same as a target deleted: the record is written before the
+		// create, so while the source's move is still on its way to this target it stays.
+		if _, err := os.Lstat(session.MetaPath(target)); errors.Is(err, fs.ErrNotExist) && !moveToward(d.Source, target) {
 			moveDeliveries.Remove(target)
 		}
 		return nil
@@ -69,6 +71,24 @@ func moveDeliveryState(target string) *moveDeliveryWire {
 	return &moveDeliveryWire{Target: target, File: d.File, InitialPromptState: st,
 		Deliverable: st != session.InitialPromptPending}
 }
+
+// moveToward reports that source's move to target has not ended: source is moving to it, or
+// the record of that move is still there.
+func moveToward(source, target string) bool {
+	if !session.ValidName(source) {
+		return false
+	}
+	if m, ok := session.ReadMeta(source); ok && m.Moving == target {
+		return true
+	}
+	rec, ok := moveRecords.Read(source)
+	return ok && rec.Target == target
+}
+
+// typeMoveDelivery types a Terminal target's first prompt and answers how it ended, as the
+// create's own delivery does: readiness wait, the Enter nudge, and delivered only on evidence
+// that a turn started. A variable so tests need no tmux.
+var typeMoveDelivery = typeInitialPrompt
 
 type moveDeliverWire struct {
 	Target             string `json:"target"`
@@ -96,6 +116,14 @@ func HandleSessionMoveDeliver(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusNotFound, "move_delivery_none", "this session has no move prompt to deliver")
 		return
 	}
+	m, ok := session.ReadMeta(name)
+	if !ok {
+		if moveToward(d.Source, name) {
+			httpx.WriteErr(w, http.StatusConflict, "move_target_not_created",
+				"the move to this session has not created it yet; finish or cancel the move from "+d.Source)
+			return
+		}
+	}
 	st := moveDeliveryState(name)
 	switch {
 	case st == nil:
@@ -110,22 +138,37 @@ func HandleSessionMoveDeliver(w http.ResponseWriter, r *http.Request) {
 		m.InitialPromptState = session.InitialPromptPending
 		return true
 	})
+	answer := moveDeliverWire{Target: name, MayDuplicate: prev == session.InitialPromptUnknown}
+	if m.DriverKind() != session.DriverManaged {
+		// Typed into a pane, a 200 from /input says only that the keys went in: a booting CLI
+		// eats them, or the Enter, without a trace. So the create's own delivery runs, in the
+		// background as on create (its readiness wait can take a minute), and the record stays
+		// until it reports delivered.
+		go func() {
+			state := typeMoveDelivery(name, d.Prompt)
+			settleInitialPrompt(name, state)
+			if state == session.InitialPromptDelivered {
+				moveDeliveries.Remove(name)
+			}
+		}()
+		answer.InitialPromptState = session.InitialPromptPending
+		httpx.WriteJSON(w, http.StatusAccepted, answer)
+		return
+	}
+	// Managed: the create's own delivery counts an accepted Send as delivered, and /input's 2xx
+	// is that acceptance.
 	body, _ := json.Marshal(map[string]string{"prompt": d.Prompt})
 	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, "/sessions/"+name+"/input", bytes.NewReader(body))
 	req.SetPathValue("name", name)
 	c := &captureWriter{header: http.Header{}}
 	HandleSessionInput(c, req)
-	state := session.InitialPromptFailed
-	if c.status >= 200 && c.status < 300 {
-		state = session.InitialPromptDelivered
-	}
-	settleInitialPrompt(name, state)
-	if state == session.InitialPromptDelivered {
-		moveDeliveries.Remove(name)
-	} else {
+	if c.status < 200 || c.status >= 300 {
+		settleInitialPrompt(name, session.InitialPromptFailed)
 		httpx.WriteJSON(w, c.status, json.RawMessage(c.body.Bytes()))
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, moveDeliverWire{Target: name, InitialPromptState: state,
-		MayDuplicate: prev == session.InitialPromptUnknown})
+	settleInitialPrompt(name, session.InitialPromptDelivered)
+	moveDeliveries.Remove(name)
+	answer.InitialPromptState = session.InitialPromptDelivered
+	httpx.WriteJSON(w, http.StatusOK, answer)
 }
