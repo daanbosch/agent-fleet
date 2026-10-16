@@ -94,6 +94,17 @@ device flow には secret が無く、トークンはメンバー自身のワー
 > 載りません。なお、メンバーには「このアプリは Atlassian の審査を受けていない」旨の注意も
 > 出ますが、自分で登録したアプリならそれが正常です。
 
+> **Jira のボード・スプリント・エピックにはスコープの追加が要ります。** メンバーのセッションの
+> Jira CLI は、ボード・スプリント・エピックを Jira Software 経由で扱います。Jira Software は
+> 上のスコープを一切受け付けません。まずアプリの **Permissions** に
+> `read:board-scope:jira-software`・`read:sprint:jira-software`・`write:sprint:jira-software`・
+> `read:epic:jira-software`・`write:epic:jira-software`・`read:project:jira`・
+> `read:issue-details:jira`・`read:jql:jira` を追加してください。**そのあとで** Jira のカードの
+> 「このアプリに Jira Software のスコープ（ボード・スプリント・エピック）も許可済み」に
+> チェックを入れて保存します。順番が大事です。アプリにないスコープを求める認可は Atlassian に
+> 拒否されるので、先にチェックを入れると全メンバーが接続できなくなります。接続済みのメンバーは、
+> Jira を接続し直すと新しいスコープを受け取れます。
+
 secret は**保存時に暗号化され、二度と表示されません**。後で登録を編集するとき、
 secret を空のままにすれば保存済みのものが保たれます——**変更するときだけ**入力してください。
 **登録を削除**すると OAuth ボタンが消えます。トークンで接続済みのメンバーには影響しません。

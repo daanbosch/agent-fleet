@@ -27,6 +27,9 @@ interface GitOAuthApp {
   needs_secret?: boolean;
   updated_at?: string;
   redirect_uri?: string;
+  // Optional scope groups the admin confirms the app grants, and the ones this provider offers.
+  scope_groups?: string[];
+  scope_groups_available?: string[];
   // GitHub only (issue #1667).
   source?: GitHubSource;
   is_default?: boolean;
@@ -51,6 +54,17 @@ const REGISTER_URL: Record<string, string> = {
   // Console, and a Bitbucket consumer cannot be reused (docs/log/80 §80.17).
   jira: "https://developer.atlassian.com/console/myapps/",
 };
+
+// The optional scope groups this screen knows how to explain. A group the server offers but this
+// build has no text for is not drawn: an unexplained box is one nobody can tick safely.
+const SCOPE_GROUP_TEXT = {
+  jira_software: {
+    label: "tenant.git_oauth_scope_group_jira_software",
+    hint: "tenant.git_oauth_scope_group_jira_software_hint",
+  },
+} as const;
+type ScopeGroup = keyof typeof SCOPE_GROUP_TEXT;
+const isScopeGroup = (g: string): g is ScopeGroup => Object.hasOwn(SCOPE_GROUP_TEXT, g);
 
 export function TenantGitOAuthView({ slug }: { slug: string }) {
   const tr = useT();
@@ -89,12 +103,17 @@ function GitOAuthCard({ slug, app, onChanged }: { slug: string; app: GitOAuthApp
   const toast = useToast();
   const [clientID, setClientID] = useState(app.client_id || "");
   const [secret, setSecret] = useState("");
+  const [groups, setGroups] = useState<string[]>(app.scope_groups || []);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
+  const storedGroups = (app.scope_groups || []).join(",");
   useEffect(() => {
     setClientID(app.client_id || "");
     setSecret("");
   }, [app.client_id, app.provider]);
+  useEffect(() => {
+    setGroups(storedGroups ? storedGroups.split(",") : []);
+  }, [storedGroups]);
 
   const base = `api/admin/tenants/${encodeURIComponent(slug)}/git-oauth/${encodeURIComponent(app.provider)}`;
   const registered = !!app.client_id;
@@ -102,7 +121,11 @@ function GitOAuthCard({ slug, app, onChanged }: { slug: string; app: GitOAuthApp
   const save = async () => {
     setBusy(true);
     try {
-      const res = await apiJSON(base, "PUT", { client_id: clientID.trim(), client_secret: secret.trim() });
+      const res = await apiJSON(base, "PUT", {
+        client_id: clientID.trim(),
+        client_secret: secret.trim(),
+        scope_groups: groups,
+      });
       if (res?.error) {
         toast(errText(res.error), { kind: "warn" });
         return;
@@ -181,6 +204,21 @@ function GitOAuthCard({ slug, app, onChanged }: { slug: string; app: GitOAuthApp
           <p className="admin-hint">{tr("tenant.git_oauth_jira_sharing")}</p>
         </>
       )}
+      {/* A scope group is ticked only after the app has it: Atlassian refuses an authorize request
+          naming a scope the app was never given, so ticking first breaks connecting for everyone. */}
+      {(app.scope_groups_available || []).filter(isScopeGroup).map((g) => (
+        <div key={g}>
+          <label className="admin-check">
+            <input
+              type="checkbox"
+              checked={groups.includes(g)}
+              onChange={(e) => setGroups((cur) => (e.target.checked ? [...cur, g] : cur.filter((x) => x !== g)))}
+            />
+            <span>{tr(SCOPE_GROUP_TEXT[g].label)}</span>
+          </label>
+          <p className="admin-hint">{tr(SCOPE_GROUP_TEXT[g].hint)}</p>
+        </div>
+      ))}
       <p className="admin-hint">
         {tr("tenant.git_oauth_where")}{" "}
         <a href={REGISTER_URL[app.provider]} target="_blank" rel="noopener noreferrer">

@@ -298,7 +298,7 @@ func TestJiraOAuthStoreResolvesSitesAndPicksOne(t *testing.T) {
 			_, _ = w.Write([]byte(`[{"id":"cid-1","url":"https://one.atlassian.net/","name":"One"},
 			                        {"id":"cid-2","url":"https://two.atlassian.net","name":"Two"}]`))
 		case "/ex/jira/cid-1/rest/api/3/myself":
-			_, _ = w.Write([]byte(`{"displayName":"山田 太郎"}`))
+			_, _ = w.Write([]byte(`{"displayName":"山田 太郎","emailAddress":"taro@example.com"}`))
 		case "/ex/jira/cid-2/rest/api/3/myself":
 			_, _ = w.Write([]byte(`{"displayName":"Taro on Two"}`))
 		default:
@@ -333,6 +333,10 @@ func TestJiraOAuthStoreResolvesSitesAndPicksOne(t *testing.T) {
 	if s.Jira.Account != "山田 太郎" {
 		t.Errorf("account = %q", s.Jira.Account)
 	}
+	// The jira CLI's login: a bearer token carries no email, so it is kept from /myself.
+	if s.Jira.Login != "taro@example.com" {
+		t.Errorf("login = %q", s.Jira.Login)
+	}
 	if s.Jira.Expiry <= time.Now().Unix() {
 		t.Errorf("expiry not stamped: %d", s.Jira.Expiry)
 	}
@@ -349,6 +353,10 @@ func TestJiraOAuthStoreResolvesSitesAndPicksOne(t *testing.T) {
 	}
 	if s.Jira.Account != "Taro on Two" {
 		t.Errorf("account not re-resolved for the new site: %q", s.Jira.Account)
+	}
+	// The second site hides the email: the first site's must not linger.
+	if s.Jira.Login != "" {
+		t.Errorf("login carried over from the other site: %q", s.Jira.Login)
 	}
 	w = httptest.NewRecorder()
 	handlePutJiraSite(w, httptest.NewRequest("PUT", "/connections/jira/site", strings.NewReader(`{"cloudId":"cid-999"}`)))

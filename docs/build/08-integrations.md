@@ -234,6 +234,75 @@ The inbox is fetched **by the agent with credentials it already holds** — the 
 token, the Bitbucket connection, the Jira connection — on a schedule the CP drives. The
 CP keeps only non-secret metadata (`work_item_cache`); nothing is a webhook.
 
+#### Making `jira` work without a separate login
+
+`jira` ([ankitpokhrel/jira-cli](https://github.com/ankitpokhrel/jira-cli)) gives every agent
+kind the Jira counterpart of `gh` / `bkt`: viewing, listing, creating, editing, commenting on
+and transitioning issues, plus boards, sprints and epics. The real binary is
+`/usr/local/libexec/jira`, and `/usr/local/bin/jira` is `workspace/jira-auth-wrapper.sh`.
+jira-cli takes its token from `JIRA_API_TOKEN`, and the environment overrides its config
+file key by key (`JIRA_SERVER`, `JIRA_LOGIN`, `JIRA_AUTH_TYPE`, `JIRA_INSTALLATION`). On each
+run the wrapper asks `workspace-agent jira-cred` (`workspace/agent/jira_cred.go`) and fills
+those variables in for one `exec`:
+
+- **API-token connection**: `auth_type` basic, the site as the server, and the stored email
+  as the login.
+- **OAuth connection**: `auth_type` bearer against `api.atlassian.com/ex/jira/{cloudId}`. The
+  site's own host refuses a 3LO token. `jira-cred` renews a token with less than five minutes
+  left before handing it out, because the token has to last a whole jira run, not one
+  request. The login is the email `/myself` reported at connect time (`JiraCreds.Login`). It
+  is absent when the account hides its email, and then `jira me` prints nothing.
+- **The refresh is serialized across processes.** The Agent and every `jira-cred` hold the
+  same rotating refresh token, so `jiraRefreshNow` takes the `jira-refresh` store lock
+  (the same pattern as the GitHub refresh) and re-reads the store inside it. Presenting a
+  spent refresh token twice can revoke the authorization.
+- **Config, decided by location, never by contents**: a config's `server` can be spelt in more
+  ways than a shell can parse (quoted keys, comments, other formats), and a wrong guess would
+  send this connection's token to another Jira. So the credential goes only to a config under
+  `~/.config/agent-fleet/jira/` (the managed directory) or to a generated one:
+  - `jira init --project KEY --board NAME [--force]` (or any alias: `configure`, `config`,
+    `setup`, `initialize`) run through the wrapper writes `~/.config/agent-fleet/jira/config.yml`
+    and gets `--installation`, `--server`, `--login` and `--auth-type` from the connection, so it
+    does not prompt. Another board is `jira init -c ~/.config/agent-fleet/jira/<board>.yml …`,
+    then `jira -c` that file. The files hold no secret.
+  - With no config named, the wrapper uses the managed `config.yml`, or else points
+    `JIRA_CONFIG_FILE` at `~/.cache/agent-fleet/jira/config.yml`, which holds only
+    `installation: Cloud`: enough for `issue view` and `issue list -p KEY`. `issue create`,
+    `sprint list` and the epic commands need the issue types, board and epic fields that only
+    `jira init` writes.
+- **The user's own setup wins**: an explicit `JIRA_API_TOKEN` or `JIRA_SERVER`, a `jira init`
+  given its own `--server` / `--login` / `--installation` / `--auth-type`, or any config outside
+  the managed directory (`-c` in any spelling, `JIRA_CONFIG_FILE`, or jira's own default
+  `~/.config/.jira/.config.yml`) makes the wrapper exec jira unchanged. A misread argv can only
+  make a config look like someone else's, which runs jira without the token.
+- **No credential for a debug run**: `jira --debug` dumps every request, Authorization header
+  included, so `--debug` or `JIRA_DEBUG` runs jira without the token and says why on stderr.
+  A config's own `debug:` cannot be read reliably (YAML tags, flow style, JSON), so every
+  injected run sets `JIRA_DEBUG=false`, which jira ranks above the config file.
+- **Fails closed**: if `jira-cred` errors or answers without a token, jira runs with no
+  injected auth. The token is never an argument, never written to a file, and exists only in
+  the environment of that one jira process: the wrapper switches off an inherited xtrace and
+  allexport before it holds the token. `jira version` skips the helper, so the
+  Toolchains probe takes no store lock.
+
+**Limits worth knowing:**
+
+- **Scopes on OAuth**: boards, sprints, epics and `jira init` call `/rest/agile/1.0`, which
+  accepts no classic scope. The tenant's Jira app has to grant read:board-scope:jira-software,
+  read:project:jira, read/write:sprint:jira-software, read/write:epic:jira-software,
+  read:issue-details:jira and read:jql:jira. The administrator then ticks the
+  `jira_software` scope group on the app (`tenant_git_oauth.scope_groups`), and only then does
+  the authorize URL ask for them: Atlassian refuses an authorization that names a scope the
+  app lacks. Members already connected reconnect to receive them. An API-token connection has
+  whatever the account can do.
+- **Links on OAuth**: jira-cli builds browse URLs from its server, so with OAuth they point at
+  `api.atlassian.com/ex/jira/...` rather than the site.
+- **Pin**: `JIRA_CLI_VERSION` in the Dockerfile (v1.7.0, the latest release). The tarball must
+  match the release's `checksums.txt`. Measured against a stub: v1.7.0 garbles multi-byte text
+  only on the Data Center path (`/rest/api/2`, wiki markup). The Cloud path (`/rest/api/3`,
+  ADF) renders Japanese correctly, so there is no reason to build `main` from source while the
+  connection is Cloud-only. The image smoke checks the pinned version.
+
 ## 8.5 Claude authentication and onboarding
 
 **The method**: the CLI's own subscription sign-in, `claude auth login --claudeai`. The

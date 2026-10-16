@@ -39,7 +39,28 @@ const (
 	// to write would need a second app; that trade was accepted deliberately rather than
 	// splitting the connection in two.
 	jiraScopes = "read:jira-work read:jira-user write:jira-work offline_access"
+	// jiraSoftwareScopes are added when the tenant's app grants scope group
+	// jira_software: boards, sprints and epics for the jira CLI. Jira Software accepts no
+	// classic scope, and its issue-listing endpoints also demand the granular platform
+	// scopes, so read:jira-work does not stand in for read:issue-details / read:jql /
+	// read:project. Taken from the OAuth2 security of every /rest/agile/1.0 operation the
+	// CLI calls in Atlassian's swagger.v3.json.
+	jiraSoftwareScopes = "read:board-scope:jira-software read:project:jira " +
+		"read:sprint:jira-software write:sprint:jira-software " +
+		"read:epic:jira-software write:epic:jira-software " +
+		"read:issue-details:jira read:jql:jira"
 )
+
+// jiraScopesFor is the scope parameter of the authorize URL for an app granting groups.
+func jiraScopesFor(groups []string) string {
+	sc := jiraScopes
+	for _, g := range groups {
+		if g == scopeGroupJiraSoftware {
+			sc += " " + jiraSoftwareScopes
+		}
+	}
+	return sc
+}
 
 // jiraTokenURL is a var for the same reason bbTokenURL is: the refresh grant is a real
 // HTTP conversation and the only honest way to pin its behaviour is a stub server.
@@ -71,6 +92,11 @@ func (c config) handleJiraOAuthStart(w http.ResponseWriter, r *http.Request) {
 			"this tenant has no Jira OAuth app (a tenant administrator registers it in tenant settings)"})
 		return
 	}
+	groups, err := c.mgr.gitOAuthScopeGroups(r.Context(), mv.TenantID, gitOAuthJira)
+	if err != nil {
+		writeAPIErr(w, internalErr(err))
+		return
+	}
 	redirect := c.jiraRedirectURI()
 	if redirect == "" {
 		writeAPIErr(w, &apiError{http.StatusBadRequest, "no_public_base_url",
@@ -84,7 +110,7 @@ func (c config) handleJiraOAuthStart(w http.ResponseWriter, r *http.Request) {
 	au := jiraAuthorizeURL +
 		"?audience=api.atlassian.com" +
 		"&client_id=" + url.QueryEscape(key) +
-		"&scope=" + url.QueryEscape(jiraScopes) +
+		"&scope=" + url.QueryEscape(jiraScopesFor(groups)) +
 		"&redirect_uri=" + url.QueryEscape(redirect) +
 		"&state=" + url.QueryEscape(state) +
 		"&response_type=code" +

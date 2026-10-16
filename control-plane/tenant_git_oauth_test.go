@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -359,5 +360,99 @@ func TestDevAuthUserIsSuperAdmin(t *testing.T) {
 	}
 	if got := m2.roleHintFor("boss@acme.co.jp"); got != "super_admin" {
 		t.Fatalf("a listed operator must be upgraded, got %q", got)
+	}
+}
+
+// The Jira Software scopes reach the authorize URL only once the administrator has confirmed
+// that the app grants them: Atlassian refuses an authorize request naming a scope the app was
+// never given, and every member's connect would fail until the developer console catches up.
+func TestJiraScopeGroupsAreOptInAndReachTheAuthorizeURL(t *testing.T) {
+	ctx := context.Background()
+	st, mgr, api := gitOAuthEnv(t)
+	tn := seedGitOAuthTenant(t, st, "sub", "admin@sub.co.jp")
+	member, _ := st.UpsertIdentity(ctx, "user@sub.co.jp", "user-sub-co-jp", "")
+	if _, err := st.EnsureMembership(ctx, member.ID, tn.ID, "member"); err != nil {
+		t.Fatalf("membership: %v", err)
+	}
+	mgr.publicBaseURL = "https://af.example"
+	scope := func() string {
+		t.Helper()
+		cfg := config{mgr: mgr, publicBaseURL: mgr.publicBaseURL}
+		r := httptest.NewRequest(http.MethodPost, "/api/connections/jira/oauth/start", nil)
+		r.Header.Set("X-Forwarded-Email", "user@sub.co.jp")
+		r.Header.Set("X-AF-Tenant", "sub")
+		w := httptest.NewRecorder()
+		cfg.handleJiraOAuthStart(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("start: %d %s", w.Code, w.Body.String())
+		}
+		var out struct {
+			AuthorizeURL string `json:"authorize_url"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		u, err := url.Parse(out.AuthorizeURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u.Query().Get("scope")
+	}
+	card := func() gitOAuthBody {
+		t.Helper()
+		w := gitOAuthCall(api, http.MethodGet, "sub", "", "admin@sub.co.jp", "")
+		var out struct {
+			Providers []gitOAuthBody `json:"providers"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		for _, p := range out.Providers {
+			if p.Provider == gitOAuthJira {
+				return p
+			}
+		}
+		t.Fatal("no jira card")
+		return gitOAuthBody{}
+	}
+
+	if w := gitOAuthCall(api, http.MethodPut, "sub", "jira", "admin@sub.co.jp",
+		`{"client_id":"cid-1","client_secret":"s3cret"}`); w.Code != http.StatusOK {
+		t.Fatalf("save: %d %s", w.Code, w.Body.String())
+	}
+	if sc := scope(); strings.Contains(sc, "jira-software") || !strings.Contains(sc, "write:jira-work") {
+		t.Fatalf("without the group: scope = %q", sc)
+	}
+	if c := card(); len(c.ScopeGroups) != 0 || len(c.ScopeGroupsAvailable) != 1 || c.ScopeGroupsAvailable[0] != "jira_software" {
+		t.Fatalf("card = %+v", c)
+	}
+
+	if w := gitOAuthCall(api, http.MethodPut, "sub", "jira", "admin@sub.co.jp",
+		`{"client_id":"cid-1","scope_groups":["jira_software"]}`); w.Code != http.StatusOK {
+		t.Fatalf("save with group: %d %s", w.Code, w.Body.String())
+	}
+	sc := scope()
+	for _, want := range strings.Fields(jiraScopes + " " + jiraSoftwareScopes) {
+		if !strings.Contains(" "+sc+" ", " "+want+" ") {
+			t.Errorf("scope %q is missing %q", sc, want)
+		}
+	}
+	if c := card(); len(c.ScopeGroups) != 1 || c.ScopeGroups[0] != "jira_software" {
+		t.Fatalf("card after save = %+v", c)
+	}
+
+	// Unticking is a save without the field.
+	if w := gitOAuthCall(api, http.MethodPut, "sub", "jira", "admin@sub.co.jp", `{"client_id":"cid-1"}`); w.Code != http.StatusOK {
+		t.Fatalf("save without group: %d %s", w.Code, w.Body.String())
+	}
+	if sc := scope(); strings.Contains(sc, "jira-software") {
+		t.Fatalf("group survived a save without it: %q", sc)
+	}
+
+	// A group the provider does not have is refused, not silently dropped.
+	for _, tc := range []struct{ provider, body string }{
+		{"jira", `{"client_id":"cid-1","scope_groups":["confluence"]}`},
+		{"bitbucket", `{"client_id":"key-1","client_secret":"s","scope_groups":["jira_software"]}`},
+	} {
+		if w := gitOAuthCall(api, http.MethodPut, "sub", tc.provider, "admin@sub.co.jp", tc.body); w.Code != http.StatusBadRequest ||
+			!strings.Contains(w.Body.String(), "bad_scope_group") {
+			t.Errorf("%s %s: %d %s", tc.provider, tc.body, w.Code, w.Body.String())
+		}
 	}
 }

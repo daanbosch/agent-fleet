@@ -217,6 +217,74 @@ Jira は git でなく作業項目インボックス
 接続——で、CP が駆動する周期で取得する。CP は機密でないメタデータ（`work_item_cache`）だけを
 持ち、webhook はどこにも無い。
 
+#### `jira` を別ログインなしで動かす
+
+`jira`（[ankitpokhrel/jira-cli](https://github.com/ankitpokhrel/jira-cli)）は、どのエージェント
+種別にも `gh` / `bkt` と同じ形で Jira 操作を渡すためのもの。課題の表示・一覧・作成・編集・
+コメント・遷移に加えて、ボード・スプリント・エピックも扱える。実体は `/usr/local/libexec/jira`、
+`/usr/local/bin/jira` は `workspace/jira-auth-wrapper.sh`。jira-cli はトークンを
+`JIRA_API_TOKEN` から読み、設定ファイルの値は環境変数（`JIRA_SERVER` / `JIRA_LOGIN` /
+`JIRA_AUTH_TYPE` / `JIRA_INSTALLATION`）がキーごとに上書きする。ラッパーは実行のたびに
+`workspace-agent jira-cred`（`workspace/agent/jira_cred.go`）に尋ね、実 jira を exec する
+1 回分だけそれらを埋める:
+
+- **API トークン接続**: `auth_type` は basic、サーバーはサイト、ログインは保存済みの email。
+- **OAuth 接続**: `api.atlassian.com/ex/jira/{cloudId}` に対して `auth_type` は bearer
+  （サイト自身のホストは 3LO トークンを受け付けない）。`jira-cred` は残り 5 分を切った
+  トークンを先に更新してから渡す。1 回のリクエストではなく jira の実行 1 回分もたせる必要が
+  あるため。ログインは接続時に `/myself` が返した email（`JiraCreds.Login`）。アカウントが
+  email を非公開にしていると空になり、`jira me` は何も出さない。
+- **更新はプロセスをまたいで直列化する。** Agent とすべての `jira-cred` が同じローテーション
+  式の refresh token を持つので、`jiraRefreshNow` は `jira-refresh` のストアロックを取り
+  （GitHub の更新と同じ形）、その中でストアを読み直す。使用済みの refresh token を 2 度
+  出すと、認可ごと取り消されることがある。
+- **設定ファイルは中身ではなく置き場所で判断する**: 設定の `server` の書き方はシェルで
+  解釈しきれないほどある（キーの引用・コメント・別の形式）。推測を誤ると、この接続のトークンが
+  別の Jira に渡ってしまう。そこで、資格を渡すのは `~/.config/agent-fleet/jira/`（管理
+  ディレクトリ）の下の設定か、ラッパーが作った設定だけにする:
+  - ラッパー経由の `jira init --project KEY --board NAME [--force]`（別名の `configure`・
+    `config`・`setup`・`initialize` も同じ）は `~/.config/agent-fleet/jira/config.yml` に書き、
+    `--installation` / `--server` / `--login` / `--auth-type` を接続から受け取るので対話なしで
+    終わる。別のボードは `jira init -c ~/.config/agent-fleet/jira/<ボード>.yml …` で作り、
+    `jira -c` でそのファイルを指定する。どのファイルにも秘密は入らない。
+  - 設定を指定しないときは管理ディレクトリの `config.yml` を使い、なければ
+    `JIRA_CONFIG_FILE` を `~/.cache/agent-fleet/jira/config.yml`（中身は
+    `installation: Cloud` だけ）に向ける。`issue view` や `issue list -p KEY` はこれで動く。
+    `issue create`・`sprint list`・エピック系は、`jira init` だけが書く課題タイプ・ボード・
+    エピック用フィールドが要る。
+- **利用者自身の設定が勝つ**: 明示の `JIRA_API_TOKEN` か `JIRA_SERVER`、自分で `--server` /
+  `--login` / `--installation` / `--auth-type` を渡した `jira init`、または管理ディレクトリの
+  外の設定（どの書き方の `-c` でも、`JIRA_CONFIG_FILE` でも、jira 自身の既定の
+  `~/.config/.jira/.config.yml` でも）があると、ラッパーは jira をそのまま exec する。引数を
+  読み誤っても、設定が他人のものに見えるだけで、jira はトークンなしで動く。
+- **デバッグ実行には資格を渡さない**: `jira --debug` は Authorization ヘッダーを含むリクエストを
+  すべて出力する。そのため `--debug` か `JIRA_DEBUG` があると、トークンなしで jira を動かし、
+  理由を標準エラーに出す。設定ファイル自身の `debug:` は確実には読めない（YAML のタグ・
+  flow 形式・JSON）ので、資格を渡す実行ではいつも `JIRA_DEBUG=false` を設定する。jira は
+  これを設定ファイルより優先する。
+- **失敗したら認証なしに倒す**: `jira-cred` がエラーになるかトークンを返さなければ、jira は
+  認証を注入せずに動く。トークンは引数にもファイルにも出ず、その jira プロセス 1 つの環境に
+  だけ存在する（ラッパーはトークンを持つ前に、引き継いだ xtrace と allexport を切る）。`jira version` はヘルパーを呼ばないので、Toolchains の確認でストアのロックは
+  取られない。
+
+**知っておくべき制限:**
+
+- **OAuth のスコープ**: ボード・スプリント・エピックと `jira init` は `/rest/agile/1.0` を
+  呼び、そこはクラシックスコープを受け付けない。テナントの Jira アプリに
+  read:board-scope:jira-software / read:project:jira / read・write:sprint:jira-software /
+  read・write:epic:jira-software / read:issue-details:jira / read:jql:jira の許可が必要。
+  そのうえで管理者がアプリの `jira_software` スコープグループ（`tenant_git_oauth.scope_groups`）
+  にチェックを入れて初めて、認可 URL がそれらを求める。アプリにないスコープを求める認可は
+  Atlassian に拒否されるため。接続済みのメンバーは接続し直すと受け取れる。API トークン接続は
+  アカウントができることを何でもできる。
+- **OAuth のリンク**: jira-cli はブラウザ用 URL をサーバーから組み立てるので、OAuth では
+  サイトではなく `api.atlassian.com/ex/jira/...` を指す。
+- **版の固定**: Dockerfile の `JIRA_CLI_VERSION`（v1.7.0、最新リリース）。tarball はリリースの
+  `checksums.txt` と一致しなければならない。スタブで実測したところ、v1.7.0 がマルチバイト文字を
+  化かすのは Data Center の経路（`/rest/api/2`、wiki 記法）だけで、Cloud の経路
+  （`/rest/api/3`、ADF）は日本語を正しく表示した。接続が Cloud 専用である限り、`main` を
+  ソースからビルドする理由はない。イメージのスモークが固定した版を確認する。
+
 ## 8.5 Claude 認証・オンボーディング（L2 の本丸）
 
 **方式**: CLI 自身のサブスクリプションサインイン `claude auth login --claudeai`。Agent が

@@ -110,7 +110,8 @@ type PagerDutyCreds struct {
 // (docs/log/80 P1). Site is the instance base URL (https://<tenant>.atlassian.net), Email
 // the Atlassian account address and Token an API token — Jira's REST v3 authenticates
 // with HTTP Basic over those two, so BOTH are credentials and neither leaves the
-// container. A read-only account is recommended (see guide): af only ever reads.
+// container. The jira CLI wrapper (jira_cred.go) writes to Jira with it as the member, so
+// it carries whatever the account is allowed to do.
 type JiraCreds struct {
 	// AuthKind is "oauth" (Atlassian 3LO, docs/log/80 §80.17) or "token" (email + API
 	// token). "" reads as "token": stores written before OAuth existed have no field
@@ -127,6 +128,10 @@ type JiraCreds struct {
 	Account string `json:"account,omitempty"`
 
 	// --- OAuth (3LO) only ---
+	// Login is the account email /myself reported at connect time, kept for the jira CLI's
+	// `login` (`jira me`, assignee filters). A bearer token carries no email, and Jira Cloud
+	// answers /myself without one when the account hides it, so "" is a normal value.
+	Login        string `json:"login,omitempty"`
 	AccessToken  string `json:"accessToken,omitempty"`
 	RefreshToken string `json:"refreshToken,omitempty"`
 	// Expiry is the unix second the access token dies. ~1h out, which is why the CP

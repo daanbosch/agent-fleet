@@ -86,6 +86,7 @@ if [ "${1:-}" = "--inner" ]; then
   check_ver go       "$EXPECT_GO"       /usr/local/go/bin/go version
   check_ver gh       "$EXPECT_GH"       /usr/local/libexec/gh --version
   check_ver bkt      "$EXPECT_BKT"      /usr/local/libexec/bkt --version
+  check_ver jira     "$EXPECT_JIRA"     /usr/local/libexec/jira version
 
   # Chromium is pinned down to the Debian revision, so compare the dpkg version too —
   # `chromium --version` only prints the 4-part upstream version.
@@ -103,6 +104,7 @@ if [ "${1:-}" = "--inner" ]; then
   check_file x /usr/local/bin/entrypoint.sh
   check_file x /usr/local/bin/gh                # transparent-auth wrapper (real binary in libexec)
   check_file x /usr/local/bin/bkt               # same for the Bitbucket CLI
+  check_file x /usr/local/bin/jira              # and the Jira CLI
   check_file f /etc/claude-code/CLAUDE.md
   check_file f /etc/tmux.conf
   check_file d /usr/local/share/agent-fleet/opencode-plugin
@@ -347,6 +349,7 @@ EXPECT_RTK_VER="${EXPECT_RTK_VER:-$(arg_pin RTK_VERSION)}"
 EXPECT_GO="$(arg_pin GO_VERSION)"
 EXPECT_GH="$(arg_pin GH_VERSION)"
 EXPECT_BKT="$(arg_pin BKT_VERSION)"
+EXPECT_JIRA="$(arg_pin JIRA_CLI_VERSION)"
 EXPECT_CHROMIUM="$(arg_pin CHROMIUM_VERSION)"
 EXPECT_CHROMIUM_CFT="$(arg_pin CHROMIUM_CFT_VERSION)"
 EXPECT_CHROMIUM_DL="$(arg_pin CHROMIUM_DL_VERSION)"
@@ -388,6 +391,7 @@ exec docker run --rm -i --init --network none --memory "$SMOKE_MEMORY" --cap-add
   -e EXPECT_GO="$EXPECT_GO" \
   -e EXPECT_GH="$EXPECT_GH" \
   -e EXPECT_BKT="$EXPECT_BKT" \
+  -e EXPECT_JIRA="$EXPECT_JIRA" \
   -e EXPECT_CHROMIUM="$EXPECT_CHROMIUM" \
   -e EXPECT_CHROMIUM_CFT="$EXPECT_CHROMIUM_CFT" \
   -e EXPECT_CHROMIUM_DL="$EXPECT_CHROMIUM_DL" \

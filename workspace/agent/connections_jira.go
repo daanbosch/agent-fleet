@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -216,8 +217,8 @@ func handleJiraOAuthStore(w http.ResponseWriter, r *http.Request) {
 	c.Sites = sites
 	c.CloudID = sites[0].CloudID
 	c.Site = sites[0].URL
-	if name, err := jiraAccount(c); err == nil {
-		c.Account = name
+	if me, err := jiraMyself(c); err == nil {
+		c.Account, c.Login = me.DisplayName, me.EmailAddress
 	}
 	s, err := secrets.Load()
 	if err != nil {
@@ -257,8 +258,8 @@ func handlePutJiraSite(w http.ResponseWriter, r *http.Request) {
 			s.Jira.CloudID = st.CloudID
 			s.Jira.Site = st.URL
 			// The display name can differ per site (another tenant's Jira is another persona).
-			if name, err := jiraAccount(s.Jira); err == nil {
-				s.Jira.Account = name
+			if me, err := jiraMyself(s.Jira); err == nil {
+				s.Jira.Account, s.Jira.Login = me.DisplayName, me.EmailAddress
 			}
 			if err := s.Save(); err != nil {
 				httpx.WriteErr(w, http.StatusInternalServerError, "store_failed", err.Error())
@@ -317,27 +318,36 @@ func handleDeleteJiraConn(w http.ResponseWriter, r *http.Request) {
 // jiraAccount returns the display name behind the credentials (GET /rest/api/3/myself),
 // and is what makes "connect" mean "these credentials work".
 func jiraAccount(c *secrets.JiraCreds) (string, error) {
+	me, err := jiraMyself(c)
+	return me.DisplayName, err
+}
+
+type jiraMe struct {
+	DisplayName  string `json:"displayName"`
+	EmailAddress string `json:"emailAddress"`
+}
+
+// jiraMyself is GET /rest/api/3/myself, with its errors phrased for the connection card.
+func jiraMyself(c *secrets.JiraCreds) (jiraMe, error) {
+	var me jiraMe
 	body, status, err := jiraRequest(c, "GET", jiraAPIBase(c)+"/rest/api/3/myself", nil)
 	if err != nil {
-		return "", fmt.Errorf("could not reach %s", jiraAPIBase(c))
+		return me, fmt.Errorf("could not reach %s", jiraAPIBase(c))
 	}
 	switch {
 	case status == http.StatusOK:
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
-		return "", fmt.Errorf("Jira rejected the credentials")
+		return me, fmt.Errorf("Jira rejected the credentials")
 	case status == http.StatusNotFound:
 		// A 404 usually means the host exists but is not a Jira, or the URL is wrong.
-		return "", fmt.Errorf("no Jira REST API at %s", jiraAPIBase(c))
+		return me, fmt.Errorf("no Jira REST API at %s", jiraAPIBase(c))
 	default:
-		return "", fmt.Errorf("Jira answered %d", status)
-	}
-	var me struct {
-		DisplayName string `json:"displayName"`
+		return me, fmt.Errorf("Jira answered %d", status)
 	}
 	if json.Unmarshal(body, &me) != nil {
-		return "", fmt.Errorf("unexpected answer from %s", jiraAPIBase(c))
+		return jiraMe{}, fmt.Errorf("unexpected answer from %s", jiraAPIBase(c))
 	}
-	return me.DisplayName, nil
+	return me, nil
 }
 
 // jiraSearchWorkItems resolves one saved JQL query into rail rows.
@@ -475,7 +485,8 @@ func jiraEnsureFresh(c *secrets.JiraCreds) error {
 	return jiraRefreshNow(c)
 }
 
-// jiraRefreshMu serializes the refresh grant within this process.
+// jiraRefreshMu serializes the refresh grant within this process, in front of the
+// cross-process lock jiraRefreshNow also takes.
 //
 // Not an optimisation — a correctness requirement of ROTATING refresh tokens, which
 // Atlassian now mandates for new integrations. Rotation means each refresh token is
@@ -485,7 +496,20 @@ func jiraEnsureFresh(c *secrets.JiraCreds) error {
 // so without this lock the normal case is two identical grants racing.
 var jiraRefreshMu sync.Mutex
 
+// jiraRefreshBudget bounds one renewal: the wait for the cross-process lock and the grant.
+// The jira wrapper blocks on `workspace-agent jira-cred`, so a holder that is stuck must
+// cost it a delay, not a hang.
+var jiraRefreshBudget = 30 * time.Second
+
 // jiraRefreshNow runs the refresh grant through the CP bridge and PERSISTS the result.
+//
+// The Agent and every `workspace-agent jira-cred` the jira wrapper starts are separate
+// processes holding the same refresh token, so the in-process mutex alone cannot keep a
+// rotated token from being presented twice; the "jira-refresh" store lock is what does.
+// Inside it the store is read again and is the only source: a caller whose token is no
+// longer the stored one adopts what another process renewed instead of exchanging, and a
+// caller whose token IS the stored one exchanges the stored refresh token, never its own
+// possibly stale copy.
 //
 // Atlassian rotates the refresh token: the response carries a new one and retires the
 // old. Not saving it strands the connection at the next expiry with nothing to renew, so
@@ -493,48 +517,59 @@ var jiraRefreshMu sync.Mutex
 func jiraRefreshNow(c *secrets.JiraCreds) error {
 	jiraRefreshMu.Lock()
 	defer jiraRefreshMu.Unlock()
-	// Another caller may have finished refreshing while this one waited. Do not exchange
-	// again in that case: presenting a spent refresh token is exactly what rotation treats
-	// as theft. Adopt the fresher values from disk and return.
-	if fresh, err := secrets.Load(); err == nil && fresh.Jira != nil && fresh.Jira.AuthKind == "oauth" {
-		if fresh.Jira.Expiry > time.Now().Add(jiraFreshWindow).Unix() && fresh.Jira.AccessToken != "" {
-			c.AccessToken = fresh.Jira.AccessToken
-			c.RefreshToken = fresh.Jira.RefreshToken
-			c.Expiry = fresh.Jira.Expiry
+	ctx, cancel := context.WithTimeout(context.Background(), jiraRefreshBudget)
+	defer cancel()
+	seen := c.AccessToken
+	return secrets.WithLockContext(ctx, "jira-refresh", func() error {
+		cur, err := secrets.LoadContext(ctx)
+		if err != nil {
+			return err
+		}
+		d := cur.Jira
+		if d == nil || d.AuthKind != "oauth" {
+			return fmt.Errorf("jira connection disappeared")
+		}
+		if d.AccessToken != "" && d.AccessToken != seen && d.Expiry > time.Now().Add(jiraFreshWindow).Unix() {
+			c.AccessToken, c.RefreshToken, c.Expiry = d.AccessToken, d.RefreshToken, d.Expiry
 			return nil
 		}
-	}
-	b := gitx.LoadGitOAuthBridge()
-	if b == nil {
-		return fmt.Errorf("no CP bridge to refresh the Jira token")
-	}
-	if c.RefreshToken == "" {
-		return fmt.Errorf("no refresh token stored (re-connect Jira)")
-	}
-	tok, err := gitx.RefreshOAuthViaCP(*b, "jira", c.RefreshToken)
-	if err != nil {
-		return err
-	}
-	c.AccessToken = tok.AccessToken
-	if tok.RefreshToken != "" {
-		c.RefreshToken = tok.RefreshToken
-	}
-	exp := tok.ExpiresIn
-	if exp <= 0 {
-		exp = 3600
-	}
-	c.Expiry = time.Now().Unix() + exp
-	s, err := secrets.Load()
-	if err != nil {
-		return err
-	}
-	if s.Jira == nil {
-		return fmt.Errorf("jira connection disappeared")
-	}
-	s.Jira.AccessToken = c.AccessToken
-	s.Jira.RefreshToken = c.RefreshToken
-	s.Jira.Expiry = c.Expiry
-	return s.Save()
+		b := cur.GitOAuthBridge
+		if b == nil || b.BaseURL == "" || b.Token == "" {
+			return fmt.Errorf("no CP bridge to refresh the Jira token")
+		}
+		if d.RefreshToken == "" {
+			return fmt.Errorf("no refresh token stored (re-connect Jira)")
+		}
+		tok, err := gitx.RefreshOAuthViaCP(*b, "jira", d.RefreshToken)
+		if err != nil {
+			return err
+		}
+		next := tok.RefreshToken
+		if next == "" {
+			next = d.RefreshToken
+		}
+		exp := tok.ExpiresIn
+		if exp <= 0 {
+			exp = 3600
+		}
+		expiry := time.Now().Unix() + exp
+		// The grant has already spent the old refresh token, so the write gets its own
+		// deadline rather than whatever is left of the budget.
+		wctx, wcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer wcancel()
+		err = secrets.UpdateContext(wctx, func(s *secrets.Data) error {
+			if s.Jira == nil || s.Jira.AuthKind != "oauth" {
+				return fmt.Errorf("jira connection disappeared")
+			}
+			s.Jira.AccessToken, s.Jira.RefreshToken, s.Jira.Expiry = tok.AccessToken, next, expiry
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		c.AccessToken, c.RefreshToken, c.Expiry = tok.AccessToken, next, expiry
+		return nil
+	})
 }
 
 // jiraErrText pulls the first errorMessages entry out of a Jira error body ("" when the

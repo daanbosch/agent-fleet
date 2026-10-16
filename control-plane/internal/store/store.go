@@ -1167,8 +1167,11 @@ type TenantGitOAuth struct {
 	Source                 string
 	AppType, AppTypeBy     string
 	InstallURL             string
-	UpdatedBy              string
-	CreatedAt, UpdatedAt   string
+	// ScopeGroups is the comma-separated optional scope groups the administrator confirmed
+	// the app grants (migration 0100); "" is none.
+	ScopeGroups          string
+	UpdatedBy            string
+	CreatedAt, UpdatedAt string
 }
 
 // TenantGitOAuthStore is the per-tenant git provider OAuth app registry (docs/log/71).

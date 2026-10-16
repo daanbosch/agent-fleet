@@ -195,6 +195,14 @@ var subcommands = []subcommand{
 		run:     runBktCred,
 	},
 	{
+		// The Jira connection for the PATH wrapper at /usr/local/bin/jira, renewed when an
+		// OAuth token is about to expire. See jira_cred.go.
+		name:    "jira-cred",
+		summary: "Jira site, login and token for the jira wrapper",
+		hidden:  true,
+		run:     runJiraCred,
+	},
+	{
 		// Transparent SVN auth: the PATH shim at /usr/local/bin/svn re-enters this binary,
 		// which fills in the credential and execs the real svn — so the process svn's caller
 		// sees is still svn. See svn_wrapper.go.

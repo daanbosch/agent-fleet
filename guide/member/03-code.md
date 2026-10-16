@@ -44,6 +44,34 @@ the way git does.
   Settings. Set it up yourself (`bkt auth login`, or `BKT_HOST` and `BKT_TOKEN`); the
   wrapper then leaves `bkt` alone.
 
+## Use `jira` in a session
+
+Once Jira is connected (Settings, **Issue tracker**), `jira`, the Jira CLI, works in every session
+and for every agent, with no `jira init` token prompt and no login. It uses your saved connection,
+and an OAuth connection is renewed on each call, so an expired token never means restarting the
+session. You can view, list, create, edit, comment on and transition issues:
+`jira issue view PROJ-1`, `jira issue list -p PROJ`, `jira issue create -p PROJ`,
+`jira issue comment add PROJ-1 "…"`, `jira issue move PROJ-1 "In Progress"`.
+
+- **Project, board, sprints and epics**: run `jira init --project PROJ --board "PROJ board"` once
+  (add `--force` to replace an earlier setup). It writes your default project, board, issue types
+  and epic fields, which `jira issue create`, `jira sprint list` and the epic commands need, and it
+  asks no questions. Without it, pass `-p PROJ` to each command. For a second board, run
+  `jira init -c ~/.config/agent-fleet/jira/other-board.yml --project PROJ --board "Other board"`
+  and then use `jira -c ~/.config/agent-fleet/jira/other-board.yml …`. Your connection is used
+  only with configs in `~/.config/agent-fleet/jira/`.
+- **`--debug` runs without your connection**: jira's debug output prints the authorization
+  header, so the wrapper does not hand the token to a debug run.
+- **What it can change** is what your connection can. The CLI writes to Jira as you, so creating,
+  editing and moving issues needs an account that is allowed to.
+- **With OAuth, boards, sprints and epics** need the Jira Software scopes on the tenant's Jira app.
+  Your tenant administrator turns them on, and you then **reconnect Jira** once. Until then those
+  commands, and `jira init`, fail with an authorization error. Links the CLI prints point at
+  `api.atlassian.com` rather than your site.
+- **Jira Data Center** (or another Jira) is not connected through Settings. Set it up yourself
+  (`jira init` with your own `--server`, a config outside `~/.config/agent-fleet/jira/`, or
+  `JIRA_API_TOKEN`); the wrapper then leaves `jira` alone.
+
 ## Clone a repository
 
 Open **"Add"** in the **Repositories** section of the left pane and pick **Git** under **Kind**.

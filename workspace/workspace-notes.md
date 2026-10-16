@@ -141,7 +141,10 @@ directory belongs to someone else.
   failures fail fast. Interactive commands (`gh auth login`, `rebase -i`) are for the user's shell.
 - `gh` is pre-authenticated through a wrapper — use it freely, never run `gh auth login`. So is
   `bkt` (Bitbucket Cloud: PRs, pipelines) for a bitbucket.org connection — never `bkt auth login`;
-  a Data Center host is the user's own `BKT_HOST` / `BKT_TOKEN`. Other
+  a Data Center host is the user's own `BKT_HOST` / `BKT_TOKEN`. So is `jira` (Jira Cloud: view,
+  create, comment on and transition issues) for a Jira connection — never paste a token or run
+  `jira init` with your own `--server`; `jira init --project KEY --board NAME` once sets up
+  sprints/epics, otherwise pass `-p KEY`. Other
   commands are shims too: when output looks impossible, check `type <cmd>` and re-run the real
   binary.
 - The clock is the workspace's local timezone (`date`), not UTC. Outbound network may be
