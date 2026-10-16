@@ -86,6 +86,12 @@ export const mirror: Record<keyof typeof jaMirror, string> = {
   "plan.review_in_session": "Review in another session",
   "plan.review_in_session_title": "Reject the plan and start a review session with the agent you pick",
   "plan.review_launch_failed": "Could not start the review session: {err}",
+  "plan.review_again": "Review again in {name}",
+  "plan.review_again_title":
+    "Reject the plan and send the revised plan to {name}, which reviewed it before. A stopped session is resumed; a reviewer that is mid-turn gets the message when its turn ends.",
+  "plan.review_again_failed": "Could not send the plan to {name}: {err}",
+  "plan.review_again_prompt":
+    "The plan was revised. Review it again.\n\n- Plan: {path} (read it; do not edit it)\n\nCompare it with your earlier findings. Do not re-raise items the planner kept with a sound reason.\nAnswer in the same format as before (Verdict / Findings), sent to {session} with send_to_peer_session.",
   "plan.review_title": "Review: {title}",
   "plan.review_prompt_head":
     "You have been asked to review the plan session {session} proposed to its user (started from the Console by that user).",
@@ -368,6 +374,8 @@ export const mirror: Record<keyof typeof jaMirror, string> = {
   "mirror.carried_plan_reject": "Do not approve",
   "mirror.carried_plan_approve_confirm": "Approving resumes the session and runs this plan straight away. This cannot be undone. Continue?",
   "mirror.carried_plan_review_title": "Start a review session for this plan. The findings come back to this session as a message.",
+  "mirror.carried_plan_review_again_title":
+    "Send the revised plan to {name}, which reviewed it before. A stopped session is resumed; a reviewer that is mid-turn gets the message when its turn ends. The findings come back to this session as a message.",
   "mirror.carried_plan_discard_failed": "The review session started, but this plan card could not be discarded ({err}). Discard it here before approving anything.",
   "mirror.carried_plan_feedback_ph": "Notes or changes (optional)",
   "mirror.carried_no_keys": "A carried interaction cannot be answered with key presses.",

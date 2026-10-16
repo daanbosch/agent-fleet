@@ -1321,3 +1321,30 @@ export function wsURL(session: string): URL {
     (selectedTenant ? `&tenant=${encodeURIComponent(selectedTenant)}` : "");
   return u;
 }
+
+/** sessionPeerSend delivers a peer message to a RUNNING session as `from` does with
+ *  send_to_peer_session. The Agent builds the envelope, applies the peer rate limit and queues
+ *  the message while the target waits on its user, so `queued` is a success: it arrives once
+ *  that turn ends. Resuming a stopped target is the caller's job (see features/mirror/reviewAgain.ts). */
+export async function sessionPeerSend(
+  to: string,
+  from: string,
+  intent: "request" | "question" | "answer" | "notice",
+  message: string,
+): Promise<{ ok: boolean; queued?: boolean; message?: string; code?: string }> {
+  const r = await apiJSON(`api/sessions/${encodeURIComponent(to)}/input`, "POST", {
+    prompt: message,
+    peer_from: from,
+    peer_intent: intent,
+  }).catch(() => ({ error: { message: t("err.network") } }));
+  const err = r?.error as ApiError | undefined;
+  if (err) return { ok: false, message: errText(err) || t("err.send_failed"), code: String(err.code || "") };
+  return { ok: true, queued: !!r?.queued };
+}
+
+/** sessionReady reports whether a session's agent can take input right now (alive and its
+ *  composer is up). A failed read is "not ready", so polling callers simply try again. */
+export async function sessionReady(session: string): Promise<boolean> {
+  const r = await apiJSON(`api/sessions/${encodeURIComponent(session)}/status`, "GET").catch(() => null);
+  return !!r && !r.error && !!r.alive && !!r.ready;
+}

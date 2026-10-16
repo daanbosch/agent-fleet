@@ -30,6 +30,8 @@ export function CarriedBlock({
   onError,
   onOpenPlan,
   onReviewPlan,
+  onReviewPlanAgain,
+  reviewAgainName,
   translate,
 }: {
   carried: CarriedInteraction;
@@ -42,6 +44,10 @@ export function CarriedBlock({
   /** Opens the review launch dialog for the carried plan. The container discards this
    *  card itself once the reviewer session exists. */
   onReviewPlan?: (plan: string) => Promise<void>;
+  /** Send the revised plan to the session that reviewed it before (named by `reviewAgainName`,
+   *  only set while that session still exists). Discards this card after the send succeeded. */
+  onReviewPlanAgain?: (plan: string) => Promise<void>;
+  reviewAgainName?: string;
   translate?: TranscriptTranslateWiring;
 }) {
   const [sending, setSending] = useState(false);
@@ -131,6 +137,17 @@ export function CarriedBlock({
                   onClick={() => void onReviewPlan(carried.plan!)}
                 >
                   <Icon name="comment-discussion" /> {tr("plan.review_in_session")}
+                </button>
+              )}
+              {onReviewPlanAgain && reviewAgainName && carried.plan && (
+                <button
+                  type="button"
+                  className="ghost mt-plan-review-again"
+                  disabled={sending}
+                  title={tr("mirror.carried_plan_review_again_title", { name: reviewAgainName })}
+                  onClick={() => void onReviewPlanAgain(carried.plan!)}
+                >
+                  <Icon name="comment-discussion" /> {tr("plan.review_again", { name: reviewAgainName })}
                 </button>
               )}
               <button
