@@ -146,3 +146,80 @@ func TestDevIdPKeysRetireAndDrop(t *testing.T) {
 		}
 	}
 }
+
+// Both dialects: personas are scoped to their workspace, handles are unique per workspace, a
+// consent ticket is spent once, and an address is "taken" by an identity or a linked sign-in
+// in any letter case.
+func TestDevIdPPersonasAndConsentTickets(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range homeOpStores(t) {
+		ws := homeOpWorkspace(t, st)
+		p := DevIdPPersona{ID: "p1", WorkspaceID: ws.ID, Handle: "admin", Name: "Admin", CreatedAt: 1}
+		if err := st.CreateDevIdPPersona(ctx, p); err != nil {
+			t.Fatalf("%s: create: %v", name, err)
+		}
+		dup := p
+		dup.ID = "p2"
+		if err := st.CreateDevIdPPersona(ctx, dup); err != ErrDevIdPPersonaExists {
+			t.Fatalf("%s: duplicate handle: %v", name, err)
+		}
+		other := p
+		other.ID, other.WorkspaceID = "p3", "elsewhere"
+		if err := st.CreateDevIdPPersona(ctx, other); err != nil {
+			t.Fatalf("%s: the same handle in another workspace: %v", name, err)
+		}
+		if _, ok, _ := st.GetDevIdPPersona(ctx, ws.ID, "p3"); ok {
+			t.Errorf("%s: another workspace's persona was readable", name)
+		}
+		if ok, _ := st.DeleteDevIdPPersona(ctx, ws.ID, "p3"); ok {
+			t.Errorf("%s: another workspace's persona was deletable", name)
+		}
+		if list, _ := st.ListDevIdPPersonas(ctx, ws.ID); len(list) != 1 || list[0].ID != "p1" {
+			t.Errorf("%s: list = %+v", name, list)
+		}
+
+		if _, err := st.UpsertIdentity(ctx, "Real.Person@Example.Test", "real-person", ""); err != nil {
+			t.Fatal(err)
+		}
+		if taken, err := st.DevIdPEmailTaken(ctx, "real.person@example.test"); err != nil || !taken {
+			t.Errorf("%s: an identity's address (other case) is not taken: %v %v", name, taken, err)
+		}
+		if taken, _ := st.DevIdPEmailTaken(ctx, "nobody@example.test"); taken {
+			t.Errorf("%s: an unused address is taken", name)
+		}
+
+		g := DevIdPGrant{Hash: "t1", Kind: DevIdPGrantConsent, ClientID: "c", WorkspaceID: ws.ID, MembershipID: "m", ExpiresAt: 1100}
+		if err := st.InsertDevIdPGrant(ctx, g, 1000); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok, _ := st.ConsumeDevIdPConsent(ctx, "t1", 1010); !ok {
+			t.Errorf("%s: live ticket refused", name)
+		}
+		if _, ok, _ := st.ConsumeDevIdPConsent(ctx, "t1", 1010); ok {
+			t.Errorf("%s: ticket spent twice", name)
+		}
+		// A ticket is not a code, and a code is not a ticket.
+		if err := st.InsertDevIdPGrant(ctx, DevIdPGrant{Hash: "t2", Kind: DevIdPGrantConsent, ClientID: "c", WorkspaceID: ws.ID, MembershipID: "m", ExpiresAt: 1100}, 1000); err != nil {
+			t.Fatal(err)
+		}
+		if _, state, _ := st.ConsumeDevIdPCode(ctx, "t2", 1010); state == DevIdPCodeOK {
+			t.Errorf("%s: a consent ticket was redeemed as a code", name)
+		}
+		if err := st.InsertDevIdPGrant(ctx, DevIdPGrant{Hash: "c2", Kind: DevIdPGrantCode, ClientID: "c", WorkspaceID: ws.ID, MembershipID: "m", ExpiresAt: 1100}, 1000); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok, _ := st.ConsumeDevIdPConsent(ctx, "c2", 1010); ok {
+			t.Errorf("%s: a code was accepted as a consent ticket", name)
+		}
+		if _, ok, _ := st.ConsumeDevIdPConsent(ctx, "t2", 1200); ok {
+			t.Errorf("%s: an expired ticket was accepted", name)
+		}
+
+		if err := st.DeleteWorkspace(ctx, ws.ID); err != nil {
+			t.Fatal(err)
+		}
+		if list, _ := st.ListDevIdPPersonas(ctx, ws.ID); len(list) != 0 {
+			t.Errorf("%s: personas outlived their workspace", name)
+		}
+	}
+}

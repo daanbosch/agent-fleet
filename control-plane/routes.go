@@ -993,6 +993,10 @@ func registerAgentEnvRoutes(mux *http.ServeMux, cfg config) {
 	// Reissue the preview URL (docs/log/81 §4.1). POST rather than GET/PUT because it
 	// throws state away.
 	mux.HandleFunc("POST /api/env/ws-settings/preview/reissue", wss.withResolved(wss.reissuePreview))
+	// Test personas of the development OIDC IdP (ADR 0116, #2223).
+	mux.HandleFunc("GET /api/env/ws-settings/dev-idp/personas", wss.withResolved(wss.listPersonas))
+	mux.HandleFunc("POST /api/env/ws-settings/dev-idp/personas", wss.withResolved(wss.createPersona))
+	mux.HandleFunc("DELETE /api/env/ws-settings/dev-idp/personas/{id}", wss.withResolved(wss.deletePersona))
 	// Previews shared inside the same tenant (docs/log/81 §14.6). withMembership, not
 	// withResolved: this reads another Workspace's publication settings, so the caller's
 	// own container is not needed and the answer is available while it is stopped.

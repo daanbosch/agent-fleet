@@ -61,6 +61,7 @@ func (a devIdPAPI) mount(mux *http.ServeMux) {
 	mux.HandleFunc(devIdPDiscoveryPath, a.gate(http.MethodGet, a.discovery))
 	mux.HandleFunc(devIdPJWKSPath, a.gate(http.MethodGet, a.jwks))
 	mux.HandleFunc(devIdPAuthorizePath, a.gate(http.MethodGet, a.authorize))
+	mux.HandleFunc(devIdPConsentPath, a.gate(http.MethodPost, a.consent))
 	mux.HandleFunc(devIdPTokenPath, a.gate(http.MethodPost, a.token))
 	mux.HandleFunc(devIdPUserinfoPath, a.gate("GET, POST", a.userinfo))
 }
@@ -244,21 +245,22 @@ func (a devIdPAPI) authorize(w http.ResponseWriter, r *http.Request) {
 		fail("invalid_request", "malformed code_challenge")
 		return
 	}
-	code := "afdevcode-" + devIdPRandom(32)
-	now := a.now()
-	err := a.mgr.store.InsertDevIdPGrant(ctx, store.DevIdPGrant{
-		Hash: devIdPHash(code), Kind: store.DevIdPGrantCode,
-		ClientID: cc.row.ClientID, WorkspaceID: cc.ws.ID, MembershipID: mv.MembershipID, IdentityID: ident.ID,
-		RedirectURI: redirectURI, Challenge: challenge, Nonce: q.Get("nonce"), Scope: scope,
-		Claims:    devIdPProfileJSON(devIdPScopedClaims(devIdPClaims(ctx, a.mgr.store, ident), scope)),
-		ExpiresAt: now.Add(devIdPCodeTTL).Unix(),
-	}, now.Unix())
-	if err != nil {
-		log.Printf("dev idp: store code: %v", err)
-		fail("server_error", "could not issue a code")
-		return
+	req := devIdPAuthRequest{redirectURI: redirectURI, state: state, nonce: q.Get("nonce"), challenge: challenge, scope: scope}
+	// prompt=none is the silent path and stays so: the member, as themselves, whatever personas
+	// exist and whatever the request asks for. Otherwise a workspace with personas asks first.
+	if q.Get("prompt") != "none" {
+		personas, err := a.mgr.store.ListDevIdPPersonas(ctx, cc.ws.ID)
+		if err != nil {
+			log.Printf("dev idp: list personas: %v", err)
+			fail("server_error", "could not read the personas")
+			return
+		}
+		if len(personas) > 0 {
+			a.askConsent(w, r, cc, ident, mv.MembershipID, req, personas)
+			return
+		}
 	}
-	a.redirectBack(w, r, redirectURI, state, url.Values{"code": {code}})
+	a.issueCode(w, r, cc, ident, mv.MembershipID, req, devIdPClaims(ctx, a.mgr.store, ident))
 }
 
 // redirectBack sends the browser to the vetted redirect_uri with the response parameters.
@@ -427,6 +429,16 @@ func (a devIdPAPI) token(w http.ResponseWriter, r *http.Request) {
 		tokenError(w, http.StatusBadRequest, "invalid_grant", "this sign-in is no longer permitted")
 		return
 	}
+	// A persona fixed into the code at consent time is checked again now (decision 9: a real
+	// member's address is refused at use, not only at consent).
+	if ok, err := a.mgr.personaSubUsable(ctx, devIdPParseProfile(grant.Claims).Sub); err != nil {
+		log.Printf("dev idp: persona check: %v", err)
+		tokenError(w, http.StatusInternalServerError, "server_error", "could not check the persona")
+		return
+	} else if !ok {
+		tokenError(w, http.StatusBadRequest, "invalid_grant", "that persona is not usable")
+		return
+	}
 	signer, err := a.keys.signer(ctx)
 	if err != nil {
 		log.Printf("dev idp: signing key: %v", err)
@@ -452,7 +464,7 @@ func (a devIdPAPI) token(w http.ResponseWriter, r *http.Request) {
 	if err := a.mgr.store.InsertAudit(ctx, store.AuditLog{
 		ID: store.NewID(), TenantID: cc.ws.TenantID, ActorKind: "user", ActorID: grant.IdentityID,
 		Action: "workspace.dev_idp_token", Target: cc.ws.ID,
-		Detail: "client=" + cc.row.ClientID + " sub=" + strconv.Quote(profile.Sub), At: store.NowTS(),
+		Detail: "client=" + cc.row.ClientID + " sub=" + strconv.Quote(profile.Sub) + personaAuditDetail(profile.Sub), At: store.NowTS(),
 	}); err != nil {
 		log.Printf("dev idp: audit: %v", err)
 		tokenError(w, http.StatusInternalServerError, "server_error", "audit unavailable")
@@ -516,6 +528,10 @@ func (a devIdPAPI) userinfo(w http.ResponseWriter, r *http.Request) {
 	}
 	grant, ok, err := a.mgr.store.GetDevIdPAccess(ctx, devIdPHash(tok), a.now().Unix())
 	if err != nil || !ok {
+		deny()
+		return
+	}
+	if ok, err := a.mgr.personaSubUsable(ctx, devIdPParseProfile(grant.Claims).Sub); err != nil || !ok {
 		deny()
 		return
 	}
