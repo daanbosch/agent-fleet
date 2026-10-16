@@ -11,6 +11,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -796,5 +797,70 @@ func TestRollbackAfterARestartThatFinishedTheCancel(t *testing.T) {
 	rateLimitTick(now.Add(2 * time.Minute))
 	if rateLimitCancelRecorded("sch_spent") {
 		t.Error("the confirmed cancellation outlived the episode that named it")
+	}
+}
+
+// A transition returns success only once it is on disk: after a restart the meta is the only
+// record that a source is closed. A write that fails leaves the meta and the in-memory state
+// agreeing, and the move where it was.
+func TestMoveTransitionsPersistBeforeTheyReturn(t *testing.T) {
+	newRateLimitFixture(t)
+	now := time.Now()
+	_, m := moveEnv(t, "mvpersist")
+	setRateLimitPref(t, true)
+	if err := RateLimitStates.Write(m.Name, rateLimitState{At: now.Format(time.RFC3339), ScheduleID: "sch_live"}); err != nil {
+		t.Fatal(err)
+	}
+	// A read-only meta file is replaced, not written in place.
+	p := session.MetaPath(m.Name)
+	if err := os.Chmod(p, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	mv := mustBegin(t, beginAsync(m.Name, "mvpersist-target"))
+	if cur, _ := session.ReadMeta(m.Name); cur.Moving != "mvpersist-target" {
+		t.Fatalf("begin returned with moving %q on disk", cur.Moving)
+	}
+	dir := session.MetaDir()
+	readOnly := func() { _ = os.Chmod(dir, 0o500) }
+	writable := func() { _ = os.Chmod(dir, 0o700) }
+	t.Cleanup(writable)
+	restartRefuses := func(what string) {
+		t.Helper()
+		lifegate.ResetForTest()
+		var moved *lifegate.MovedError
+		if l, err := lifegate.Enter(context.Background(), m.Name); !errors.As(err, &moved) {
+			l.Release()
+			t.Fatalf("%s: after a restart Enter = %v, want the source still closed", what, err)
+		}
+	}
+
+	readOnly()
+	if err := mv.commit(); err == nil {
+		t.Fatal("commit succeeded with movedTo not written")
+	}
+	if cur, _ := session.ReadMeta(m.Name); cur.Moving != "mvpersist-target" || cur.MovedTo != "" {
+		t.Fatalf("after a failed commit: moving %q movedTo %q", cur.Moving, cur.MovedTo)
+	}
+	if _, has := RateLimitStates.Read(m.Name); !has {
+		t.Fatal("a failed commit closed the episode")
+	}
+	if err := mv.rollback(now); err == nil {
+		t.Fatal("rollback succeeded with moving not cleared on disk")
+	}
+	assertMovedRefusal(t, postInput(t, m.Name, `{"prompt":"x"}`), "mvpersist-target")
+	restartRefuses("failed rollback")
+
+	writable()
+	if err := mv.rollback(now); err != nil {
+		t.Fatal(err)
+	}
+	// A begin that cannot write moving fails, and leaves the source open everywhere.
+	readOnly()
+	if _, err := beginSessionMove(context.Background(), m.Name, "mvpersist-target"); err == nil {
+		t.Fatal("begin succeeded with moving not written")
+	}
+	writable()
+	if rec := postInput(t, m.Name, `{"prompt":"still open"}`); rec.Code != http.StatusOK {
+		t.Fatalf("after a failed begin = %d %s", rec.Code, rec.Body.String())
 	}
 }

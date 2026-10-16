@@ -57,6 +57,48 @@ func WriteMeta(m Meta) {
 	rememberCWD(m)
 }
 
+// ErrMetaDeleted is WriteMetaChecked's answer for a meta deleted since the caller read it.
+var ErrMetaDeleted = errors.New("the session's meta was deleted")
+
+// WriteMetaChecked is WriteMeta for a writer that must know the meta reached the disk: a move's
+// moving / movedTo is the only record of a closed source after a restart, and success there
+// must mean it is on disk. It writes a temporary file and renames it over the meta, so a reader
+// sees the old meta or the new one, never a torn one, and returns every error.
+func WriteMetaChecked(m Meta) error {
+	if err := os.MkdirAll(MetaDir(), 0o700); err != nil {
+		return err
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(MetaDir(), ".meta-*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	_, werr := tmp.Write(b)
+	if werr == nil {
+		werr = tmp.Sync()
+	}
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return werr
+	}
+	metaWriteMu.Lock()
+	defer metaWriteMu.Unlock()
+	if deletedMetas[MetaPath(m.Name)] {
+		return ErrMetaDeleted
+	}
+	if err := os.Rename(tmp.Name(), MetaPath(m.Name)); err != nil {
+		return err
+	}
+	rememberCWD(m)
+	return nil
+}
+
 // metaWriteMu orders WriteMeta against the removal of a meta, and deletedMetas remembers which
 // meta files a person deleted in this process (keyed by path, so a test's temporary directory
 // never shadows another's). Together they make "read a meta, work, write it back" safe against

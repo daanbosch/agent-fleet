@@ -324,6 +324,10 @@ it is not yet.
 - A confirmed cancellation stays in the record, marked done, while the session's episode still
   names the id: a commit that recorded it and stopped leaves a moving source whose rollback must
   still see that id as dead after the sweep cancelled it.
+- **Every transition is on disk before it returns**: `moving`, `movedTo` and their clearing go
+  through `session.WriteMetaChecked` (a temporary file renamed over the meta, every error
+  returned). The in-memory mirror changes, and the episode closes, only after that write
+  succeeded; a failed write leaves the move where it was.
 - **The move's primitives** are `beginSessionMove`, `rollback` and `commit` (sessionx,
   `session_move_gate.go`) plus `reopenMovedSession` for decision 11.6. Commit changes the meta,
   closes the episode and cancels its booking; stopping the source and taking its spooled peer

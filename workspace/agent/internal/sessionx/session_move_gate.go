@@ -182,13 +182,18 @@ func beginSessionMove(ctx context.Context, source, target string) (*sourceMove, 
 	if !movableSourceState(state) {
 		return nil, &moveStateError{Session: source, State: state}
 	}
-	if _, ok := UpdateSessionMeta(source, func(cur *session.Meta) bool {
+	// Checked and atomic: after a restart the meta is the only record that input is closed, so the
+	// in-memory mirror is closed, and success returned, only once moving is on disk. The same holds
+	// for every transition below.
+	if _, ok, err := updateSessionMetaChecked(source, func(cur *session.Meta) bool {
 		if cur.Moving != "" || cur.MovedTo != "" {
 			return false
 		}
 		cur.Moving = target
 		return true
-	}); !ok {
+	}); err != nil {
+		return nil, fmt.Errorf("recording the move of %s: %w", source, err)
+	} else if !ok {
 		return nil, errMoveSourceGone
 	}
 	x.SetClosed(target, false)
@@ -209,13 +214,15 @@ func (mv *sourceMove) rollback(now time.Time) error {
 	if afterMoveRepair != nil {
 		afterMoveRepair()
 	}
-	if _, ok := UpdateSessionMeta(mv.source, func(cur *session.Meta) bool {
+	if _, ok, err := updateSessionMetaChecked(mv.source, func(cur *session.Meta) bool {
 		if cur.Moving != mv.target {
 			return false
 		}
 		cur.Moving = ""
 		return true
-	}); !ok {
+	}); err != nil {
+		return fmt.Errorf("reopening %s: %w", mv.source, err) // still closed, on disk and in memory
+	} else if !ok {
 		if m, exists := session.ReadMeta(mv.source); exists && m.Moving != "" {
 			return fmt.Errorf("session %s is moving to %s, not %s", mv.source, m.Moving, mv.target)
 		}
@@ -246,14 +253,19 @@ func (mv *sourceMove) commit() error {
 			return fmt.Errorf("recording the cancellation of the usage-limit resume: %w", err)
 		}
 	}
-	if _, ok := UpdateSessionMeta(mv.source, func(cur *session.Meta) bool {
+	if _, ok, err := updateSessionMetaChecked(mv.source, func(cur *session.Meta) bool {
 		if cur.Moving != mv.target {
 			return false
 		}
 		cur.Moving, cur.MovedTo = "", mv.target
 		return true
-	}); !ok {
+	}); err != nil || !ok {
+		// The source stays moving with its episode; the recorded id is treated as spent by a
+		// rollback (repairRateLimitBookingAfterMove), so a failed commit loses no resume.
 		episodeMu.Unlock()
+		if err != nil {
+			return fmt.Errorf("recording the move of %s: %w", mv.source, err)
+		}
 		return fmt.Errorf("session %s is not moving to %s", mv.source, mv.target)
 	}
 	lifegate.SetClosed(mv.source, mv.target, true)
@@ -274,13 +286,15 @@ func (mv *sourceMove) commit() error {
 // reopenMovedSession is the user's explicit "resume here anyway" (ADR 0115 decision 11.6): the
 // only way a moved source takes input again.
 func reopenMovedSession(name string) error {
-	if _, ok := UpdateSessionMeta(name, func(cur *session.Meta) bool {
+	if _, ok, err := updateSessionMetaChecked(name, func(cur *session.Meta) bool {
 		if cur.MovedTo == "" {
 			return false
 		}
 		cur.MovedTo = ""
 		return true
-	}); !ok {
+	}); err != nil {
+		return fmt.Errorf("reopening %s: %w", name, err)
+	} else if !ok {
 		return fmt.Errorf("session %s was not moved", name)
 	}
 	lifegate.Reopen(name)
@@ -289,8 +303,9 @@ func reopenMovedSession(name string) error {
 
 // repairRateLimitBookingAfterMove books the resume again when the source's booking is spent:
 // it fired during the move and the gate refused it, or it was recorded for cancellation (a
-// commit that recorded it and then stopped; the sweep may have cancelled it since). The watch would never replace it: scheduleRateLimitResume
-// declines while the episode holds an id. Called with the episode lock held.
+// commit that recorded it and then stopped or failed; the sweep may have cancelled it since).
+// The watch would never replace it: scheduleRateLimitResume declines while the episode holds an
+// id. Called with the episode lock held.
 func repairRateLimitBookingAfterMove(name string, now time.Time) {
 	st, ok := RateLimitStates.Read(name)
 	if !ok || st.ScheduleID == "" {

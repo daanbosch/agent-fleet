@@ -292,6 +292,9 @@ develop（2026-10-15）の `Agent.Transcript`／`claude.CollectAllTurns` を読�
 - 確認済みの取り消しも、そのセッションのエピソードが id を指している間は完了の印付きで記録に残す。
   id を記録した後で止まった確定は移動中の元を残し、巡回が取り消した後でもロールバックがその id を
   死んだものと分かる必要がある。
+- **どの遷移も返る前にディスクにある**: `moving`・`movedTo` とその消去は `session.WriteMetaChecked`
+  （一時ファイルをメタへ rename し、すべてのエラーを返す）を通る。メモリ上の写しの変更とエピソードを
+  閉じるのは、その書き込みが成功した後だけだ。書き込みに失敗した移動は元の段階に留まる。
 - **移動の基本操作**は `beginSessionMove`・`rollback`・`commit`（sessionx の `session_move_gate.go`）と、
   決定 11.6 のための `reopenMovedSession`。確定はメタを変え、エピソードを閉じ、その予約を取り消す。
   元セッションの停止と spool の peer メッセージの取り出しは、順序を持つ移動の側に残した。
