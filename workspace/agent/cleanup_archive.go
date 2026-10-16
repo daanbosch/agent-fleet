@@ -41,7 +41,9 @@ import (
 func cleanupStoreDir() string { return sessionx.CleanupArchiveDir() }
 
 // cleanupArchivedSession is one session captured in an archive: enough to restore the
-// listed row (meta) and the conversation (jsonl payloads, stored as tar entries).
+// listed row (meta) and the conversation (jsonl payloads, stored as tar entries). The same
+// lists carry a move target's handover files (ADR 0115 decision 9): any payload with a
+// destination restores the same way.
 type cleanupArchivedSession struct {
 	Name       string   `json:"name"`
 	Display    string   `json:"display"`

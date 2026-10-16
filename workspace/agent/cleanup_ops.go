@@ -19,6 +19,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -348,6 +349,14 @@ func archiveSessionForDelete(m session.Meta) (string, error) {
 			add(0, bkDest, dest, bk)
 		}
 	}
+	// A move target's handover files are part of its conversation (ADR 0115 decision 9), and
+	// removeSessionSideFiles is about to delete their directory. They ride in the same payload
+	// lists as the jsonl: restore stages each one next to its destination and places it only
+	// where nothing exists, so a file that is there by then is kept, and a purge drops them with
+	// the tarball. Only handover-*.md travels; other throwaway files in the directory do not.
+	if err := addHandoverPayloads(m.Name, &as, payloads); err != nil {
+		return "", err
+	}
 	man := cleanupManifest{
 		ID: newCleanupID(nowUTC(), idSlug(m.Name)), At: nowUTC().Format(time.RFC3339),
 		Reason: "delete_session", Sessions: []cleanupArchivedSession{as},
@@ -356,6 +365,32 @@ func archiveSessionForDelete(m session.Meta) (string, error) {
 		return "", err
 	}
 	return man.ID, nil
+}
+
+// addHandoverPayloads adds the session's handover-*.md files to the archive with their
+// absolute destinations. A file that vanished since it was listed is skipped; one that cannot
+// be read is not, because the delete would then destroy the only copy.
+func addHandoverPayloads(name string, as *cleanupArchivedSession, payloads map[string][]byte) error {
+	names, err := sessionx.ListHandoverFiles(name)
+	if err != nil {
+		return err
+	}
+	dir := paths.SessionWorkDir(name)
+	for _, n := range names {
+		src := filepath.Join(dir, n)
+		b, err := os.ReadFile(src)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		entry := "sessions/" + idSlug(name) + "/work/" + n
+		payloads[entry] = b
+		as.JSONLPaths = append(as.JSONLPaths, src)
+		as.JSONLNames = append(as.JSONLNames, entry)
+	}
+	return nil
 }
 
 // handleDeleteBranch (DELETE /repos/{name}/branch?branch=<name>[&remote=1]) deletes a
