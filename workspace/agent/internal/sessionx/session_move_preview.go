@@ -45,6 +45,9 @@ type movePreviewWire struct {
 	MovedTo        string   `json:"movedTo,omitempty"`
 	// Pending is a move waiting for retry or cancel.
 	Pending *movePendingWire `json:"pending,omitempty"`
+	// Delivery is, for a moved source, whether its target got the first prompt that points at
+	// the file; nil once it did.
+	Delivery *moveDeliveryWire `json:"delivery,omitempty"`
 }
 
 type moveTargetWire struct {
@@ -123,12 +126,17 @@ func buildMovePreview(m session.Meta, now time.Time) movePreviewWire {
 		}
 	}
 	if rec, ok := moveRecords.Read(m.Name); ok && (rec.Target == m.Moving || rec.Target == m.MovedTo) {
-		recorded, orphan := moveTargetPresence(rec)
+		pr := moveTargetPresence(rec)
 		p.Pending = &movePendingWire{Target: rec.Target, Kind: rec.Kind, File: rec.File, State: rec.State,
-			Error: sc(rec.Error), TargetExists: recorded, Orphan: orphan, Busy: moveOpBusy(m.Name)}
+			Error: sc(rec.Error), TargetExists: pr == targetRecorded || pr == targetUnreadable,
+			Orphan: pr == targetOrphan, Busy: moveOpBusy(m.Name)}
 	} else if m.Moving != "" {
-		p.Pending = &movePendingWire{Target: m.Moving, Busy: moveOpBusy(m.Name)}
-		p.Pending.TargetExists, p.Pending.Orphan = moveTargetPresence(moveRecord{Target: m.Moving})
+		pr := moveTargetPresence(moveRecord{Target: m.Moving})
+		p.Pending = &movePendingWire{Target: m.Moving, Busy: moveOpBusy(m.Name),
+			TargetExists: pr == targetRecorded || pr == targetUnreadable, Orphan: pr == targetOrphan}
+	}
+	if m.MovedTo != "" {
+		p.Delivery = moveDeliveryState(m.MovedTo)
 	}
 	if m.Kind == session.KindCursor && m.DriverKind() == session.DriverManaged {
 		p.Warnings = append(p.Warnings, moveWarnCursorMirror)

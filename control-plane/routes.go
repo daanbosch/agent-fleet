@@ -366,6 +366,7 @@ func registerSessionRoutes(mux *http.ServeMux, cfg config) {
 	mux.HandleFunc("GET /api/sessions/{name}/move/preview", rest)
 	mux.HandleFunc("POST /api/sessions/{name}/move/cancel", rest)
 	mux.HandleFunc("POST /api/sessions/{name}/move/reopen", rest)
+	mux.HandleFunc("POST /api/sessions/{name}/move/deliver", rest)
 	mux.HandleFunc("POST /api/sessions/{name}/stop", rest)
 	mux.HandleFunc("POST /api/sessions/{name}/halt", rest)
 	mux.HandleFunc("POST /api/sessions/{name}/recreate", rest)

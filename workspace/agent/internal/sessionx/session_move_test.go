@@ -62,11 +62,12 @@ func moveRunEnv(t *testing.T, name string) *moveRun {
 		}
 		return HandoverInput{Source: m, Turns: r.turns, QueuedItems: queued, Git: r.git, PeerMessages: agents.PendingPeers(m.Name)}
 	}
-	moveTargetPresence = func(rec moveRecord) (bool, bool) {
-		if _, ok := session.ReadMeta(rec.Target); ok {
-			return true, false
+	moveTargetPresence = func(rec moveRecord) targetPresence {
+		p := prevPresence(rec)
+		if p == targetAbsent && r.orphan {
+			return targetOrphan
 		}
-		return false, r.orphan
+		return p
 	}
 	stopOrphanTarget = func(rec moveRecord) error {
 		r.orphanStops = append(r.orphanStops, rec.Target)
@@ -114,6 +115,8 @@ func postMove(t *testing.T, name, path, body string) *httptest.ResponseRecorder 
 		HandleSessionMoveCancel(rec, req)
 	case "/reopen":
 		HandleSessionMoveReopen(rec, req)
+	case "/deliver":
+		HandleSessionMoveDeliver(rec, req)
 	default:
 		t.Fatalf("no handler for %s", path)
 	}
@@ -963,5 +966,122 @@ func TestReadMoveGitIsBounded(t *testing.T) {
 	}
 	if !strings.HasPrefix(g.Status, "?? untracked-file-") {
 		t.Fatalf("status lost its columns: %q", g.Status[:40])
+	}
+}
+
+// A target meta that exists and does not read (here: truncated, as an ordinary rewrite leaves it
+// for an instant) is a target that may be working: cancel must not take it for an orphan and
+// stop it, and retry must not commit on it either.
+func TestUnreadableTargetMetaIsNeverAnOrphan(t *testing.T) {
+	r := moveRunEnv(t, "mvunr")
+	r.create = func(req CreateReq) (int, []byte) {
+		createFakeTarget(req)
+		return http.StatusGatewayTimeout, nil
+	}
+	a := decodeMove(t, postMove(t, "mvunr", "", `{"kind":"claude"}`))
+	if a.Error.Code != "move_create_uncertain" {
+		t.Fatalf("answer = %+v", a.Error)
+	}
+	if err := os.WriteFile(session.MetaPath(a.Error.Target), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.orphan = true // a pane runs under the name too
+	if rec := postMove(t, "mvunr", "/cancel", ""); rec.Code != http.StatusConflict || decodeMove(t, rec).Error.Code != "move_target_exists" {
+		t.Fatalf("cancel on an unreadable meta: %d %s", rec.Code, rec.Body.String())
+	}
+	if len(r.orphanStops) != 0 {
+		t.Fatalf("stopped %v", r.orphanStops)
+	}
+	if _, err := os.Stat(a.Error.File); err != nil {
+		t.Fatalf("the file went: %v", err)
+	}
+	if rec := postMove(t, "mvunr", "/retry", ""); rec.Code != http.StatusConflict || decodeMove(t, rec).Error.Code != "move_target_unreadable" {
+		t.Fatalf("retry on an unreadable meta: %d %s", rec.Code, rec.Body.String())
+	}
+	if cur := mustMeta(t, "mvunr"); cur.Moving != a.Error.Target {
+		t.Fatalf("moving = %q", cur.Moving)
+	}
+}
+
+// An Agent that stops after begin wrote moving and before the record exists leaves the target's
+// name only in the source's meta. It is still held, and cancel still opens the source.
+func TestTargetNameHeldByMovingAloneAndCancelWithoutARecord(t *testing.T) {
+	moveRunEnv(t, "mvnorec")
+	target := bookMoveTarget(t.TempDir())
+	mustBegin(t, beginAsync("mvnorec", target))
+	// The restart: memory is gone.
+	releaseMoveTarget(target)
+	slugMu.Lock()
+	delete(slugHandedAt, target)
+	slugMu.Unlock()
+	prev := randSlug
+	slugs := []string{target, "sfresh1"}
+	randSlug = func() string { s := slugs[0]; slugs = slugs[1:]; return s }
+	t.Cleanup(func() { randSlug = prev })
+	if got := allocSessionName(t.TempDir()); got != "sfresh1" {
+		t.Fatalf("handed out %q, which the source's meta names as its move target", got)
+	}
+	if rec := postMove(t, "mvnorec", "/retry", ""); rec.Code != http.StatusConflict || decodeMove(t, rec).Error.Code != "move_record_missing" {
+		t.Fatalf("retry without a record: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := postMove(t, "mvnorec", "/cancel", ""); rec.Code != http.StatusOK {
+		t.Fatalf("cancel without a record: %d %s", rec.Code, rec.Body.String())
+	}
+	if cur := mustMeta(t, "mvnorec"); cur.Moving != "" {
+		t.Fatalf("moving = %q after cancel", cur.Moving)
+	}
+}
+
+// A target whose first prompt was lost to an Agent stop (written pending, never sent) is not
+// reported as a finished move: the answer says the prompt is not known to have arrived, and the
+// deliver step, on the user's word, points the target at its file.
+func TestLostFirstPromptIsReportedAndDeliverable(t *testing.T) {
+	r := moveRunEnv(t, "mvdlv-unused")
+	session.WriteMeta(session.Meta{Name: "mvdlv", Dir: t.TempDir(), Kind: session.KindClaude})
+	t.Cleanup(func() { lifegate.Reopen("mvdlv") })
+	r.create = func(req CreateReq) (int, []byte) {
+		session.WriteMeta(session.Meta{Name: req.name, Dir: req.Dir, Kind: req.Kind, Driver: req.Driver,
+			InitialPromptState: session.InitialPromptPending})
+		return 0, nil // the Agent stopped here
+	}
+	a := decodeMove(t, postMove(t, "mvdlv", "", `{"kind":"codex","driver":"managed"}`))
+	if a.Error.Code != "move_create_uncertain" {
+		t.Fatalf("answer = %+v", a.Error)
+	}
+	target := a.Error.Target
+	RecoverPendingInitialPrompts()
+	rec := postMove(t, "mvdlv", "/retry", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("retry: %d %s", rec.Code, rec.Body.String())
+	}
+	var res sessionMoveWire
+	_ = json.Unmarshal(rec.Body.Bytes(), &res)
+	if res.Delivery == nil || res.Delivery.InitialPromptState != session.InitialPromptUnknown || !res.Delivery.Deliverable {
+		t.Fatalf("retry answered delivery %+v; want unknown and deliverable", res.Delivery)
+	}
+	if p := buildMovePreview(mustMeta(t, "mvdlv"), time.Now()); p.Delivery == nil || p.Delivery.Target != target {
+		t.Fatalf("source preview delivery = %+v", p.Delivery)
+	}
+	assertNothingSent(t, r.d)
+	rec = postMove(t, target, "/deliver", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"mayDuplicate":true`) {
+		t.Fatalf("deliver: %d %s", rec.Code, rec.Body.String())
+	}
+	select {
+	case in := <-r.d.h.sent:
+		if !strings.Contains(in.Prompt, a.Error.File) {
+			t.Fatalf("delivered %q, which does not name %s", in.Prompt, a.Error.File)
+		}
+	case <-time.After(moveGuard):
+		t.Fatal("the first prompt never reached the target")
+	}
+	if st := mustMeta(t, target).InitialPromptState; st != session.InitialPromptDelivered {
+		t.Fatalf("initial prompt state = %q", st)
+	}
+	if p := buildMovePreview(mustMeta(t, "mvdlv"), time.Now()); p.Delivery != nil {
+		t.Fatalf("delivery still reported after it arrived: %+v", p.Delivery)
+	}
+	if rec := postMove(t, target, "/deliver", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("a second deliver: %d %s", rec.Code, rec.Body.String())
 	}
 }

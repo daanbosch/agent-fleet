@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -215,6 +216,9 @@ type sessionMoveWire struct {
 	// moved either way, and the user can stop it from its row.
 	SourceStopped bool   `json:"sourceStopped"`
 	StopError     string `json:"stopError,omitempty"`
+	// Delivery is set while the target's first prompt is not known to have arrived (pending on
+	// a Terminal target, whose prompt is typed once its CLI has booted; failed; unknown).
+	Delivery *moveDeliveryWire `json:"delivery,omitempty"`
 }
 
 // Seams for tests: the create of the target, and the stop of the source after the commit.
@@ -362,9 +366,18 @@ func runMove(ctx context.Context, src session.Meta, req moveRequest, now time.Ti
 // the move pending. A 2xx alone is not enough: the meta is what lists the target and what
 // retry, cancel and a restart find it by.
 func createAndCommit(ctx context.Context, mv *sourceMove, src session.Meta, rec moveRecord, now time.Time, retry bool) (*sessionMoveWire, error) {
-	status, body := createMoveTarget(ctx, moveCreateReq(src, rec))
-	recorded, orphan := moveTargetPresence(rec)
-	if status >= 200 && status < 300 && recorded {
+	req := moveCreateReq(src, rec)
+	// The first prompt is recorded before the create: a target whose prompt never arrives is
+	// still pointed at its file by the deliver step (HandleSessionMoveDeliver).
+	if err := moveDeliveries.Write(rec.Target, moveDelivery{Source: mv.source, File: rec.File, Prompt: req.InitialPrompt}); err != nil {
+		if !retry {
+			return nil, abortMove(mv, rec, now, fmt.Errorf("recording the target's first prompt: %w", err))
+		}
+		return nil, fmt.Errorf("recording the target's first prompt: %w", err)
+	}
+	status, body := createMoveTarget(ctx, req)
+	presence := moveTargetPresence(rec)
+	if status >= 200 && status < 300 && presence == targetRecorded {
 		return finishMove(mv, rec, body)
 	}
 	cause := createErrorOf(status, body)
@@ -372,7 +385,7 @@ func createAndCommit(ctx context.Context, mv *sourceMove, src session.Meta, rec 
 		cause = &moveError{Status: http.StatusBadGateway, Code: errCodeMetaWriteFailed,
 			Message: "the target started but its meta is not on disk"}
 	}
-	refused := status >= 300 && cause.Code != errCodeMetaWriteFailed && !recorded && !orphan
+	refused := status >= 300 && cause.Code != errCodeMetaWriteFailed && presence == targetAbsent
 	if refused && !retry {
 		return nil, abortMove(mv, rec, now, cause)
 	}
@@ -428,6 +441,7 @@ func completeMove(source string, rec moveRecord, target []byte) *sessionMoveWire
 	}
 	moveRecords.Remove(source)
 	releaseMoveTarget(rec.Target)
+	res.Delivery = moveDeliveryState(rec.Target)
 	return res
 }
 
@@ -447,22 +461,41 @@ func abortMove(mv *sourceMove, rec moveRecord, now time.Time, cause error) error
 			Target:  rec.Target, File: rec.File}
 	}
 	moveRecords.Remove(mv.source)
+	moveDeliveries.Remove(rec.Target)
 	releaseMoveTarget(rec.Target)
 	return cause
 }
 
-// moveTargetPresence says what exists under the target's name: its meta (a recorded session), or
-// only a pane or a managed runtime that a create left without one (an orphan, which no list
-// shows and nothing but the move knows about). A variable so tests need neither tmux nor a
-// runtime.
-var moveTargetPresence = func(rec moveRecord) (recorded, orphan bool) {
-	if _, ok := session.ReadMeta(rec.Target); ok {
-		return true, false
+// targetPresence is what exists under a move target's name.
+type targetPresence int
+
+const (
+	targetAbsent     targetPresence = iota
+	targetRecorded                  // its meta reads: a listed session
+	targetUnreadable                // a meta file exists and does not read now (a rewrite in flight, damage)
+	targetOrphan                    // no meta file, but a pane or a managed runtime under the name
+)
+
+// moveTargetPresence reads the target's state. The meta is read under the meta lock, so a
+// rewrite by an ordinary writer is never seen half-done; a file that still does not read is
+// unreadable, never absent: only a meta file that does not exist lets cancel treat a running
+// pane or runtime as an orphan to stop. Nothing else writes a meta under a booked name while
+// the move's operation lock is held, so the answer holds until the caller acts on it. A
+// variable so tests need neither tmux nor a runtime.
+var moveTargetPresence = func(rec moveRecord) targetPresence {
+	var ok bool
+	WithSessionMetaLock(func() { _, ok = session.ReadMeta(rec.Target) })
+	if ok {
+		return targetRecorded
 	}
-	if tmuxx.HasSession(session.TmuxName(rec.Target)) {
-		return false, true
+	if _, err := os.Lstat(session.MetaPath(rec.Target)); !errors.Is(err, fs.ErrNotExist) {
+		return targetUnreadable
 	}
-	return false, rec.Kind != "" && ManagedAlive(session.Meta{Name: rec.Target, Kind: rec.Kind, Driver: session.DriverManaged})
+	if tmuxx.HasSession(session.TmuxName(rec.Target)) ||
+		rec.Kind != "" && ManagedAlive(session.Meta{Name: rec.Target, Kind: rec.Kind, Driver: session.DriverManaged}) {
+		return targetOrphan
+	}
+	return targetAbsent
 }
 
 // stopOrphanTarget ends what an unrecorded create started, so that cancelling leaves one session
@@ -499,11 +532,18 @@ func listMoveRecords() map[string]moveRecord {
 	return out
 }
 
-// pendingMoveTargets are the names pending moves hold, which no allocation may hand out.
+// pendingMoveTargets are the names pending moves hold on disk, which no allocation may hand out.
 func pendingMoveTargets() map[string]bool {
 	out := map[string]bool{}
 	for _, rec := range listMoveRecords() {
 		out[rec.Target] = true
+	}
+	// A source's meta names its target from begin on, before the record is first written: an
+	// Agent that stopped in between leaves only that.
+	for _, m := range session.ListMetas() {
+		if m.Moving != "" {
+			out[m.Moving] = true
+		}
 	}
 	return out
 }
@@ -599,9 +639,8 @@ func HandleSessionMoveRetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mv := &sourceMove{source: name, target: m.Moving}
-	recorded, orphan := moveTargetPresence(rec)
-	switch {
-	case recorded:
+	switch moveTargetPresence(rec) {
+	case targetRecorded:
 		res, err := finishMove(mv, rec, targetWire(rec.Target))
 		if err != nil {
 			writeMoveErr(w, err)
@@ -609,7 +648,11 @@ func HandleSessionMoveRetry(w http.ResponseWriter, r *http.Request) {
 		}
 		httpx.WriteJSON(w, http.StatusOK, res)
 		return
-	case orphan:
+	case targetUnreadable:
+		writeMoveErr(w, &moveError{Status: http.StatusConflict, Code: "move_target_unreadable",
+			Message: "the target's meta exists but cannot be read right now; try again", Target: rec.Target, File: rec.File})
+		return
+	case targetOrphan:
 		// Creating again would collide with what is running under the name; finishing it would
 		// need a meta nobody wrote. Cancel stops it and opens the source again.
 		writeMoveErr(w, &moveError{Status: http.StatusConflict, Code: "move_target_orphaned",
@@ -697,15 +740,15 @@ func HandleSessionMoveCancel(w http.ResponseWriter, r *http.Request) {
 	if rec.Target == "" {
 		rec.Target = target
 	}
-	recorded, orphan := moveTargetPresence(rec)
-	if recorded {
+	presence := moveTargetPresence(rec)
+	if presence == targetRecorded || presence == targetUnreadable {
 		// Two sessions on one working copy is what the move exists to prevent: the target has to
 		// go first, or the move be finished with retry.
 		writeMoveErr(w, &moveError{Status: http.StatusConflict, Code: "move_target_exists",
 			Message: "the target session exists; finish the move with retry, or delete the target first", Target: target})
 		return
 	}
-	if orphan {
+	if presence == targetOrphan {
 		if err := stopOrphanTarget(rec); err != nil {
 			writeMoveErr(w, &moveError{Status: http.StatusInternalServerError, Code: "move_orphan_stop_failed",
 				Message: "could not stop the unrecorded target: " + err.Error(), Target: target})

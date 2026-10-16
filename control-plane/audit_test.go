@@ -38,6 +38,7 @@ func TestAuditActionTarget(t *testing.T) {
 		{"POST", "/api/sessions/s1/move/retry", "s1", "session.move.retry", "s1", true},
 		{"POST", "/api/sessions/s1/move/cancel", "s1", "session.move.cancel", "s1", true},
 		{"POST", "/api/sessions/s1/move/reopen", "s1", "session.move.reopen", "s1", true},
+		{"POST", "/api/sessions/s1/move/deliver", "s1", "session.move.deliver", "s1", true},
 		{"GET", "/api/sessions/s1/move/preview", "s1", "", "", false},
 		{"POST", "/api/sessions/s1/stop", "s1", "session.delete", "s1", true},
 		{"DELETE", "/api/sessions/s1", "s1", "session.delete", "s1", true},

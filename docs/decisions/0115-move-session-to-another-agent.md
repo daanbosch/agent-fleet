@@ -400,6 +400,15 @@ it is not yet.
   pending. A target that runs under the name without a meta (an orphan pane or runtime) is not
   created again by retry; cancel stops it. The booked name is held against every allocation, in
   memory and through the pending move's record, until the move ends.
+- **A meta file that exists and does not read** is never taken for absent: retry and cancel
+  refuse it, and only a target with no meta file at all is stopped as an orphan. The source's
+  `moving` holds the target's name as well as the record does, so an Agent that stopped between
+  begin and the first record write does not hand the name out again.
+- **The first prompt is part of the move.** It is recorded by target (`session-move-delivery`)
+  before the create, and kept until the target's `InitialPromptState` says delivered. While it
+  does not, the move's answer and the source's preview report it, and
+  `POST /sessions/{target}/move/deliver` sends it again on the user's word. It is never resent
+  by itself, since an unknown delivery may have arrived.
 - **After the commit**, the record stays, marked `committed`, until the spooled peer messages are
   taken and the source is stopped. An Agent that stops in between finishes those steps at boot
   (`RecoverMoves`), on retry, or before a reopen. Reopen runs under the move's operation lock.
