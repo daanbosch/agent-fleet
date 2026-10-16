@@ -116,7 +116,6 @@ type devIdPProfile struct {
 	EmailVerified bool   `json:"email_verified,omitempty"`
 	Name          string `json:"name,omitempty"`
 	Picture       string `json:"picture,omitempty"`
-	HD            string `json:"hd,omitempty"`
 }
 
 // devIdPClaims are the claims asserted for one member. With a linked Google identity the real
@@ -125,11 +124,10 @@ type devIdPProfile struct {
 // or a future persona's.
 func devIdPClaims(ctx context.Context, st store.IdentityStore, ident store.Identity) devIdPProfile {
 	p := devIdPProfile{Email: ident.Email}
-	google := false
 	if links, err := st.ListLinkedProviders(ctx, ident.ID); err == nil {
 		for _, l := range links {
 			if l.Realm == googleRealm && l.Subject != "" {
-				p.Sub, google = l.Subject, true
+				p.Sub = l.Subject
 				if l.Email != "" {
 					p.Email = l.Email
 				}
@@ -147,12 +145,9 @@ func devIdPClaims(ctx context.Context, st store.IdentityStore, ident store.Ident
 	}
 	p.EmailVerified = true
 	p.Name = p.Email[:strings.IndexByte(p.Email+"@", '@')]
-	// Google sets hd only for a Workspace account, never for a consumer one.
-	if at := strings.LastIndexByte(p.Email, '@'); google && at >= 0 {
-		if d := strings.ToLower(p.Email[at+1:]); d != "gmail.com" && d != "googlemail.com" {
-			p.HD = d
-		}
-	}
+	// No `hd`: it says the account belongs to a Google-hosted domain, which the address's
+	// domain does not prove (a personal Google account can use any address), and the
+	// IdentityLink does not keep the value Google verified. Omitted, like picture.
 	return p
 }
 
@@ -164,7 +159,7 @@ func devIdPScopedClaims(all devIdPProfile, scope string) devIdPProfile {
 	}
 	out := devIdPProfile{Sub: all.Sub}
 	if has["email"] {
-		out.Email, out.EmailVerified, out.HD = all.Email, all.EmailVerified, all.HD
+		out.Email, out.EmailVerified = all.Email, all.EmailVerified
 	}
 	if has["profile"] {
 		out.Name, out.Picture = all.Name, all.Picture

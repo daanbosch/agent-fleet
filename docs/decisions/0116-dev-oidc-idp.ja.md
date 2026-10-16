@@ -93,13 +93,14 @@ openid-client（Auth.js）も Spring Security も既定が RS256 なので、提
 
 ### 6. Google に似せたクレーム
 
-`sub`、`email`、`email_verified`、`name`、`picture`、`hd`。付与されたスコープで絞る（`sub` は常に。`email` は
-`email`・`email_verified`・`hd`、`profile` は `name`・`picture`）。
+`sub`、`email`、`email_verified`、`name`、`picture`。付与されたスコープで絞る（`sub` は常に。`email` は
+`email`・`email_verified`、`profile` は `name`・`picture`）。
 
 - メンバーの紐づいたアイデンティティに realm が `https://accounts.google.com` のもの（`IdentityLink.Realm`）が
-  あれば、`sub` とメールアドレスは**本物の Google の値**になり、アプリの既存ユーザー行と一致する。`hd` は
-  アドレスのドメイン。ただし `gmail.com`・`googlemail.com` には付けない（Google も Workspace アカウントにしか
-  付けない）。
+  あれば、`sub` とメールアドレスは**本物の Google の値**になり、アプリの既存ユーザー行と一致する。**`hd` は付けない**。
+  `hd` は Google ホストのドメインに属することを表すが、アドレスのドメインからは証明できず（個人の Google
+  アカウントでも任意のアドレスを使える）、リンクには Google が検証した値も残っていない。`hd` で組織所属を
+  確認するアプリには、非所属者と同じく欠落して見える。検証済みの `hd` をリンクに保存すれば、後から出せる。
 - なければ `sub` は `af-` ＋アイデンティティ ID のハッシュ。人ごとに安定し、Google の `sub`（数字）とは
   衝突し得ない。アドレスはアイデンティティのもの。
 - `picture` は Control Plane が知らないので、作らずに省く。

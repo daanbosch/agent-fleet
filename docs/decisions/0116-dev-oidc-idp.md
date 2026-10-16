@@ -107,13 +107,16 @@ Console screen (#2222) if it turns out to be wanted.
 
 ### 6. Claims shaped like Google's
 
-`sub`, `email`, `email_verified`, `name`, `picture`, `hd`, limited by the granted scopes (`sub`
-always; `email` brings `email`, `email_verified`, `hd`; `profile` brings `name`, `picture`).
+`sub`, `email`, `email_verified`, `name`, `picture`, limited by the granted scopes (`sub`
+always; `email` brings `email`, `email_verified`; `profile` brings `name`, `picture`).
 
 - When the member has a linked identity with realm `https://accounts.google.com`
   (`IdentityLink.Realm`), `sub` and the address are the **real Google values**, so the app's
-  existing user rows match. `hd` is the address's domain, except for `gmail.com` and
-  `googlemail.com`: Google sets it only for a Workspace account.
+  existing user rows match. There is **no `hd`**: it
+  says the account belongs to a Google-hosted domain, which the address's domain does not prove (a
+  personal Google account can use any address) and the link does not record what Google verified,
+  so an app that checks `hd` for organisation membership sees it missing, as it would for a
+  non-member. Persisting the verified `hd` on the link would allow it later.
 - Otherwise `sub` is `af-` plus a hash of the identity id: stable per person, and unable to equal a
   Google `sub` (numeric). The address is the identity's.
 - `picture` is not known to the Control Plane and is omitted rather than invented.

@@ -756,16 +756,16 @@ func TestDevIdPClaims(t *testing.T) {
 		t.Errorf("openid email: %v", em)
 	}
 
-	// A linked Google identity brings the real subject and address, and the domain as hd.
+	// A linked Google identity brings the real subject and address, and never an hd: a non-gmail address does not prove a Workspace account.
 	if err := d.mgr.store.AttachProvider(ctx, ident.ID, store.IdentityLink{Provider: "google", Subject: "109876543210",
 		Realm: googleRealm, Email: "alice@corp.example"}); err != nil {
 		t.Fatal(err)
 	}
 	c = claimsFor("openid email profile")
-	if c["sub"] != "109876543210" || c["email"] != "alice@corp.example" || c["hd"] != "corp.example" {
+	if c["sub"] != "109876543210" || c["email"] != "alice@corp.example" || c["hd"] != nil {
 		t.Errorf("claims with a Google link: %v", c)
 	}
-	// A consumer Google account has no hd.
+	// A consumer Google account on a gmail.com address, likewise.
 	bob, err := d.mgr.store.UpsertIdentity(ctx, "bob@gmail.com", "bob", "")
 	if err != nil {
 		t.Fatal(err)
@@ -775,7 +775,7 @@ func TestDevIdPClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 	cl := devIdPClaims(ctx, d.mgr.store, bob)
-	if cl.HD != "" || cl.Sub != "5550001" {
+	if strings.Contains(devIdPProfileJSON(cl), `"hd"`) || cl.Sub != "5550001" {
 		t.Errorf("a gmail.com account: %v", cl)
 	}
 }

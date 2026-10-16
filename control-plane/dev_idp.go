@@ -123,7 +123,7 @@ func (a devIdPAPI) discovery(w http.ResponseWriter, _ *http.Request) {
 		TokenAuthMethods:     []string{"client_secret_basic", "client_secret_post"},
 		CodeChallengeMethods: []string{"S256"},
 		Claims: []string{"sub", "iss", "aud", "exp", "iat", "nonce", "email", "email_verified",
-			"name", "picture", "hd", "af_dev"},
+			"name", "af_dev"},
 		IssParameterSupported: true,
 	})
 }
