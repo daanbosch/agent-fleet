@@ -385,10 +385,10 @@ var devIdPConsentTmpl = template.Must(template.New("consent").Parse(`<!doctype h
 *{box-sizing:border-box}
 body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif;padding:24px}
 .card{width:100%;max-width:440px;background:var(--panel);border:1px solid var(--border);border-radius:14px;overflow:hidden;box-shadow:0 10px 40px #0006}
-.top{display:flex;align-items:center;gap:10px;padding:14px 20px;border-bottom:1px solid var(--border);background:var(--panel2)}
-.top img{width:28px;height:28px;border-radius:7px}
+.top{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:14px 20px;border-bottom:1px solid var(--border);background:var(--panel2)}
+.top img{flex:none;width:28px;height:28px;border-radius:7px}
 .top .brand{font-weight:600;letter-spacing:.01em}
-.top .dep{color:var(--muted);font-size:13px}
+.top .dep{color:var(--muted);font-size:13px;min-width:0;max-width:100%;overflow-wrap:anywhere}
 .badge{margin-left:auto;flex:none;font-size:11px;font-weight:700;letter-spacing:.08em;color:var(--warn);border:1px solid currentColor;border-radius:999px;padding:2px 8px}
 .body{padding:22px 20px 18px}
 h1{font-size:20px;margin:0 0 6px}
@@ -403,13 +403,14 @@ label.opt:has(input:focus-visible){outline:2px solid var(--accent);outline-offse
 label.opt input{position:absolute;opacity:0;pointer-events:none}
 .av{flex:none;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-weight:700;color:#fff;background:#3b6ea5}
 .av.p{background:#7a5bb5}
-.who{min-width:0}
-.who b{display:block;font-weight:600;overflow-wrap:anywhere}
-.who small{color:var(--muted);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.who{min-width:0;flex:1 1 auto}
+.who b{display:block;font-weight:600;overflow-wrap:break-word}
+.who small{color:var(--muted);display:block;overflow-wrap:anywhere}
 .tag{margin-left:auto;font-size:11px;color:var(--muted);border:1px solid var(--border);border-radius:999px;padding:1px 8px;flex:none}
 .tick{margin-left:auto;width:18px;height:18px;border-radius:50%;border:2px solid var(--border);flex:none}
 label.opt:has(input:checked) .tick{border-color:var(--accent);background:radial-gradient(var(--accent) 45%,transparent 50%)}
 .tag+.tick{margin-left:8px}
+@media (max-width:420px){.tick{display:none}label.opt{gap:10px}label.opt:has(input:checked){border-width:2px;padding:9px 11px}}
 .actions{display:flex;gap:10px;align-items:center;margin-top:16px}
 button{font:inherit;font-weight:600;border:0;border-radius:9px;padding:10px 18px;background:var(--accent);color:var(--accent-fg);cursor:pointer}
 button.cancel{background:none;color:var(--muted);font-weight:400;font-size:14px;padding:10px 6px}

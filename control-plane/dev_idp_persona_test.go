@@ -614,7 +614,7 @@ func TestDevIdPConsentCancelIsRefusedLikeContinue(t *testing.T) {
 			t.Errorf("%s: %d, want 403", name, rec.Code)
 		}
 	}
-	// Another member's ticket is refused, and refusing it did not hurt the owner.
+	// Another member's ticket is refused (and spent: consumption precedes the member check).
 	d.addViewer(t, "colleague")
 	d.setPreviewSettings(t, func(st *wsSettings) { st.PreviewTenantShare = true })
 	if rec := d.postConsent("colleague", cancel(ticket), nil); rec.Code == http.StatusFound {
@@ -652,5 +652,18 @@ func TestDevIdPConsentPageIsBrandedAndEscaped(t *testing.T) {
 	body = d.authorizeAs(t, "preview-user", d.authQuery(d.ownHost(3000)+"/cb", "")).Body.String()
 	if !strings.Contains(body, "#149ba7") || strings.Contains(body, "#7c4dff") {
 		t.Errorf("unbranded page accent:\n%s", body)
+	}
+}
+
+// The page has no layout engine in the Go tests, so pin the two rules whose absence cut the DEV IdP
+// badge off the card at 320px (measured in headless Chromium with a 16-letter brand label) and
+// hid the test addresses' domain behind an ellipsis on phones.
+func TestDevIdPConsentPageStaysReadableOnNarrowScreens(t *testing.T) {
+	css := devIdPConsentTmpl.Tree.Root.String()
+	if !strings.Contains(css, ".top{display:flex;flex-wrap:wrap;") {
+		t.Error("the header must wrap so the badge stays inside the card")
+	}
+	if strings.Contains(css, "text-overflow:ellipsis") {
+		t.Error("addresses must wrap, not be cut with an ellipsis")
 	}
 }
