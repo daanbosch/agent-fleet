@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { createElement, useEffect, useRef, useState } from "react";
 import { sessionPlanFile, sessionPlanRespond } from "../../../core/api/client.ts";
 import type { Session } from "../../../types/session.ts";
 import { t as tr } from "../../../lib/i18n/index.ts";
@@ -115,9 +115,6 @@ export function usePlanActions({
     return r ? { path: res.path, reviewer: r } : null;
   };
 
-  const rereviewFailed = (r: Session, err: string) =>
-    toast(tr("plan.review_again_failed", { name: reviewerLabel(r), err }));
-
   // Review this plan in another session: reject it, then open the ordinary launch dialog
   // seeded with a prompt that points the reviewer at the plan FILE.
   //
@@ -159,45 +156,94 @@ export function usePlanActions({
     useLaunchTarget.getState().open(target.repo, "", true);
   };
 
+  // One "review again" at a time per card: a press holds this from before its first await until
+  // it settles (the resume alone can take 30 s), and the cards disable their other buttons on
+  // `rereviewing`. Without it a second press, an approval or a launch overlaps the first, and a
+  // late interrupt lands on a planner the member has already approved.
+  const rereviewLock = useRef({ held: false });
+  const [rereviewing, setRereviewing] = useState(false);
+  const latest = useRef({ pending: "", carried: "" });
+  latest.current = { pending: pendingPlan || "", carried: carried?.kind === "plan" ? carried.plan || "" : "" };
+  const exclusive = async (fn: () => Promise<unknown>) => {
+    if (rereviewLock.current.held) return;
+    rereviewLock.current.held = true;
+    setRereviewing(true);
+    try {
+      await fn();
+    } finally {
+      rereviewLock.current.held = false;
+      setRereviewing(false);
+    }
+  };
+
+  // A failure after the live card's reject has no card left to press again, so the toast carries
+  // the retry (the send alone: the planner is already rejected).
+  const rereviewFailed = (r: Session, err: string, retry?: () => Promise<boolean>) => {
+    const msg = tr("plan.review_again_failed", { name: reviewerLabel(r), err });
+    if (!retry) {
+      toast(msg);
+      return;
+    }
+    toast(
+      createElement(
+        "span",
+        { className: "update-toast" },
+        createElement("span", { className: "update-toast-txt" }, msg),
+        createElement("button", { type: "button", className: "update-toast-btn", onClick: () => void retry() }, tr("plan.review_again_retry")),
+      ),
+      { kind: "error", duration: 0 },
+    );
+  };
+
   // "Review again in <reviewer>" on the live card: the same ordering as reviewPlanElsewhere
   // (the planner must be idle in plan mode, not behind the approval modal, when the peer message
   // arrives), with one addition — the reviewer is made ready FIRST, so a reviewer that will not
-  // come up leaves the plan untouched. Only the send itself can fail after the rejection, and
-  // then the card is in the same state as after a cancelled launch dialog.
-  const reviewPlanAgain = async (plan: string) => {
-    if (planSendBlocked) {
-      toast(planSendBlocked);
-      return;
-    }
-    if (wsDown()) return;
-    const hit = await reviewerNow();
-    if (!hit) return reviewPlanElsewhere(plan); // reviewer deleted since the card rendered
-    await runRereview({
-      planner: session,
-      path: hit.path,
-      reviewer: hit.reviewer,
-      beforeSend: async () => {
-        markRejected(plan, true); // optimistic "rejected" badge; planOutcome reconciles it
-        wasWorkingRef.current = false; // as with an interrupt: no reply is being waited for
-        await sendInterrupt();
-      },
-      onFail: (err) => rereviewFailed(hit.reviewer, err),
+  // come up leaves the plan untouched. An interrupt that did not go through stops the send and
+  // takes the optimistic "rejected" back.
+  const reviewPlanAgain = (plan: string) =>
+    exclusive(async () => {
+      if (planSendBlocked) {
+        toast(planSendBlocked);
+        return;
+      }
+      if (wsDown()) return;
+      const hit = await reviewerNow();
+      if (!hit) return reviewPlanElsewhere(plan); // reviewer deleted since the card rendered
+      await runRereview({
+        planner: session,
+        path: hit.path,
+        plan,
+        reviewer: hit.reviewer,
+        lock: { held: false },
+        stillCurrent: () => latest.current.pending.trim() === plan.trim(),
+        beforeSend: async () => {
+          markRejected(plan, true); // optimistic "rejected" badge; planOutcome reconciles it
+          wasWorkingRef.current = false; // as with an interrupt: no reply is being waited for
+          const ok = await sendInterrupt();
+          if (!ok) markRejected(plan, false);
+          return ok;
+        },
+        onFail: (err, retry) => rereviewFailed(hit.reviewer, err, retry),
+      });
     });
-  };
 
   // The same from the carried card: nothing to reject, and the card is discarded only after the
   // send succeeded — a failed send leaves the plan reachable.
-  const reviewCarriedPlanAgain = async (plan: string) => {
-    const hit = await reviewerNow();
-    if (!hit) return reviewCarriedPlan(plan);
-    await runRereview({
-      planner: session,
-      path: hit.path,
-      reviewer: hit.reviewer,
-      onSent: discardCarriedAfterReview({ session, setCarried, toast }),
-      onFail: (err) => rereviewFailed(hit.reviewer, err),
+  const reviewCarriedPlanAgain = (plan: string) =>
+    exclusive(async () => {
+      const hit = await reviewerNow();
+      if (!hit) return reviewCarriedPlan(plan);
+      await runRereview({
+        planner: session,
+        path: hit.path,
+        plan,
+        reviewer: hit.reviewer,
+        lock: { held: false },
+        stillCurrent: () => latest.current.carried === plan,
+        onSent: discardCarriedAfterReview({ session, setCarried, toast }),
+        onFail: (err) => rereviewFailed(hit.reviewer, err),
+      });
     });
-  };
 
   // Review the plan a STOPPED session was waiting on (the carried plan card). The same
   // launch dialog, minus everything the live card needs: no modal is up, so nothing is
@@ -330,5 +376,5 @@ export function usePlanActions({
     openTargetInNew(target, true);
   };
 
-  return { openPlan, reviewPlanElsewhere, reviewCarriedPlan, reviewPlanAgain, reviewCarriedPlanAgain, rereview, planSendBlocked, sendPlanComments, openFile, openDiff };
+  return { openPlan, reviewPlanElsewhere, reviewCarriedPlan, reviewPlanAgain, reviewCarriedPlanAgain, rereview, rereviewing, planSendBlocked, sendPlanComments, openFile, openDiff };
 }

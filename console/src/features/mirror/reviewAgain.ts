@@ -16,6 +16,7 @@ import { useSyncExternalStore } from "react";
 import { sessionPeerSend, sessionReady } from "../../core/api/client.ts";
 import { useSessionsStore } from "../sessions/store.ts";
 import type { Session } from "../../types/session.ts";
+import { planFingerprint } from "./planComments.ts";
 import { rereviewPrompt } from "./planReview.ts";
 
 const LS_KEY = "af.plan-reviewers";
@@ -41,6 +42,16 @@ function load(): Store {
 let store: Store = load();
 const listeners = new Set<() => void>();
 
+// Another tab can launch a new reviewer for the same plan. Every write merges onto what storage
+// holds NOW (not this tab's copy from import time), or a write for another plan would erase it.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => {
+    if (e.key !== null && e.key !== LS_KEY) return;
+    store = load();
+    listeners.forEach((l) => l());
+  });
+}
+
 function commit(next: Store) {
   store = next;
   try {
@@ -56,7 +67,7 @@ function commit(next: Store) {
 export function rememberReviewer(planner: string, planPath: string, reviewer: string) {
   if (!planner || !planPath || !reviewer) return;
   const k = reviewerKey(planner, planPath);
-  const next = { ...store };
+  const next = load();
   delete next[k]; // re-insert last so insertion order is recency
   next[k] = reviewer;
   const keys = Object.keys(next);
@@ -66,8 +77,8 @@ export function rememberReviewer(planner: string, planPath: string, reviewer: st
 
 export function forgetReviewer(planner: string, planPath: string) {
   const k = reviewerKey(planner, planPath);
-  if (!(k in store)) return;
-  const next = { ...store };
+  const next = load();
+  if (!(k in next)) return;
   delete next[k];
   commit(next);
 }
@@ -144,9 +155,15 @@ export async function sendRereview(
   planner: string,
   planPath: string,
   reviewer: Session,
+  plan: string,
   send: typeof sessionPeerSend = sessionPeerSend,
 ): Promise<RereviewResult> {
-  const r = await send(reviewer.name, planner, "question", rereviewPrompt({ parent: planner, path: planPath }));
+  const r = await send(
+    reviewer.name,
+    planner,
+    "question",
+    rereviewPrompt({ parent: planner, path: planPath, revision: planFingerprint(plan) }),
+  );
   if (r.ok) return { ok: true };
   // A reviewer deleted since the list was read is gone for good: stop offering it.
   if (r.code === "peer_target_unknown") forgetReviewer(planner, planPath);
@@ -154,32 +171,50 @@ export async function sendRereview(
 }
 
 
-/** The two cards' flows share one order: make the reviewer ready, THEN do the card's own
- *  precondition (`beforeSend`: the live card rejects the planner so it is idle rather than
- *  behind the approval modal), THEN send, and only a successful send runs `onSent` (the carried
- *  card discards itself there). A failure before the send leaves the plan card untouched; one
- *  after it leaves it as usable as a cancelled launch dialog does. */
+/** The two cards' flows share one order: take the card's lock, make the reviewer ready, check
+ *  the plan on screen is still the one pressed, THEN do the card's own precondition (`beforeSend`:
+ *  the live card rejects the planner so it is idle rather than behind the approval modal; false =
+ *  it failed, send nothing), THEN send, and only a successful send runs `onSent` (the carried
+ *  card discards itself there).
+ *
+ *  `lock` makes a second press during the (up to 30 s) resume a no-op. A failure before the
+ *  send leaves the plan card untouched; one AFTER beforeSend hands `onFail` a `retry` that
+ *  repeats just the send, because the rejected plan's card is gone and nothing else would. */
 export async function runRereview(o: {
   planner: string;
   path: string;
+  plan: string;
   reviewer: Session;
-  beforeSend?: () => Promise<void>;
+  lock: { held: boolean };
+  /** False once the card this press came from is no longer the plan on screen. */
+  stillCurrent?: () => boolean;
+  beforeSend?: () => Promise<boolean>;
   onSent?: () => void;
-  onFail: (message: string) => void;
+  onFail: (message: string, retry?: () => Promise<boolean>) => void;
   prepare?: typeof prepareReviewer;
   send?: typeof sessionPeerSend;
 }): Promise<boolean> {
-  const ready = await (o.prepare ?? prepareReviewer)(o.reviewer);
-  if (!ready.ok) {
-    if (!ready.silent) o.onFail(ready.message);
-    return false;
+  if (o.lock.held) return false;
+  o.lock.held = true;
+  try {
+    const ready = await (o.prepare ?? prepareReviewer)(o.reviewer);
+    if (!ready.ok) {
+      if (!ready.silent) o.onFail(ready.message);
+      return false;
+    }
+    if (o.stillCurrent && !o.stillCurrent()) return false;
+    if (o.beforeSend && !(await o.beforeSend())) return false;
+    const attempt = async (): Promise<boolean> => {
+      const sent = await sendRereview(o.planner, o.path, o.reviewer, o.plan, o.send);
+      if (!sent.ok) {
+        o.onFail(sent.message, o.beforeSend ? attempt : undefined);
+        return false;
+      }
+      o.onSent?.();
+      return true;
+    };
+    return await attempt();
+  } finally {
+    o.lock.held = false;
   }
-  await o.beforeSend?.();
-  const sent = await sendRereview(o.planner, o.path, o.reviewer, o.send);
-  if (!sent.ok) {
-    o.onFail(sent.message);
-    return false;
-  }
-  o.onSent?.();
-  return true;
 }

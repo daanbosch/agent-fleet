@@ -95,9 +95,10 @@ export const mirror = {
   "plan.review_again": "{name} で再レビュー",
   "plan.review_again_title":
     "プランを却下し、以前レビューした {name} に改訂版を送ります。停止中なら再開します。作業中のレビュアーには、そのターンが終わってから届きます",
+  "plan.review_again_retry": "もう一度送る",
   "plan.review_again_failed": "{name} にプランを送れませんでした：{err}",
   "plan.review_again_prompt":
-    "計画を改訂しました。もう一度レビューしてください。\n\n- 計画: {path}（読むだけ。編集しないでください）\n\n前回の指摘と見比べてください。計画側が妥当な理由で残した点は、再び指摘しないでください。\n形式は前回と同じ（判定 / 指摘）で、send_to_peer_session で {session} に送ってください。",
+    "計画を改訂しました（改訂 {rev}）。もう一度レビューしてください。\n\n- 計画: {path}（読むだけ。編集しないでください）\n\n前回の指摘と見比べてください。計画側が妥当な理由で残した点は、再び指摘しないでください。\n形式は前回と同じ（判定 / 指摘）で、send_to_peer_session で {session} に送ってください。",
   "plan.review_title": "レビュー: {title}",
   "plan.review_prompt_head":
     "セッション {session} が利用者に提示した作業計画のレビューを依頼されました（利用者が Console から起動しています）。",

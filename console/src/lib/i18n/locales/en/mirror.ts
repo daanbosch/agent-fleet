@@ -89,9 +89,10 @@ export const mirror: Record<keyof typeof jaMirror, string> = {
   "plan.review_again": "Review again in {name}",
   "plan.review_again_title":
     "Reject the plan and send the revised plan to {name}, which reviewed it before. A stopped session is resumed; a reviewer that is mid-turn gets the message when its turn ends.",
+  "plan.review_again_retry": "Send again",
   "plan.review_again_failed": "Could not send the plan to {name}: {err}",
   "plan.review_again_prompt":
-    "The plan was revised. Review it again.\n\n- Plan: {path} (read it; do not edit it)\n\nCompare it with your earlier findings. Do not re-raise items the planner kept with a sound reason.\nAnswer in the same format as before (Verdict / Findings), sent to {session} with send_to_peer_session.",
+    "The plan was revised (revision {rev}). Review it again.\n\n- Plan: {path} (read it; do not edit it)\n\nCompare it with your earlier findings. Do not re-raise items the planner kept with a sound reason.\nAnswer in the same format as before (Verdict / Findings), sent to {session} with send_to_peer_session.",
   "plan.review_title": "Review: {title}",
   "plan.review_prompt_head":
     "You have been asked to review the plan session {session} proposed to its user (started from the Console by that user).",

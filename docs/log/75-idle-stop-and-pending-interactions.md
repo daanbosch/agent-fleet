@@ -660,3 +660,7 @@ session" on the live and the carried plan card. It resumes a stopped reviewer, t
 `question` peer message through `POST /input` (`peer_from` = the planner) carrying the unchanged
 path; the live card rejects the planner first, the carried card is discarded only after the send.
 No Agent or Control Plane change.
+Review round (2026-10-16): the follow-up carries a revision id (the Agent drops an identical body
+to the same target for 2 minutes), a press holds a per-card lock, a failed interrupt stops the
+send, a send that fails after the reject offers a retry in the toast, and the reviewer memory
+follows `storage` events and merges onto storage on write.

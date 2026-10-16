@@ -56,4 +56,10 @@ describe("carried plan card", () => {
     await act(async () => again()!.click());
     expect(fn).toHaveBeenCalledWith("# P\n\nbody");
   });
+  it("disables every button of the card while a review-again is in flight", async () => {
+    await mount(<CarriedBlock {...props} onReviewPlan={async () => {}} onReviewPlanAgain={async () => {}} reviewAgainName="R" busy />);
+    const buttons = [...host.querySelectorAll<HTMLButtonElement>("button")].filter((b) => !b.classList.contains("mt-plan-open")); // expand/collapse is read-only
+    expect(buttons.length).toBeGreaterThan(2);
+    expect(buttons.filter((b) => !b.disabled).map((b) => b.className + b.textContent)).toEqual([]);
+  });
 });

@@ -32,6 +32,7 @@ export function CarriedBlock({
   onReviewPlan,
   onReviewPlanAgain,
   reviewAgainName,
+  busy,
   translate,
 }: {
   carried: CarriedInteraction;
@@ -48,6 +49,8 @@ export function CarriedBlock({
    *  only set while that session still exists). Discards this card after the send succeeded. */
   onReviewPlanAgain?: (plan: string) => Promise<void>;
   reviewAgainName?: string;
+  /** A review-again is in flight: every button of the card waits for it. */
+  busy?: boolean;
   translate?: TranscriptTranslateWiring;
 }) {
   const [sending, setSending] = useState(false);
@@ -118,11 +121,11 @@ export function CarriedBlock({
               rows={2}
               placeholder={tr("mirror.carried_plan_feedback_ph")}
               value={feedback}
-              disabled={sending}
+              disabled={sending || !!busy}
               onChange={(e) => setFeedback(e.target.value)}
             />
             <div className="mq-submit-row mq-footer">
-              <button type="button" className="ghost" disabled={sending} onClick={() => void send({ decision: "discard" })}>
+              <button type="button" className="ghost" disabled={sending || !!busy} onClick={() => void send({ decision: "discard" })}>
                 <Icon name="close" /> {tr("mirror.carried_discard")}
               </button>
               {/* No interrupt or reject first (unlike the live plan card): there is no modal
@@ -132,7 +135,7 @@ export function CarriedBlock({
                 <button
                   type="button"
                   className="ghost mt-plan-review"
-                  disabled={sending}
+                  disabled={sending || !!busy}
                   title={tr("mirror.carried_plan_review_title")}
                   onClick={() => void onReviewPlan(carried.plan!)}
                 >
@@ -143,7 +146,7 @@ export function CarriedBlock({
                 <button
                   type="button"
                   className="ghost mt-plan-review-again"
-                  disabled={sending}
+                  disabled={sending || !!busy}
                   title={tr("mirror.carried_plan_review_again_title", { name: reviewAgainName })}
                   onClick={() => void onReviewPlanAgain(carried.plan!)}
                 >
@@ -153,7 +156,7 @@ export function CarriedBlock({
               <button
                 type="button"
                 className="ghost"
-                disabled={sending}
+                disabled={sending || !!busy}
                 onClick={() => void send({ decision: "reject", feedback })}
               >
                 {tr("mirror.carried_plan_reject")}
@@ -164,7 +167,7 @@ export function CarriedBlock({
               <button
                 type="button"
                 className="btn primary"
-                disabled={sending}
+                disabled={sending || !!busy}
                 onClick={() => {
                   if (!window.confirm(tr("mirror.carried_plan_approve_confirm"))) return;
                   void send({ decision: "approve", feedback });
@@ -182,10 +185,10 @@ export function CarriedBlock({
                 action. */}
             <div className="mt-perm-msg">{carried.permission}</div>
             <div className="mq-submit-row mq-footer">
-              <button type="button" className="ghost" disabled={sending} onClick={() => void send({ decision: "discard" })}>
+              <button type="button" className="ghost" disabled={sending || !!busy} onClick={() => void send({ decision: "discard" })}>
                 <Icon name="close" /> {tr("mirror.carried_discard")}
               </button>
-              <button type="button" className="btn primary" disabled={sending} onClick={() => void send({ decision: "continue" })}>
+              <button type="button" className="btn primary" disabled={sending || !!busy} onClick={() => void send({ decision: "continue" })}>
                 {tr("mirror.carried_continue")}
               </button>
             </div>
