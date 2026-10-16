@@ -361,9 +361,9 @@ RUN if [ "${BAKE_RTK}" = "1" ] && [ "${BAKE_AGENT_CLIS}" = "1" ]; then set -eux;
 # 換えて再ビルド → 各 Workspace を Stop→Start。latest の確認は `npm view <pkg> version`。
 # 未ピン時代は同一 RUN 行が Docker レイヤキャッシュに当たり、再ビルドしても古い版の
 # ままになる罠があった（ピン止めなら ARG 変更が確実にキャッシュを破る）。
-ARG CLAUDE_CODE_VERSION=2.1.300
-ARG OPENCODE_VERSION=2.0.29
-ARG CODEX_VERSION=0.162.1
+ARG CLAUDE_CODE_VERSION=2.1.301
+ARG OPENCODE_VERSION=2.0.30
+ARG CODEX_VERSION=0.163.0
 ARG COPILOT_VERSION=1.0.98
 # opencode's npm package follows the pin's major: `opencode-ai` for 1.x, `@opencode/cli` for
 # 2.x (which also installs an `opencode2` bin). The pin has been 2.x since the v2 cut-over
@@ -396,10 +396,10 @@ ENV COPILOT_AUTO_UPDATE=false
 # 当てるのと同じ OPENSSL_ia32cap マスクで検証する（0008 の 2026-09-07 決定）ので、
 # --version 検証を飛ばすのは x86 以外のビルドホストだけ（arm64 のクロスビルドは
 # バイナリを走らせられるとは限らない）。
-ARG AGY_VERSION=1.3.5
-ARG AGY_RELEASE_BUILD=6164039479459840
-ARG AGY_SHA256_X64=007a5a44dbaf1caea464c3d9848c63b2f69945b01a8bf8852c56c477a64374cf
-ARG AGY_SHA256_ARM64=065505ab4686ec7113b7ccd87fce87795a8fd4b7776f771da4d53940206e34cc
+ARG AGY_VERSION=1.3.6
+ARG AGY_RELEASE_BUILD=5068262057312256
+ARG AGY_SHA256_X64=e88ed835cbc4af504f64dfe20175f5572dc2a425dbfa2fcf55c0358bb444d80c
+ARG AGY_SHA256_ARM64=0e11472f376e2943c6f812280dea49b204acc3be15794c6604a46972c5995b12
 RUN if [ "${BAKE_AGENT_CLIS}" = "1" ]; then set -eux; \
       arch="$(dpkg --print-architecture)"; \
       case "$arch" in \
@@ -505,9 +505,9 @@ ARG KIRO_SHA256_ARM64=d8b1e47bee2e5950b437aa85b347989d15b5fb41883b70f8c17ee2e361
 # MUSE_VERSION と両 arch の sha を揃えて書き換え）。実測 362,440,920 B / 323,360,856 B（1.4.1-R4503.1）。
 # ⚠️ 版文字列は `Muse Code 1.3.0 (1.3.0-R3401.1)`＝**括弧内のビルド id** がピンと突合する値。
 # agy の `tr -dc '0-9.'` 流儀だと `-R3401.1` が落ちて毎回不一致になる（install_muse.go）。
-ARG MUSE_VERSION=1.4.8-R6256.1
-ARG MUSE_SHA256_X64=416eaa520e6bf98c7d67f8d2772a2464d41839c1cb7a75d299845400f484fd4b
-ARG MUSE_SHA256_ARM64=592aabe306186794e05d9329ccef7d49116abf0a8bcbc1e07703d22ef1b34f3a
+ARG MUSE_VERSION=1.4.9-R6297.1
+ARG MUSE_SHA256_X64=a228010021276e112aa8422eb56ae82c0375405701950f6529bed4c9fe8abe05
+ARG MUSE_SHA256_ARM64=d64c61f4357b246fb46ab4f01332b36066bb4ac17541a88f520680354a32e06a
 # Postgres供給ピン（ADR 0086 P0 供給レーン）: Zonky embedded-postgres 17.11.0 jar のハッシュ。
 # sha256 は `curl -sfL <jar-url> | sha256sum` で確認した値。
 # 他メジャー（16/17/18）は install-postgres が Maven Central の .sha256 サイドカーで動的に取得する。
