@@ -285,9 +285,12 @@ func (a devIdPAPI) askConsent(w http.ResponseWriter, r *http.Request, cc devIdPC
 	}
 	noStore(w)
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	// The page is a click target: refuse framing so it cannot be clicked through.
+	// The page is a click target: refuse framing so it cannot be clicked through. No form-action:
+	// Chromium applies it to the 302 that follows the POST too, so 'self' would block the return
+	// to the app on its preview host (measured in headless Chromium). The page has no script and
+	// the form's own action is fixed in the template.
 	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = devIdPConsentTmpl.Execute(w, data)
 }
@@ -403,6 +406,18 @@ func (a devIdPAPI) consent(w http.ResponseWriter, r *http.Request) {
 		profile = devIdPPersonaProfile(p)
 	}
 	a.issueCode(w, r, cc, ident, mv.MembershipID, req, profile)
+}
+
+// personaSubUsable re-checks a persona-shaped subject just before it is signed or served: the
+// claims were fixed into the code at consent time, and a real member with that address may have
+// appeared in the minute since. Anything that is not a persona subject passes; a persona subject
+// whose handle is malformed, whose address is now a real person's, or whose check failed does not.
+func (m *manager) personaSubUsable(ctx context.Context, sub string) (bool, error) {
+	h, ok := strings.CutPrefix(sub, devIdPPersonaPrefix)
+	if !ok {
+		return true, nil
+	}
+	return m.personaUsable(ctx, store.DevIdPPersona{Handle: h})
 }
 
 // personaAuditDetail names the persona in the token audit row, or "" for a real member.

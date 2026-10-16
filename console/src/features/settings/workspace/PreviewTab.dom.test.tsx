@@ -488,4 +488,45 @@ describe("test personas editor", () => {
     expect(apiJSON).toHaveBeenCalledWith(`${PATH}/id-admin`, "DELETE");
     expect(host!.textContent).not.toContain("admin@example.test");
   });
+
+  it("blocks edits while the first load is out, so a late list cannot wipe an add", async () => {
+    let release!: (v: unknown) => void;
+    api.mockImplementation((path: string) =>
+      path === PATH ? new Promise((r) => (release = r)) : Promise.resolve({ ...wsSettings(), devIdpAvailable: true, devIdp: true }),
+    );
+    const { PreviewTab } = await freshModule();
+    await mount(<PreviewTab />);
+    await type(await inputByLabel("env.persona_handle"), "viewer");
+    expect((await btn("env.persona_add")).disabled).toBe(true); // GET still out
+    await act(async () => (await btn("env.persona_add")).click());
+    expect(apiJSON).not.toHaveBeenCalled();
+    await act(async () => release({ personas: [persona("admin")], domain: "example.test" }));
+    expect((await btn("env.persona_add")).disabled).toBe(false);
+    expect(host!.textContent).toContain("admin@example.test");
+  });
+
+  it("serialises edits: a second click while one is out does nothing, and a late answer is not lost", async () => {
+    serve([]);
+    let release!: (v: unknown) => void;
+    apiJSON.mockImplementation(() => new Promise((r) => (release = r)));
+    const { PreviewTab } = await freshModule();
+    await mount(<PreviewTab />);
+    await type(await inputByLabel("env.persona_handle"), "viewer");
+    await act(async () => (await btn("env.persona_add")).click());
+    await act(async () => (await btn("env.persona_add")).click());
+    expect(apiJSON).toHaveBeenCalledTimes(1);
+    await act(async () => release({ personas: [persona("viewer")], domain: "example.test" }));
+    expect(host!.textContent).toContain("viewer@example.test");
+  });
+
+  it("frees the editor and reports it when a request fails outright", async () => {
+    serve([]);
+    apiJSON.mockRejectedValue(new Error("network"));
+    const { PreviewTab } = await freshModule();
+    await mount(<PreviewTab />);
+    await type(await inputByLabel("env.persona_handle"), "viewer");
+    await act(async () => (await btn("env.persona_add")).click());
+    expect(toastSpy).toHaveBeenCalled();
+    expect((await btn("env.persona_add")).disabled).toBe(false);
+  });
 });

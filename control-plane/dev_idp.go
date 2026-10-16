@@ -429,6 +429,16 @@ func (a devIdPAPI) token(w http.ResponseWriter, r *http.Request) {
 		tokenError(w, http.StatusBadRequest, "invalid_grant", "this sign-in is no longer permitted")
 		return
 	}
+	// A persona fixed into the code at consent time is checked again now (decision 9: a real
+	// member's address is refused at use, not only at consent).
+	if ok, err := a.mgr.personaSubUsable(ctx, devIdPParseProfile(grant.Claims).Sub); err != nil {
+		log.Printf("dev idp: persona check: %v", err)
+		tokenError(w, http.StatusInternalServerError, "server_error", "could not check the persona")
+		return
+	} else if !ok {
+		tokenError(w, http.StatusBadRequest, "invalid_grant", "that persona is not usable")
+		return
+	}
 	signer, err := a.keys.signer(ctx)
 	if err != nil {
 		log.Printf("dev idp: signing key: %v", err)
@@ -518,6 +528,10 @@ func (a devIdPAPI) userinfo(w http.ResponseWriter, r *http.Request) {
 	}
 	grant, ok, err := a.mgr.store.GetDevIdPAccess(ctx, devIdPHash(tok), a.now().Unix())
 	if err != nil || !ok {
+		deny()
+		return
+	}
+	if ok, err := a.mgr.personaSubUsable(ctx, devIdPParseProfile(grant.Claims).Sub); err != nil || !ok {
 		deny()
 		return
 	}

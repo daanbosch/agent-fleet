@@ -423,6 +423,11 @@ func TestDevIdPConsentPageEscapesAndRefusesFraming(t *testing.T) {
 		h.Get("Cache-Control") != "no-store" || h.Get("Referrer-Policy") != "no-referrer" {
 		t.Errorf("consent page headers: %v", h)
 	}
+	// Chromium applies form-action to the redirect after the POST, so any value here that does not
+	// list the app's origin blocks the return to the app (measured in headless Chromium).
+	if strings.Contains(h.Get("Content-Security-Policy"), "form-action") {
+		t.Errorf("CSP has form-action, which blocks the post-POST redirect to the app: %s", h.Get("Content-Security-Policy"))
+	}
 }
 
 func TestDevIdPConsentIsNotServedOnAPreviewHost(t *testing.T) {
@@ -483,5 +488,42 @@ func TestDevIdPPersonasGoWithTheWorkspace(t *testing.T) {
 	}
 	if list, _ := d.mgr.store.ListDevIdPPersonas(ctx, d.ws.ID); len(list) != 0 {
 		t.Errorf("personas outlived the workspace: %v", list)
+	}
+}
+
+func TestDevIdPPersonaCollisionAfterTheCodeWasIssuedIsRefusedAtToken(t *testing.T) {
+	d := newDevIdPTestEnv(t)
+	d.addPersona(t, "later", "Later")
+	redirect := d.ownHost(3000) + "/cb"
+	issue := func() string {
+		_, ticket := d.askAs(t, "preview-user", d.authQuery(redirect, ""))
+		return codeFrom(t, d.postConsent("preview-user", url.Values{"ticket": {ticket}, "choice": {d.personaID(t, "later")}}, nil))
+	}
+	// A token issued while the address is free works, and its access token is served...
+	tok := d.exchange(issue(), redirect, "")
+	if tok.Code != http.StatusOK {
+		t.Fatalf("baseline: %d %s", tok.Code, tok.Body)
+	}
+	access := idpJSON(t, tok)["access_token"].(string)
+	userinfo := func() int {
+		req := httptest.NewRequest(http.MethodGet, "https://af.example.com"+devIdPUserinfoPath, nil)
+		req.Header.Set("Authorization", "Bearer "+access)
+		rec := httptest.NewRecorder()
+		d.mux.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if userinfo() != http.StatusOK {
+		t.Fatal("baseline userinfo")
+	}
+	// ...then a real member takes the address after the code was issued (the 60 s window).
+	code := issue()
+	if _, err := d.mgr.store.UpsertIdentity(context.Background(), "later@example.test", "later-user", ""); err != nil {
+		t.Fatal(err)
+	}
+	if rec := d.exchange(code, redirect, ""); rec.Code == http.StatusOK || strings.Contains(rec.Body.String(), "id_token") {
+		t.Errorf("a persona token was signed for a real member's address: %d %s", rec.Code, rec.Body)
+	}
+	if userinfo() != http.StatusUnauthorized {
+		t.Error("userinfo kept serving a persona that now collides with a real member")
 	}
 }

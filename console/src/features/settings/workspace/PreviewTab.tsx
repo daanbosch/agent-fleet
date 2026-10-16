@@ -14,7 +14,7 @@
 //
 // The i18n keys stay `env.preview_*`: a key is an identifier, not a location, so moving the
 // UI is not a reason to rewrite every one of them.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useToast } from "../../../ui/ToastProvider.tsx";
 import { useConfirm } from "../../../ui/ConfirmProvider.tsx";
 import { api, apiJSON, errText } from "../../../core/api/client.ts";
@@ -349,42 +349,60 @@ function PersonaEditor() {
   const [handle, setHandle] = useState("");
   const [name, setName] = useState("");
   const [domain, setDomain] = useState("example.test");
+  const [busy, setBusy] = useState(false);
+  // Every request takes a number when it starts and only the newest may write the list: a slow
+  // first load answering after an add must not wipe what the add just showed.
+  const latest = useRef(0);
+  const alive = useRef(true);
+  useEffect(
+    () => () => {
+      alive.current = false;
+    },
+    [],
+  );
 
-  const take = (res: any) => {
-    if (res && !res.error) {
-      setList(res.personas || []);
-      if (res.domain) setDomain(res.domain);
-      return true;
+  // run sends one request and applies its answer if no newer request was started meanwhile.
+  // Returns whether the server accepted it. Failure of any kind clears busy and says why.
+  const run = async (send: () => Promise<any>): Promise<boolean> => {
+    const mine = ++latest.current;
+    setBusy(true);
+    try {
+      const res = await send();
+      if (!alive.current) return false;
+      if (res && !res.error) {
+        if (mine === latest.current) {
+          setList(res.personas || []);
+          if (res.domain) setDomain(res.domain);
+        }
+        return true;
+      }
+      const why = res?.error ? errText(res.error) : "";
+      toast(why ? `${tr("common.save_failed")}: ${why}` : tr("common.save_failed"));
+      return false;
+    } catch {
+      if (alive.current) toast(tr("common.save_failed"));
+      return false;
+    } finally {
+      if (alive.current && mine === latest.current) setBusy(false);
     }
-    const why = res?.error ? errText(res.error) : "";
-    toast(why ? `${tr("common.save_failed")}: ${why}` : tr("common.save_failed"));
-    return false;
   };
 
   useEffect(() => {
-    let cancelled = false;
-    void api("api/env/ws-settings/dev-idp/personas").then(
-      (res: any) => {
-        if (!cancelled && res && !res.error) take(res);
-      },
-      () => {},
-    );
-    return () => {
-      cancelled = true;
-    };
+    void run(() => api("api/env/ws-settings/dev-idp/personas"));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const add = async () => {
     const h = handle.trim();
-    if (!h) return;
-    if (take(await apiJSON("api/env/ws-settings/dev-idp/personas", "POST", { handle: h, name: name.trim() }))) {
+    if (!h || busy) return;
+    if (await run(() => apiJSON("api/env/ws-settings/dev-idp/personas", "POST", { handle: h, name: name.trim() }))) {
       setHandle("");
       setName("");
     }
   };
   const remove = async (id: string) => {
-    take(await apiJSON(`api/env/ws-settings/dev-idp/personas/${encodeURIComponent(id)}`, "DELETE"));
+    if (busy) return;
+    await run(() => apiJSON(`api/env/ws-settings/dev-idp/personas/${encodeURIComponent(id)}`, "DELETE"));
   };
 
   return (
@@ -394,7 +412,7 @@ function PersonaEditor() {
       {(list || []).map((p) => (
         <Row key={p.id} label={p.name || p.handle}>
           <code className="ds-note">{p.email}</code> <code className="ds-note">{p.sub}</code>{" "}
-          <button className="ghost" onClick={() => void remove(p.id)} aria-label={`${tr("env.persona_remove")}: ${p.handle}`}>
+          <button className="ghost" disabled={busy} onClick={() => void remove(p.id)} aria-label={`${tr("env.persona_remove")}: ${p.handle}`}>
             {tr("env.persona_remove")}
           </button>
         </Row>
@@ -417,7 +435,7 @@ function PersonaEditor() {
           aria-label={tr("env.persona_name")}
           maxLength={64}
         />{" "}
-        <button className="ghost" onClick={() => void add()} disabled={!handle.trim()}>
+        <button className="ghost" onClick={() => void add()} disabled={!handle.trim() || busy}>
           {tr("env.persona_add")}
         </button>
       </Row>
