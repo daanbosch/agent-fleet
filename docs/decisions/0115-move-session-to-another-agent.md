@@ -361,6 +361,12 @@ it is not yet.
     a running turn, and a source with a running turn cannot be moved (11.2). `accept` no longer
     runs the pump on the caller's goroutine, since the caller holds a lease and a second one
     taken there would be a nested take.
+- Releasing the lease there is early for the state check: the runtime's own record (copilot's
+  `events.jsonl`, opencode's store, muse's `turn/started`) can still show the previous turn's idle
+  when the queue no longer holds the entry. So `beginSessionMove` also asks the Managed handle,
+  under the exclusive gate, whether it holds an entry it took and has not settled
+  (`ManagedInFlight`; entries still queued do not count), and refuses the source as `working`
+  if so.
 - A pump the gate refuses leaves its entry queued and starts again on `lifegate.Reopen`; a meta
   it cannot read makes it look again after a second.
 - `POST /sessions/{name}/settings` holds the lease and refuses a moving or moved source with

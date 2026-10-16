@@ -117,6 +117,15 @@ var moveSourceState = func(m session.Meta) (state, blocker string) {
 	return DriveState(m, SessionAlive(m), false), promptBlocker(m.Name)
 }
 
+// moveSourceInFlight reports that the source's Managed handle has a turn in flight that its state
+// may not show yet. A pump releases its lease once the runtime has the input, and the runtime's
+// own record (copilot's events.jsonl, opencode's store, muse's turn/started) can lag that; in the
+// gap DriveState still reads the previous turn's idle while the queue no longer holds the entry,
+// so a move would leave it out of the handover and the source would still run it.
+var moveSourceInFlight = func(m session.Meta) bool {
+	return m.DriverKind() == session.DriverManaged && managedInFlight(m)
+}
+
 // movableSourceState lists the states a move may start from. idle, limited and spendLimit are
 // ADR 0115's; stopped is added because a source parked at its limit for days is usually stopped
 // by the idle reaper by then, and a stopped session can start nothing either (a stopped Managed
@@ -187,6 +196,9 @@ func beginSessionMove(ctx context.Context, source, target string) (*sourceMove, 
 	}
 	if !movableSourceState(state) {
 		return nil, &moveStateError{Session: source, State: state}
+	}
+	if moveSourceInFlight(m) {
+		return nil, &moveStateError{Session: source, State: "working"}
 	}
 	// Checked and atomic: after a restart the meta is the only record that input is closed, so the
 	// in-memory mirror is closed, and success returned, only once moving is on disk. The same holds

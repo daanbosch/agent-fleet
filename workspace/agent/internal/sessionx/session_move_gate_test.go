@@ -412,6 +412,38 @@ func TestBeginRefusesWhatCannotMove(t *testing.T) {
 	}
 }
 
+// A source whose state still reads idle while its handle has an entry in flight (the pump gave
+// its lease back once the runtime had the input, before the runtime's own record shows the turn)
+// is refused as working, and the refusal changes nothing. What the drivers report in that window
+// is pinned by each driver's TestPump...BeforeAMove.
+func TestBeginRefusesASourceWithAnEntryInFlight(t *testing.T) {
+	_, m := moveEnv(t, "mvinflight")
+	prev := moveSourceInFlight
+	t.Cleanup(func() { moveSourceInFlight = prev })
+	inFlight := true
+	moveSourceInFlight = func(got session.Meta) bool { return got.Name == m.Name && inFlight }
+
+	var se *moveStateError
+	if _, err := beginSessionMove(context.Background(), m.Name, "mvinflight-t"); !errors.As(err, &se) || se.State != "working" {
+		t.Fatalf("source with an entry in flight: %v, want refused as working", err)
+	}
+	if cur, _ := session.ReadMeta(m.Name); cur.Moving != "" || cur.MovedTo != "" {
+		t.Fatalf("meta after the refusal = moving %q movedTo %q, want neither", cur.Moving, cur.MovedTo)
+	}
+	if lifegate.Closed(m.Name) {
+		t.Fatal("the refused move left input closed")
+	}
+
+	inFlight = false // the turn settled: the same source can move now
+	mv, err := beginSessionMove(context.Background(), m.Name, "mvinflight-t")
+	if err != nil {
+		t.Fatalf("source with nothing in flight: %v", err)
+	}
+	if err := mv.rollback(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A sweep that read its ListMetas before the move closed input must not book from that stale
 // snapshot: the gate re-reads the meta.
 func TestRateLimitTickFromAStaleSnapshotBooksNothing(t *testing.T) {

@@ -32,6 +32,14 @@ func TestPumpSendsBeforeAMoveOrLeavesTheEntryQueued(t *testing.T) {
 	h := newTestHandle(t, srv)
 	h.name = "oc-move-1"
 	t.Cleanup(func() { lifegate.Reopen(h.name) }) // the gate's memory is process-wide
+	handlesMu.Lock()
+	handles[h.name] = h // where ManagedInFlight looks
+	handlesMu.Unlock()
+	t.Cleanup(func() {
+		handlesMu.Lock()
+		delete(handles, h.name)
+		handlesMu.Unlock()
+	})
 	// Runs before newTestHandle's wait for the pump: a failed assertion must not leave the pump
 	// parked in waitIdle or in a turn serve never ends.
 	t.Cleanup(func() { endForeignTurn(m); endTurn(m) })
@@ -68,6 +76,12 @@ func TestPumpSendsBeforeAMoveOrLeavesTheEntryQueued(t *testing.T) {
 		t.Fatal("the pump kept its lease past /message; a running turn must not hold a move off")
 	}
 	waitTurns(t, m, 1)
+	// The runtime has the input, but its own record (and so DriveState) may not show the turn
+	// yet: the move's state check has to see it in flight here, or it would start.
+	if !ManagedInFlight(h.name) {
+		x.Unlock()
+		t.Fatal("the writer was admitted with the entry out of the queue, but ManagedInFlight says nothing is in flight")
+	}
 	x.SetClosed("oc-move-1-target", false)
 	x.Unlock()
 
@@ -96,4 +110,7 @@ func TestPumpSendsBeforeAMoveOrLeavesTheEntryQueued(t *testing.T) {
 		t.Fatalf("turns = %s, want one then two, each once", got)
 	}
 	waitState(t, h, agents.TurnCompleted)
+	if ManagedInFlight(h.name) {
+		t.Error("ManagedInFlight still reports an entry after the queue drained")
+	}
 }

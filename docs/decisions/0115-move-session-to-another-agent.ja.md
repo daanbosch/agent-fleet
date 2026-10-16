@@ -319,6 +319,11 @@ develop（2026-10-15）の `Agent.Transcript`／`claude.CollectAllTurns` を読�
     持っていることを意味し、実行中のターンがある元セッションは移動できない（11.2）。呼び出し元が
     リースを持っており、そこでもう一つ取ると入れ子になるため、`accept` は呼び出し元の goroutine で
     ポンプを回さなくなった。
+- この時点でのリースの解放は状態の判定には早い。キューが項目を手放した後も、ランタイム自身の記録
+  （copilot の `events.jsonl`、opencode のストア、muse の `turn/started`）は前のターンの idle を示して
+  いることがある。そこで `beginSessionMove` は排他ゲートの下で Managed のハンドルにも、取り出して
+  まだ決着していない項目を持っているか（`ManagedInFlight`。キューに残る項目は数えない）を尋ね、
+  持っていれば元を `working` として拒否する。
 - ゲートに拒否されたポンプは項目をキューに残したまま止まり、`lifegate.Reopen` で再び動く。メタが
   読めないときは 1 秒後に見直す。
 - `POST /sessions/{name}/settings` はリースを取り、移動中・移動済みの元を `session_moved` で拒否する。

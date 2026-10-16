@@ -19,6 +19,14 @@ func TestPumpCommitsBeforeAMoveOrLeavesTheEntryQueued(t *testing.T) {
 	h, f := newTestHandle(t)
 	h.name = "copilot-move-1"
 	t.Cleanup(func() { lifegate.Reopen(h.name) }) // the gate's memory is process-wide
+	handlesMu.Lock()
+	handles[h.name] = h // where ManagedInFlight looks
+	handlesMu.Unlock()
+	t.Cleanup(func() {
+		handlesMu.Lock()
+		delete(handles, h.name)
+		handlesMu.Unlock()
+	})
 
 	taken, rel := holdAtCommit(h)
 	var once sync.Once
@@ -69,6 +77,12 @@ func TestPumpCommitsBeforeAMoveOrLeavesTheEntryQueued(t *testing.T) {
 	case <-time.After(hangGuard):
 		t.Fatal("the pump kept its lease past the handover; a running turn must not hold a move off")
 	}
+	// The runtime has the input, but its own record (and so DriveState) may not show the turn
+	// yet: the move's state check has to see it in flight here, or it would start.
+	if !ManagedInFlight(h.name) {
+		x.Unlock()
+		t.Fatal("the writer was admitted with the entry out of the queue, but ManagedInFlight says nothing is in flight")
+	}
 	x.SetClosed("copilot-move-1-target", false)
 	x.Unlock()
 
@@ -90,5 +104,8 @@ func TestPumpCommitsBeforeAMoveOrLeavesTheEntryQueued(t *testing.T) {
 	waitPumpIdle(t, h)
 	if st := h.currentState(); st != agents.TurnCompleted {
 		t.Errorf("state = %s, want completed", st)
+	}
+	if ManagedInFlight(h.name) {
+		t.Error("ManagedInFlight still reports an entry after the queue drained")
 	}
 }

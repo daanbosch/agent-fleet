@@ -65,6 +65,12 @@ func TestPumpStartsBeforeAMoveOrLeavesTheEntryQueued(t *testing.T) {
 	case <-time.After(waitBackstop):
 		t.Fatal("the pump kept its lease past turn/start; a running turn must not hold a move off")
 	}
+	// The runtime has the input, but its own record (and so DriveState) may not show the turn
+	// yet: the move's state check has to see it in flight here, or it would start.
+	if !ManagedInFlight(h.name) {
+		x.Unlock()
+		t.Fatal("the writer was admitted with the entry out of the queue, but ManagedInFlight says nothing is in flight")
+	}
 	x.SetClosed("codex-move-1-target", false)
 	x.Unlock()
 
@@ -91,5 +97,8 @@ func TestPumpStartsBeforeAMoveOrLeavesTheEntryQueued(t *testing.T) {
 	waitPumpDone(t, h)
 	if got := fmt.Sprint(sentTurns(m)); got != "[one two]" {
 		t.Fatalf("turns = %s, want one then two, each once", got)
+	}
+	if ManagedInFlight(h.name) {
+		t.Error("ManagedInFlight still reports an entry after the queue drained")
 	}
 }

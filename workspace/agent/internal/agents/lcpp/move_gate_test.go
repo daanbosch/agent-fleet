@@ -55,6 +55,12 @@ func TestPumpStoresBeforeAMoveOrLeavesTheEntryQueued(t *testing.T) {
 	case <-time.After(hangGuard):
 		t.Fatal("the pump kept its lease past the store; a running turn must not hold a move off")
 	}
+	// The runtime has the input, but its own record (and so DriveState) may not show the turn
+	// yet: the move's state check has to see it in flight here, or it would start.
+	if !ManagedInFlight(h.name) {
+		x.Unlock()
+		t.Fatal("the writer was admitted with the entry out of the queue, but ManagedInFlight says nothing is in flight")
+	}
 	x.SetClosed("lcpp-move-1-target", false)
 	x.Unlock()
 
@@ -78,5 +84,8 @@ func TestPumpStoresBeforeAMoveOrLeavesTheEntryQueued(t *testing.T) {
 	}
 	if got := c.seen(); !equal(got, []string{"one", "two"}) {
 		t.Fatalf("engine saw %q, want one then two, each once", got)
+	}
+	if ManagedInFlight(h.name) {
+		t.Error("ManagedInFlight still reports an entry after the queue drained")
 	}
 }

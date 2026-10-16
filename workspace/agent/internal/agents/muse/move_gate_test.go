@@ -22,6 +22,14 @@ func TestPumpStartsBeforeAMoveOrLeavesTheEntryQueued(t *testing.T) {
 	h := &threadHandle{name: "muse-move-1"}
 	host := newTestHandle(t, h)
 	t.Cleanup(func() { lifegate.Reopen(h.name) }) // the gate's memory is process-wide
+	handlesMu.Lock()
+	handles[h.name] = h // where ManagedInFlight looks
+	handlesMu.Unlock()
+	t.Cleanup(func() {
+		handlesMu.Lock()
+		delete(handles, h.name)
+		handlesMu.Unlock()
+	})
 
 	// turn/start answers at once until hold is armed; then it waits for the test.
 	var mu sync.Mutex
@@ -91,6 +99,12 @@ func TestPumpStartsBeforeAMoveOrLeavesTheEntryQueued(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the pump kept its lease past turn/start; a running turn must not hold a move off")
 	}
+	// The runtime has the input, but its own record (and so DriveState) may not show the turn
+	// yet: the move's state check has to see it in flight here, or it would start.
+	if !ManagedInFlight(h.name) {
+		x.Unlock()
+		t.Fatal("the writer was admitted with the entry out of the queue, but ManagedInFlight says nothing is in flight")
+	}
 	x.SetClosed("muse-move-1-target", false)
 	x.Unlock()
 
@@ -121,5 +135,8 @@ func TestPumpStartsBeforeAMoveOrLeavesTheEntryQueued(t *testing.T) {
 	noStart(t, starts, "a second start of the parked entry")
 	if !settled(h) {
 		t.Fatal("the queue is not settled after the reopened entry ran")
+	}
+	if ManagedInFlight(h.name) {
+		t.Error("ManagedInFlight still reports an entry after the queue drained")
 	}
 }

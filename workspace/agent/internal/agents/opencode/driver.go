@@ -331,6 +331,21 @@ func ManagedBusy(name string) bool {
 	return h.running || h.tq().Len() > 0
 }
 
+// ManagedInFlight reports that the handle holds an entry it took from the queue and has not
+// settled. The pump gives its move-gate lease back once the runtime has the input, which can be
+// before the runtime's own record (and so DriveState) shows the turn; a move asks this, under the
+// exclusive gate, so it never starts in that window (ADR 0115 decision 11.2). Entries still
+// queued do not count: the move carries them.
+func ManagedInFlight(name string) bool {
+	h := handleFor(name)
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.running || h.tq().Head() != nil
+}
+
 // AbortManaged interrupts every running managed turn — the managed counterpart of
 // graceful shutdown's per-pane Ctrl-C (docs/log/27 §10.2-8). It takes the same path as
 // ThreadHandle.Interrupt, so once the abort lands the turn goroutine records cancelled
