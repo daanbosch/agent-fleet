@@ -103,4 +103,17 @@ describe("DevIdpAdminView", () => {
     expect(text()).toContain("super_admin required");
     expect(box().checked).toBe(true);
   });
+
+  it("reports a lost response and re-reads the real state", async () => {
+    api.mockResolvedValueOnce(status()).mockResolvedValueOnce(status({ enabled: false, setting: false }));
+    apiJSON.mockRejectedValue(new TypeError("network"));
+    await mount();
+    await act(async () => {
+      box().click();
+    });
+    expect(api).toHaveBeenCalledTimes(2); // the reload
+    expect(box().checked).toBe(false); // the server had applied it
+    expect(host!.querySelectorAll(".form-err").length).toBeGreaterThan(1); // warning + the error
+    expect(box().disabled).toBe(false); // not stuck busy
+  });
 });

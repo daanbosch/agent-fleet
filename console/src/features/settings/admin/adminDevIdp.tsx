@@ -51,6 +51,10 @@ export function DevIdpAdminView() {
       }
       setErr("");
       setData(d as DevIdpStatus);
+    } catch {
+      // A lost response may still have applied the change: say so, then show the real state.
+      await load();
+      setErr(tr("admin.devidp_save_error"));
     } finally {
       setBusy(false);
     }

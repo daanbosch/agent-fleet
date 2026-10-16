@@ -30,6 +30,7 @@ export const admin: Record<keyof typeof jaAdmin, string> = {
   "admin.devidp_no_base_url": "PUBLIC_BASE_URL is not set, so there is no Console address to serve the IdP from. Set it and restart the Control Plane.",
   "admin.devidp_issuer": "Issuer",
   "admin.devidp_opted_in": "Workspaces opted in: {n}",
+  "admin.devidp_save_error": "Could not confirm the change. The state shown is what the server reports now.",
   "admin.brand_title": "This deployment's colour and name",
   "admin.brand_note": "Ship the same image to several environments and every tab and every home-screen icon looks identical. A colour and a label tell them apart through the favicon, the PWA icon and the app name. Cosmetic only: nothing about access or data depends on it.",
   "admin.brand_color": "Colour",

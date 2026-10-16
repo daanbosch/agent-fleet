@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -52,29 +53,44 @@ func (c *devIdPSwitch) invalidate() {
 	c.mu.Unlock()
 }
 
-// devIdPStored is the admin's choice, true when none was made. An unreadable store answers
-// an error and is never cached.
+// errDevIdPSwitchStale: the read finished after a flip, or after the cache window had already
+// run out, so its answer cannot be trusted and is neither returned nor cached.
+var errDevIdPSwitchStale = errors.New("dev idp: the deployment switch read was stale")
+
+// devIdPStored is the admin's choice, true when none was made. The window is measured from
+// when the read STARTED: a slow read must not extend how long an old "on" is believed. A
+// read that crossed an invalidate or outlived the window is retried once, then fails; an
+// unreadable store answers an error. None of those is cached.
 func (m *manager) devIdPStored(ctx context.Context) (bool, error) {
 	c := &m.devIdPSw
-	c.mu.Lock()
-	if c.ok && c.clock().Sub(c.at) < devIdPSwitchTTL {
-		on := c.on
+	for try := 0; try < 2; try++ {
+		c.mu.Lock()
+		start := c.clock()
+		if c.ok && start.Sub(c.at) < devIdPSwitchTTL {
+			on := c.on
+			c.mu.Unlock()
+			return on, nil
+		}
+		gen := c.gen
 		c.mu.Unlock()
-		return on, nil
+		rctx, cancel := context.WithTimeout(ctx, devIdPSwitchTTL)
+		v, err := m.store.GetSetting(rctx, devIdPSettingKey)
+		cancel()
+		if err != nil {
+			return false, err
+		}
+		on := strings.TrimSpace(v) != "off"
+		c.mu.Lock()
+		fresh := c.gen == gen && c.clock().Sub(start) < devIdPSwitchTTL
+		if fresh {
+			c.on, c.at, c.ok = on, start, true
+		}
+		c.mu.Unlock()
+		if fresh {
+			return on, nil
+		}
 	}
-	gen := c.gen
-	c.mu.Unlock()
-	v, err := m.store.GetSetting(ctx, devIdPSettingKey)
-	if err != nil {
-		return false, err
-	}
-	on := strings.TrimSpace(v) != "off"
-	c.mu.Lock()
-	if c.gen == gen {
-		c.on, c.at, c.ok = on, c.clock(), true
-	}
-	c.mu.Unlock()
-	return on, nil
+	return false, errDevIdPSwitchStale
 }
 
 // devIdPEnabled is the deployment switch in force. When in doubt — no store, a failed

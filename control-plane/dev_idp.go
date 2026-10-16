@@ -446,12 +446,19 @@ func (a devIdPAPI) token(w http.ResponseWriter, r *http.Request) {
 		tokenError(w, http.StatusInternalServerError, "server_error", "no signing key")
 		return
 	}
+	// The gate passed some reads ago; a switch flipped since must not sign anything. An empty
+	// issuer here means off, a failed read or a read too slow to trust.
+	iss := a.mgr.devIdPIssuer(ctx)
+	if iss == "" {
+		http.NotFound(w, r)
+		return
+	}
 	access := "afdevtok-" + devIdPRandom(32)
 	atHash := sha256.Sum256([]byte(access))
 	profile := devIdPParseProfile(grant.Claims)
 	idToken, err := signer.sign(devIdPIDToken{
 		devIdPProfile: profile,
-		Iss:           a.mgr.devIdPIssuer(ctx), Aud: cc.row.ClientID, Azp: cc.row.ClientID,
+		Iss:           iss, Aud: cc.row.ClientID, Azp: cc.row.ClientID,
 		Iat: now.Unix(), Exp: now.Add(devIdPTokenTTL).Unix(),
 		AtHash: devIdPB64.EncodeToString(atHash[:16]), Nonce: grant.Nonce, AfDev: true,
 	})
@@ -483,6 +490,11 @@ func (a devIdPAPI) token(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("dev idp: store access token: %v", err)
 		tokenError(w, http.StatusInternalServerError, "server_error", "could not issue a token")
+		return
+	}
+	// Audit and store may have waited: check once more right before the credentials leave.
+	if a.mgr.devIdPIssuer(ctx) == "" {
+		http.NotFound(w, r)
 		return
 	}
 	noStore(w)

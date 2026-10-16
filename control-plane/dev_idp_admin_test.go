@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -174,20 +176,157 @@ func TestDevIdPCacheWindowIsBoundedForARemoteOff(t *testing.T) {
 	}
 }
 
-// A read that began before a PUT must not write its old answer back over the invalidation.
+// idpStoreHook injects faults and pauses into the calls the switch and the token endpoint make.
+type idpStoreHook struct {
+	store.Store
+	getSetting    func(ctx context.Context, key string) (string, error)
+	insertAudit   func(ctx context.Context, a store.AuditLog) error
+	getClientByID func(ctx context.Context, id string) (store.DevIdPClient, bool, error)
+}
+
+func (h *idpStoreHook) GetSetting(ctx context.Context, key string) (string, error) {
+	if h.getSetting != nil {
+		return h.getSetting(ctx, key)
+	}
+	return h.Store.GetSetting(ctx, key)
+}
+
+func (h *idpStoreHook) InsertAudit(ctx context.Context, a store.AuditLog) error {
+	if h.insertAudit != nil {
+		return h.insertAudit(ctx, a)
+	}
+	return h.Store.InsertAudit(ctx, a)
+}
+
+func (h *idpStoreHook) GetDevIdPClientByID(ctx context.Context, id string) (store.DevIdPClient, bool, error) {
+	if h.getClientByID != nil {
+		return h.getClientByID(ctx, id)
+	}
+	return h.Store.GetDevIdPClientByID(ctx, id)
+}
+
+func hookStore(d *devIdPTestEnv) (*idpStoreHook, store.Store) {
+	real := d.mgr.store
+	h := &idpStoreHook{Store: real}
+	d.mgr.store = h
+	return h, real
+}
+
+// A read that began before a local PUT returns its old "on" afterwards. It must neither be
+// handed to the caller nor written back over the invalidation.
 func TestDevIdPInvalidateBeatsAnInFlightRead(t *testing.T) {
 	d := newDevIdPTestEnv(t)
-	m := d.mgr
-	m.devIdPSw.invalidate()
-	m.devIdPSw.mu.Lock()
-	gen := m.devIdPSw.gen
-	m.devIdPSw.mu.Unlock()
-	m.devIdPSw.invalidate() // the PUT lands while the reader is between "read" and "store"
-	m.devIdPSw.mu.Lock()
-	if m.devIdPSw.gen == gen {
-		t.Error("invalidate did not advance the generation")
+	h, real := hookStore(d)
+	d.mgr.devIdPSw.invalidate()
+	read, release := make(chan struct{}), make(chan struct{})
+	var paused atomic.Bool
+	h.getSetting = func(ctx context.Context, key string) (string, error) {
+		v, err := real.GetSetting(ctx, key) // the old value
+		if paused.CompareAndSwap(false, true) { // only the first read pauses
+			close(read)
+			<-release
+		}
+		return v, err
 	}
-	m.devIdPSw.mu.Unlock()
+	res := make(chan bool, 1)
+	go func() { on, _ := d.mgr.devIdPStored(context.Background()); res <- on }()
+	<-read
+	if rec, s := devIdPAdminPut(t, devIdPAdminAPI{memberAuth{d.mgr}}, `{"enabled":false}`); rec.Code != http.StatusOK || s.Enabled {
+		t.Fatalf("PUT off = %d %+v", rec.Code, s)
+	}
+	close(release)
+	if on := <-res; on {
+		t.Error("the in-flight read returned its stale on")
+	}
+	if got := discoveryCode(d, t); got != http.StatusNotFound {
+		t.Errorf("discovery after the PUT = %d, want 404 (the stale read re-filled the cache)", got)
+	}
+}
+
+// A read that returns late with an old "on" (another replica flipped meanwhile) is not
+// believed for a fresh window: the window runs from when the read started.
+func TestDevIdPSlowReadDoesNotExtendAStaleOn(t *testing.T) {
+	d := newDevIdPTestEnv(t)
+	h, real := hookStore(d)
+	clock := time.Now()
+	d.mgr.devIdPSw.now = func() time.Time { return clock }
+	d.mgr.devIdPSw.invalidate()
+	first := true
+	h.getSetting = func(ctx context.Context, key string) (string, error) {
+		v, err := real.GetSetting(ctx, key)
+		if first {
+			first = false
+			_ = real.SetSetting(ctx, key, "off") // flipped elsewhere while this read was slow
+			clock = clock.Add(devIdPSwitchTTL + time.Second)
+		}
+		return v, err
+	}
+	if got := discoveryCode(d, t); got != http.StatusNotFound {
+		t.Errorf("discovery after a slow stale read = %d, want 404", got)
+	}
+	clock = clock.Add(devIdPSwitchTTL - time.Millisecond)
+	if got := discoveryCode(d, t); got != http.StatusNotFound {
+		t.Errorf("a stale on was cached: %d", got)
+	}
+}
+
+// A switch that fails to read answers off at every gate, never on a guess.
+func TestDevIdPFailsClosedWhenTheSwitchCannotBeRead(t *testing.T) {
+	d := newDevIdPTestEnv(t)
+	h, _ := hookStore(d)
+	d.mgr.devIdPSw.invalidate()
+	h.getSetting = func(context.Context, string) (string, error) { return "", errors.New("db down") }
+	for _, p := range []string{devIdPDiscoveryPath, devIdPJWKSPath, devIdPAuthorizePath, devIdPTokenPath, devIdPUserinfoPath} {
+		if got := d.console(t, "https://af.example.com"+p).Code; got != http.StatusNotFound {
+			t.Errorf("%s with an unreadable switch = %d, want 404", p, got)
+		}
+	}
+	if iss := d.mgr.devIdPIssuer(context.Background()); iss != "" {
+		t.Errorf("issuer = %q", iss)
+	}
+	wsPut := httptest.NewRecorder()
+	d.mux.ServeHTTP(wsPut, httptest.NewRequest(http.MethodPut, "https://af.example.com/api/env/ws-settings", strings.NewReader(`{"devIdp":false}`)))
+	// Turning the workspace off is allowed; turning it on is a 409.
+	on := httptest.NewRecorder()
+	d.mux.ServeHTTP(on, httptest.NewRequest(http.MethodPut, "https://af.example.com/api/env/ws-settings", strings.NewReader(`{"devIdp":true}`)))
+	if on.Code != http.StatusConflict {
+		t.Errorf("opt-in with an unreadable switch = %d, want 409", on.Code)
+	}
+}
+
+// The deployment goes off after the gate let a valid code in: no token may come out.
+func TestDevIdPTokenIsRefusedWhenTheSwitchFlipsMidRequest(t *testing.T) {
+	d := newDevIdPTestEnv(t)
+	redirect := d.ownHost(3000) + "/api/auth/callback/google"
+	verifier, challenge := pkcePair()
+	code := codeFrom(t, d.authorizeAs(t, "preview-user", d.authQuery(redirect, challenge)))
+	h, real := hookStore(d)
+	h.getClientByID = func(ctx context.Context, id string) (store.DevIdPClient, bool, error) {
+		c, ok, err := real.GetDevIdPClientByID(ctx, id)
+		setDevIdPDeployment(t, d.mgr, false) // flipped between the gate and the signing
+		return c, ok, err
+	}
+	rec := d.exchange(code, redirect, verifier)
+	if rec.Code == http.StatusOK || strings.Contains(rec.Body.String(), "access_token") {
+		t.Fatalf("token issued after the switch went off: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// Audit comes first: when it cannot be written nothing changes and the answer is 503.
+func TestDevIdPAdminPutIsRefusedWhenTheAuditCannotBeWritten(t *testing.T) {
+	d := newDevIdPTestEnv(t)
+	h, real := hookStore(d)
+	h.insertAudit = func(context.Context, store.AuditLog) error { return errors.New("audit down") }
+	rec, _ := devIdPAdminPut(t, devIdPAdminAPI{memberAuth{d.mgr}}, `{"enabled":false}`)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("PUT with the audit down = %d, want 503", rec.Code)
+	}
+	if v, _ := real.GetSetting(context.Background(), devIdPSettingKey); v != "" {
+		t.Errorf("the setting was written without an audit row: %q", v)
+	}
+	if got := discoveryCode(d, t); got != http.StatusOK {
+		t.Errorf("discovery = %d after a refused PUT", got)
+	}
 }
 
 // AF_DEV_IDP=0 wins over a stored "on", the API says so, and a PUT cannot change it.

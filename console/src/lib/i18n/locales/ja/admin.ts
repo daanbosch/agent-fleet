@@ -28,6 +28,7 @@ export const admin = {
   "admin.devidp_no_base_url": "PUBLIC_BASE_URL が未設定のため、IdP を置く Console のアドレスがありません。設定して Control Plane を再起動してください。",
   "admin.devidp_issuer": "Issuer",
   "admin.devidp_opted_in": "オプトイン中のワークスペース: {n}",
+  "admin.devidp_save_error": "変更を確認できませんでした。表示しているのは、いまサーバーが返した状態です。",
   "admin.brand_title": "この配備の色と名前",
   "admin.brand_note": "同じイメージを複数の環境に配ると、タブもスマホのホーム画面も同じアイコンになります。色とラベルを設定すると、favicon・PWA アイコン・アプリ名で見分けられます。表示だけの設定で、権限やデータには影響しません。",
   "admin.brand_color": "色",
