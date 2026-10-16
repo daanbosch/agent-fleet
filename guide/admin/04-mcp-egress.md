@@ -405,6 +405,22 @@ the allowlist → enforce**.
   whether it was **allowed / blocked / a block candidate**. Clearing the block candidates while
   still in log-only is what makes the switch to enforce uneventful.
 
+## Development sign-in (dev OIDC IdP — super_admin only)
+
+The **Dev sign-in** section of the Admin modal switches the Control Plane's development OIDC IdP
+(ADR 0116) for the whole deployment. **It is on by default** and super_admin only, so it does not
+appear in your tenant settings. Members still opt in per workspace; this is only the deployment's
+yes or no.
+
+- The section shows the issuer, how many workspaces have opted in, and the one rule that matters:
+  **a production app must never trust this issuer**, because it signs in as any member without a
+  password.
+- Turning it off takes effect without a restart (another Control Plane replica follows within a few
+  seconds): every `/dev-idp/…` URL answers 404. **Workspace opt-ins are kept**, so turning it on
+  again hands the same client ids and secrets back.
+- It shows as locked when the operator set `AF_DEV_IDP=0`, and cannot be on without
+  `PUBLIC_BASE_URL`; the section says which one applies. Every change is audited (`dev_idp.set`).
+
 ## A template for asking upstream
 
 For anything outside a tenant_admin's permission, ask the super_admin / IT. Include these three

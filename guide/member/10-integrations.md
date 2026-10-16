@@ -151,8 +151,9 @@ Where the deployment turns it on, the Control Plane can stand in for Google **du
 server of its own at `https://<console>/dev-idp`. Your app changes **configuration only** (issuer, client id,
 client secret); no code, and nothing to register in the Google Cloud console.
 
-- **Availability**: the operator sets `AF_DEV_IDP=1` on the Control Plane (ADR 0116); until then every
-  `/dev-idp/…` URL is a 404, and the switch below does not appear. **It is off per workspace too.** Turn it on
+- **Availability**: a deployment administrator can turn it off in the Admin modal, and the
+  operator can lock it off with `AF_DEV_IDP=0` (ADR 0116). It is on by default; while off, every
+  `/dev-idp/…` URL is a 404 and the switch below does not appear. **It is off per workspace too.** Turn it on
   under Settings › Preview subdomains › "Use the development OIDC IdP", then **stop and start the workspace**
   so the values below reach the container. The same screen shows the issuer, the discovery URL and the client
   id with copy buttons. The client secret is not shown there: read `AF_DEV_IDP_CLIENT_SECRET` inside the

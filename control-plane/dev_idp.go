@@ -7,8 +7,9 @@
 //	app server              ──► /dev-idp/token, /jwks, /userinfo       (server to server; no session)
 //
 // It never claims to be Google: the issuer is its own, every token carries `af_dev: true`, and
-// the audience is the one workspace's client id. Off unless the deployment sets AF_DEV_IDP and
-// the workspace opts in; while off, every route answers 404.
+// the audience is the one workspace's client id. Served while the deployment switch is on (on
+// unless a super admin turned it off or AF_DEV_IDP=0 locked it) and the workspace opts in; while
+// off, every route answers 404.
 //
 // The preview host serves none of this (ADR 0062 decision 8): those hostnames are relayed to
 // the user's app, so this code is reachable on the Console origin only.
@@ -69,7 +70,7 @@ func (a devIdPAPI) mount(mux *http.ServeMux) {
 // gate answers 404 while the deployment does not serve the IdP, then 405 for a wrong method.
 func (a devIdPAPI) gate(methods string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if a.mgr.devIdPIssuer() == "" {
+		if a.mgr.devIdPIssuer(r.Context()) == "" {
 			http.NotFound(w, r)
 			return
 		}
@@ -112,8 +113,8 @@ type devIdPDiscovery struct {
 	IssParameterSupported bool `json:"authorization_response_iss_parameter_supported"`
 }
 
-func (a devIdPAPI) discovery(w http.ResponseWriter, _ *http.Request) {
-	iss := a.mgr.devIdPIssuer()
+func (a devIdPAPI) discovery(w http.ResponseWriter, r *http.Request) {
+	iss := a.mgr.devIdPIssuer(r.Context())
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	writeJSON(w, http.StatusOK, devIdPDiscovery{
 		Issuer: iss, AuthorizationEndpoint: iss + "/authorize", TokenEndpoint: iss + "/token",
@@ -277,7 +278,7 @@ func (a devIdPAPI) redirectBack(w http.ResponseWriter, r *http.Request, redirect
 	if state != "" {
 		q.Set("state", state)
 	}
-	q.Set("iss", a.mgr.devIdPIssuer())
+	q.Set("iss", a.mgr.devIdPIssuer(r.Context()))
 	u.RawQuery = q.Encode()
 	noStore(w)
 	// The app's page may carry the code in Referer to whatever it loads next: the code is
@@ -450,7 +451,7 @@ func (a devIdPAPI) token(w http.ResponseWriter, r *http.Request) {
 	profile := devIdPParseProfile(grant.Claims)
 	idToken, err := signer.sign(devIdPIDToken{
 		devIdPProfile: profile,
-		Iss:           a.mgr.devIdPIssuer(), Aud: cc.row.ClientID, Azp: cc.row.ClientID,
+		Iss:           a.mgr.devIdPIssuer(ctx), Aud: cc.row.ClientID, Azp: cc.row.ClientID,
 		Iat: now.Unix(), Exp: now.Add(devIdPTokenTTL).Unix(),
 		AtHash: devIdPB64.EncodeToString(atHash[:16]), Nonce: grant.Nonce, AfDev: true,
 	})

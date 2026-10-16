@@ -54,6 +54,7 @@ func buildMux(cfg config) *http.ServeMux {
 	registerBrandAdminRoutes(mux, cfg)
 	registerTerminalPreviewRoutes(mux, cfg)
 	registerDevIdPRoutes(mux, cfg)
+	registerDevIdPAdminRoutes(mux, cfg)
 	registerLegacyRedirect(mux)
 	registerStatic(mux, cfg)
 	return mux

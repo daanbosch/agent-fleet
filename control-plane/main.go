@@ -281,7 +281,7 @@ func main() {
 	// mistyped setting charitably beats having the whole feature go dead.
 	mgr.githubBuiltinOff = githubBuiltinOffFromEnv(os.Getenv("AF_GITHUB_BUILTIN_APPS"))
 	mgr.previewDomain = strings.ToLower(strings.Trim(strings.TrimSpace(os.Getenv("AF_PREVIEW_DOMAIN")), "."))
-	mgr.devIdPOn = envBool("AF_DEV_IDP", false)
+	mgr.devIdPEnvOff = !envBool("AF_DEV_IDP", true)
 	cfg := config{
 		addr:          envx.Or("CP_ADDR", ":8080"),
 		consoleDir:    envx.Or("CONSOLE_DIR", "./console"),
@@ -567,11 +567,16 @@ func main() {
 	}
 	// Development OIDC IdP (ADR 0116): say plainly what this deployment serves, because an
 	// identity provider that mints tokens for any signed-in member must never be on by accident.
-	if mgr.devIdPOn {
-		if iss := mgr.devIdPIssuer(); iss != "" {
-			log.Printf("WARNING: AF_DEV_IDP is on — serving a development OIDC IdP at %s (workspaces opt in individually; never trust this issuer in production)", iss)
+	switch {
+	case mgr.devIdPEnvOff:
+		log.Printf("development OIDC IdP: locked off by AF_DEV_IDP=0 (the admin setting is ignored)")
+	case cfg.publicBaseURL == "":
+		log.Printf("WARNING: PUBLIC_BASE_URL is not set — the development OIDC IdP has no Console origin to live on and stays off")
+	default:
+		if iss := mgr.devIdPIssuer(context.Background()); iss != "" {
+			log.Printf("WARNING: serving a development OIDC IdP at %s until a super admin turns it off in the admin modal (workspaces opt in individually; never trust this issuer in production)", iss)
 		} else {
-			log.Printf("WARNING: AF_DEV_IDP is set without PUBLIC_BASE_URL — the development OIDC IdP has no Console origin to live on and stays off")
+			log.Printf("development OIDC IdP: turned off in the admin modal")
 		}
 	}
 	// withClientIP is OUTERMOST on purpose: it is the only place the forwarding

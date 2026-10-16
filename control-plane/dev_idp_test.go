@@ -50,7 +50,6 @@ func (d *devIdPTestEnv) advance(by time.Duration) {
 func newDevIdPTestEnv(t *testing.T) *devIdPTestEnv {
 	t.Helper()
 	e := newPreviewHostEnv(t, "http://127.0.0.1:1")
-	e.mgr.devIdPOn = true
 	e.mgr.master32 = bytes.Repeat([]byte{7}, 32)
 	e.mgr.custodian = newLocalCustodian(e.mgr.master32)
 	d := &devIdPTestEnv{previewHostEnv: e, clock: time.Now()}
@@ -326,7 +325,7 @@ func TestDevIdPDiscoveryDocument(t *testing.T) {
 
 func TestDevIdPDisabledIsA404Everywhere(t *testing.T) {
 	d := newDevIdPTestEnv(t)
-	d.mgr.devIdPOn = false
+	setDevIdPDeployment(t, d.mgr, false)
 	for _, p := range []string{devIdPDiscoveryPath, devIdPJWKSPath, devIdPAuthorizePath, devIdPTokenPath, devIdPUserinfoPath} {
 		for _, m := range []string{http.MethodGet, http.MethodPost, http.MethodPut} {
 			rec := httptest.NewRecorder()
@@ -364,15 +363,22 @@ func TestDevIdPNeedsTheWorkspaceToOptIn(t *testing.T) {
 }
 
 func TestDevIdPOptInRefusedWhereTheDeploymentDoesNotServeIt(t *testing.T) {
-	e := newPreviewHostEnv(t, "http://127.0.0.1:1")
-	rec := httptest.NewRecorder()
-	e.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "https://af.example.com/api/env/ws-settings", strings.NewReader(`{"devIdp":true}`)))
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("PUT devIdp on a deployment without AF_DEV_IDP: %d %s, want 409", rec.Code, rec.Body)
-	}
-	raw, _ := e.mgr.store.GetWorkspaceSettings(context.Background(), e.ws.ID)
-	if parseWSSettings(raw).DevIdP {
-		t.Error("the refused opt-in was stored")
+	for name, off := range map[string]func(*testing.T, *previewHostEnv){
+		"switched off": func(t *testing.T, e *previewHostEnv) { setDevIdPDeployment(t, e.mgr, false) },
+		"locked":       func(_ *testing.T, e *previewHostEnv) { e.mgr.devIdPEnvOff = true },
+		"no base URL":  func(_ *testing.T, e *previewHostEnv) { e.mgr.publicBaseURL = "" },
+	} {
+		e := newPreviewHostEnv(t, "http://127.0.0.1:1")
+		off(t, e)
+		rec := httptest.NewRecorder()
+		e.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "https://af.example.com/api/env/ws-settings", strings.NewReader(`{"devIdp":true}`)))
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("%s: PUT devIdp on a deployment that does not serve the IdP: %d %s, want 409", name, rec.Code, rec.Body)
+		}
+		raw, _ := e.mgr.store.GetWorkspaceSettings(context.Background(), e.ws.ID)
+		if parseWSSettings(raw).DevIdP {
+			t.Errorf("%s: the refused opt-in was stored", name)
+		}
 	}
 }
 
@@ -994,6 +1000,8 @@ func TestDevIdPReplayDuringTheFirstRedemptionLeavesNoLiveToken(t *testing.T) {
 func TestDevIdPDisabledIsA404BehindTheAuthGateToo(t *testing.T) {
 	cfg := oauthTestConfig(t)
 	cfg.mgr.publicBaseURL = "https://af.example.com"
+	cfg.mgr.store = brandTestStore(t)
+	setDevIdPDeployment(t, cfg.mgr, false)
 	mux := http.NewServeMux()
 	newDevIdPAPI(cfg).mount(mux)
 	gate := cfg.authGate(mux)
@@ -1009,7 +1017,7 @@ func TestDevIdPDisabledIsA404BehindTheAuthGateToo(t *testing.T) {
 		}
 	}
 	// Switched on, a signed-out visitor meets the login as before.
-	cfg.mgr.devIdPOn = true
+	setDevIdPDeployment(t, cfg.mgr, true)
 	req := httptest.NewRequest(http.MethodGet, "https://af.example.com"+devIdPAuthorizePath, nil)
 	req.Header.Set("Accept", "text/html")
 	rec := httptest.NewRecorder()

@@ -183,9 +183,11 @@ type manager struct {
 	// exists. Held here as well as on config because the container env injection
 	// (workspaceExtraEnv) has to name the URLs the app will be reachable at.
 	previewDomain string
-	// devIdPOn is AF_DEV_IDP: the deployment serves the development OIDC IdP (ADR 0116).
-	// Off by default; a workspace still has to opt in.
-	devIdPOn bool
+	// devIdPEnvOff is AF_DEV_IDP=0|false: the operator locks the development OIDC IdP off
+	// (ADR 0116) whatever the admin modal says. Unset or 1 leaves it to the stored switch,
+	// which is on when unset; a workspace still has to opt in.
+	devIdPEnvOff bool
+	devIdPSw     devIdPSwitch
 }
 
 // apiError carries an HTTP status + machine code for handlers to return.

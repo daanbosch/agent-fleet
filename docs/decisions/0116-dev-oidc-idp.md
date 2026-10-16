@@ -258,3 +258,23 @@ unchanged and these specifics. Decisions 1 to 9 and 11 stand as written.
   with no persona never sees the page, so existing setups behave as before.
 - Not verified: a real browser walk-through of the page and an Auth.js / Spring sign-in through it on a
   deployment with `AF_DEV_IDP` set.
+
+## Note (2026-10-16): the deployment switch is a setting, on by default (#2228)
+
+This supersedes the "deployment flag, … off by default" part of decision 3; the decision itself is
+left as written. Agent Fleet deployments are development environments, and an environment variable
+plus a restart before any member can use the IdP is the step that kept it unused.
+
+- The deployment switch is the `dev_idp` row of `deployment_setting` (`on` / `off`), set by a super
+  admin in the Admin modal (`GET` / `PUT /api/admin/dev-idp`, every PUT audited as `dev_idp.set`).
+  **No row means on.** There is no per-tenant gate.
+- `AF_DEV_IDP` keeps one meaning: `0` / `false` locks the IdP off whatever the row says (the modal
+  shows it locked). Unset or `1` leaves it to the row. `PUBLIC_BASE_URL` is still required.
+- Every reader (the `/dev-idp/*` handlers, `devIdpAvailable`, the 409 on storing `devIdp: true`, the
+  env injection at workspace start) asks per request. The answer is cached for 3 seconds and the
+  cache is dropped on PUT in the process that took it, so another replica follows within 3 seconds.
+  Off means every `/dev-idp/*` route is 404 exactly as in decision 3; an unreadable store answers off.
+- Workspace opt-ins and their client registrations are not touched when the switch goes off, so
+  turning it on again does not rotate any secret. The 409 rule stands: a workspace cannot store
+  `devIdp: true` while the deployment does not serve the IdP.
+- Not verified: a live run on a deployment (toggle in the modal, then an app signing in).

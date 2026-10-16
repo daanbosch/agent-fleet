@@ -76,6 +76,8 @@ type DevIdPStore interface {
 
 	GetDevIdPClient(ctx context.Context, workspaceID string) (DevIdPClient, bool, error)
 	GetDevIdPClientByID(ctx context.Context, clientID string) (DevIdPClient, bool, error)
+	// CountDevIdPClients is the number of workspaces registered, i.e. opted in.
+	CountDevIdPClients(ctx context.Context) (int, error)
 	// CreateDevIdPClient inserts the registration and reports false when the workspace
 	// already has one (the existing row stands).
 	CreateDevIdPClient(ctx context.Context, c DevIdPClient) (bool, error)
@@ -162,6 +164,12 @@ func (s *SQL) devIdPClient(ctx context.Context, where, arg string) (DevIdPClient
 		return DevIdPClient{}, false, nil
 	}
 	return c, err == nil, err
+}
+
+func (s *SQL) CountDevIdPClients(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM dev_idp_client`).Scan(&n)
+	return n, err
 }
 
 func (s *SQL) CreateDevIdPClient(ctx context.Context, c DevIdPClient) (bool, error) {
