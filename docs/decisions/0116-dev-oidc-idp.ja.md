@@ -199,3 +199,31 @@ openid-client（Auth.js）も Spring Security も既定が RS256 なので、提
 - 未計測：実際の Next.js（Auth.js）アプリと Spring Boot アプリをプレビューホストで動かしたサインイン、および
   ブラウザペインでの `127.0.0.1` 上の同じアプリ。テストは実ライブラリではなく、手書きの依存側（署名・issuer・
   audience・有効期限）でプロトコルを検証している。
+
+## 追記（2026-10-16）：ペルソナを実装した（#2223）
+
+決定 10 は初回の変更からペルソナを外していた。制約はそのままに、いま実装した。決定 1〜9 と 11 は書かれた
+とおり有効。
+
+- **定義。** ペルソナは `handle`（と任意の表示名）で、ワークスペースごとに保存する（`dev_idp_persona`、
+  マイグレーション `0102` / `0087`、ワークスペース＋handle で一意、最大 20 件）。handle は
+  `[a-z0-9][a-z0-9._-]{0,31}` に一致する必要があり、入力したままの綴りで保持する（大文字小文字や Unicode の
+  正規化はしない）ので、どんな綴りも別のアドレスにはならない。表示名は `name` クレームにしか出ない。
+  アドレスは `<handle>@example.test`、`sub` は `persona:<handle>`。そのアドレスが実在の identity やリンク済み
+  サインインのものなら、定義時と**使用時にも**拒否する（テスト用テナントが `x@example.test` を本当に持つことが
+  ありうる）。管理は `/api/env/ws-settings/dev-idp/personas`（GET / POST / `DELETE …/{id}`）、変更は
+  `workspace.dev_idp_persona` として監査し、Console のプレビュータブで編集する。
+- **同意画面。** `authorize` はこれまでどおり全てを検証した後、ワークスペースにペルソナが 1 つ以上あり、かつ
+  `prompt=none` でなければ、コードの代わりにページを返す。リクエストは `dev_idp_grant` の `consent` 行
+  （5 分・1 回限り）として預かり、そのランダムな id がフォームの ticket になる。フォームは `authGate` の内側の
+  `/dev-idp/consent` へ POST する。リダイレクト先・`state`・nonce・PKCE challenge は預かったリクエストから取り、
+  フォームからは取らない。ticket は表示したメンバーに結び付き、POST は ticket に触れる前に他サイトの `Origin` と
+  `same-origin` 以外の `Sec-Fetch-Site` を拒否し、メンバー・`redirect_uri` の規則・オプトインを改めて判定する。
+  他ワークスペースのペルソナ id は「存在しない」。ページは `frame-ancestors 'none'`・`no-store`・`no-referrer`
+  付きで返し、`html/template` でエスケープする。他の `/dev-idp` と同じく Console オリジンにだけ存在し
+  （0062 決定 8）、IdP が off の間は 404。
+- **`prompt=none`** は従来どおり本人として黙って通る。リクエストからペルソナを指名する方法はない。
+- **監査。** `workspace.dev_idp_token` の行に `sub="persona:…"` と `persona="<handle>"` が入る。
+- **変わらないもの：** `redirect_uri` の規則、PKCE、1 回限りのコード、`af_dev: true`、トークンの寿命。
+  ペルソナのないワークスペースは画面を見ないので、既存の構成の挙動は変わらない。
+- 未確認：実ブラウザでの画面の通し操作と、`AF_DEV_IDP` を有効にした環境での Auth.js / Spring のサインイン。

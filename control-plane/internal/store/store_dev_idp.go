@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 )
 
 // DevIdPKey is one RS256 signing key of the development OIDC IdP (ADR 0116). PrivateEnc is the
@@ -38,6 +39,19 @@ type DevIdPGrant struct {
 	RedirectURI, Challenge, Nonce, Scope, Claims                        string
 	ExpiresAt, UsedAt                                                   int64
 }
+
+// DevIdPGrantConsent is a pending consent: the authorize request the member has been asked to
+// decide on. It is single-use and short-lived, and its id is the CSRF token of the form.
+const DevIdPGrantConsent = "consent"
+
+// DevIdPPersona is a test identity defined for one workspace (ADR 0116, #2223).
+type DevIdPPersona struct {
+	ID, WorkspaceID, Handle, Name string
+	CreatedAt                     int64
+}
+
+// ErrDevIdPPersonaExists: the workspace already has a persona with that handle.
+var ErrDevIdPPersonaExists = errors.New("dev idp: persona handle already exists")
 
 // DevIdPCodeState is what ConsumeDevIdPCode found.
 type DevIdPCodeState int
@@ -76,6 +90,18 @@ type DevIdPStore interface {
 	// `until`, so the mark outlives every token it could have produced), is marked revoked, and
 	// the tokens already issued from it are deleted.
 	RevokeDevIdPCode(ctx context.Context, hash string, until int64) error
+
+	ListDevIdPPersonas(ctx context.Context, workspaceID string) ([]DevIdPPersona, error)
+	// GetDevIdPPersona is scoped to the workspace: another workspace's id is "not found".
+	GetDevIdPPersona(ctx context.Context, workspaceID, id string) (DevIdPPersona, bool, error)
+	// CreateDevIdPPersona returns ErrDevIdPPersonaExists on a duplicate handle.
+	CreateDevIdPPersona(ctx context.Context, p DevIdPPersona) error
+	DeleteDevIdPPersona(ctx context.Context, workspaceID, id string) (bool, error)
+	// DevIdPEmailTaken reports whether an address belongs to a real person (an identity or a
+	// linked sign-in), compared case-insensitively.
+	DevIdPEmailTaken(ctx context.Context, email string) (bool, error)
+	// ConsumeDevIdPConsent spends a pending consent exactly once.
+	ConsumeDevIdPConsent(ctx context.Context, hash string, now int64) (DevIdPGrant, bool, error)
 }
 
 func (s *SQL) ListDevIdPKeys(ctx context.Context) ([]DevIdPKey, error) {
@@ -244,4 +270,97 @@ func (s *SQL) RevokeDevIdPCode(ctx context.Context, hash string, until int64) er
 	}
 	_, err := s.db.ExecContext(ctx, `DELETE FROM dev_idp_grant WHERE parent=?`, hash)
 	return err
+}
+
+func (s *SQL) ListDevIdPPersonas(ctx context.Context, workspaceID string) ([]DevIdPPersona, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, workspace_id, handle, name, created_at FROM dev_idp_persona
+		 WHERE workspace_id=? ORDER BY handle`, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DevIdPPersona
+	for rows.Next() {
+		var p DevIdPPersona
+		if err := rows.Scan(&p.ID, &p.WorkspaceID, &p.Handle, &p.Name, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQL) GetDevIdPPersona(ctx context.Context, workspaceID, id string) (DevIdPPersona, bool, error) {
+	var p DevIdPPersona
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, workspace_id, handle, name, created_at FROM dev_idp_persona
+		 WHERE workspace_id=? AND id=?`, workspaceID, id).
+		Scan(&p.ID, &p.WorkspaceID, &p.Handle, &p.Name, &p.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DevIdPPersona{}, false, nil
+	}
+	return p, err == nil, err
+}
+
+func (s *SQL) CreateDevIdPPersona(ctx context.Context, p DevIdPPersona) error {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO dev_idp_persona(id, workspace_id, handle, name, created_at)
+		 VALUES(?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+		p.ID, p.WorkspaceID, p.Handle, p.Name, p.CreatedAt)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		if err != nil {
+			return err
+		}
+		return ErrDevIdPPersonaExists
+	}
+	return nil
+}
+
+func (s *SQL) DeleteDevIdPPersona(ctx context.Context, workspaceID, id string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM dev_idp_persona WHERE workspace_id=? AND id=?`, workspaceID, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+func (s *SQL) DevIdPEmailTaken(ctx context.Context, email string) (bool, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return false, nil
+	}
+	var one int
+	for _, q := range []string{
+		`SELECT 1 FROM identity WHERE LOWER(email)=? LIMIT 1`,
+		`SELECT 1 FROM identity_provider WHERE LOWER(email)=? LIMIT 1`,
+	} {
+		err := s.db.QueryRowContext(ctx, q, email).Scan(&one)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return false, err
+		}
+	}
+	return false, nil
+}
+
+func (s *SQL) ConsumeDevIdPConsent(ctx context.Context, hash string, now int64) (DevIdPGrant, bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE dev_idp_grant SET used_at=? WHERE hash=? AND kind=? AND used_at=0 AND expires_at>?`,
+		now, hash, DevIdPGrantConsent, now)
+	if err != nil {
+		return DevIdPGrant{}, false, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return DevIdPGrant{}, false, err
+	}
+	g, err := scanDevIdPGrant(s.db.QueryRowContext(ctx,
+		`SELECT `+devIdPGrantCols+` FROM dev_idp_grant WHERE hash=?`, hash))
+	return g, err == nil, err
 }

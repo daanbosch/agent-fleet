@@ -650,7 +650,7 @@ func (c config) authGate(next http.Handler) http.Handler {
 		// A deployment that does not serve the dev IdP answers 404 on every /dev-idp route
 		// (ADR 0116 decision 3), including authorize, which is otherwise inside this gate: a
 		// signed-out visitor must not be sent to the login page for a page that does not exist.
-		if r.URL.Path == devIdPAuthorizePath && c.mgr.devIdPIssuer() == "" {
+		if (r.URL.Path == devIdPAuthorizePath || r.URL.Path == devIdPConsentPath) && c.mgr.devIdPIssuer() == "" {
 			next.ServeHTTP(w, r)
 			return
 		}

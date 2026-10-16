@@ -415,3 +415,77 @@ describe("development OIDC IdP switch", () => {
     expect(text()).toContain("afdev_last");
   });
 });
+
+describe("test personas editor", () => {
+  const PATH = "api/env/ws-settings/dev-idp/personas";
+  const persona = (handle: string) => ({ id: "id-" + handle, handle, name: handle.toUpperCase(), email: `${handle}@example.test`, sub: `persona:${handle}` });
+  const serve = (personas: unknown[], extra: Record<string, unknown> = {}) =>
+    api.mockImplementation((path: string) =>
+      Promise.resolve(path === PATH ? { personas, max: 20, domain: "example.test" } : { ...wsSettings(), devIdpAvailable: true, devIdp: true, ...extra }),
+    );
+  const type = async (el: HTMLInputElement, v: string) =>
+    act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(el, v);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  const inputByLabel = async (key: "env.persona_handle" | "env.persona_name") => {
+    const { t } = await import("../../../lib/i18n/index.ts");
+    return host!.querySelector<HTMLInputElement>(`input[aria-label="${t(key)}"]`)!;
+  };
+  const btn = async (key: "env.persona_add" | "env.persona_remove") => {
+    const { t } = await import("../../../lib/i18n/index.ts");
+    return [...host!.querySelectorAll("button")].find((b) => b.textContent === t(key))!;
+  };
+
+  it("lists the personas with their derived address and sub", async () => {
+    serve([persona("admin")]);
+    const { PreviewTab } = await freshModule();
+    await mount(<PreviewTab />);
+    expect(host!.textContent).toContain("admin@example.test");
+    expect(host!.textContent).toContain("persona:admin");
+  });
+
+  it("is absent where the IdP is not available", async () => {
+    serve([], { devIdpAvailable: false, devIdp: false });
+    const { PreviewTab } = await freshModule();
+    await mount(<PreviewTab />);
+    const { t } = await import("../../../lib/i18n/index.ts");
+    expect(host!.textContent).not.toContain(t("env.persona_title"));
+    expect(api).not.toHaveBeenCalledWith(PATH);
+  });
+
+  it("adds a persona, clears the form and shows the answer", async () => {
+    serve([]);
+    apiJSON.mockResolvedValue({ personas: [persona("viewer")], domain: "example.test" });
+    const { PreviewTab } = await freshModule();
+    await mount(<PreviewTab />);
+    expect((await btn("env.persona_add")).disabled).toBe(true); // nothing typed yet
+    await type(await inputByLabel("env.persona_handle"), "viewer");
+    await type(await inputByLabel("env.persona_name"), "Viewer");
+    await act(async () => (await btn("env.persona_add")).click());
+    expect(apiJSON).toHaveBeenCalledWith(PATH, "POST", { handle: "viewer", name: "Viewer" });
+    expect(host!.textContent).toContain("viewer@example.test");
+    expect((await inputByLabel("env.persona_handle")).value).toBe("");
+  });
+
+  it("keeps the typed handle and says why when the server refuses it", async () => {
+    serve([]);
+    apiJSON.mockResolvedValue({ error: { code: "invalid_persona", message: "handle must be lower case" } });
+    const { PreviewTab } = await freshModule();
+    await mount(<PreviewTab />);
+    await type(await inputByLabel("env.persona_handle"), "Admin");
+    await act(async () => (await btn("env.persona_add")).click());
+    expect(toastSpy).toHaveBeenCalledWith(expect.stringContaining("handle must be lower case"));
+    expect((await inputByLabel("env.persona_handle")).value).toBe("Admin");
+  });
+
+  it("removes a persona", async () => {
+    serve([persona("admin")]);
+    apiJSON.mockResolvedValue({ personas: [], domain: "example.test" });
+    const { PreviewTab } = await freshModule();
+    await mount(<PreviewTab />);
+    await act(async () => (await btn("env.persona_remove")).click());
+    expect(apiJSON).toHaveBeenCalledWith(`${PATH}/id-admin`, "DELETE");
+    expect(host!.textContent).not.toContain("admin@example.test");
+  });
+});

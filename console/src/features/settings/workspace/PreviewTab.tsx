@@ -326,6 +326,101 @@ function DevIdpSection({ au, save }: { au: any; save: (patch: Record<string, unk
       <p className="muted ds-note">{tr("env.devidp_warn_prod")}</p>
       <p className="muted ds-note">{tr("env.devidp_warn_rotate")}</p>
       <p className="muted ds-note">{tr("env.devidp_warn_env")}</p>
+      <PersonaEditor />
+    </>
+  );
+}
+
+interface Persona {
+  id: string;
+  handle: string;
+  name: string;
+  email: string;
+  sub: string;
+}
+
+// Test personas (ADR 0116, #2223): extra identities the consent page offers next to the member
+// themself, for exercising role checks. Their own endpoint, not ws-settings, so a persona edit
+// never queues behind (or clobbers) a preview save.
+function PersonaEditor() {
+  const tr = useT();
+  const toast = useToast();
+  const [list, setList] = useState<Persona[] | null>(null);
+  const [handle, setHandle] = useState("");
+  const [name, setName] = useState("");
+  const [domain, setDomain] = useState("example.test");
+
+  const take = (res: any) => {
+    if (res && !res.error) {
+      setList(res.personas || []);
+      if (res.domain) setDomain(res.domain);
+      return true;
+    }
+    const why = res?.error ? errText(res.error) : "";
+    toast(why ? `${tr("common.save_failed")}: ${why}` : tr("common.save_failed"));
+    return false;
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    void api("api/env/ws-settings/dev-idp/personas").then(
+      (res: any) => {
+        if (!cancelled && res && !res.error) take(res);
+      },
+      () => {},
+    );
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const add = async () => {
+    const h = handle.trim();
+    if (!h) return;
+    if (take(await apiJSON("api/env/ws-settings/dev-idp/personas", "POST", { handle: h, name: name.trim() }))) {
+      setHandle("");
+      setName("");
+    }
+  };
+  const remove = async (id: string) => {
+    take(await apiJSON(`api/env/ws-settings/dev-idp/personas/${encodeURIComponent(id)}`, "DELETE"));
+  };
+
+  return (
+    <>
+      <h4 className="ds-title">{tr("env.persona_title")}</h4>
+      <p className="muted ds-note">{tr("env.persona_note", { domain })}</p>
+      {(list || []).map((p) => (
+        <Row key={p.id} label={p.name || p.handle}>
+          <code className="ds-note">{p.email}</code> <code className="ds-note">{p.sub}</code>{" "}
+          <button className="ghost" onClick={() => void remove(p.id)} aria-label={`${tr("env.persona_remove")}: ${p.handle}`}>
+            {tr("env.persona_remove")}
+          </button>
+        </Row>
+      ))}
+      <Row label={tr("env.persona_add_label")}>
+        <input
+          className="ds-select"
+          value={handle}
+          onChange={(e) => setHandle(e.target.value)}
+          placeholder={tr("env.persona_handle_ph")}
+          aria-label={tr("env.persona_handle")}
+          spellCheck={false}
+          maxLength={32}
+        />{" "}
+        <input
+          className="ds-select"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder={tr("env.persona_name_ph")}
+          aria-label={tr("env.persona_name")}
+          maxLength={64}
+        />{" "}
+        <button className="ghost" onClick={() => void add()} disabled={!handle.trim()}>
+          {tr("env.persona_add")}
+        </button>
+      </Row>
     </>
   );
 }

@@ -223,6 +223,12 @@ With `server.forward-headers-strategy=framework` (above) Spring builds the callb
 > the Console. Keep the settings in a profile or in variables that exist only in the workspace; every token also
 > carries `af_dev: true`, so a backend can refuse it.
 
+**Test personas.** To try role checks (admin, viewer, …) define personas under Settings › Preview subdomains ›
+"Test personas". Once the workspace has one, the sign-in shows a confirmation page where you pick yourself or a
+persona. A persona's address is always `<handle>@example.test` and its `sub` starts with `persona:`, so it can
+never be a real member; the token audit names the persona. A sign-in with `prompt=none` still passes silently as
+yourself, and a workspace with no persona never sees the page.
+
 Good to know: tokens last 10 minutes and the sign-in code 60 seconds. **Only sign-in is replaced**: you do not
 get Google API access tokens (Calendar, Drive, …), and there is no `picture`. Turning the option off removes the
 client; turning it on again issues a **new** client id and secret (that is how you rotate the secret). The

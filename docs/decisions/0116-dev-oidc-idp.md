@@ -226,3 +226,35 @@ account can mint any identity the Control Plane will vouch for. What stands in t
 - Not measured: sign-in of a real Next.js (Auth.js) app and a real Spring Boot app on a preview
   host, and the same app on `127.0.0.1` in the browser pane. The tests drive the protocol with a
   hand-written relying party (signature, issuer, audience, expiry), not the real libraries.
+
+## Note (2026-10-16): personas are now in (#2223)
+
+Decision 10 kept personas out of the first change; they are implemented now, with its constraints
+unchanged and these specifics. Decisions 1 to 9 and 11 stand as written.
+
+- **Definition.** A persona is a `handle` plus an optional display name, stored per workspace
+  (`dev_idp_persona`, migrations `0102` / `0087`, unique on workspace and handle, at most 20). The
+  handle must match `[a-z0-9][a-z0-9._-]{0,31}` and is kept exactly as typed, never case-folded or
+  Unicode-normalised, so no spelling can turn into another address. The display name reaches only the
+  `name` claim. The address is `<handle>@example.test` and `sub` is `persona:<handle>`. A handle whose
+  address belongs to a real identity or linked sign-in is refused when defined **and again when used**
+  (a test tenant may genuinely own `x@example.test`). Managed at
+  `/api/env/ws-settings/dev-idp/personas` (GET / POST / `DELETE …/{id}`), each change audited as
+  `workspace.dev_idp_persona`, and edited in the Console's Preview tab.
+- **Consent page.** `authorize` validates everything exactly as before; then, if the workspace has at
+  least one persona and the request is not `prompt=none`, it answers with a page instead of a code. The
+  request is parked as a `consent` row in `dev_idp_grant` (5 minutes, single use) whose random id is the
+  form's ticket. The form POSTs to `/dev-idp/consent` inside `authGate`; the redirect target, `state`,
+  nonce and PKCE challenge come from the parked request, never from the form. The ticket is bound to the
+  member it was shown to; the POST also refuses a foreign `Origin` or a `Sec-Fetch-Site` other than
+  `same-origin` before touching the ticket, and the member, the `redirect_uri` rules and the opt-in are
+  decided again. A persona id of another workspace is "no such persona". The page is sent with
+  `frame-ancestors 'none'`, `no-store` and `no-referrer`, and is escaped by `html/template`. Like every
+  `/dev-idp` route it exists on the Console origin only (0062 decision 8) and answers 404 while the IdP is off.
+- **`prompt=none`** keeps the silent behaviour as the member themself; nothing in the request can name a
+  persona there.
+- **Audit.** The `workspace.dev_idp_token` row carries `sub="persona:…"` and `persona="<handle>"`.
+- **Unchanged:** `redirect_uri` rules, PKCE, single-use codes, `af_dev: true`, token lifetimes. A workspace
+  with no persona never sees the page, so existing setups behave as before.
+- Not verified: a real browser walk-through of the page and an Auth.js / Spring sign-in through it on a
+  deployment with `AF_DEV_IDP` set.
