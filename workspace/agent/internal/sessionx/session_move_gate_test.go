@@ -864,3 +864,49 @@ func TestMoveTransitionsPersistBeforeTheyReturn(t *testing.T) {
 		t.Fatalf("after a failed begin = %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+// A booking refused while the meta cannot be read is still recorded as spent: the gate refused
+// it, so it is dead whichever state the move is in, and the rollback books it again.
+func TestRefusalDuringAMetaRewriteIsKept(t *testing.T) {
+	f := newRateLimitFixture(t)
+	now := time.Now()
+	_, m := moveEnv(t, "mvtorn")
+	setRateLimitPref(t, true)
+	spentEpisode(t, m.Name, now)
+	mv := mustBegin(t, beginAsync(m.Name, "mvtorn-target"))
+	p := session.MetaPath(m.Name)
+	saved, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(`{"name":`), 0o600); err != nil { // a rewrite caught half-done
+		t.Fatal(err)
+	}
+	assertMovedRefusal(t, postInput(t, m.Name, scheduleRefusal("sch_spent")), "mvtorn-target")
+	if err := os.WriteFile(p, saved, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mv.rollback(now); err != nil {
+		t.Fatal(err)
+	}
+	if st := stateOf(t, m.Name); f.scheduled != 1 || st.ScheduleID != "sch_test" {
+		t.Fatalf("booked %d, episode %+v; want the refused booking replaced", f.scheduled, st)
+	}
+}
+
+// A refusal recorded on a session that is open again without a rollback having repaired it is
+// repaired by the sweep.
+func TestSweepRepairsARecordedRefusalOnAnOpenSession(t *testing.T) {
+	f := newRateLimitFixture(t)
+	now := time.Now()
+	_, m := moveEnv(t, "mvsweepfix")
+	setRateLimitPref(t, true)
+	if err := RateLimitStates.Write(m.Name, rateLimitState{At: now.Add(-time.Hour).Format(time.RFC3339),
+		ResumeAt: now.Add(-time.Minute).Format(time.RFC3339), ScheduleID: "sch_spent", FiredDuringMove: "sch_spent"}); err != nil {
+		t.Fatal(err)
+	}
+	rateLimitTickSession(m, now)
+	if st := stateOf(t, m.Name); f.scheduled != 1 || st.ScheduleID != "sch_test" || st.FiredDuringMove != "" {
+		t.Fatalf("booked %d, episode %+v; want the refused booking replaced", f.scheduled, st)
+	}
+}

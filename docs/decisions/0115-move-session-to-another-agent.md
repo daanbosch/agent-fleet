@@ -341,3 +341,8 @@ it is not yet.
   messages are left to the move, which owns their order.
 - Only the cursor pump takes a lease of its own; the other Managed drivers' pumps are a
   follow-up.
+- A refused booking is recorded even when the meta cannot be read at that moment (it is read
+  under the meta lock first), and a sweep that finds a recorded refusal on an open session books
+  the resume again, so a record the rollback missed is not a dead id for good.
+- **Amendment to decision 11.2** (2026-10-16): the user accepted the start states above — a move
+  may also start from `stopped`, except a stopped Managed cursor source.

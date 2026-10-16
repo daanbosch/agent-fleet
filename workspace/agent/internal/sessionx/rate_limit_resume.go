@@ -189,6 +189,14 @@ func rateLimitTickSession(m session.Meta, now time.Time) {
 	episodeMu.Lock()
 	defer episodeMu.Unlock()
 	st, has := RateLimitStates.Read(m.Name)
+	if has && st.ScheduleID != "" && st.FiredDuringMove == st.ScheduleID {
+		// A booking a move refused, recorded on a session that is open again (the lease says so)
+		// without the rollback having repaired it: book it again here.
+		if cur, ok := session.ReadMeta(m.Name); ok {
+			rebookSpentRateLimitBooking(cur, st, now)
+		}
+		return
+	}
 	alive := SessionAlive(m)
 	if alive {
 		if NormalizeKind(m.Kind) == session.KindClaude && tmuxx.ReadPane(m.Name).RateLimitMenu {

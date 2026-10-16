@@ -85,11 +85,17 @@ func noteBookingRefusedDuringMove(name, source, scheduleID string, now time.Time
 	if !ok || st.ScheduleID != scheduleID {
 		return
 	}
-	m, ok := session.ReadMeta(name)
+	// Under the meta lock, so a rewrite by an ordinary writer is never read half-done. A meta
+	// that still cannot be read is taken as moving: the gate did refuse this booking, so it is
+	// spent either way, and if the move has in fact rolled back, the sweep repairs the record
+	// (rateLimitTickSession) — dropping it would leave the dead id in place for good.
+	var m session.Meta
+	ok = false
+	WithSessionMetaLock(func() { m, ok = session.ReadMeta(name) })
 	switch {
-	case !ok || m.MovedTo != "":
+	case ok && m.MovedTo != "":
 		return
-	case m.Moving != "":
+	case !ok || m.Moving != "":
 		if st.FiredDuringMove != scheduleID {
 			st.FiredDuringMove = scheduleID
 			_ = RateLimitStates.Write(name, st)
