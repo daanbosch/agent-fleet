@@ -53,6 +53,9 @@ type DevIdPPersona struct {
 // ErrDevIdPPersonaExists: the workspace already has a persona with that handle.
 var ErrDevIdPPersonaExists = errors.New("dev idp: persona handle already exists")
 
+// ErrDevIdPPersonaLimit: the workspace already holds the maximum number of personas.
+var ErrDevIdPPersonaLimit = errors.New("dev idp: persona limit reached")
+
 // DevIdPCodeState is what ConsumeDevIdPCode found.
 type DevIdPCodeState int
 
@@ -96,8 +99,10 @@ type DevIdPStore interface {
 	ListDevIdPPersonas(ctx context.Context, workspaceID string) ([]DevIdPPersona, error)
 	// GetDevIdPPersona is scoped to the workspace: another workspace's id is "not found".
 	GetDevIdPPersona(ctx context.Context, workspaceID, id string) (DevIdPPersona, bool, error)
-	// CreateDevIdPPersona returns ErrDevIdPPersonaExists on a duplicate handle.
-	CreateDevIdPPersona(ctx context.Context, p DevIdPPersona) error
+	// CreateDevIdPPersona returns ErrDevIdPPersonaLimit when the workspace already holds max
+	// personas (counted in the same transaction as the insert, so concurrent creates cannot
+	// overshoot) and ErrDevIdPPersonaExists on a duplicate handle.
+	CreateDevIdPPersona(ctx context.Context, p DevIdPPersona, max int) error
 	DeleteDevIdPPersona(ctx context.Context, workspaceID, id string) (bool, error)
 	// DevIdPEmailTaken reports whether an address belongs to a real person (an identity or a
 	// linked sign-in), compared case-insensitively.
@@ -311,21 +316,38 @@ func (s *SQL) GetDevIdPPersona(ctx context.Context, workspaceID, id string) (Dev
 	return p, err == nil, err
 }
 
-func (s *SQL) CreateDevIdPPersona(ctx context.Context, p DevIdPPersona) error {
-	res, err := s.db.ExecContext(ctx,
+func (s *SQL) CreateDevIdPPersona(ctx context.Context, p DevIdPPersona, max int) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Serialises creates per workspace: a count taken without it is stale by the time the
+	// insert runs (Postgres READ COMMITTED does not block a concurrent insert of a new row).
+	if _, err = tx.ExecContext(ctx, `UPDATE workspace SET id=id WHERE id=?`, p.WorkspaceID); err != nil {
+		return err
+	}
+	var n int
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM dev_idp_persona WHERE workspace_id=?`, p.WorkspaceID).Scan(&n); err != nil {
+		return err
+	}
+	if n >= max {
+		return ErrDevIdPPersonaLimit
+	}
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO dev_idp_persona(id, workspace_id, handle, name, created_at)
 		 VALUES(?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
 		p.ID, p.WorkspaceID, p.Handle, p.Name, p.CreatedAt)
 	if err != nil {
 		return err
 	}
-	if n, err := res.RowsAffected(); err != nil || n == 0 {
+	if c, err := res.RowsAffected(); err != nil || c == 0 {
 		if err != nil {
 			return err
 		}
 		return ErrDevIdPPersonaExists
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *SQL) DeleteDevIdPPersona(ctx context.Context, workspaceID, id string) (bool, error) {

@@ -278,3 +278,16 @@ plus a restart before any member can use the IdP is the step that kept it unused
   turning it on again does not rotate any secret. The 409 rule stands: a workspace cannot store
   `devIdp: true` while the deployment does not serve the IdP.
 - Not verified: a live run on a deployment (toggle in the modal, then an app signing in).
+
+## Note (2026-10-16): consent page language and an atomic persona limit (#2227)
+
+Two limits of the personas note are closed; nothing about the security properties changes.
+
+- **Language.** The consent page and its refusal text come from a ja / en table
+  (`devIdPConsentText`) and follow `Accept-Language` through `auth.PreferredUILang`, as the login and
+  OAuth-link pages do. The page is a top-level navigation from the app being developed, so it has no
+  Console session to read a stored language from. Japanese is the default.
+- **Limit.** `CreateDevIdPPersona` counts and inserts in one transaction that first takes a row lock on
+  the workspace (`UPDATE workspace SET id=id`), so concurrent creates cannot leave more than 20 rows on
+  sqlite or Postgres. Measured: without the lock, 16 racing creates against a limit of 5 left 7 to 9 rows
+  on Postgres. The handler keeps its early check and the same `persona_limit` error.

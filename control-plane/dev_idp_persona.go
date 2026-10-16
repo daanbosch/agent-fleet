@@ -24,6 +24,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/k-k1/agent-fleet/control-plane/internal/auth"
 	"github.com/k-k1/agent-fleet/control-plane/internal/store"
 )
 
@@ -172,7 +173,7 @@ func (a wsSettingsAPI) createPersona(w http.ResponseWriter, r *http.Request, res
 		writeAPIErr(w, internalErr(err))
 		return
 	}
-	// Soft limit: two simultaneous creates can overshoot it by one, which costs nothing.
+	// Fast path only; CreateDevIdPPersona enforces the limit atomically.
 	if len(existing) >= devIdPPersonaMax {
 		writeAPIErr(w, &apiError{http.StatusConflict, "persona_limit", "at most " + strconv.Itoa(devIdPPersonaMax) + " personas per workspace"})
 		return
@@ -187,7 +188,11 @@ func (a wsSettingsAPI) createPersona(w http.ResponseWriter, r *http.Request, res
 		writeAPIErr(w, &apiError{http.StatusServiceUnavailable, errCodeAuditUnavailable, "nothing was changed: " + err.Error()})
 		return
 	}
-	if err := a.mgr.store.CreateDevIdPPersona(ctx, p); err != nil {
+	if err := a.mgr.store.CreateDevIdPPersona(ctx, p, devIdPPersonaMax); err != nil {
+		if errors.Is(err, store.ErrDevIdPPersonaLimit) {
+			writeAPIErr(w, &apiError{http.StatusConflict, "persona_limit", "at most " + strconv.Itoa(devIdPPersonaMax) + " personas per workspace"})
+			return
+		}
 		if errors.Is(err, store.ErrDevIdPPersonaExists) {
 			writeAPIErr(w, &apiError{http.StatusConflict, "persona_exists", "a persona with that handle already exists"})
 			return
@@ -271,11 +276,13 @@ func (a devIdPAPI) askConsent(w http.ResponseWriter, r *http.Request, cc devIdPC
 		a.redirectBack(w, r, req.redirectURI, req.state, url.Values{"error": {"server_error"}, "error_description": {"could not start the consent"}})
 		return
 	}
+	lang := auth.PreferredUILang(r)
 	type row struct{ ID, Label, Email string }
 	data := struct {
-		Ticket, Action, Target, Self string
-		Personas                     []row
-	}{Ticket: ticket, Action: devIdPConsentPath, Self: ident.Email}
+		Ticket, Action, Target, Self, Lang string
+		T                                  devIdPConsentStrings
+		Personas                           []row
+	}{Lang: lang, T: devIdPConsentText[lang], Ticket: ticket, Action: devIdPConsentPath, Self: ident.Email}
 	if u, err := url.Parse(req.redirectURI); err == nil {
 		data.Target = u.Host
 	}
@@ -295,27 +302,57 @@ func (a devIdPAPI) askConsent(w http.ResponseWriter, r *http.Request, cc devIdPC
 	_ = devIdPConsentTmpl.Execute(w, data)
 }
 
+// devIdPConsentStrings is the consent page's text for one language. The language follows the
+// browser's Accept-Language like every other CP-rendered page (auth.PreferredUILang): the page
+// is a top-level navigation from the app being developed, so there is no Console session to ask.
+type devIdPConsentStrings struct {
+	Title, Heading, SignInTo, Myself, Persona, Continue, Note, Refused string
+}
+
+var devIdPConsentText = map[string]devIdPConsentStrings{
+	"ja": {
+		Title:    "開発用サインイン",
+		Heading:  "開発用サインイン",
+		SignInTo: "次の身元でサインインします",
+		Myself:   "自分",
+		Persona:  "テスト用身元",
+		Continue: "続ける",
+		Note:     "テスト用身元は、この開発用 IdP の中だけにあります。",
+		Refused:  "dev-idp: このサインインの確認は拒否されたか、期限が切れています。最初からサインインし直してください",
+	},
+	"en": {
+		Title:    "Development sign-in",
+		Heading:  "Development sign-in",
+		SignInTo: "Sign in as:",
+		Myself:   "Myself",
+		Persona:  "test persona",
+		Continue: "Continue",
+		Note:     "Test personas exist only on this development IdP.",
+		Refused:  "dev-idp: this sign-in confirmation was refused or has expired; start the sign-in again",
+	},
+}
+
 var devIdPConsentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Development sign-in</title>
+<html lang="{{.Lang}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{.T.Title}}</title>
 <style>body{font:15px system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem}
 label{display:block;padding:.5rem;border:1px solid #8884;border-radius:6px;margin:.4rem 0}
 small{color:#666}button{margin-top:1rem;padding:.5rem 1.2rem}</style></head>
-<body><h1>Development sign-in / 開発用サインイン</h1>
-<p>Sign in to <b>{{.Target}}</b> as: / 次の身元でサインインします</p>
+<body><h1>{{.T.Heading}}</h1>
+<p><b>{{.Target}}</b> — {{.T.SignInTo}}</p>
 <form method="post" action="{{.Action}}">
 <input type="hidden" name="ticket" value="{{.Ticket}}">
-<label><input type="radio" name="choice" value="self" checked> Myself / 自分 <small>{{.Self}}</small></label>
-{{range .Personas}}<label><input type="radio" name="choice" value="{{.ID}}"> {{.Label}} <small>{{.Email}} (test persona)</small></label>
-{{end}}<button type="submit">Continue / 続ける</button>
+<label><input type="radio" name="choice" value="self" checked> {{.T.Myself}} <small>{{.Self}}</small></label>
+{{range .Personas}}<label><input type="radio" name="choice" value="{{.ID}}"> {{.Label}} <small>{{.Email}} ({{$.T.Persona}})</small></label>
+{{end}}<button type="submit">{{.T.Continue}}</button>
 </form>
-<p><small>Test personas exist only on this development IdP. 開発用 IdP の中だけのテスト用身元です。</small></p>
+<p><small>{{.T.Note}}</small></p>
 </body></html>`))
 
-func consentRefuse(w http.ResponseWriter, status int, why string) {
+func consentRefuse(w http.ResponseWriter, r *http.Request, status int, why string) {
 	log.Printf("dev idp: consent refused: %s", why)
 	noStore(w)
-	http.Error(w, "dev-idp: this sign-in confirmation was refused or has expired; start the sign-in again", status)
+	http.Error(w, devIdPConsentText[auth.PreferredUILang(r)].Refused, status)
 }
 
 // sameOrigin is the cross-site guard for the consent POST: a browser that sends Origin or
@@ -339,17 +376,17 @@ func (a devIdPAPI) sameOrigin(r *http.Request) bool {
 func (a devIdPAPI) consent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if !a.sameOrigin(r) {
-		consentRefuse(w, http.StatusForbidden, "cross-site")
+		consentRefuse(w, r, http.StatusForbidden, "cross-site")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
 	if err := r.ParseForm(); err != nil {
-		consentRefuse(w, http.StatusBadRequest, "unreadable form")
+		consentRefuse(w, r, http.StatusBadRequest, "unreadable form")
 		return
 	}
 	ticket := r.PostForm.Get("ticket")
 	if ticket == "" {
-		consentRefuse(w, http.StatusBadRequest, "no ticket")
+		consentRefuse(w, r, http.StatusBadRequest, "no ticket")
 		return
 	}
 	id := a.mgr.resolveIdentity(r)
@@ -360,27 +397,27 @@ func (a devIdPAPI) consent(w http.ResponseWriter, r *http.Request) {
 	g, ok, err := a.mgr.store.ConsumeDevIdPConsent(ctx, devIdPHash(ticket), a.now().Unix())
 	if err != nil {
 		log.Printf("dev idp: consume consent: %v", err)
-		consentRefuse(w, http.StatusInternalServerError, "store")
+		consentRefuse(w, r, http.StatusInternalServerError, "store")
 		return
 	}
 	if !ok {
-		consentRefuse(w, http.StatusBadRequest, "unknown, spent or expired ticket")
+		consentRefuse(w, r, http.StatusBadRequest, "unknown, spent or expired ticket")
 		return
 	}
 	cc, found := a.loadClient(r, g.ClientID)
 	if !found {
-		consentRefuse(w, http.StatusBadRequest, "client")
+		consentRefuse(w, r, http.StatusBadRequest, "client")
 		return
 	}
 	// Everything authorize decided is decided again: the member, the redirect and the opt-in
 	// may have changed in the minutes the page was open.
 	ident, mv, aerr := a.mgr.resolveMembership(ctx, id.key, id.email, cc.ws.TenantID)
 	if aerr != nil || mv.MembershipID != g.MembershipID || ident.ID != g.IdentityID {
-		consentRefuse(w, http.StatusForbidden, "ticket belongs to another member")
+		consentRefuse(w, r, http.StatusForbidden, "ticket belongs to another member")
 		return
 	}
 	if !a.mgr.devIdPRedirectAllowed(ctx, cc.ws, cc.st, mv.MembershipID, g.RedirectURI) {
-		consentRefuse(w, http.StatusBadRequest, "redirect_uri")
+		consentRefuse(w, r, http.StatusBadRequest, "redirect_uri")
 		return
 	}
 	var stored struct {
@@ -392,11 +429,11 @@ func (a devIdPAPI) consent(w http.ResponseWriter, r *http.Request) {
 	if choice := r.PostForm.Get("choice"); choice != "self" {
 		p, found, err := a.mgr.store.GetDevIdPPersona(ctx, cc.ws.ID, choice)
 		if err != nil {
-			consentRefuse(w, http.StatusInternalServerError, "store")
+			consentRefuse(w, r, http.StatusInternalServerError, "store")
 			return
 		}
 		if !found {
-			consentRefuse(w, http.StatusBadRequest, "no such persona in this workspace")
+			consentRefuse(w, r, http.StatusBadRequest, "no such persona in this workspace")
 			return
 		}
 		if ok, err := a.mgr.personaUsable(ctx, p); err != nil || !ok {
