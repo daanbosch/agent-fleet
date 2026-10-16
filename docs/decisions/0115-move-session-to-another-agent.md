@@ -395,6 +395,16 @@ it is not yet.
   with the request, the file and the spooled peer ids, so retry and cancel work after an Agent
   restart. Retry commits when the target exists, and otherwise creates it again under the same
   name from the same file. Cancel refuses while the target exists.
+- **The target's meta decides.** A move commits only once the target's meta is on disk: the move's
+  create writes it checked, before the first prompt is sent, and a 2xx without it leaves the move
+  pending. A target that runs under the name without a meta (an orphan pane or runtime) is not
+  created again by retry; cancel stops it. The booked name is held against every allocation, in
+  memory and through the pending move's record, until the move ends.
+- **After the commit**, the record stays, marked `committed`, until the spooled peer messages are
+  taken and the source is stopped. An Agent that stops in between finishes those steps at boot
+  (`RecoverMoves`), on retry, or before a reopen. Reopen runs under the move's operation lock.
+- **The preview is scrubbed** like the file, and the git reads are bounded in time and bytes, with
+  the cut stated.
 - **Decision 14's header:** each kind's project instruction files are a fixed table
   (`projectInstructionFiles`). It lists only files a kind is known to load, so a target is never
   wrongly assumed to have read one. The header names those of the source's files that exist in

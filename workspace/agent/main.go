@@ -233,6 +233,11 @@ func serve() {
 	if n := sessionx.RecoverPendingInitialPrompts(); n > 0 {
 		log.Printf("initial-prompt: %d pending delivery(ies) from the previous process marked unknown", n)
 	}
+	// A move the previous process committed but did not finish (ADR 0115 decision 11.5): its
+	// source may still be running and its peer messages still spooled.
+	if n := sessionx.RecoverMoves(); n > 0 {
+		log.Printf("move: finished %d move(s) the previous process had committed", n)
+	}
 	// The image studios: install the store, settle a binding written on one side only, and give
 	// every press the previous process left without a result one (ADR 0100 decisions 2 and 9).
 	imagegen.StartStudios()

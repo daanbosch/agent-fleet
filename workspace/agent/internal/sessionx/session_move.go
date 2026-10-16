@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -94,8 +95,9 @@ type moveRecord struct {
 	// PeerIDs are the spooled peer messages the file carries, taken out of the spool at commit.
 	PeerIDs []string `json:"peerIds,omitempty"`
 	// State is moveRunning while a request drives it, moveUncertain once the create may have
-	// started a target. A running record found with no request driving it (moveOpLock free) is
-	// an Agent that stopped mid-move, which is uncertain too.
+	// started a target, moveCommitted once movedTo is written and the steps after it remain. A
+	// running record found with no request driving it (moveOpLock free) is an Agent that
+	// stopped mid-move, which is uncertain too.
 	State     string `json:"state"`
 	Error     string `json:"error,omitempty"`
 	StartedAt string `json:"startedAt"`
@@ -104,6 +106,8 @@ type moveRecord struct {
 const (
 	moveRunning   = "running"
 	moveUncertain = "uncertain"
+	// moveCommitted: movedTo is on the meta; the peer messages and the source's stop may not be.
+	moveCommitted = "committed"
 )
 
 var moveRecords = fstore.JSON[moveRecord](paths.AgentStateDir, "session-move", ".json")
@@ -231,7 +235,8 @@ var (
 		_, err := haltSessionMeta(m)
 		return err
 	}
-	writeMoveHandover = WriteHandoverFile
+	writeMoveHandover   = WriteHandoverFile
+	writeMoveTargetMeta = session.WriteMetaChecked
 )
 
 // HandleSessionMove moves a session to another agent kind. POST /sessions/{name}/move
@@ -298,9 +303,10 @@ func checkMoveRequest(src session.Meta, req moveRequest) error {
 
 // runMove is the move itself, called with the source's operation lock held.
 func runMove(ctx context.Context, src session.Meta, req moveRequest, now time.Time) (*sessionMoveWire, error) {
-	target := allocSessionName(src.Dir)
+	target := bookMoveTarget(src.Dir)
 	mv, err := beginSessionMove(ctx, src.Name, target)
 	if err != nil {
+		releaseMoveTarget(target)
 		return nil, err
 	}
 	// Input is closed from here on. Nothing below may be cut short by the caller going away:
@@ -323,7 +329,6 @@ func runMove(ctx context.Context, src session.Meta, req moveRequest, now time.Ti
 		return nil, abortMove(mv, rec, now, fmt.Errorf("copying the earlier handover files: %w", err))
 	}
 	in.Earlier = earlier
-
 	in.Instructions = instructionGap(m.Dir, m.Kind, req.Kind)
 	in.Now, in.Loc = now, time.Local
 	h, err := BuildHandover(in)
@@ -343,7 +348,7 @@ func runMove(ctx context.Context, src session.Meta, req moveRequest, now time.Ti
 	if err := moveRecords.Write(src.Name, rec); err != nil {
 		return nil, abortMove(mv, rec, now, fmt.Errorf("recording the move: %w", err))
 	}
-	res, err := createAndCommit(ctx, mv, m, rec, now)
+	res, err := createAndCommit(ctx, mv, m, rec, now, false)
 	if err != nil {
 		return nil, err
 	}
@@ -351,51 +356,79 @@ func runMove(ctx context.Context, src session.Meta, req moveRequest, now time.Ti
 	return res, nil
 }
 
-// createAndCommit creates the target and, once it exists, commits the move. A create that was
-// refused with nothing left behind rolls back; one that may have started a target leaves the
-// move pending for retry or cancel.
-func createAndCommit(ctx context.Context, mv *sourceMove, src session.Meta, rec moveRecord, now time.Time) (*sessionMoveWire, error) {
+// createAndCommit creates the target and commits the move once the target's meta is on disk. A
+// create that answered and left nothing under the target's name rolls back (unless this is a
+// retry, which the user can still cancel); anything else that may have started a target leaves
+// the move pending. A 2xx alone is not enough: the meta is what lists the target and what
+// retry, cancel and a restart find it by.
+func createAndCommit(ctx context.Context, mv *sourceMove, src session.Meta, rec moveRecord, now time.Time, retry bool) (*sessionMoveWire, error) {
 	status, body := createMoveTarget(ctx, moveCreateReq(src, rec))
-	if status < 200 || status >= 300 {
-		cause := createErrorOf(status, body)
-		if status != 0 && !moveTargetMayExist(rec.Target) {
-			return nil, abortMove(mv, rec, now, cause)
-		}
-		rec.State, rec.Error = moveUncertain, cause.Message
-		_ = moveRecords.Write(mv.source, rec)
-		log.Printf("move: %s: the create of %s may have started it (%d %s); the move waits for retry or cancel",
-			mv.source, rec.Target, status, cause.Code)
-		return nil, &moveError{Status: http.StatusBadGateway, Code: "move_create_uncertain",
-			Message: "the target may have started; retry the move or cancel it (" + cause.Message + ")",
-			Target:  rec.Target, File: rec.File}
+	recorded, orphan := moveTargetPresence(rec)
+	if status >= 200 && status < 300 && recorded {
+		return finishMove(mv, rec, body)
 	}
-	return finishMove(mv, rec, body)
+	cause := createErrorOf(status, body)
+	if status >= 200 && status < 300 {
+		cause = &moveError{Status: http.StatusBadGateway, Code: errCodeMetaWriteFailed,
+			Message: "the target started but its meta is not on disk"}
+	}
+	refused := status >= 300 && cause.Code != errCodeMetaWriteFailed && !recorded && !orphan
+	if refused && !retry {
+		return nil, abortMove(mv, rec, now, cause)
+	}
+	rec.State, rec.Error = moveUncertain, cause.Message
+	_ = moveRecords.Write(mv.source, rec)
+	if refused {
+		cause.Target, cause.File = rec.Target, rec.File
+		return nil, cause
+	}
+	log.Printf("move: %s: the create of %s may have started it (%d %s); the move waits for retry or cancel",
+		mv.source, rec.Target, status, cause.Code)
+	return nil, &moveError{Status: http.StatusBadGateway, Code: "move_create_uncertain",
+		Message: "the target may have started; retry the move or cancel it (" + cause.Message + ")",
+		Target:  rec.Target, File: rec.File}
 }
 
-// finishMove commits a move whose target exists, then takes the spooled peer messages and stops
-// the source (decision 11.5). A commit that fails leaves the move pending: the target exists, so
-// retry commits it.
+// errCodeMetaWriteFailed: a move's target started (a runtime or a pane) but its meta could not
+// be written, so it may exist without being listed.
+const errCodeMetaWriteFailed = "meta_write_failed"
+
+// finishMove commits a move whose target is recorded, then completes it. A commit that fails
+// leaves the move pending: the target exists, so retry commits it.
 func finishMove(mv *sourceMove, rec moveRecord, target []byte) (*sessionMoveWire, error) {
-	if err := mv.commit(); err != nil {
-		rec.State, rec.Error = moveUncertain, err.Error()
-		_ = moveRecords.Write(mv.source, rec)
-		return nil, &moveError{Status: http.StatusInternalServerError, Code: "move_commit_failed",
-			Message: "the target exists but the move could not be recorded; retry it: " + err.Error(),
-			Target:  rec.Target, File: rec.File}
-	}
-	// They are in the file; their senders are not told (decision 11.5).
-	for _, id := range rec.PeerIDs {
-		takePending(mv.source, id)
-	}
-	res := &sessionMoveWire{Source: mv.source, Target: target, File: rec.File, Earlier: rec.Earlier, SourceStopped: true}
-	if m, ok := session.ReadMeta(mv.source); ok {
-		if err := stopMoveSource(m); err != nil {
-			res.SourceStopped, res.StopError = false, err.Error()
-			log.Printf("move: %s: moved to %s but could not be stopped: %v", mv.source, rec.Target, err)
+	if m, ok := session.ReadMeta(mv.source); !ok || m.MovedTo != rec.Target {
+		if err := mv.commit(); err != nil {
+			rec.State, rec.Error = moveUncertain, err.Error()
+			_ = moveRecords.Write(mv.source, rec)
+			return nil, &moveError{Status: http.StatusInternalServerError, Code: "move_commit_failed",
+				Message: "the target exists but the move could not be recorded; retry it: " + err.Error(),
+				Target:  rec.Target, File: rec.File}
 		}
 	}
-	moveRecords.Remove(mv.source)
-	return res, nil
+	// The record outlives the commit until the steps below are done: an Agent that stops in
+	// between finds movedTo plus this record and finishes them (RecoverMoves, retry, reopen).
+	rec.State, rec.Error = moveCommitted, ""
+	_ = moveRecords.Write(mv.source, rec)
+	return completeMove(mv.source, rec, target), nil
+}
+
+// completeMove is what follows the commit (decision 11.5): the spooled peer messages leave the
+// spool (they are in the file; their senders are not told), the source is stopped, and the
+// record and the booked name go. Every step may run again after a restart.
+func completeMove(source string, rec moveRecord, target []byte) *sessionMoveWire {
+	for _, id := range rec.PeerIDs {
+		takePending(source, id)
+	}
+	res := &sessionMoveWire{Source: source, Target: target, File: rec.File, Earlier: rec.Earlier, SourceStopped: true}
+	if m, ok := session.ReadMeta(source); ok {
+		if err := stopMoveSource(m); err != nil {
+			res.SourceStopped, res.StopError = false, err.Error()
+			log.Printf("move: %s: moved to %s but could not be stopped: %v", source, rec.Target, err)
+		}
+	}
+	moveRecords.Remove(source)
+	releaseMoveTarget(rec.Target)
+	return res
 }
 
 // abortMove rolls back a move that created no target and returns cause. If the rollback itself
@@ -414,16 +447,83 @@ func abortMove(mv *sourceMove, rec moveRecord, now time.Time, cause error) error
 			Target:  rec.Target, File: rec.File}
 	}
 	moveRecords.Remove(mv.source)
+	releaseMoveTarget(rec.Target)
 	return cause
 }
 
-// moveTargetMayExist reports whether anything under the target's name exists: a meta, or a
-// pane a failed launch left.
-func moveTargetMayExist(target string) bool {
-	if _, ok := session.ReadMeta(target); ok {
-		return true
+// moveTargetPresence says what exists under the target's name: its meta (a recorded session), or
+// only a pane or a managed runtime that a create left without one (an orphan, which no list
+// shows and nothing but the move knows about). A variable so tests need neither tmux nor a
+// runtime.
+var moveTargetPresence = func(rec moveRecord) (recorded, orphan bool) {
+	if _, ok := session.ReadMeta(rec.Target); ok {
+		return true, false
 	}
-	return tmuxx.HasSession(session.TmuxName(target))
+	if tmuxx.HasSession(session.TmuxName(rec.Target)) {
+		return false, true
+	}
+	return false, rec.Kind != "" && ManagedAlive(session.Meta{Name: rec.Target, Kind: rec.Kind, Driver: session.DriverManaged})
+}
+
+// stopOrphanTarget ends what an unrecorded create started, so that cancelling leaves one session
+// on the working copy. Its first prompt is sent only after the meta is written, so an orphan has
+// not been told to work.
+var stopOrphanTarget = func(rec moveRecord) error {
+	if tn := session.TmuxName(rec.Target); tmuxx.HasSession(tn) {
+		if out, err := tmuxx.Cmd("kill-session", "-t", session.ExactTarget(tn)).CombinedOutput(); err != nil {
+			return fmt.Errorf("%v: %s", err, out)
+		}
+	}
+	if rec.Kind != "" {
+		dropManagedRuntime(session.Meta{Name: rec.Target, Kind: rec.Kind, Driver: session.DriverManaged})
+	}
+	return nil
+}
+
+// listMoveRecords reads every pending move's record, keyed by source.
+func listMoveRecords() map[string]moveRecord {
+	ents, err := os.ReadDir(moveRecords.Dir())
+	if err != nil {
+		return nil
+	}
+	out := map[string]moveRecord{}
+	for _, e := range ents {
+		name, ok := strings.CutSuffix(e.Name(), ".json")
+		if !ok || !session.ValidName(name) {
+			continue
+		}
+		if rec, ok := moveRecords.Read(name); ok {
+			out[name] = rec
+		}
+	}
+	return out
+}
+
+// pendingMoveTargets are the names pending moves hold, which no allocation may hand out.
+func pendingMoveTargets() map[string]bool {
+	out := map[string]bool{}
+	for _, rec := range listMoveRecords() {
+		out[rec.Target] = true
+	}
+	return out
+}
+
+// RecoverMoves completes the moves a previous process committed and did not finish: their
+// sources may still be running and their peer messages still spooled. Called once at boot.
+func RecoverMoves() int {
+	n := 0
+	for name := range listMoveRecords() {
+		unlock, ok := moveOpLock(name)
+		if !ok {
+			continue
+		}
+		if _, rec, phase, err := pendingMove(name); err == nil && phase == moveCommitted {
+			completeMove(name, rec, nil)
+			n++
+		}
+		unlock()
+	}
+	return n
 }
 
 // createErrorOf reads the create's error answer.
@@ -474,9 +574,9 @@ func moveInitialPrompt(src session.Meta, file string) string {
 
 // --- retry, cancel, reopen ---------------------------------------------------------------
 
-// HandleSessionMoveRetry finishes a pending move: it commits when the target exists, and
-// otherwise creates it again under the same name from the same file.
-// POST /sessions/{name}/move/retry.
+// HandleSessionMoveRetry finishes a pending move: it completes one that was committed, commits
+// when the target is recorded, and otherwise creates it again under the same name from the same
+// file. POST /sessions/{name}/move/retry.
 func HandleSessionMoveRetry(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !session.ValidName(name) {
@@ -489,20 +589,32 @@ func HandleSessionMoveRetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer unlock()
-	m, rec, err := pendingMove(name)
+	m, rec, phase, err := pendingMove(name)
 	if err != nil {
 		writeMoveErr(w, err)
 		return
 	}
+	if phase == moveCommitted {
+		httpx.WriteJSON(w, http.StatusOK, completeMove(name, rec, targetWire(rec.Target)))
+		return
+	}
 	mv := &sourceMove{source: name, target: m.Moving}
-	if t, exists := session.ReadMeta(rec.Target); exists {
-		body, _ := json.Marshal(wireSession(t, SessionAlive(t)))
-		res, err := finishMove(mv, rec, body)
+	recorded, orphan := moveTargetPresence(rec)
+	switch {
+	case recorded:
+		res, err := finishMove(mv, rec, targetWire(rec.Target))
 		if err != nil {
 			writeMoveErr(w, err)
 			return
 		}
 		httpx.WriteJSON(w, http.StatusOK, res)
+		return
+	case orphan:
+		// Creating again would collide with what is running under the name; finishing it would
+		// need a meta nobody wrote. Cancel stops it and opens the source again.
+		writeMoveErr(w, &moveError{Status: http.StatusConflict, Code: "move_target_orphaned",
+			Message: "a target was started but never recorded; cancel the move to stop it, then move again",
+			Target:  rec.Target, File: rec.File})
 		return
 	}
 	if _, err := os.Stat(rec.File); rec.File == "" || err != nil {
@@ -512,17 +624,7 @@ func HandleSessionMoveRetry(w http.ResponseWriter, r *http.Request) {
 	}
 	rec.State, rec.Error = moveRunning, ""
 	_ = moveRecords.Write(name, rec)
-	status, body := createMoveTarget(context.WithoutCancel(r.Context()), moveCreateReq(m, rec))
-	if status < 200 || status >= 300 {
-		// Not rolled back even when refused: the user asked to retry, and cancel is one press away.
-		cause := createErrorOf(status, body)
-		rec.State, rec.Error = moveUncertain, cause.Message
-		_ = moveRecords.Write(name, rec)
-		cause.Target, cause.File = rec.Target, rec.File
-		writeMoveErr(w, cause)
-		return
-	}
-	res, err := finishMove(mv, rec, body)
+	res, err := createAndCommit(context.WithoutCancel(r.Context()), mv, m, rec, time.Now(), true)
 	if err != nil {
 		writeMoveErr(w, err)
 		return
@@ -530,30 +632,44 @@ func HandleSessionMoveRetry(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusCreated, res)
 }
 
-// pendingMove is a source's pending move: moving on its meta and a record naming the same
-// target.
-func pendingMove(name string) (session.Meta, moveRecord, error) {
-	m, ok := session.ReadMeta(name)
+// targetWire is a recorded target as POST /sessions answers it.
+func targetWire(name string) json.RawMessage {
+	t, ok := session.ReadMeta(name)
 	if !ok {
-		return m, moveRecord{}, errMoveSourceGone
+		return nil
 	}
-	if m.Moving == "" {
-		msg := "this session has no move to finish"
-		if m.MovedTo != "" {
-			msg = "this session was already moved to " + m.MovedTo
-		}
-		return m, moveRecord{}, &moveError{Status: http.StatusConflict, Code: "move_not_pending", Message: msg, Target: m.MovedTo}
-	}
-	rec, ok := moveRecords.Read(name)
-	if !ok || rec.Target != m.Moving {
-		return m, moveRecord{}, &moveError{Status: http.StatusConflict, Code: "move_record_missing",
-			Message: "the record of this move is gone; cancel it", Target: m.Moving}
-	}
-	return m, rec, nil
+	b, _ := json.Marshal(wireSession(t, SessionAlive(t)))
+	return b
 }
 
-// HandleSessionMoveCancel abandons a pending move whose target does not exist: the file goes and
-// the source's input opens again, as in a rollback. POST /sessions/{name}/move/cancel.
+// pendingMove is a source's unfinished move and its phase: moveRunning (moving, with a record
+// naming the same target) or moveCommitted (movedTo, and the record of that move still there).
+func pendingMove(name string) (session.Meta, moveRecord, string, error) {
+	m, ok := session.ReadMeta(name)
+	if !ok {
+		return m, moveRecord{}, "", errMoveSourceGone
+	}
+	rec, hasRec := moveRecords.Read(name)
+	switch {
+	case m.Moving != "":
+		if !hasRec || rec.Target != m.Moving {
+			return m, moveRecord{}, "", &moveError{Status: http.StatusConflict, Code: "move_record_missing",
+				Message: "the record of this move is gone; cancel it", Target: m.Moving}
+		}
+		return m, rec, moveRunning, nil
+	case m.MovedTo != "" && hasRec && rec.Target == m.MovedTo:
+		return m, rec, moveCommitted, nil
+	case m.MovedTo != "":
+		return m, moveRecord{}, "", &moveError{Status: http.StatusConflict, Code: "move_not_pending",
+			Message: "this session was already moved to " + m.MovedTo, Target: m.MovedTo}
+	}
+	return m, moveRecord{}, "", &moveError{Status: http.StatusConflict, Code: "move_not_pending",
+		Message: "this session has no move to finish"}
+}
+
+// HandleSessionMoveCancel abandons a pending move whose target is not recorded: an orphan the
+// create left is stopped, the file goes and the source's input opens again, as in a rollback.
+// POST /sessions/{name}/move/cancel.
 func HandleSessionMoveCancel(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !session.ValidName(name) {
@@ -566,22 +682,36 @@ func HandleSessionMoveCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer unlock()
-	m, rec, err := pendingMove(name)
+	m, rec, phase, err := pendingMove(name)
 	var me *moveError
 	if err != nil && !(errors.As(err, &me) && me.Code == "move_record_missing") {
 		writeMoveErr(w, err)
 		return
 	}
+	if phase == moveCommitted {
+		writeMoveErr(w, &moveError{Status: http.StatusConflict, Code: "move_not_pending",
+			Message: "this session was already moved to " + m.MovedTo, Target: m.MovedTo})
+		return
+	}
 	target := m.Moving
-	if moveTargetMayExist(target) {
+	if rec.Target == "" {
+		rec.Target = target
+	}
+	recorded, orphan := moveTargetPresence(rec)
+	if recorded {
 		// Two sessions on one working copy is what the move exists to prevent: the target has to
 		// go first, or the move be finished with retry.
 		writeMoveErr(w, &moveError{Status: http.StatusConflict, Code: "move_target_exists",
 			Message: "the target session exists; finish the move with retry, or delete the target first", Target: target})
 		return
 	}
-	if rec.Target == "" {
-		rec.Target = target
+	if orphan {
+		if err := stopOrphanTarget(rec); err != nil {
+			writeMoveErr(w, &moveError{Status: http.StatusInternalServerError, Code: "move_orphan_stop_failed",
+				Message: "could not stop the unrecorded target: " + err.Error(), Target: target})
+			return
+		}
+		log.Printf("move: %s: stopped the unrecorded target %s before cancelling", name, target)
 	}
 	if err := abortMove(&sourceMove{source: name, target: target}, rec, time.Now(), nil); err != nil {
 		writeMoveErr(w, err)
@@ -591,7 +721,10 @@ func HandleSessionMoveCancel(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleSessionMoveReopen is "resume here anyway" (decision 11.6): the user takes the moved
-// source back. POST /sessions/{name}/move/reopen.
+// source back. It runs under the same operation lock as the move, so it never opens input
+// between a commit and the source's stop; a committed move left unfinished is completed first,
+// so a peer message the target already has is never delivered to the source again.
+// POST /sessions/{name}/move/reopen.
 func HandleSessionMoveReopen(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !session.ValidName(name) {
@@ -601,6 +734,15 @@ func HandleSessionMoveReopen(w http.ResponseWriter, r *http.Request) {
 	if _, ok := session.ReadMeta(name); !ok {
 		httpx.WriteErr(w, http.StatusNotFound, "not_found", "no such session: "+name)
 		return
+	}
+	unlock, ok := moveOpLock(name)
+	if !ok {
+		httpx.WriteErr(w, http.StatusConflict, "move_busy", "a move of this session is still running")
+		return
+	}
+	defer unlock()
+	if _, rec, phase, err := pendingMove(name); err == nil && phase == moveCommitted {
+		completeMove(name, rec, nil)
 	}
 	if err := reopenMovedSession(name); err != nil {
 		httpx.WriteErr(w, http.StatusConflict, "move_not_moved", err.Error())

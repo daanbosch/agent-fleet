@@ -1168,6 +1168,27 @@ func createSession(w http.ResponseWriter, r *http.Request, req CreateReq) {
 	name := req.name
 	if name == "" {
 		name = allocSessionName(req.Dir)
+	} else if _, taken := session.ReadMeta(name); taken {
+		// A move's booked name is held against every allocation; a meta under it anyway is
+		// another session, which a create must never overwrite.
+		httpx.WriteErr(w, http.StatusConflict, "name_taken", "a session named "+name+" already exists")
+		return
+	}
+	// publish writes the meta. A move's target is written checked: the move commits, and stops
+	// its source, on the strength of that meta, and a target running without one is listed
+	// nowhere. Its first prompt follows the write, so a failed write leaves a target that has
+	// not been told to work.
+	publish := func(m session.Meta) bool {
+		if req.name == "" {
+			slot.publish(m)
+			return true
+		}
+		if err := writeMoveTargetMeta(m); err != nil {
+			log.Printf("move target %s: writing its meta: %v", name, err)
+			httpx.WriteErr(w, http.StatusInternalServerError, errCodeMetaWriteFailed, "the session started but its meta could not be written: "+err.Error())
+			return false
+		}
+		return true
 	}
 
 	kind := NormalizeKind(req.Kind)
@@ -1262,7 +1283,9 @@ func createSession(w http.ResponseWriter, r *http.Request, req CreateReq) {
 			writeRuntimeErr(w, err)
 			return
 		}
-		slot.publish(meta)
+		if !publish(meta) {
+			return
+		}
 		recordFleetGraphBirth(meta)
 		req.managed = true
 		noteCreateOrigin(name, &req, spawnParent, origin)
@@ -1287,7 +1310,9 @@ func createSession(w http.ResponseWriter, r *http.Request, req CreateReq) {
 		httpx.WriteErr(w, http.StatusInternalServerError, "tmux_failed", err.Error())
 		return
 	}
-	slot.publish(meta)
+	if !publish(meta) {
+		return
+	}
 	recordFleetGraphBirth(meta)
 
 	// BEFORE the delivery below, not after: the record is what the mirror matches the turn

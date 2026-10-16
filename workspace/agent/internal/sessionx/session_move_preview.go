@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/bridge"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 )
@@ -85,6 +86,8 @@ type movePendingWire struct {
 	State        string `json:"state,omitempty"`
 	Error        string `json:"error,omitempty"`
 	TargetExists bool   `json:"targetExists"`
+	// Orphan: something runs under the target's name without a meta; cancel stops it.
+	Orphan bool `json:"orphan,omitempty"`
 	// Busy: a move, retry or cancel of this source is running in this Agent right now.
 	Busy bool `json:"busy,omitempty"`
 }
@@ -109,18 +112,23 @@ func buildMovePreview(m session.Meta, now time.Time) movePreviewWire {
 	p := movePreviewWire{Source: m.Name, Kind: m.Kind, Driver: m.Driver, Moving: m.Moving, MovedTo: m.MovedTo,
 		CanFork: moveCanFork(m.Kind), Targets: []moveTargetWire{}}
 	p.State, _ = moveSourceState(m)
+	// Everything below that comes out of the conversation or the working copy is scrubbed, as
+	// the file is (decision 7): a queued prompt or a commit subject can carry a token, and this
+	// answer goes to the browser.
+	sc := bridge.ScrubSecrets
 	refuse := func(err error) {
 		if p.Refusal == nil {
 			e := asMoveError(err)
 			p.Refusal = &moveErrBody{Code: e.Code, Message: e.Message, Target: e.Target, State: e.State}
 		}
 	}
-	if m.Moving != "" {
-		pw := &movePendingWire{Target: m.Moving, TargetExists: moveTargetMayExist(m.Moving), Busy: moveOpBusy(m.Name)}
-		if rec, ok := moveRecords.Read(m.Name); ok && rec.Target == m.Moving {
-			pw.Kind, pw.File, pw.State, pw.Error = rec.Kind, rec.File, rec.State, rec.Error
-		}
-		p.Pending = pw
+	if rec, ok := moveRecords.Read(m.Name); ok && (rec.Target == m.Moving || rec.Target == m.MovedTo) {
+		recorded, orphan := moveTargetPresence(rec)
+		p.Pending = &movePendingWire{Target: rec.Target, Kind: rec.Kind, File: rec.File, State: rec.State,
+			Error: sc(rec.Error), TargetExists: recorded, Orphan: orphan, Busy: moveOpBusy(m.Name)}
+	} else if m.Moving != "" {
+		p.Pending = &movePendingWire{Target: m.Moving, Busy: moveOpBusy(m.Name)}
+		p.Pending.TargetExists, p.Pending.Orphan = moveTargetPresence(moveRecord{Target: m.Moving})
 	}
 	if m.Kind == session.KindCursor && m.DriverKind() == session.DriverManaged {
 		p.Warnings = append(p.Warnings, moveWarnCursorMirror)
@@ -143,7 +151,7 @@ func buildMovePreview(m session.Meta, now time.Time) movePreviewWire {
 	}
 	in := readMoveSource(m)
 	g := in.Git
-	p.Git = &moveGitWire{Available: g.Available, Dirty: g.Status != "", Status: g.Status, DiffStat: g.DiffStat, Ahead: g.Ahead}
+	p.Git = &moveGitWire{Available: g.Available, Dirty: g.Status != "", Status: sc(g.Status), DiffStat: sc(g.DiffStat), Ahead: sc(g.Ahead)}
 	in.Now, in.Loc = now, time.Local
 	h, err := BuildHandover(in)
 	if err != nil {
@@ -153,21 +161,27 @@ func buildMovePreview(m session.Meta, now time.Time) movePreviewWire {
 		p.SizeBytes, p.OverSizeTarget = len(md), len(md) > handoverSizeTarget
 	}
 	for _, q := range handoverStopped(in, nil).Queued {
-		p.Queued = append(p.Queued, moveQueuedWire{Text: q.Text, Origin: q.Origin, Attachments: q.Attachments})
+		var att []string
+		for _, a := range q.Attachments {
+			att = append(att, sc(a))
+		}
+		p.Queued = append(p.Queued, moveQueuedWire{Text: sc(q.Text), Origin: sc(q.Origin), Attachments: att})
 	}
 	for _, pm := range in.PeerMessages {
-		p.Peers = append(p.Peers, movePeerWire{From: pm.From, Intent: pm.Intent, Message: pm.Message})
+		p.Peers = append(p.Peers, movePeerWire{From: sc(pm.From), Intent: sc(pm.Intent), Message: sc(pm.Message)})
 	}
 	running := false
 	for _, c := range in.Children {
 		live := c.State != "stopped"
 		running = running || live
-		p.Children = append(p.Children, moveChildWire{Name: c.Name, State: c.State, Running: live})
+		p.Children = append(p.Children, moveChildWire{Name: sc(c.Name), State: c.State, Running: live})
 	}
 	if running {
 		p.Warnings = append(p.Warnings, moveWarnChildrenActive)
 	}
-	p.Proposals = in.Proposals
+	for _, pr := range in.Proposals {
+		p.Proposals = append(p.Proposals, sc(pr))
+	}
 	return p
 }
 

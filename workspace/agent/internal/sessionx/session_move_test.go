@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,14 @@ type moveRun struct {
 	stops   []string
 	// create, when set, answers the target's create instead of the default success.
 	create func(req CreateReq) (int, []byte)
+	// q, when set, is the source's driver queue the snapshot reads, standing in for the
+	// handle's own.
+	q   *agents.TurnQueue
+	git HandoverGit
+	// orphan makes a target without a meta read as running (a pane or runtime left behind);
+	// orphanStops records what cancel stopped.
+	orphan      bool
+	orphanStops []string
 }
 
 func moveRunEnv(t *testing.T, name string) *moveRun {
@@ -45,8 +54,24 @@ func moveRunEnv(t *testing.T, name string) *moveRun {
 		{Role: "assistant", Parts: []transcript.Part{{Kind: "text", Text: "Found the race in the fixture."}}},
 	}}
 	prevRead, prevCreate, prevStop, prevWrite := readMoveSource, createMoveTarget, stopMoveSource, writeMoveHandover
+	prevPresence, prevOrphanStop, prevMetaWrite := moveTargetPresence, stopOrphanTarget, writeMoveTargetMeta
 	readMoveSource = func(m session.Meta) HandoverInput {
-		return HandoverInput{Source: m, Turns: r.turns, QueuedItems: r.queued, PeerMessages: agents.PendingPeers(m.Name)}
+		queued := r.queued
+		if r.q != nil {
+			queued = r.q.Items()
+		}
+		return HandoverInput{Source: m, Turns: r.turns, QueuedItems: queued, Git: r.git, PeerMessages: agents.PendingPeers(m.Name)}
+	}
+	moveTargetPresence = func(rec moveRecord) (bool, bool) {
+		if _, ok := session.ReadMeta(rec.Target); ok {
+			return true, false
+		}
+		return false, r.orphan
+	}
+	stopOrphanTarget = func(rec moveRecord) error {
+		r.orphanStops = append(r.orphanStops, rec.Target)
+		r.orphan = false
+		return nil
 	}
 	createMoveTarget = func(_ context.Context, req CreateReq) (int, []byte) {
 		r.creates = append(r.creates, req)
@@ -61,6 +86,7 @@ func moveRunEnv(t *testing.T, name string) *moveRun {
 	}
 	t.Cleanup(func() {
 		readMoveSource, createMoveTarget, stopMoveSource, writeMoveHandover = prevRead, prevCreate, prevStop, prevWrite
+		moveTargetPresence, stopOrphanTarget, writeMoveTargetMeta = prevPresence, prevOrphanStop, prevMetaWrite
 	})
 	return r
 }
@@ -203,7 +229,8 @@ func TestMoveFailuresBeforeTheTargetRollBack(t *testing.T) {
 			r := moveRunEnv(t, name)
 			// An ordinary user input still in the driver's queue, and a peer message waiting in
 			// the spool: neither may be lost by a move that did not happen.
-			r.queued = []agents.QueueItem{{ID: "q1", Text: "also update the changelog"}}
+			r.q = agents.NewTurnQueue(name, nil, agents.LedgerAtAccept)
+			qid, _ := r.q.Accept(agents.TurnInput{Prompt: "also update the changelog", Origin: agents.Origin{Kind: "user"}})
 			if err := agents.PutPendingPeer(name, agents.PendingPeer{ID: "pp1", From: "peer", Intent: "question",
 				Message: "is the fixture shared?", QueuedAt: time.Now()}); err != nil {
 				t.Fatal(err)
@@ -232,8 +259,16 @@ func TestMoveFailuresBeforeTheTargetRollBack(t *testing.T) {
 				}
 			}
 			assertNothingSent(t, r.d)
-			// Input is open again, and the queue's input reaches the runtime as it would have.
-			if rec := postInput(t, name, `{"prompt":"also update the changelog"}`); rec.Code != http.StatusOK {
+			// The queued input is still the same entry, and the pump can take it once input is
+			// open again: a pump takes its lease before the entry leaves the queue.
+			if items := r.q.Items(); len(items) != 1 || items[0].ID != qid || items[0].Text != "also update the changelog" {
+				t.Fatalf("queue after the rollback = %+v, want %s still queued", items, qid)
+			}
+			testLease(t, name)
+			if tk := r.q.Take(); tk == nil || tk.ID() != qid || tk.In.Prompt != "also update the changelog" {
+				t.Fatalf("the pump took %+v, want %s", tk, qid)
+			}
+			if rec := postInput(t, name, `{"prompt":"next instruction"}`); rec.Code != http.StatusOK {
 				t.Fatalf("input after the rollback: %d %s", rec.Code, rec.Body.String())
 			}
 		})
@@ -622,5 +657,311 @@ func TestReadMoveGitKeepsThePorcelainColumns(t *testing.T) {
 	}
 	if g := readMoveGit(t.TempDir()); g.Available {
 		t.Fatal("a folder that is not a working copy reads as one")
+	}
+}
+
+// A create that answers 2xx, or a runtime that started, without the target's meta on disk does
+// not commit: the source would be stopped and moved to a session nothing lists. The move stays
+// pending, and the target was never sent its first prompt.
+func TestMoveWithoutTheTargetMetaOnDiskStaysPending(t *testing.T) {
+	t.Run("the checked write fails", func(t *testing.T) {
+		r := moveRunEnv(t, "mvmeta-unused")
+		createMoveTarget = func(ctx context.Context, req CreateReq) (int, []byte) {
+			r.creates = append(r.creates, req)
+			hr, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/sessions", nil)
+			c := &captureWriter{header: http.Header{}}
+			createSession(c, hr, req)
+			return c.status, c.body.Bytes()
+		}
+		writeMoveTargetMeta = func(session.Meta) error { return errors.New("no space left on device") }
+		session.WriteMeta(session.Meta{Name: "mvmeta", Dir: t.TempDir(), Kind: session.KindClaude})
+		t.Cleanup(func() { lifegate.Reopen("mvmeta") })
+		a := decodeMove(t, postMove(t, "mvmeta", "", `{"kind":"codex","driver":"managed"}`))
+		if a.Error.Code != "move_create_uncertain" || a.Error.File == "" {
+			t.Fatalf("answer = %+v, want move_create_uncertain", a.Error)
+		}
+		if cur := mustMeta(t, "mvmeta"); cur.Moving != a.Error.Target || cur.MovedTo != "" {
+			t.Fatalf("source meta = moving %q movedTo %q, want still moving", cur.Moving, cur.MovedTo)
+		}
+		if _, err := os.Stat(a.Error.File); err != nil {
+			t.Fatalf("the file went with the pending move: %v", err)
+		}
+		if len(r.stops) != 0 {
+			t.Fatalf("the source was stopped: %v", r.stops)
+		}
+		select {
+		case in := <-r.d.h.sent:
+			t.Fatalf("a target without a meta was sent %q", in.Prompt)
+		default:
+		}
+	})
+	t.Run("a 2xx with no meta", func(t *testing.T) {
+		r := moveRunEnv(t, "mvmeta2")
+		r.create = func(CreateReq) (int, []byte) { return http.StatusCreated, []byte(`{}`) }
+		a := decodeMove(t, postMove(t, "mvmeta2", "", `{"kind":"claude"}`))
+		if a.Error.Code != "move_create_uncertain" {
+			t.Fatalf("answer = %+v", a.Error)
+		}
+		if cur := mustMeta(t, "mvmeta2"); cur.MovedTo != "" || len(r.stops) != 0 {
+			t.Fatalf("committed without a target meta: %+v, stops %v", cur, r.stops)
+		}
+	})
+}
+
+// commitOnly drives a move up to its commit, as one that an Agent stop cut short after movedTo
+// was written: the record is there, the peer spool and the source are not yet dealt with.
+func commitOnly(t *testing.T, r *moveRun, name string) moveRecord {
+	t.Helper()
+	target := bookMoveTarget(r.src.Dir)
+	mv := mustBegin(t, beginAsync(name, target))
+	session.WriteMeta(session.Meta{Name: target, Dir: r.src.Dir, Kind: session.KindClaude})
+	if err := agents.PutPendingPeer(name, agents.PendingPeer{ID: "pp1", From: "peer", Message: "carried", QueuedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	rec := moveRecord{Target: target, Kind: session.KindClaude, State: moveRunning, PeerIDs: []string{"pp1"}}
+	if err := moveRecords.Write(name, rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := mv.commit(); err != nil {
+		t.Fatal(err)
+	}
+	return rec
+}
+
+func assertCompleted(t *testing.T, r *moveRun, name, target string) {
+	t.Helper()
+	if len(r.stops) != 1 || r.stops[0] != name {
+		t.Errorf("stops = %v, want %s stopped once", r.stops, name)
+	}
+	if p := agents.PendingPeers(name); len(p) != 0 {
+		t.Errorf("pending peers = %+v, want the carried one taken", p)
+	}
+	if _, ok := moveRecords.Read(name); ok {
+		t.Error("the record stayed")
+	}
+	slugMu.Lock()
+	booked := slugBooked[target]
+	slugMu.Unlock()
+	if booked {
+		t.Error("the target's name is still booked")
+	}
+}
+
+// A committed move whose remaining steps an Agent stop cut short is finished: by the boot
+// recovery, by retry, and by a reopen, which finishes it before opening input so the target's
+// peer messages never reach the source again.
+func TestCommittedMoveIsFinishedAfterARestart(t *testing.T) {
+	t.Run("boot", func(t *testing.T) {
+		r := moveRunEnv(t, "mvrec1")
+		rec := commitOnly(t, r, "mvrec1")
+		lifegate.ResetForTest()
+		if n := RecoverMoves(); n != 1 {
+			t.Fatalf("RecoverMoves = %d", n)
+		}
+		assertCompleted(t, r, "mvrec1", rec.Target)
+		assertMovedRefusal(t, postInput(t, "mvrec1", `{"prompt":"x"}`), rec.Target)
+	})
+	t.Run("retry", func(t *testing.T) {
+		r := moveRunEnv(t, "mvrec2")
+		rec := commitOnly(t, r, "mvrec2")
+		if rec2 := postMove(t, "mvrec2", "/retry", ""); rec2.Code != http.StatusOK {
+			t.Fatalf("retry: %d %s", rec2.Code, rec2.Body.String())
+		}
+		assertCompleted(t, r, "mvrec2", rec.Target)
+	})
+	t.Run("reopen", func(t *testing.T) {
+		r := moveRunEnv(t, "mvrec3")
+		rec := commitOnly(t, r, "mvrec3")
+		if rec2 := postMove(t, "mvrec3", "/reopen", ""); rec2.Code != http.StatusOK {
+			t.Fatalf("reopen: %d %s", rec2.Code, rec2.Body.String())
+		}
+		assertCompleted(t, r, "mvrec3", rec.Target)
+		if cur := mustMeta(t, "mvrec3"); cur.MovedTo != "" {
+			t.Fatalf("movedTo = %q after reopen", cur.MovedTo)
+		}
+	})
+}
+
+// Reopen waits its turn behind a move that is still running, instead of opening input between
+// the commit and the source's stop.
+func TestReopenIsRefusedWhileTheMoveRuns(t *testing.T) {
+	moveRunEnv(t, "mvrebusy")
+	mustMove(t, "mvrebusy", session.KindClaude)
+	unlock, ok := moveOpLock("mvrebusy")
+	if !ok {
+		t.Fatal("op lock")
+	}
+	defer unlock()
+	if rec := postMove(t, "mvrebusy", "/reopen", ""); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "move_busy") {
+		t.Fatalf("reopen during a move: %d %s", rec.Code, rec.Body.String())
+	}
+	if cur := mustMeta(t, "mvrebusy"); cur.MovedTo == "" {
+		t.Fatal("reopened while the move held its lock")
+	}
+}
+
+// A target that runs without a meta (a pane or runtime a create left) is neither created again
+// by retry nor left running by cancel.
+func TestOrphanTargetIsStoppedByCancelNotDuplicatedByRetry(t *testing.T) {
+	r := moveRunEnv(t, "mvorph")
+	r.create = func(CreateReq) (int, []byte) {
+		r.orphan = true
+		return http.StatusInternalServerError, []byte(`{"error":{"code":"tmux_failed","message":"lost"}}`)
+	}
+	a := decodeMove(t, postMove(t, "mvorph", "", `{"kind":"claude"}`))
+	if a.Error.Code != "move_create_uncertain" {
+		t.Fatalf("answer = %+v", a.Error)
+	}
+	if p := buildMovePreview(mustMeta(t, "mvorph"), time.Now()); p.Pending == nil || !p.Pending.Orphan {
+		t.Fatalf("preview pending = %+v, want orphan", p.Pending)
+	}
+	rec := postMove(t, "mvorph", "/retry", "")
+	if rec.Code != http.StatusConflict || decodeMove(t, rec).Error.Code != "move_target_orphaned" || len(r.creates) != 1 {
+		t.Fatalf("retry on an orphan: %d %s, %d creates", rec.Code, rec.Body.String(), len(r.creates))
+	}
+	if rec := postMove(t, "mvorph", "/cancel", ""); rec.Code != http.StatusOK {
+		t.Fatalf("cancel: %d %s", rec.Code, rec.Body.String())
+	}
+	if len(r.orphanStops) != 1 || r.orphanStops[0] != a.Error.Target {
+		t.Fatalf("orphan stops = %v", r.orphanStops)
+	}
+	if cur := mustMeta(t, "mvorph"); cur.Moving != "" {
+		t.Fatalf("moving = %q after cancel", cur.Moving)
+	}
+}
+
+// A booked target name, held in memory or by a pending move's record across a restart, is
+// never handed to another session; it is free again once the move ends.
+func TestBookedMoveTargetIsNeverHandedOut(t *testing.T) {
+	pendingTestEnv(t)
+	slugs := []string{"sbooked", "sbooked", "sother1"}
+	prev := randSlug
+	next := func() string { s := slugs[0]; slugs = slugs[1:]; return s }
+	randSlug = next
+	t.Cleanup(func() { randSlug = prev })
+	if got := bookMoveTarget(t.TempDir()); got != "sbooked" {
+		t.Fatalf("booked %q", got)
+	}
+	if got := allocSessionName(t.TempDir()); got != "sother1" {
+		t.Fatalf("handed out %q while sbooked is booked", got)
+	}
+	// After a restart only the record holds it.
+	releaseMoveTarget("sbooked")
+	slugMu.Lock()
+	delete(slugHandedAt, "sbooked")
+	slugMu.Unlock()
+	if err := moveRecords.Write("src1", moveRecord{Target: "sbooked"}); err != nil {
+		t.Fatal(err)
+	}
+	slugs = []string{"sbooked", "sother2"}
+	if got := allocSessionName(t.TempDir()); got != "sother2" {
+		t.Fatalf("handed out %q, which a pending move's record holds", got)
+	}
+	moveRecords.Remove("src1")
+	slugs = []string{"sbooked"}
+	if got := allocSessionName(t.TempDir()); got != "sbooked" {
+		t.Fatalf("got %q; a name no move holds should be free", got)
+	}
+	// A name handed to an ordinary create is not booked for a move while its meta may be on
+	// its way.
+	slugs = []string{"sbooked", "sother3"}
+	if got := bookMoveTarget(t.TempDir()); got != "sother3" {
+		t.Fatalf("booked %q, just handed to a create", got)
+	}
+}
+
+// The released name of a rolled-back move is not held.
+func TestRolledBackMoveReleasesItsName(t *testing.T) {
+	r := moveRunEnv(t, "mvrel")
+	r.turns = nil
+	booked := func() int {
+		slugMu.Lock()
+		defer slugMu.Unlock()
+		return len(slugBooked) // other tests' pending moves may hold names too
+	}
+	before := booked()
+	postMove(t, "mvrel", "", `{"kind":"claude"}`)
+	if n := booked(); n != before {
+		t.Fatalf("%d names booked after a rollback, %d before", n, before)
+	}
+}
+
+// Instructions typed into the claude turn the limit cut off are read from the jsonl's
+// queue-operation records and reach the file once.
+func TestClaudeQueuedInstructionsReachTheHandover(t *testing.T) {
+	home := withTempHome(t)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	t.Setenv("AF_SESSIONS_DIR", filepath.Join(t.TempDir(), "sessions"))
+	dir := t.TempDir()
+	m := session.Meta{Name: "mvclq", Dir: dir, Kind: session.KindClaude}
+	session.WriteMeta(m)
+	jsonl := filepath.Join(home, ".claude", "projects", "p", session.UUID(dir, m.Name)+".jsonl")
+	lines := []string{
+		`{"type":"user","timestamp":"2026-10-17T10:00:00Z","message":{"role":"user","content":"refactor the parser"}}`,
+		`{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-17T10:00:03Z","content":"and keep the old API"}`,
+		`{"type":"assistant","timestamp":"2026-10-17T10:00:05Z","message":{"role":"assistant","content":[{"type":"text","text":"Starting."}]}}`,
+	}
+	writeFile(t, jsonl, strings.Join(lines, "\n")+"\n")
+	in := readMoveSource(m)
+	if len(in.Queued) != 1 || in.Queued[0] != "and keep the old API" {
+		t.Fatalf("queued = %q", in.Queued)
+	}
+	in.Now = time.Now()
+	h, err := BuildHandover(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	md, _ := RenderHandover(h, "en")
+	if n := strings.Count(md, "and keep the old API"); n != 1 {
+		t.Fatalf("the queued instruction appears %d times:\n%s", n, md)
+	}
+}
+
+// Decision 7's scrub covers the preview's answer, not only the file.
+func TestMovePreviewAndFileAreScrubbed(t *testing.T) {
+	r := moveRunEnv(t, "mvscrub")
+	tok := "ghp_" + strings.Repeat("A1b2C3d4", 5)
+	r.queued = []agents.QueueItem{{ID: "q1", Text: "use token " + tok}}
+	r.git = HandoverGit{Available: true, Status: "?? " + tok + ".txt", Ahead: "abc123 add " + tok}
+	if err := agents.PutPendingPeer("mvscrub", agents.PendingPeer{ID: "pp1", From: "peer", Message: "key " + tok, QueuedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(buildMovePreview(mustMeta(t, "mvscrub"), time.Now()))
+	if strings.Contains(string(b), tok) {
+		t.Fatalf("the preview carries the token: %s", b)
+	}
+	if !strings.Contains(string(b), "use token") {
+		t.Fatalf("the preview lost the queued text: %s", b)
+	}
+	a := mustMove(t, "mvscrub", session.KindClaude)
+	if md := readFile(t, a.File); strings.Contains(md, tok) {
+		t.Fatal("the file carries the token")
+	}
+}
+
+// The git reads are bounded by bytes: a working copy with a huge untracked list is cut, and
+// says so.
+func TestReadMoveGitIsBounded(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git")
+	}
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+	for i := 0; i < 200; i++ {
+		if err := os.WriteFile(filepath.Join(dir, "untracked-file-"+strings.Repeat("x", 20)+string(rune('a'+i%26))+strconv.Itoa(i)), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prev := moveGitMaxBytes
+	moveGitMaxBytes = 512
+	t.Cleanup(func() { moveGitMaxBytes = prev })
+	g := readMoveGit(dir)
+	if !strings.Contains(g.Status, "cut at") || len(g.Status) > 512+100 {
+		t.Fatalf("status (%d bytes) = %q", len(g.Status), g.Status)
+	}
+	if !strings.HasPrefix(g.Status, "?? untracked-file-") {
+		t.Fatalf("status lost its columns: %q", g.Status[:40])
 	}
 }

@@ -6,10 +6,16 @@ package sessionx
 // them while the move works; the preview reads the same without the gate.
 
 import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/claude"
@@ -27,6 +33,8 @@ var readMoveSource = func(m session.Meta) HandoverInput {
 		// The whole jsonl, as the export reads it: the mirror's collector keeps only a tail.
 		lines, _, _ := claude.TranscriptRead(session.UUID(m.Dir, m.Name))
 		in.Turns = claude.CollectAllTurns(lines)
+		in.Queued = claude.CollectQueued(lines) // typed into the turn the limit cut off, never run
+
 		edits = claude.CollectFileEdits(lines, 0)
 	} else if td, ok := AgentOf(m.Kind).Transcript(m); ok {
 		// td.Path is deliberately dropped: the file carries no path into a CLI store (decision 15).
@@ -48,25 +56,78 @@ var readMoveSource = func(m session.Meta) HandoverInput {
 	return in
 }
 
-// readMoveGit reads the working copy as decision 6.3 lists it. gitx.Run is not used for the
-// status: it trims its output, and the first porcelain line starts with a meaningful space.
+// Bounds on the git reads: the move holds the source's input closed while it runs them, and the
+// preview runs them on every open of the dialog. A huge untracked tree or a long diverged
+// history must cost neither unbounded time nor unbounded memory; what is cut says so.
+var (
+	moveGitTimeout    = 10 * time.Second
+	moveGitMaxBytes   = 64 << 10
+	moveGitMaxCommits = 100
+)
+
+// readMoveGit reads the working copy as decision 6.3 lists it.
 func readMoveGit(dir string) HandoverGit {
 	if dir == "" || !gitx.IsGitRepo(dir) {
 		return HandoverGit{}
 	}
-	out, err := gitx.Cmd(dir, "status", "--porcelain").Output()
+	status, err := boundedGit(dir, "status", "--porcelain")
 	if err != nil {
 		return HandoverGit{}
 	}
-	g := HandoverGit{Available: true, Status: strings.TrimRight(string(out), "\n")}
+	g := HandoverGit{Available: true, Status: status}
 	// Against HEAD, so staged changes count too; an unborn branch has no HEAD and no diff.
-	g.DiffStat, _ = gitx.Run(dir, "diff", "--stat", "HEAD")
-	if ahead, err := gitx.Run(dir, "log", "--oneline", "--no-decorate", "@{upstream}..HEAD"); err == nil {
-		g.Ahead = ahead
-	} else {
+	g.DiffStat, _ = boundedGit(dir, "diff", "--stat", "HEAD")
+	ahead, err := boundedGit(dir, "log", "--oneline", "--no-decorate",
+		"--max-count="+strconv.Itoa(moveGitMaxCommits+1), "@{upstream}..HEAD")
+	switch {
+	case err != nil:
 		g.Ahead = "(the branch has no upstream)"
+	case strings.Count(ahead, "\n")+1 > moveGitMaxCommits:
+		g.Ahead = ahead[:strings.LastIndex(ahead, "\n")] +
+			fmt.Sprintf("\n… (only the newest %d commits are shown)", moveGitMaxCommits)
+	default:
+		g.Ahead = ahead
 	}
 	return g
+}
+
+// boundedGit runs git in dir and returns its stdout without the trailing newline, reading at
+// most moveGitMaxBytes and waiting at most moveGitTimeout; a cut output ends with a line saying
+// so. Leading spaces are kept: the first porcelain status column can be one.
+func boundedGit(dir string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), moveGitTimeout)
+	defer cancel()
+	cmd := gitx.CmdContext(ctx, dir, args...)
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	b, _ := io.ReadAll(io.LimitReader(out, int64(moveGitMaxBytes)+1))
+	truncated := len(b) > moveGitMaxBytes
+	if truncated {
+		_ = cmd.Process.Kill() // the rest is not wanted, and git may be far from done
+		b = b[:moveGitMaxBytes]
+		if i := bytes.LastIndexByte(b, '\n'); i >= 0 {
+			b = b[:i]
+		}
+	}
+	werr := cmd.Wait()
+	s := strings.TrimRight(string(b), "\n")
+	switch {
+	case truncated:
+		return s + fmt.Sprintf("\n… (cut at %d KiB; the rest is not shown)", moveGitMaxBytes>>10), nil
+	case ctx.Err() != nil:
+		if s == "" {
+			return "", ctx.Err()
+		}
+		return s + fmt.Sprintf("\n… (git did not finish within %s; the rest is not shown)", moveGitTimeout), nil
+	case werr != nil:
+		return "", werr
+	}
+	return s, nil
 }
 
 // moveChildren lists the children the source started (ADR 0073) that are not archived, with
