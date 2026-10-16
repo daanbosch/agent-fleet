@@ -1,6 +1,6 @@
 ---
 audience: "anyone connecting the workspace to something outside it"
-updated: "2026-08"
+updated: "2026-10"
 ---
 
 # 10. Going further — browser pane / lightweight preview, external integrations, other hosts, environment settings
@@ -143,6 +143,92 @@ What you use depends on who you want to show it to. **Each step opens it wider.*
 - If a URL went to the wrong place, press **"Discard and mint a new one"**. Tabs that are open now start
   returning 404 immediately. ⚠️ **Pressing it while the workspace is stopped does nothing**, because
   there is no issued URL to discard (the next start gets a new one anyway).
+
+#### Signing in with Google on a preview URL (development OIDC IdP)
+
+Google accepts only redirect URIs registered on its OAuth client, and a preview URL changes at every start.
+Where the deployment turns it on, the Control Plane can stand in for Google **during development**: a sign-in
+server of its own at `https://<console>/dev-idp`. Your app changes **configuration only** (issuer, client id,
+client secret); no code, and nothing to register in the Google Cloud console.
+
+- **Availability**: the operator sets `AF_DEV_IDP=1` on the Control Plane (ADR 0116); until then every
+  `/dev-idp/…` URL is a 404. **It is off per workspace too.** The Console has no switch for it yet (#2222), so
+  turn it on from the Console tab's browser console, then **stop and start the workspace** so the values below
+  reach the container:
+
+  ```js
+  await fetch('/api/env/ws-settings', {method: 'PUT', body: JSON.stringify({devIdp: true})})
+  ```
+
+- **What you get**: `AF_DEV_IDP_ISSUER`, `AF_DEV_IDP_WELL_KNOWN` (the discovery URL), `AF_DEV_IDP_CLIENT_ID` and
+  `AF_DEV_IDP_CLIENT_SECRET` inside the container, next to `AF_PREVIEW_URL_*`. The client is **yours alone**: its
+  id is bound to your workspace and the tokens are issued for that id only.
+- **Who signs in**: whoever is signed in to the Console. There is no password prompt. If you have signed in
+  to the Console with Google, the app sees your **real Google `sub` and address**, so the user rows it already
+  has still match. Otherwise it sees your Console address and a stable `sub` of the form `af-…`. A colleague
+  opening your shared preview ([above](#showing-it-to-someone-else-three-steps)) signs in as themselves.
+- **Where it may send the browser back to**: only your **current** preview URL on a **listed port**, and
+  `http://localhost:<port>` / `http://127.0.0.1:<port>` (so the browser pane works too). Anything else, including
+  the URL from before a restart, gets an error page and is never redirected to. Set the app's own URL from
+  `AF_PREVIEW_URL_<port>` (for example `AUTH_URL`) so the callback it sends is exactly that.
+
+**Auth.js (NextAuth)**, v5: point the Google provider at the dev issuer when the variables exist.
+
+```ts
+// auth.ts
+import NextAuth from "next-auth"
+import Google from "next-auth/providers/google"
+
+export const { handlers, auth } = NextAuth({
+  providers: [
+    Google(
+      process.env.AF_DEV_IDP_ISSUER
+        ? {
+            issuer: process.env.AF_DEV_IDP_ISSUER,
+            clientId: process.env.AF_DEV_IDP_CLIENT_ID,
+            clientSecret: process.env.AF_DEV_IDP_CLIENT_SECRET,
+          }
+        : {},
+    ),
+  ],
+})
+```
+
+In v4 it is `GoogleProvider({ wellKnown: process.env.AF_DEV_IDP_WELL_KNOWN, clientId, clientSecret })`; a generic
+OIDC provider with `issuer` and the same two values works as well.
+
+**Spring Boot**: keep the registration called `google` and move its provider.
+
+```yaml
+# application-devidp.yml  (activate with SPRING_PROFILES_ACTIVE=devidp, in the workspace only)
+spring:
+  security:
+    oauth2:
+      client:
+        registration:
+          google:
+            client-id: ${AF_DEV_IDP_CLIENT_ID}
+            client-secret: ${AF_DEV_IDP_CLIENT_SECRET}
+            scope: openid,email,profile
+        provider:
+          google:
+            issuer-uri: ${AF_DEV_IDP_ISSUER}
+      resourceserver:
+        jwt:
+          issuer-uri: ${AF_DEV_IDP_ISSUER}   # only for a backend that verifies the ID token itself
+```
+
+With `server.forward-headers-strategy=framework` (above) Spring builds the callback from the preview host.
+
+> ⚠️ **Never let a production configuration trust this issuer.** It will vouch for anyone who can sign in to
+> the Console. Keep the settings in a profile or in variables that exist only in the workspace; every token also
+> carries `af_dev: true`, so a backend can refuse it.
+
+Good to know: tokens last 10 minutes and the sign-in code 60 seconds. **Only sign-in is replaced**: you do not
+get Google API access tokens (Calendar, Drive, …), and there is no `picture`. Turning the option off removes the
+client; turning it on again issues a **new** client id and secret (that is how you rotate the secret). The
+switch takes effect immediately for the endpoints, but a running container keeps the values it started with
+until the next start.
 
 ### Examples by setup
 

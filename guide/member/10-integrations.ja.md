@@ -1,6 +1,6 @@
 ---
 audience: "ワークスペースを外のものへつなぐ人"
-updated: "2026-08"
+updated: "2026-10"
 ---
 
 # 10. 一歩進んだ使い方 — ブラウザペイン／軽量プレビュー・外部連携・別ホスト・環境設定
@@ -137,6 +137,92 @@ https://k7f2q9x1w3ub5nzt0abc-8080.pv.example.com/   → 8080 番（例: Spring B
 - URL を渡す相手を間違えたら、「**いま捨てて発行し直す**」を押してください。今開いているタブも
   すぐ 404 になります。**停止中に押した場合は捨てるものが無いので何も起こりません**
   （次に起動すると、どのみち新しい URL になります）。
+
+#### プレビュー URL で Google サインインを使う（開発用 OIDC IdP）
+
+Google は OAuth クライアントに登録したリダイレクト URI しか受け付けず、プレビュー URL は起動のたびに変わります。
+デプロイが有効にしている環境では、**開発中に限って** Control Plane が Google の代わりを務められます。
+`https://<Console>/dev-idp` にある専用のサインインサーバーです。アプリ側で変えるのは**設定だけ**（issuer、
+client id、client secret）。コードは変えず、Google Cloud コンソールでの登録も要りません。
+
+- **使える条件**：運用者が Control Plane に `AF_DEV_IDP=1` を設定していること（ADR 0116）。それまで
+  `/dev-idp/…` は全部 404 です。**ワークスペースごとにも既定は off** で、Console にはまだスイッチがありません
+  （#2222）。Console のタブのブラウザコンソールから on にして、下の値がコンテナに届くよう**ワークスペースを
+  停止→起動**してください。
+
+  ```js
+  await fetch('/api/env/ws-settings', {method: 'PUT', body: JSON.stringify({devIdp: true})})
+  ```
+
+- **渡される値**：コンテナ内の `AF_DEV_IDP_ISSUER`、`AF_DEV_IDP_WELL_KNOWN`（discovery の URL）、
+  `AF_DEV_IDP_CLIENT_ID`、`AF_DEV_IDP_CLIENT_SECRET`（`AF_PREVIEW_URL_*` の隣）。クライアントは**自分専用**で、
+  id はあなたのワークスペースに結び付き、トークンはその id 宛にしか発行されません。
+- **誰としてサインインするか**：Console にサインインしている本人です。パスワード入力はありません。Console に
+  Google でサインインしていれば、アプリには**本物の Google の `sub` とメールアドレス**が渡るので、アプリが
+  すでに持っているユーザー行とそのまま一致します。そうでなければ Console のアドレスと、`af-…` 形式の安定した
+  `sub` です。共有したプレビュー（[上記](#人に見せる3-段階)）を開いた同僚は、その同僚自身としてサインインします。
+- **ブラウザを戻してよい先**：あなたの**現在の**プレビュー URL の**一覧にあるポート**と、
+  `http://localhost:<ポート>`／`http://127.0.0.1:<ポート>`（ブラウザペインでも使えます）だけです。それ以外は、
+  再起動前の URL も含めてエラーページになり、リダイレクトされません。アプリ自身の URL（たとえば `AUTH_URL`）は
+  `AF_PREVIEW_URL_<ポート>` から設定し、送るコールバックがちょうどそれになるようにしてください。
+
+**Auth.js（NextAuth）v5**：変数があるときだけ Google プロバイダーの向き先を開発用 issuer にします。
+
+```ts
+// auth.ts
+import NextAuth from "next-auth"
+import Google from "next-auth/providers/google"
+
+export const { handlers, auth } = NextAuth({
+  providers: [
+    Google(
+      process.env.AF_DEV_IDP_ISSUER
+        ? {
+            issuer: process.env.AF_DEV_IDP_ISSUER,
+            clientId: process.env.AF_DEV_IDP_CLIENT_ID,
+            clientSecret: process.env.AF_DEV_IDP_CLIENT_SECRET,
+          }
+        : {},
+    ),
+  ],
+})
+```
+
+v4 なら `GoogleProvider({ wellKnown: process.env.AF_DEV_IDP_WELL_KNOWN, clientId, clientSecret })` です。汎用の
+OIDC プロバイダーに `issuer` と同じ 2 つの値を渡す方法でも動きます。
+
+**Spring Boot**：登録名は `google` のまま、プロバイダー側を差し替えます。
+
+```yaml
+# application-devidp.yml  （SPRING_PROFILES_ACTIVE=devidp で有効化。ワークスペースの中だけ）
+spring:
+  security:
+    oauth2:
+      client:
+        registration:
+          google:
+            client-id: ${AF_DEV_IDP_CLIENT_ID}
+            client-secret: ${AF_DEV_IDP_CLIENT_SECRET}
+            scope: openid,email,profile
+        provider:
+          google:
+            issuer-uri: ${AF_DEV_IDP_ISSUER}
+      resourceserver:
+        jwt:
+          issuer-uri: ${AF_DEV_IDP_ISSUER}   # ID トークンを自分で検証するバックエンドだけ
+```
+
+`server.forward-headers-strategy=framework`（上記）を付けておくと、Spring はコールバックをプレビューのホストから
+組み立てます。
+
+> ⚠️ **本番の設定にこの issuer を信用させないでください。** Console にサインインできる人なら誰でも保証して
+> しまいます。設定はプロファイルか、ワークスペースの中にしかない変数に置いてください。すべてのトークンに
+> `af_dev: true` も入るので、バックエンド側で拒否することもできます。
+
+知っておくこと：トークンの寿命は 10 分、サインイン用のコードは 60 秒です。**置き換わるのはサインインだけ**で、
+Google API のアクセストークン（Calendar、Drive など）は得られず、`picture` もありません。オプションを切るとクライ
+アントは消え、入れ直すと**新しい** client id とシークレットが出ます（シークレットのローテーションはこれです）。
+スイッチはエンドポイントには即座に効きますが、起動中のコンテナは次の起動まで起動時の値を持ち続けます。
 
 ### 構成別の例
 
