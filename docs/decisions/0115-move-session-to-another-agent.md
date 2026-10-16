@@ -281,3 +281,10 @@ than write an empty file (decision 6).
   that needs a file the source read reads it again; the working copy is the same.
 - A moved source cannot be woken by anything but its user. That is stricter than any other
   stopped session, and it is what keeps one writer per working copy.
+
+## Notes
+
+- 2026-10-16: `MarkdownOptions.ToolOutput bool` no longer exists (commit 2518bab71); it is
+  `Tools ToolDetail`. Where decision 8 says `ToolOutput: true`, read `Tools: ToolsFull`: any
+  lesser level still drops compaction summaries, delegation prompts and results and option
+  previews. The builder is `sessionx.BuildHandover` / `RenderHandover` (#2182, P2a step 1).
