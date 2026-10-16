@@ -42,6 +42,8 @@ export function PlanPendingCard({
   onApprove,
   onReject,
   onReview,
+  onReviewAgain,
+  reviewAgainName,
 }: {
   agentName: string;
   plan: string;
@@ -53,6 +55,8 @@ export function PlanPendingCard({
   onApprove: () => void;
   onReject: () => void;
   onReview: () => void;
+  onReviewAgain?: () => void;
+  reviewAgainName?: string;
 }) {
   return (
     <PendingTurn agentName={agentName} note={tr("mirror.plan_pending")}>
@@ -67,6 +71,8 @@ export function PlanPendingCard({
         onApprove={onApprove}
         onReject={onReject}
         onReview={onReview}
+        onReviewAgain={onReviewAgain}
+        reviewAgainName={reviewAgainName}
       />
     </PendingTurn>
   );

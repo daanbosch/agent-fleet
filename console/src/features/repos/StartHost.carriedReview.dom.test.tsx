@@ -101,6 +101,14 @@ describe("carried plan review launch", () => {
     expect(setCarried).toHaveBeenCalledWith(null);
   });
 
+  it("hands the new session's name to onLaunched (what 'review again' remembers)", async () => {
+    const seen: string[] = [];
+    useLaunchSeed.getState().setOnLaunched((n) => seen.push(n));
+    routes({ status: 201, body: { name: "reviewer" } }, { status: 200, body: {} });
+    await press("launch");
+    expect(seen).toEqual(["reviewer"]);
+  });
+
   it("keeps the card when the launch fails", async () => {
     routes({ status: 502, body: { error: { code: "x", message: "boom" } } }, { status: 200, body: {} });
     await press("launch");

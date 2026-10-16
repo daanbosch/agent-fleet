@@ -247,7 +247,7 @@ export function useMirrorActions({
   // one that ends what the queue started — is needed (ADR 0105 decision 2). discardQueue is the
   // menu's "stop and discard the queue" (decision 3), which only a Managed session offers.
   const sendInterrupt = async (discardQueue = false) => {
-    if (wsDown()) return; // WS stopped: no live turn to interrupt (also plan-reject / question-cancel)
+    if (wsDown()) return false; // WS stopped: no live turn to interrupt (also plan-reject / question-cancel)
     // A stop must not be followed by the held follow-ups firing the moment the turn ends.
     useSendQueueStore.getState().pauseIfHolding(session);
     // An explicit stop (also plan-reject / question-cancel) means the user does NOT expect
@@ -261,6 +261,7 @@ export function useMirrorActions({
     // A first stop lets the queue go on, which looks like the stop did nothing unless said.
     else if (managed && res.stop === "first" && queuedCount > 0) toast(tr("mirror.stop_first_continues"));
     setTimeout(() => tickRef.current?.(), 400);
+    return res.ok; // the plan review needs to know the modal was really closed
   };
 
   // cancelQuestion declines a Managed session's pending question (see the QuestionCard's

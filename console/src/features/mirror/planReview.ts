@@ -60,3 +60,11 @@ export function reviewPrompt({ parent, path, dir, focus }: ReviewPromptInput): s
 export function reviewTitle(planHeading: string): string {
   return clampSessionTitle(t("plan.review_title", { title: planHeading }));
 }
+
+/** The follow-up for a reviewer that already reviewed this plan. The path again (the plan file
+ *  is rewritten in place on a revision), a revision id (the Agent drops an identical body to the
+ *  same target for 2 minutes, and without the id a quick rev3 would read as a duplicate of rev2), plus the one rule that makes a second round
+ *  cheaper than a cold reviewer: do not re-raise what the planner kept with a sound reason. */
+export function rereviewPrompt({ parent, path, revision }: { parent: string; path: string; revision: string }): string {
+  return t("plan.review_again_prompt", { session: parent, path, rev: revision });
+}

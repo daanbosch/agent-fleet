@@ -652,3 +652,15 @@ not wake the session), so no reload or pane can approve a plan under review; a c
 launch dialog leaves the card alone, and a failed discard is reported with the card's own
 Discard as the retry. The reviewer's peer message resumes the planner, which may no longer be
 in plan mode, so findings arrive as prose.
+
+Note (2026-10-16): "Review again in <reviewer>" (#2219, piece 1). The Console remembers which
+session reviewed a plan (localStorage, keyed by planner session + plan-file path, claude-written
+paths only) and, while that session still exists, offers a button beside "Review in another
+session" on the live and the carried plan card. It resumes a stopped reviewer, then sends a
+`question` peer message through `POST /input` (`peer_from` = the planner) carrying the unchanged
+path; the live card rejects the planner first, the carried card is discarded only after the send.
+No Agent or Control Plane change.
+Review round (2026-10-16): the follow-up carries a revision id (the Agent drops an identical body
+to the same target for 2 minutes), a press holds a per-card lock, a failed interrupt stops the
+send, a send that fails after the reject offers a retry in the toast, and the reviewer memory
+follows `storage` events and merges onto storage on write.

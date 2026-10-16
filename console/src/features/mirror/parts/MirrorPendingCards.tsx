@@ -42,7 +42,7 @@ export function MirrorPendingCards({
     carried, setCarried, markRejected, sending,
   } = st;
   const { sendKeys, sendSeq, sendInterrupt, cancelQuestion, sendApproval, sendRespond } = actions;
-  const { openPlan, openFile, planSendBlocked, sendPlanComments, reviewPlanElsewhere, reviewCarriedPlan } = plan;
+  const { openPlan, openFile, planSendBlocked, sendPlanComments, reviewPlanElsewhere, reviewCarriedPlan, reviewPlanAgain, reviewCarriedPlanAgain, rereview, rereviewing } = plan;
   const byId = answersByRespond(managed, pending);
   return (
     <>
@@ -56,6 +56,9 @@ export function MirrorPendingCards({
           agentName={agentName}
           onOpenPlan={openPlan}
           onReviewPlan={reviewCarriedPlan}
+          onReviewPlanAgain={reviewCarriedPlanAgain}
+          reviewAgainName={rereview?.label}
+          busy={rereviewing}
           onError={(m, code) => toastSendFailure(toast, { message: m, code }, m)}
           onDone={() => setCarried(null)}
           translate={translate}
@@ -66,7 +69,7 @@ export function MirrorPendingCards({
           agentName={agentName}
           plan={pendingPlan}
           session={session}
-          sending={sending}
+          sending={sending || rereviewing}
           sendDisabled={planSendBlocked}
           onOpen={() => openPlan(pendingPlan)}
           onSendComments={() => void sendPlanComments(pendingPlan)}
@@ -92,6 +95,8 @@ export function MirrorPendingCards({
             void sendInterrupt();
           }}
           onReview={() => void reviewPlanElsewhere(pendingPlan)}
+          onReviewAgain={() => void reviewPlanAgain(pendingPlan)}
+          reviewAgainName={rereview?.label}
         />
       )}
       {pendingApproval && !pending && !pendingPlan && (

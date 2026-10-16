@@ -1,13 +1,18 @@
-import { useEffect } from "react";
+import { createElement, useEffect, useRef, useState } from "react";
 import { sessionPlanFile, sessionPlanRespond } from "../../../core/api/client.ts";
 import type { Session } from "../../../types/session.ts";
 import { t as tr } from "../../../lib/i18n/index.ts";
 import type { useLayoutStore } from "../../../layout/store.ts";
 import type { useToast } from "../../../ui/ToastProvider.tsx";
+import { dismissToast } from "../../../ui/toast.ts";
+import { useSessionsStore } from "../../sessions/store.ts";
 import { useLaunchSeed, useLaunchTarget, useReposStore } from "../../repos/store.ts";
 import { handoffLaunchTarget } from "../handoffLaunch.ts";
 import { discardCarriedAfterReview } from "../carriedPlanReview.ts";
 import { deliverPlanComments, planKey } from "../planComments.ts";
+import {
+  liveReviewer, rememberReviewer, reviewerLabel, runRereview, useHasRememberedReviewer, useReviewer,
+} from "../reviewAgain.ts";
 import { reviewPrompt, reviewTitle } from "../planReview.ts";
 import { planTitle } from "../transcript/blocks.tsx";
 import type { Part } from "../transcript/types.ts";
@@ -47,7 +52,7 @@ export function usePlanActions({
   setActivePane: LayoutState["setActive"];
 }) {
   const {
-    applyEchoes, setFinalizing, finalizingRef, wasWorkingRef, alive, pendingPlan, markRejected, sending, setCarried,
+    applyEchoes, setFinalizing, finalizingRef, wasWorkingRef, alive, pendingPlan, markRejected, sending, carried, setCarried,
     setSending, tickRef,
   } = st;
   const { wsDown, sendInterrupt, sendPrompt, newestIdx } = actions;
@@ -75,6 +80,42 @@ export function usePlanActions({
     openTargetInNew(target);
   };
 
+  // The plan file the cards' "review again" is keyed by: fetched once per presented plan text,
+  // and only for a planner that has a remembered reviewer at all — the endpoint snapshots the
+  // plan into a new file when claude recorded no path, which is not worth doing for every
+  // plan card on screen. A snapshot path changes with every revision, so it never keys anything.
+  const planText = pendingPlan || (carried?.kind === "plan" ? carried.plan || "" : "");
+  const [planPath, setPlanPath] = useState("");
+  const hasMemory = useHasRememberedReviewer(session);
+  useEffect(() => {
+    setPlanPath("");
+    if (!planText || !hasMemory) return;
+    let stale = false;
+    void sessionPlanFile(session).then((r) => {
+      if (!stale && r.ok && r.path && r.source === "claude") setPlanPath(r.path);
+    });
+    return () => {
+      stale = true;
+    };
+  }, [planText, session, hasMemory]);
+  const reviewer = useReviewer(session, planPath);
+  const rereview = reviewer ? { name: reviewer.name, label: reviewerLabel(reviewer) } : null;
+
+  // Remember who reviews this plan once the launch dialog has created the session. Only a path
+  // claude wrote keys anything (see above); a snapshot is a one-off copy.
+  const rememberOnLaunch = (res: { path?: string; source?: string }) => (name: string) => {
+    if (name && res.path && res.source === "claude") rememberReviewer(session, res.path, name);
+  };
+
+  // The reviewer to send a revised plan to, checked again at press time (the list moves on
+  // while a card sits on screen). Null = take the launch dialog instead.
+  const reviewerNow = async (): Promise<{ path: string; reviewer: Session } | null> => {
+    const res = await sessionPlanFile(session);
+    if (!res.ok || !res.path || res.source !== "claude") return null;
+    const r = liveReviewer(session, res.path, useSessionsStore.getState().sessions);
+    return r ? { path: res.path, reviewer: r } : null;
+  };
+
   // Review this plan in another session: reject it, then open the ordinary launch dialog
   // seeded with a prompt that points the reviewer at the plan FILE.
   //
@@ -86,6 +127,7 @@ export function usePlanActions({
   // The path is fetched BEFORE anything is rejected: a launch with no plan to review is
   // worse than no launch, and this way a failure leaves the plan exactly as it was.
   const reviewPlanElsewhere = async (plan: string) => {
+    retireRetry(); // a different review starts: an older "send again" must not fire after it
     if (planSendBlocked) {
       toast(planSendBlocked);
       return;
@@ -110,10 +152,116 @@ export function usePlanActions({
       reviewPrompt({ parent: session, path: res.path, dir: target.repo.path || "" }),
       reviewTitle(planTitle(plan)),
     );
+    useLaunchSeed.getState().setOnLaunched(rememberOnLaunch(res));
     // inPlace: the reviewer reads the working copy this plan is about, uncommitted work
     // included. A worktree would show it the base instead — the dialog still offers one.
     useLaunchTarget.getState().open(target.repo, "", true);
   };
+
+  // One "review again" at a time per card: a press holds this from before its first await until
+  // it settles (the resume alone can take 30 s), and the cards disable their other buttons on
+  // `rereviewing`. Without it a second press, an approval or a launch overlaps the first, and a
+  // late interrupt lands on a planner the member has already approved.
+  const rereviewLock = useRef({ held: false });
+  const [rereviewing, setRereviewing] = useState(false);
+  const latest = useRef({ pending: "", carried: "" });
+  latest.current = { pending: pendingPlan || "", carried: carried?.kind === "plan" ? carried.plan || "" : "" };
+  // Bumped by anything that makes an outstanding "send again" toast stale: a new review-again or
+  // launch, a new plan presented, leaving the card. The toast's retry refuses on a mismatch.
+  const retryEpoch = useRef(0);
+  const retryKey = `plan-rereview:${session}`;
+  const retireRetry = () => {
+    retryEpoch.current++;
+    dismissToast(retryKey);
+  };
+  useEffect(() => retireRetry, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (pendingPlan) retireRetry();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingPlan]);
+  const exclusive = async (fn: () => Promise<unknown>) => {
+    if (rereviewLock.current.held) return;
+    retireRetry();
+    rereviewLock.current.held = true;
+    setRereviewing(true);
+    try {
+      await fn();
+    } finally {
+      rereviewLock.current.held = false;
+      setRereviewing(false);
+    }
+  };
+
+  // A failure after the live card's reject has no card left to press again, so the toast carries
+  // the retry (the send alone: the planner is already rejected).
+  const rereviewFailed = (r: Session, err: string, retry?: () => Promise<boolean>) => {
+    const msg = tr("plan.review_again_failed", { name: reviewerLabel(r), err });
+    if (!retry) {
+      toast(msg);
+      return;
+    }
+    toast(
+      createElement(
+        "span",
+        { className: "update-toast" },
+        createElement("span", { className: "update-toast-txt" }, msg),
+        createElement("button", { type: "button", className: "update-toast-btn", onClick: () => void retry() }, tr("plan.review_again_retry")),
+      ),
+      { kind: "error", duration: 0, key: retryKey }, // same key: a failed retry replaces this toast
+    );
+  };
+
+  // "Review again in <reviewer>" on the live card: the same ordering as reviewPlanElsewhere
+  // (the planner must be idle in plan mode, not behind the approval modal, when the peer message
+  // arrives), with one addition — the reviewer is made ready FIRST, so a reviewer that will not
+  // come up leaves the plan untouched. An interrupt that did not go through stops the send and
+  // takes the optimistic "rejected" back.
+  const reviewPlanAgain = (plan: string) =>
+    exclusive(async () => {
+      if (planSendBlocked) {
+        toast(planSendBlocked);
+        return;
+      }
+      if (wsDown()) return;
+      const hit = await reviewerNow();
+      if (!hit) return reviewPlanElsewhere(plan); // reviewer deleted since the card rendered
+      await runRereview({
+        planner: session,
+        path: hit.path,
+        plan,
+        reviewer: hit.reviewer,
+        lock: { held: false },
+        stillCurrent: () => latest.current.pending.trim() === plan.trim(),
+        beforeSend: async () => {
+          markRejected(plan, true); // optimistic "rejected" badge; planOutcome reconciles it
+          wasWorkingRef.current = false; // as with an interrupt: no reply is being waited for
+          const ok = await sendInterrupt();
+          if (!ok) markRejected(plan, false);
+          return ok;
+        },
+        onFail: (err, retry) => rereviewFailed(hit.reviewer, err, retry),
+        retryValid: ((epoch) => () => retryEpoch.current === epoch && !latest.current.pending)(retryEpoch.current),
+        onRetryDone: () => dismissToast(retryKey),
+      });
+    });
+
+  // The same from the carried card: nothing to reject, and the card is discarded only after the
+  // send succeeded — a failed send leaves the plan reachable.
+  const reviewCarriedPlanAgain = (plan: string) =>
+    exclusive(async () => {
+      const hit = await reviewerNow();
+      if (!hit) return reviewCarriedPlan(plan);
+      await runRereview({
+        planner: session,
+        path: hit.path,
+        plan,
+        reviewer: hit.reviewer,
+        lock: { held: false },
+        stillCurrent: () => latest.current.carried === plan,
+        onSent: discardCarriedAfterReview({ session, setCarried, toast }),
+        onFail: (err) => rereviewFailed(hit.reviewer, err),
+      });
+    });
 
   // Review the plan a STOPPED session was waiting on (the carried plan card). The same
   // launch dialog, minus everything the live card needs: no modal is up, so nothing is
@@ -125,6 +273,7 @@ export function usePlanActions({
   // server-side state, so no pane or reload can approve a plan whose review is under way,
   // and discard does not wake the session.
   const reviewCarriedPlan = async (plan: string) => {
+    retireRetry();
     const res = await sessionPlanFile(session);
     if (!res.ok || !res.path) {
       toast(tr("plan.review_launch_failed", { err: res.message || "" }));
@@ -139,7 +288,12 @@ export function usePlanActions({
       reviewPrompt({ parent: session, path: res.path, dir: target.repo.path || "" }),
       reviewTitle(planTitle(plan)),
     );
-    useLaunchSeed.getState().setOnLaunched(discardCarriedAfterReview({ session, setCarried, toast }));
+    const discard = discardCarriedAfterReview({ session, setCarried, toast });
+    const remember = rememberOnLaunch(res);
+    useLaunchSeed.getState().setOnLaunched((name) => {
+      remember(name);
+      discard();
+    });
     useLaunchTarget.getState().open(target.repo, "", true);
   };
 
@@ -241,5 +395,5 @@ export function usePlanActions({
     openTargetInNew(target, true);
   };
 
-  return { openPlan, reviewPlanElsewhere, reviewCarriedPlan, planSendBlocked, sendPlanComments, openFile, openDiff };
+  return { openPlan, reviewPlanElsewhere, reviewCarriedPlan, reviewPlanAgain, reviewCarriedPlanAgain, rereview, rereviewing, planSendBlocked, sendPlanComments, openFile, openDiff };
 }

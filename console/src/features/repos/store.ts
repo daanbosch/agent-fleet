@@ -205,9 +205,9 @@ interface LaunchSeedStore {
 	inboxMemoId: string;
 	set(p: string, title?: string, handoffSession?: string, handoffId?: string, handoffOfferId?: string, workItem?: LaunchWorkItem | null): void;
 	/** Runs once, after a launch seeded from this store has created its session (never on
-	 *  cancel). Dropped by set()/clear(), so a cancelled dialog leaves nothing behind. */
-	onLaunched: (() => void) | null;
-	setOnLaunched(fn: (() => void) | null): void;
+	 *  cancel). Gets the new session's name ("" when the launch did not report one). Dropped by set()/clear(), so a cancelled dialog leaves nothing behind. */
+	onLaunched: ((sessionName: string) => void) | null;
+	setOnLaunched(fn: ((sessionName: string) => void) | null): void;
 	setInboxItem(id: string): void;
 	setInboxMemo(id: string): void;
   clear(): void;

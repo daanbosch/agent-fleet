@@ -92,6 +92,13 @@ export const mirror = {
   "plan.review_in_session": "別セッションでレビュー",
   "plan.review_in_session_title": "プランを却下し、選んだエージェントでレビューセッションを起動します",
   "plan.review_launch_failed": "レビューセッションを起動できませんでした：{err}",
+  "plan.review_again": "{name} で再レビュー",
+  "plan.review_again_title":
+    "プランを却下し、以前レビューした {name} に改訂版を送ります。停止中なら再開します。作業中のレビュアーには、そのターンが終わってから届きます",
+  "plan.review_again_retry": "もう一度送る",
+  "plan.review_again_failed": "{name} にプランを送れませんでした：{err}",
+  "plan.review_again_prompt":
+    "計画を改訂しました（改訂 {rev}）。もう一度レビューしてください。\n\n- 計画: {path}（読むだけ。編集しないでください）\n\n前回の指摘と見比べてください。計画側が妥当な理由で残した点は、再び指摘しないでください。\n形式は前回と同じ（判定 / 指摘）で、send_to_peer_session で {session} に送ってください。",
   "plan.review_title": "レビュー: {title}",
   "plan.review_prompt_head":
     "セッション {session} が利用者に提示した作業計画のレビューを依頼されました（利用者が Console から起動しています）。",
@@ -396,6 +403,8 @@ export const mirror = {
   "mirror.carried_plan_reject": "承認しない",
   "mirror.carried_plan_approve_confirm": "この計画を承認すると、セッションを再開してそのまま実行します。取り消せません。よろしいですか？",
   "mirror.carried_plan_review_title": "このプランのレビューセッションを起動します。指摘はメッセージとしてこのセッションに届きます",
+  "mirror.carried_plan_review_again_title":
+    "以前レビューした {name} に改訂版のプランを送ります。停止中なら再開します。作業中のレビュアーには、そのターンが終わってから届きます。指摘はメッセージとしてこのセッションに届きます",
   "mirror.carried_plan_discard_failed": "レビューセッションは起動しましたが、このプランカードを破棄できませんでした（{err}）。承認する前にここで破棄してください。",
   "mirror.carried_plan_feedback_ph": "補足や修正指示（任意）",
   "mirror.carried_no_keys": "持ち越した対話にキー操作は送れません。",

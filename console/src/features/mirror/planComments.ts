@@ -113,6 +113,9 @@ if (typeof window !== "undefined") {
   });
 }
 
+/** A short id of the plan text (whitespace-normalised): equal for equal text, different for a revision. */
+export const planFingerprint = (plan: string): string => hash(normalizePlan(plan));
+
 /** planKey groups by "which session, and which plan text". */
 export function planKey(session: string, plan: string): string {
   return session + ":" + hash(normalizePlan(plan));
