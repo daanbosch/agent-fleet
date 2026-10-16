@@ -53,6 +53,7 @@ func buildMux(cfg config) *http.ServeMux {
 	registerDrawioStencilRoutes(mux, cfg)
 	registerBrandAdminRoutes(mux, cfg)
 	registerTerminalPreviewRoutes(mux, cfg)
+	registerDevIdPRoutes(mux, cfg)
 	registerLegacyRedirect(mux)
 	registerStatic(mux, cfg)
 	return mux

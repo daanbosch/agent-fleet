@@ -281,6 +281,7 @@ func main() {
 	// mistyped setting charitably beats having the whole feature go dead.
 	mgr.githubBuiltinOff = githubBuiltinOffFromEnv(os.Getenv("AF_GITHUB_BUILTIN_APPS"))
 	mgr.previewDomain = strings.ToLower(strings.Trim(strings.TrimSpace(os.Getenv("AF_PREVIEW_DOMAIN")), "."))
+	mgr.devIdPOn = envBool("AF_DEV_IDP", false)
 	cfg := config{
 		addr:          envx.Or("CP_ADDR", ":8080"),
 		consoleDir:    envx.Or("CONSOLE_DIR", "./console"),
@@ -563,6 +564,15 @@ func main() {
 			log.Printf("WARNING: AF_PREVIEW_DOMAIN is set without PUBLIC_BASE_URL — the preview handshake has no Console origin to bounce to")
 		}
 		log.Printf("preview subdomains: *.%s (ports are per-workspace; default %v)", cfg.previewDomain, defaultPreviewPorts)
+	}
+	// Development OIDC IdP (ADR 0116): say plainly what this deployment serves, because an
+	// identity provider that mints tokens for any signed-in member must never be on by accident.
+	if mgr.devIdPOn {
+		if iss := mgr.devIdPIssuer(); iss != "" {
+			log.Printf("WARNING: AF_DEV_IDP is on — serving a development OIDC IdP at %s (workspaces opt in individually; never trust this issuer in production)", iss)
+		} else {
+			log.Printf("WARNING: AF_DEV_IDP is set without PUBLIC_BASE_URL — the development OIDC IdP has no Console origin to live on and stays off")
+		}
 	}
 	// withClientIP is OUTERMOST on purpose: it is the only place the forwarding
 	// headers are read, so nothing downstream can be tempted to trust a client's own
