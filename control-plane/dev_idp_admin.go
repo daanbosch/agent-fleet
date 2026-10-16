@@ -10,8 +10,8 @@ package main
 
 import (
 	"context"
-	"errors"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"

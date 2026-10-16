@@ -221,7 +221,7 @@ func TestDevIdPInvalidateBeatsAnInFlightRead(t *testing.T) {
 	read, release := make(chan struct{}), make(chan struct{})
 	var paused atomic.Bool
 	h.getSetting = func(ctx context.Context, key string) (string, error) {
-		v, err := real.GetSetting(ctx, key) // the old value
+		v, err := real.GetSetting(ctx, key)     // the old value
 		if paused.CompareAndSwap(false, true) { // only the first read pauses
 			close(read)
 			<-release
