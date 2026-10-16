@@ -52,7 +52,7 @@ effect crosses tenants, or that could lock people out, sits upstream of you.
 | Distributing a shared integration server to the team, the team's default branch naming rules, the agent new members are pointed at | **you** |
 | Registering a sign-in method, login rules you can read, restricting where members connect from, your tenant's own OAuth apps | **you** (a sign-in method still needs approval) |
 | Creating tenants, tenant-wide limits and idle auto-stop, granting admin rights, changing the login rules, approving a sign-in method | deployment administrator |
-| Egress control, the speech engine, the shared dictionary | deployment administrator |
+| Egress control, the speech engine, the shared dictionary, the development OIDC IdP switch | deployment administrator |
 | Backups, upgrades, host incident response | deployment administrator (often the same person as IT / SRE) |
 
 When something cannot be completed with your own authority, the people to consult are

@@ -28,11 +28,12 @@ const devIdPPath = "/dev-idp"
 // googleRealm is the issuer an IdentityLink carries for a Google sign-in.
 const googleRealm = "https://accounts.google.com"
 
-// devIdPIssuer is the issuer URL, or "" when the IdP is not served: the deployment flag
-// (AF_DEV_IDP) is off, or there is no Console origin to put it on.
-func (m *manager) devIdPIssuer() string {
+// devIdPIssuer is the issuer URL, or "" when the IdP is not served: the deployment switch
+// is off (devIdPEnabled), or there is no Console origin to put it on. Every caller asks per
+// request, so a switch flipped in the admin modal is followed without a restart.
+func (m *manager) devIdPIssuer(ctx context.Context) string {
 	base := strings.TrimRight(m.publicBaseURL, "/")
-	if !m.devIdPOn || base == "" {
+	if base == "" || !m.devIdPEnabled(ctx) {
 		return ""
 	}
 	return base + devIdPPath
@@ -90,7 +91,7 @@ func (m *manager) ensureDevIdPClient(ctx context.Context, ws store.Workspace) (c
 // devIdPEnv is the configuration an app switches its sign-in to, as container env. Nothing
 // here is injected unless the deployment serves the IdP and this workspace opted in.
 func (m *manager) devIdPEnv(ctx context.Context, ws store.Workspace, st wsSettings) []string {
-	issuer := m.devIdPIssuer()
+	issuer := m.devIdPIssuer(ctx)
 	if issuer == "" || !st.DevIdP {
 		return nil
 	}
@@ -253,7 +254,7 @@ func (a wsSettingsAPI) setDevIdP(w http.ResponseWriter, r *http.Request, res *re
 // container receives it as AF_DEV_IDP_CLIENT_SECRET, and a screen that displayed it would
 // put it in one more place for no gain.
 func (a wsSettingsAPI) addDevIdP(r *http.Request, res *resolved, st wsSettings, out map[string]any) {
-	issuer := a.mgr.devIdPIssuer()
+	issuer := a.mgr.devIdPIssuer(r.Context())
 	out["devIdpAvailable"] = issuer != ""
 	out["devIdp"] = st.DevIdP && issuer != ""
 	if issuer == "" || !st.DevIdP {

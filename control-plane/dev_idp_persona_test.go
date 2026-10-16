@@ -155,7 +155,7 @@ func TestDevIdPPersonaCRUDAndLimits(t *testing.T) {
 
 func TestDevIdPPersonaAPIIs409WhereTheIdPIsNotServed(t *testing.T) {
 	d := newDevIdPTestEnv(t)
-	d.mgr.devIdPOn = false
+	setDevIdPDeployment(t, d.mgr, false)
 	if rec := d.personaReq(t, http.MethodPost, personaAPI, `{"handle":"admin"}`); rec.Code != http.StatusConflict {
 		t.Errorf("create with the IdP off: %d", rec.Code)
 	}
@@ -459,6 +459,8 @@ func TestDevIdPConsentIsNotServedOnAPreviewHost(t *testing.T) {
 func TestDevIdPConsentIsA404WhereTheIdPIsOff(t *testing.T) {
 	cfg := oauthTestConfig(t)
 	cfg.mgr.publicBaseURL = "https://af.example.com"
+	cfg.mgr.store = brandTestStore(t)
+	setDevIdPDeployment(t, cfg.mgr, false)
 	mux := http.NewServeMux()
 	newDevIdPAPI(cfg).mount(mux)
 	gate := cfg.authGate(mux)
@@ -471,7 +473,7 @@ func TestDevIdPConsentIsA404WhereTheIdPIsOff(t *testing.T) {
 		}
 	}
 	// On, a signed-out POST is refused by the gate (no session), never handled.
-	cfg.mgr.devIdPOn = true
+	setDevIdPDeployment(t, cfg.mgr, true)
 	rec := httptest.NewRecorder()
 	cfg.authGate(mux).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "https://af.example.com"+devIdPConsentPath, nil))
 	if rec.Code != http.StatusUnauthorized {

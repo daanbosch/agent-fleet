@@ -100,8 +100,8 @@ func personaJSON(p store.DevIdPPersona) devIdPPersonaJSON {
 	return devIdPPersonaJSON{ID: p.ID, Handle: p.Handle, Name: pr.Name, Email: pr.Email, Sub: pr.Sub}
 }
 
-func (a wsSettingsAPI) personasServed(w http.ResponseWriter) bool {
-	if a.mgr.devIdPIssuer() == "" {
+func (a wsSettingsAPI) personasServed(w http.ResponseWriter, r *http.Request) bool {
+	if a.mgr.devIdPIssuer(r.Context()) == "" {
 		writeAPIErr(w, &apiError{http.StatusConflict, "not_configured", "the development OIDC IdP is not enabled on this deployment"})
 		return false
 	}
@@ -122,7 +122,7 @@ func (a wsSettingsAPI) writePersonas(w http.ResponseWriter, r *http.Request, res
 }
 
 func (a wsSettingsAPI) listPersonas(w http.ResponseWriter, r *http.Request, res *resolved) {
-	if a.personasServed(w) {
+	if a.personasServed(w, r) {
 		a.writePersonas(w, r, res, http.StatusOK)
 	}
 }
@@ -135,7 +135,7 @@ func (a wsSettingsAPI) auditPersona(ctx context.Context, res *resolved, detail s
 }
 
 func (a wsSettingsAPI) createPersona(w http.ResponseWriter, r *http.Request, res *resolved) {
-	if !a.personasServed(w) {
+	if !a.personasServed(w, r) {
 		return
 	}
 	ctx := r.Context()
@@ -199,7 +199,7 @@ func (a wsSettingsAPI) createPersona(w http.ResponseWriter, r *http.Request, res
 }
 
 func (a wsSettingsAPI) deletePersona(w http.ResponseWriter, r *http.Request, res *resolved) {
-	if !a.personasServed(w) {
+	if !a.personasServed(w, r) {
 		return
 	}
 	ctx := r.Context()

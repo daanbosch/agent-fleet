@@ -223,3 +223,45 @@ func TestDevIdPPersonasAndConsentTickets(t *testing.T) {
 		}
 	}
 }
+
+// Both dialects: the count behind the admin modal's "workspaces opted in" follows
+// registrations, and the deployment switch row reads back "" until it is written.
+func TestDevIdPClientCountAndSwitchRow(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range homeOpStores(t) {
+		if v, err := st.GetSetting(ctx, "dev_idp"); err != nil || v != "" {
+			t.Fatalf("%s: unset switch read %q, %v", name, v, err)
+		}
+		if n, err := st.CountDevIdPClients(ctx); err != nil || n != 0 {
+			t.Fatalf("%s: empty count %d, %v", name, n, err)
+		}
+		for _, ws := range []string{"w1", "w2"} {
+			if _, err := st.CreateDevIdPClient(ctx, DevIdPClient{WorkspaceID: ws, MembershipID: "m", ClientID: "c-" + ws,
+				SecretEnc: "s", KeyRef: "k", CreatedAt: 1}); err != nil {
+				t.Fatalf("%s: create: %v", name, err)
+			}
+		}
+		if n, _ := st.CountDevIdPClients(ctx); n != 2 {
+			t.Errorf("%s: count = %d, want 2", name, n)
+		}
+		if err := st.SetSetting(ctx, "dev_idp", "off"); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.SetSetting(ctx, "dev_idp", "on"); err != nil {
+			t.Fatal(err)
+		}
+		if v, _ := st.GetSetting(ctx, "dev_idp"); v != "on" {
+			t.Errorf("%s: switch row = %q", name, v)
+		}
+		// The switch never touches registrations.
+		if n, _ := st.CountDevIdPClients(ctx); n != 2 {
+			t.Errorf("%s: count after the switch = %d", name, n)
+		}
+		if err := st.DeleteDevIdPClient(ctx, "w1"); err != nil {
+			t.Fatal(err)
+		}
+		if n, _ := st.CountDevIdPClients(ctx); n != 1 {
+			t.Errorf("%s: count after a delete = %d, want 1", name, n)
+		}
+	}
+}

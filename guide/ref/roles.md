@@ -41,7 +41,7 @@ settings**. Only a deployment administrator sees the shield-icon **Admin** item.
 | Distribute integration servers to the team | — | ✓ | ✓ |
 | Read the audit log | — | ✓ | ✓ |
 | Running time and cloud cost | — | ✓ | ✓ |
-| Egress control, speech engine, shared dictionary | — | — | ✓ |
+| Egress control, speech engine, shared dictionary, the development OIDC IdP switch | — | — | ✓ |
 | Allow a tenant the self-hosted engines (llm / image), take models in, API tokens | — | —³ | ✓ |
 | Create tenants and grant admin rights | — | — | ✓ |
 | Install, upgrade, back up, restore | — | — | ✓ |

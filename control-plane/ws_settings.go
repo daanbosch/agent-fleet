@@ -60,7 +60,7 @@ type wsSettings struct {
 	PreviewCrossOrigin bool `json:"previewCrossOrigin,omitempty"`
 
 	// DevIdP opts this workspace in to the development OIDC IdP (ADR 0116). Off by default, and
-	// inert unless the deployment also serves it (AF_DEV_IDP). Turning it off deletes the
+	// inert while the deployment switch is off (admin modal, or AF_DEV_IDP=0). Turning it off deletes the
 	// workspace's client registration, so turning it on again issues a new client id and secret:
 	// that is the only way to rotate the secret.
 	DevIdP bool `json:"devIdp,omitempty"`
@@ -337,7 +337,7 @@ func (a wsSettingsAPI) put(w http.ResponseWriter, r *http.Request, res *resolved
 	if v, ok := body["devIdp"].(bool); ok && v != st.DevIdP {
 		// A deployment that does not serve the IdP cannot opt in: a stored "on" there would
 		// light up the day the flag is set, without anyone having decided it for that day.
-		if v && a.mgr.devIdPIssuer() == "" {
+		if v && a.mgr.devIdPIssuer(r.Context()) == "" {
 			writeAPIErr(w, &apiError{http.StatusConflict, "not_configured", "the development OIDC IdP is not enabled on this deployment"})
 			return
 		}
