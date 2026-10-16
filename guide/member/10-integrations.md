@@ -152,13 +152,12 @@ server of its own at `https://<console>/dev-idp`. Your app changes **configurati
 client secret); no code, and nothing to register in the Google Cloud console.
 
 - **Availability**: the operator sets `AF_DEV_IDP=1` on the Control Plane (ADR 0116); until then every
-  `/dev-idp/…` URL is a 404. **It is off per workspace too.** The Console has no switch for it yet (#2222), so
-  turn it on from the Console tab's browser console, then **stop and start the workspace** so the values below
-  reach the container:
-
-  ```js
-  await fetch('/api/env/ws-settings', {method: 'PUT', body: JSON.stringify({devIdp: true})})
-  ```
+  `/dev-idp/…` URL is a 404, and the switch below does not appear. **It is off per workspace too.** Turn it on
+  under Settings › Preview subdomains › "Use the development OIDC IdP", then **stop and start the workspace**
+  so the values below reach the container. The same screen shows the issuer, the discovery URL and the client
+  id with copy buttons. The client secret is not shown there: read `AF_DEV_IDP_CLIENT_SECRET` inside the
+  container. Turning the switch off and on again issues a new client id and secret, and a production
+  configuration must never trust this issuer.
 
 - **What you get**: `AF_DEV_IDP_ISSUER`, `AF_DEV_IDP_WELL_KNOWN` (the discovery URL), `AF_DEV_IDP_CLIENT_ID` and
   `AF_DEV_IDP_CLIENT_SECRET` inside the container, next to `AF_PREVIEW_URL_*`. The client is **yours alone**: its
