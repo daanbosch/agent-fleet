@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -15,11 +16,14 @@ import (
 // browser puts on the consent form's own POST, which depends on the page's Referrer-Policy.
 // The real consent page (body and headers) is replayed from a local server; only the CSP is
 // relaxed and an auto-submit script injected, because headless Chromium has no one to click.
-// Skipped when no Chromium is installed.
+// Skipped only when no Chromium is installed or the workspace says it has no browser.
 func TestDevIdPConsentFormSubmitsInChromium(t *testing.T) {
 	bin := os.Getenv("AF_CHROMIUM_BIN")
 	if bin == "" {
 		bin = "/usr/bin/chromium"
+	}
+	if os.Getenv("AF_BROWSER_UNAVAILABLE") != "" {
+		t.Skip("no browser in this workspace")
 	}
 	if _, err := os.Stat(bin); err != nil {
 		t.Skip("no Chromium at " + bin)
@@ -31,9 +35,12 @@ func TestDevIdPConsentFormSubmitsInChromium(t *testing.T) {
 		t.Fatalf("consent page: %d %s", page.Code, page.Body)
 	}
 
-	var gotOrigin string
-	var srv *httptest.Server
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// The address is known before Serve starts, so handlers read an immutable string; the Origin the
+	// POST carried goes back through a channel.
+	srv := httptest.NewUnstartedServer(nil)
+	baseURL := "http://" + srv.Listener.Addr().String()
+	origins := make(chan string, 4)
+	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			for k, v := range page.Header() {
 				w.Header()[k] = v
@@ -43,28 +50,42 @@ func TestDevIdPConsentFormSubmitsInChromium(t *testing.T) {
 			_, _ = w.Write([]byte(body))
 			return
 		}
-		gotOrigin = r.Header.Get("Origin")
-		api := devIdPAPI{mgr: &manager{publicBaseURL: srv.URL}}
+		select {
+		case origins <- r.Header.Get("Origin"):
+		default:
+		}
+		api := devIdPAPI{mgr: &manager{publicBaseURL: baseURL}}
 		if !api.sameOrigin(r) {
 			http.Error(w, "CROSS-SITE-REFUSED", http.StatusForbidden)
 			return
 		}
 		_, _ = w.Write([]byte("SUBMIT-ACCEPTED"))
-	}))
+	})
+	srv.Start()
 	defer srv.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	dir := t.TempDir()
-	out, err := exec.CommandContext(ctx, bin, "--headless", "--disable-gpu", "--user-data-dir="+dir,
-		"--virtual-time-budget=5000", "--dump-dom", srv.URL+"/").Output()
+	cmd := exec.CommandContext(ctx, bin, "--headless", "--disable-gpu", "--user-data-dir="+t.TempDir(),
+		"--virtual-time-budget=5000", "--dump-dom", baseURL+"/")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	// An installed Chromium that times out or crashes is a failure, not a skip: a skip here would
+	// let the regression this test guards pass unnoticed.
+	out, err := cmd.Output()
 	if err != nil {
-		t.Skipf("Chromium would not run here: %v", err)
+		t.Fatalf("Chromium failed: %v (ctx: %v)\nstderr: %s", err, ctx.Err(), stderr.String())
+	}
+	var gotOrigin string
+	select {
+	case gotOrigin = <-origins:
+	default:
+		t.Fatalf("the form was never POSTed: %s", out)
 	}
 	if !strings.Contains(string(out), "SUBMIT-ACCEPTED") {
 		t.Errorf("form submit not accepted (Origin seen: %q): %s", gotOrigin, out)
 	}
-	if gotOrigin != srv.URL {
-		t.Errorf("Origin on the form POST = %q, want %q", gotOrigin, srv.URL)
+	if gotOrigin != baseURL {
+		t.Errorf("Origin on the form POST = %q, want %q", gotOrigin, baseURL)
 	}
 }
