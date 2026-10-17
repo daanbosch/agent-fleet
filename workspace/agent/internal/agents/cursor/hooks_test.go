@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -232,6 +233,9 @@ func TestEnsureHooksFailsClosed(t *testing.T) {
 		"hooks not object": `{"version":1,"hooks":[]}`,
 		"hooks null":       `{"version":1,"hooks":null}`,
 		"stop not array":   `{"version":1,"hooks":{"stop":{"command":"x"}}}`,
+		"stop null":        `{"version":1,"hooks":{"stop":null}}`,
+		"no version":       `{"hooks":{"stop":[]}}`,
+		"empty file":       ``,
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
@@ -273,5 +277,106 @@ func TestEnsureHooksWritesThroughASymlink(t *testing.T) {
 	}
 	if len(stopEntries(t, real)) != 2 {
 		t.Fatal("the link target was not updated")
+	}
+}
+
+func TestEnsureHooksKeepsLookalikeUserEntries(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := hooksPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mine := []string{
+		`{"command":"printf 'completed cursor-hook stop' >> ./audit.log"}`,
+		`{"command":"audit cursor-hook stop"}`,
+		`{"command":"'/opt/x/tool' cursor-hook stop extra"}`,
+		`{"command":"'/opt/x/tool' cursor-hook stop","matcher":"x"}`,
+		`{"command":"/opt/x/tool cursor-hook stop"}`,
+	}
+	doc := `{"version":1,"hooks":{"stop":[` + strings.Join(mine, ",") + `]}}`
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureHooksAt(path, "/opt/af/a"); err != nil {
+		t.Fatal(err)
+	}
+	es := stopEntries(t, path)
+	if len(es) != len(mine)+1 {
+		t.Fatalf("a user entry was replaced or dropped: %+v", es)
+	}
+	for i, m := range mine {
+		var want map[string]any
+		_ = json.Unmarshal([]byte(m), &want)
+		if es[i]["command"] != want["command"] {
+			t.Fatalf("entry %d changed: %+v", i, es[i])
+		}
+	}
+	// A path with a quote in it is still recognised as ours when we wrote it.
+	if err := ensureHooksAt(path, "/opt/it's/a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureHooksAt(path, "/opt/af/b"); err != nil {
+		t.Fatal(err)
+	}
+	if got := stopEntries(t, path); len(got) != len(mine)+1 {
+		t.Fatalf("our entry was duplicated: %+v", got)
+	}
+}
+
+func TestEnsureHooksRefusesWhatIsNotARegularFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := hooksPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Skip("no mkfifo:", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- ensureHooksAt(path, "/opt/af/a") }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ensureHooksAt blocked on a FIFO")
+	}
+	// Too large to be a hooks.json.
+	os.Remove(path)
+	if err := os.WriteFile(path, append([]byte(`{"version":1,"x":"`), make([]byte, maxHooksSize)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureHooksAt(path, "/opt/af/a"); err == nil {
+		t.Fatal("expected an error for an oversized file")
+	}
+}
+
+// A save that lands between our read and our publish is never overwritten.
+func TestEnsureHooksOnceDoesNotClobberAConcurrentSave(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(target, []byte(userHooks), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	saved := `{"version":1,"hooks":{"stop":[{"command":"./saved-later.sh"}]}}`
+	hookAfterRead = func() { _ = os.WriteFile(target, []byte(saved), 0o600) }
+	defer func() { hookAfterRead = nil }()
+	done, err := ensureHooksOnce(target, "/opt/af/a")
+	if err != nil || done {
+		t.Fatalf("done=%v err=%v, want a retry", done, err)
+	}
+	if got, _ := os.ReadFile(target); string(got) != saved {
+		t.Fatalf("the user's save was lost: %s", got)
+	}
+	hookAfterRead = nil
+	if err := ensureHooksAt(target, "/opt/af/a"); err != nil {
+		t.Fatal(err)
+	}
+	if es := stopEntries(t, target); len(es) != 2 || es[0]["command"] != "./saved-later.sh" {
+		t.Fatalf("merge after the retry = %+v", es)
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, ".hooks.json.af-*")); len(left) != 0 {
+		t.Fatalf("temp files left behind: %v", left)
 	}
 }

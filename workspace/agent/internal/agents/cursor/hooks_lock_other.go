@@ -4,6 +4,8 @@ package cursor
 
 import "os"
 
-// tryFlock is a no-op where flock is unavailable: writers still re-check the file before
-// publishing, which narrows the race without closing it.
-func tryFlock(*os.File) bool { return true }
+// lockSupported is false where flock is unavailable: EnsureHooks gives up rather than let two
+// agent processes race each other over the user's file.
+const lockSupported = false
+
+func tryFlock(*os.File) bool { return false }

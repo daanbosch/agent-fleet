@@ -16,6 +16,7 @@ package cursor
 //     HookSubcommand is ours. Anything about the file we do not understand leaves it untouched.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
@@ -136,11 +138,32 @@ func hookCommand(exe string) string {
 	return session.ShellQuote(exe) + " " + HookSubcommand + " stop"
 }
 
+// isOurs recognises only the exact entry hookCommand generates: the command is one
+// single-quoted absolute path followed by " cursor-hook stop", and the entry has no key besides
+// command and timeout. Anything that merely mentions the subcommand (an argument to another
+// tool, a wrapper, a script) is the user's and is kept. hooks.json has no field for a name, and
+// an extra key's effect on cursor is unmeasured, so the shape itself is the marker.
 func isOurs(entry json.RawMessage) bool {
-	var e struct {
-		Command string `json:"command"`
+	var e map[string]json.RawMessage
+	if json.Unmarshal(entry, &e) != nil {
+		return false
 	}
-	return json.Unmarshal(entry, &e) == nil && strings.Contains(e.Command, " "+HookSubcommand+" ")
+	for k := range e {
+		if k != "command" && k != "timeout" {
+			return false
+		}
+	}
+	var cmd string
+	if json.Unmarshal(e["command"], &cmd) != nil {
+		return false
+	}
+	const suffix = "' " + HookSubcommand + " stop"
+	if !strings.HasPrefix(cmd, "'/") || !strings.HasSuffix(cmd, suffix) {
+		return false
+	}
+	inner := strings.TrimSuffix(strings.TrimPrefix(cmd, "'"), suffix)
+	// ShellQuote writes a quote inside the path as '\'' ; any other quote ends the word early.
+	return !strings.Contains(strings.ReplaceAll(inner, `'\''`, ""), "'")
 }
 
 // EnsureHooks installs af's `stop` entry into the global hooks.json. Idempotent: nothing is
@@ -205,6 +228,8 @@ func mergeStop(orig []byte, exe string) (out []byte, changed bool, err error) {
 		}
 	} else if orig == nil {
 		root["version"] = json.RawMessage("1")
+	} else {
+		return nil, false, fmt.Errorf(`no "version": 1`)
 	}
 	hooks := map[string]json.RawMessage{}
 	if raw, ok := root["hooks"]; ok {
@@ -214,7 +239,8 @@ func mergeStop(orig []byte, exe string) (out []byte, changed bool, err error) {
 	}
 	var stops []json.RawMessage
 	if raw, ok := hooks["stop"]; ok {
-		if json.Unmarshal(raw, &stops) != nil {
+		// null decodes into a nil slice without error, so the type is checked on the text.
+		if t := bytes.TrimSpace(raw); len(t) == 0 || t[0] != '[' || json.Unmarshal(raw, &stops) != nil {
 			return nil, false, fmt.Errorf(`"hooks.stop" is not an array`)
 		}
 	}
@@ -260,24 +286,64 @@ func canon(in []json.RawMessage) []any {
 	return out
 }
 
-// ensureHooksOnce merges once. done=false means the file changed under us before the rename and
-// the caller should read it again.
+// maxHooksSize bounds what is read of the user's file; a larger one is not a hooks.json.
+const maxHooksSize = 1 << 20
+
+// readHooks reads path only when it is a regular file. A FIFO or device would block the
+// launch forever, so it is opened non-blocking and checked with fstat before any read.
+// exists=false means there is no file.
+func readHooks(path string) (data []byte, mode os.FileMode, exists bool, err error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if os.IsNotExist(err) {
+		return nil, 0, false, nil
+	}
+	if err != nil {
+		return nil, 0, false, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, 0, false, fmt.Errorf("%s is not a regular file", path)
+	}
+	data, err = io.ReadAll(io.LimitReader(f, maxHooksSize+1))
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if len(data) > maxHooksSize {
+		return nil, 0, false, fmt.Errorf("%s is larger than %d bytes", path, maxHooksSize)
+	}
+	return data, fi.Mode().Perm(), true, nil
+}
+
+// hookAfterRead is a test seam: it runs between the read and the publish, where an editor's
+// save would land.
+var hookAfterRead func()
+
+// ensureHooksOnce merges once. done=false means the file changed under us and the caller should
+// read it again.
+//
+// Publishing never overwrites a save the user made after our read: the current file is first
+// moved aside (an atomic rename), checked against what we merged from, and the new content is
+// then linked into place, which fails if anything has appeared at the path in the meantime.
+// A changed file is put back as it was. The only moment the path is empty is between the two
+// renames; cursor reading hooks.json then sees no file, which it treats as no hooks.
 func ensureHooksOnce(target, exe string) (done bool, err error) {
-	orig, err := os.ReadFile(target)
-	var mode os.FileMode = 0o600
-	switch {
-	case err == nil:
-		if fi, err := os.Stat(target); err == nil {
-			mode = fi.Mode().Perm()
-		}
-	case !os.IsNotExist(err):
-		return false, err
-	default:
-		orig = nil
+	orig, mode, exists, err := readHooks(target)
+	if err != nil {
+		return false, fmt.Errorf("%w, leaving it alone", err)
+	}
+	if !exists {
+		orig, mode = nil, 0o600
 	}
 	out, changed, err := mergeStop(orig, exe)
 	if err != nil {
 		return false, fmt.Errorf("%s: %w, leaving it alone", target, err)
+	}
+	if hookAfterRead != nil {
+		hookAfterRead()
 	}
 	if !changed {
 		return true, nil
@@ -286,7 +352,7 @@ func ensureHooksOnce(target, exe string) (done bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	defer os.Remove(tmp.Name()) // no-op once renamed
+	defer os.Remove(tmp.Name()) // no-op once linked or removed
 	if _, err := tmp.Write(out); err != nil {
 		_ = tmp.Close()
 		return false, err
@@ -298,11 +364,45 @@ func ensureHooksOnce(target, exe string) (done bool, err error) {
 	if err := tmp.Close(); err != nil {
 		return false, err
 	}
-	// An editor may have saved since our read: do not publish a merge of the old content.
-	if now, err := os.ReadFile(target); !(err == nil && string(now) == string(orig)) && !(orig == nil && os.IsNotExist(err)) {
+	if !exists {
+		// Link fails with EEXIST when the user created the file since our read.
+		if err := os.Link(tmp.Name(), target); err != nil {
+			if os.IsExist(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		return true, nil
+	}
+	aside := tmp.Name() + ".prev"
+	if err := os.Rename(target, aside); err != nil {
+		return false, err
+	}
+	moved, _, _, rerr := readHooks(aside)
+	if rerr != nil || !bytes.Equal(moved, orig) {
+		// Saved since our read: put that save back untouched and merge again from it.
+		if err := os.Link(aside, target); err != nil {
+			return false, fmt.Errorf("%s changed while it was being updated; the user's newer content is kept at %s: %w", target, aside, err)
+		}
+		_ = os.Remove(aside)
 		return false, nil
 	}
-	return true, os.Rename(tmp.Name(), target)
+	if err := os.Link(tmp.Name(), target); err != nil {
+		// A new file appeared at the path: it is the user's newest, so ours is dropped and the
+		// moved-aside content is only the older version of it.
+		if os.IsExist(err) {
+			_ = os.Remove(aside)
+			return false, nil
+		}
+		// Anything else: restore the original so the user is never left without a file.
+		if lerr := os.Link(aside, target); lerr != nil {
+			return false, fmt.Errorf("%s could not be restored (a copy is at %s): %w", target, aside, lerr)
+		}
+		_ = os.Remove(aside)
+		return false, err
+	}
+	_ = os.Remove(aside)
+	return true, nil
 }
 
 // hooksLockPath is the cross-process lock for hooks.json, kept in the agent's own state so
@@ -314,6 +414,11 @@ var hooksMu sync.Mutex
 // lockHooks serialises writers of hooks.json across processes. The wait is bounded: a launch
 // must not hang on a stuck holder, and giving up only costs the usage signal.
 func lockHooks() (func(), error) {
+	if !lockSupported {
+		// Without an advisory lock two agent processes can race each other; giving up only
+		// costs the usage numbers.
+		return nil, fmt.Errorf("no cross-process lock on this OS")
+	}
 	hooksMu.Lock()
 	if err := os.MkdirAll(filepath.Dir(hooksLockPath()), 0o700); err != nil {
 		hooksMu.Unlock()

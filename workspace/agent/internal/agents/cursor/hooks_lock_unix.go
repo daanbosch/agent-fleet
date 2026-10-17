@@ -12,3 +12,6 @@ import (
 func tryFlock(f *os.File) bool {
 	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil
 }
+
+// lockSupported says tryFlock really excludes other processes.
+const lockSupported = true
