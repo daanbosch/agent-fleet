@@ -318,5 +318,44 @@ describe("MoveSessionModal: states that move on by themselves", () => {
     expect(document.querySelector(".move-done .move-delivery")?.textContent).toContain(t("move.delivery_failed", { target: "t9" }));
     expect(document.querySelector(".move-done .move-deliver")).toBeTruthy();
   });
-});
 
+  it("keeps the view and the re-reads through one failed read", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let reads = 0;
+    routes[PREVIEW] = () => {
+      reads++;
+      if (reads === 1) return preview({ moving: "t9", pending: { target: "t9", targetExists: false, busy: true } });
+      if (reads === 2) return { error: { code: "http_502", message: "workspace agent unreachable", status: 502 } };
+      return preview({ moving: "t9", pending: { target: "t9", targetExists: false, state: "uncertain" } });
+    };
+    await render();
+    await tick();
+    // The blip is said, the pending view stays, and the next read still comes.
+    expect(document.querySelector(".move-stale")).toBeTruthy();
+    expect(document.querySelector(".move-pending")).toBeTruthy();
+    await tick();
+    expect(reads).toBe(3);
+    expect(document.querySelector(".move-stale")).toBeNull();
+    expect(document.querySelector<HTMLButtonElement>(".move-retry")?.disabled).toBe(false);
+  });
+
+  it("keeps following a pending delivery through one failed read", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let reads = 0;
+    const moved = (st: string) =>
+      preview({ movedTo: "t9", delivery: { target: "t9", file: "/f.md", initialPromptState: st, deliverable: st !== "pending" } });
+    routes[PREVIEW] = () => {
+      reads++;
+      if (reads === 1) return moved("pending");
+      if (reads === 2) throw new Error("network");
+      return moved("failed");
+    };
+    await render();
+    expect(document.querySelector(".move-deliver")).toBeNull();
+    await tick();
+    expect(document.querySelector(".move-moved")).toBeTruthy();
+    await tick();
+    expect(document.querySelector(".move-delivery")?.textContent).toContain(t("move.delivery_failed", { target: "t9" }));
+    expect(document.querySelector(".move-deliver")).toBeTruthy();
+  });
+});

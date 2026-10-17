@@ -51,7 +51,12 @@ interface MoveSessionModalProps {
   onClose: () => void;
 }
 
-type Load = { state: "loading" } | { state: "error"; error: MoveRefusal | string } | { state: "ready"; preview: MovePreview };
+// stale: the last read failed after an earlier one succeeded. The preview it gave is kept, so a
+// Workspace that drops one request does not take the dialog's view, and its re-reads, with it.
+type Load =
+  | { state: "loading" }
+  | { state: "error"; error: MoveRefusal | string }
+  | { state: "ready"; preview: MovePreview; stale?: MoveRefusal | string };
 
 export function MoveSessionModal({ session, onClose }: MoveSessionModalProps) {
   const tr = useT();
@@ -65,11 +70,14 @@ export function MoveSessionModal({ session, onClose }: MoveSessionModalProps) {
   // api() ETag cache), and the re-read below has to be rescheduled after every read regardless.
   const [seq, setSeq] = useState(0);
   const reload = useCallback(async () => {
+    const failed = (error: MoveRefusal | string) =>
+      setLoad((l) => (l.state === "ready" ? { ...l, stale: error } : { state: "error", error }));
     try {
       const d = await movePreview(session.name);
-      setLoad(d.error ? { state: "error", error: d.error } : { state: "ready", preview: d });
+      if (d.error) failed(d.error);
+      else setLoad({ state: "ready", preview: d });
     } catch (e) {
-      setLoad({ state: "error", error: String(e) });
+      failed(String(e));
     } finally {
       setSeq((n) => n + 1);
     }
@@ -140,6 +148,9 @@ export function MoveSessionModal({ session, onClose }: MoveSessionModalProps) {
           <div className="muted move-loading">
             <Icon name="loading" spin /> {tr("move.loading")}
           </div>
+        )}
+        {load.state === "ready" && load.stale && (
+          <div className="ui-field-hint warn move-stale">{tr("move.reread_failed", { reason: errText(load.stale) })}</div>
         )}
         {load.state === "error" && !result && (
           <div className="ui-field-hint warn move-load-error">{tr("move.load_failed", { reason: errText(load.error) })}</div>

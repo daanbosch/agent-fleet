@@ -439,6 +439,7 @@ export const sessions = {
   "move.delivery_unknown": "{target} が最初の指示（引き継ぎファイルの場所）を受け取ったか分かりません。送り直すと二重に届くことがあります。",
   "move.deliver": "最初の指示を送り直す",
   "move.deliver_started": "最初の指示の送り直しを始めました。届いたかどうかはこの画面で確認します。",
+  "move.reread_failed": "最新の状態を読めませんでした（{reason}）。最後に読めた内容を表示したまま、読み直しを続けます。",
   "move.deliver_sent": "最初の指示を送り直しました。",
   "move.deliver_sent_maybe_twice": "最初の指示を送り直しました。前の分が届いていた場合は二重になっています。",
   "move.cancelled": "移動を取り消しました。このセッションは元どおり使えます。",
