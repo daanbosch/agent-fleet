@@ -391,6 +391,20 @@ func ReconcileManaged(reason string) {
 // reconcileAll is the supervisor-facing wrapper (serve.go, after a daemon death or restart).
 func reconcileAll(reason string) { ReconcileManaged(reason) }
 
+// reconcileInflight counts the reconciles started by goReconcile. Tests wait on it so a
+// reconcile that outlives the code that triggered it cannot read a package var after the test
+// has restored it; production never waits.
+var reconcileInflight sync.WaitGroup
+
+// goReconcile runs reconcileAll in the background, tracked by reconcileInflight.
+func goReconcile(reason string) {
+	reconcileInflight.Add(1)
+	go func() {
+		defer reconcileInflight.Done()
+		reconcileAll(reason)
+	}()
+}
+
 // --- thread handle -----------------------------------------------------------
 
 type threadHandle struct {
