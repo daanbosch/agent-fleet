@@ -554,9 +554,9 @@ func (m *manager) workspaceExtraEnv(ctx context.Context, ws store.Workspace) []s
 			"AF_PREVIEW_SLUG="+ws.PreviewSlug,
 			"AF_PREVIEW_PORTS="+strings.Join(strs, ","))
 	}
-	// Development OIDC IdP (ADR 0116): issuer + this workspace's client id and secret, only
-	// when the deployment serves it and the workspace opted in.
-	env = append(env, m.devIdPEnv(ctx, ws, st)...)
+	// Development OIDC IdP (ADR 0116): issuer + this workspace's client id and secret, whenever
+	// the deployment offers it; the workspace opt-in is checked per request, not here.
+	env = append(env, m.devIdPEnv(ctx, ws)...)
 	// The Agent withholds the workspace task's AWS identity from sessions unless told
 	// otherwise (awsx.IsolateWorkloadChain). The ECS runtimes do not pass WS_ENV on, so
 	// the deployment's opt-in has to travel from here to reach them.

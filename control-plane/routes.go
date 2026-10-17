@@ -1002,6 +1002,7 @@ func registerAgentEnvRoutes(mux *http.ServeMux, cfg config) {
 	// Reissue the preview URL (docs/log/81 §4.1). POST rather than GET/PUT because it
 	// throws state away.
 	mux.HandleFunc("POST /api/env/ws-settings/preview/reissue", wss.withResolved(wss.reissuePreview))
+	mux.HandleFunc("POST /api/env/ws-settings/dev-idp/rotate", wss.withResolved(wss.rotateDevIdPSecret))
 	// Test personas of the development OIDC IdP (ADR 0116, #2223).
 	mux.HandleFunc("GET /api/env/ws-settings/dev-idp/personas", wss.withResolved(wss.listPersonas))
 	mux.HandleFunc("POST /api/env/ws-settings/dev-idp/personas", wss.withResolved(wss.createPersona))

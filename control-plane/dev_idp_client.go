@@ -33,7 +33,7 @@ const googleRealm = "https://accounts.google.com"
 // request, so a switch flipped in the admin modal is followed without a restart.
 func (m *manager) devIdPIssuer(ctx context.Context) string {
 	base := strings.TrimRight(m.publicBaseURL, "/")
-	if base == "" || !m.devIdPEnabled(ctx) {
+	if base == "" || !m.devIdPOfferedToMembers() || !m.devIdPEnabled(ctx) {
 		return ""
 	}
 	return base + devIdPPath
@@ -41,8 +41,8 @@ func (m *manager) devIdPIssuer(ctx context.Context) string {
 
 // devIdPOfferedToMembers is false on a deployment without a preview domain. Without preview
 // hosts the only redirect target is localhost, which only the workspace's browser pane can
-// reach, and that pane would itself need a Console session to pass authGate. The endpoints
-// keep answering and existing opt-ins stay stored; only new opt-ins are refused.
+// reach, and that pane would itself need a Console session to pass authGate. devIdPIssuer
+// folds it in, so such a deployment serves nothing and injects nothing.
 func (m *manager) devIdPOfferedToMembers() bool {
 	return m.previewDomain != ""
 }
@@ -96,11 +96,13 @@ func (m *manager) ensureDevIdPClient(ctx context.Context, ws store.Workspace) (c
 	return row.ClientID, secret, nil
 }
 
-// devIdPEnv is the configuration an app switches its sign-in to, as container env. Nothing
-// here is injected unless the deployment serves the IdP and this workspace opted in.
-func (m *manager) devIdPEnv(ctx context.Context, ws store.Workspace, st wsSettings) []string {
+// devIdPEnv is the configuration an app switches its sign-in to, as container env. It is
+// injected at every start while the deployment offers the IdP. There is no per-workspace
+// switch: the env is fixed at start while a switch is not, so a switch could only break apps
+// that follow the guide. Nothing is injected when the deployment does not offer it.
+func (m *manager) devIdPEnv(ctx context.Context, ws store.Workspace) []string {
 	issuer := m.devIdPIssuer(ctx)
-	if issuer == "" || !st.DevIdP {
+	if issuer == "" {
 		return nil
 	}
 	clientID, secret, err := m.ensureDevIdPClient(ctx, ws)
@@ -228,46 +230,59 @@ func devIdPParseProfile(s string) devIdPProfile {
 	return p
 }
 
-// setDevIdP flips the workspace opt-in and keeps the registration in step: turning it on
-// registers the client, turning it off deletes it (so the next "on" is a new client id and
-// secret). The change is audited before it is applied. It writes the response itself and
-// returns false on failure.
-func (a wsSettingsAPI) setDevIdP(w http.ResponseWriter, r *http.Request, res *resolved, st *wsSettings, on bool) bool {
+// devIdPRotated is the answer to a rotation. The secret is not in it, as in addDevIdP.
+type devIdPRotated struct {
+	ClientID        string `json:"devIdpClientId"`
+	RestartRequired bool   `json:"restartRequired"`
+}
+
+// rotateDevIdPSecret (POST /api/env/ws-settings/dev-idp/rotate) issues the workspace a new
+// client id and secret and invalidates the old ones at once. The container keeps the old values
+// until its next start, which is why the Console says a restart is needed. It is audited before
+// it is applied, and refused where the deployment does not offer the IdP.
+func (a wsSettingsAPI) rotateDevIdPSecret(w http.ResponseWriter, r *http.Request, res *resolved) {
 	ctx := r.Context()
-	state := "off"
-	if on {
-		state = "on"
+	if !a.mgr.devIdPOfferedToMembers() {
+		writeAPIErr(w, &apiError{http.StatusConflict, "no_preview_domain", "the development OIDC IdP needs preview subdomains, and this deployment has no preview domain"})
+		return
+	}
+	if a.mgr.devIdPIssuer(ctx) == "" {
+		writeAPIErr(w, &apiError{http.StatusConflict, "not_configured", "the development OIDC IdP is not enabled on this deployment"})
+		return
 	}
 	if err := a.mgr.store.InsertAudit(ctx, store.AuditLog{
 		ID: store.NewID(), TenantID: res.ws.TenantID, ActorKind: "user", ActorID: res.ident.ID,
-		Action: "workspace.dev_idp", Target: res.ws.ID, Detail: "dev_idp=" + state, At: store.NowTS(),
+		Action: "workspace.dev_idp_rotate", Target: res.ws.ID, At: store.NowTS(),
 	}); err != nil {
 		writeAPIErr(w, &apiError{http.StatusServiceUnavailable, errCodeAuditUnavailable, "nothing was changed: " + err.Error()})
-		return false
+		return
 	}
-	if on {
-		if _, _, err := a.mgr.ensureDevIdPClient(ctx, res.ws); err != nil {
-			writeAPIErr(w, internalErr(err))
-			return false
-		}
-	} else if err := a.mgr.store.DeleteDevIdPClient(ctx, res.ws.ID); err != nil {
+	secret := "afdevsec-" + devIdPRandom(32)
+	enc, ref, err := a.mgr.sealTenantSecret(ctx, res.ws.TenantID, secret)
+	if err != nil {
 		writeAPIErr(w, internalErr(err))
-		return false
+		return
 	}
-	st.DevIdP = on
-	return true
+	fresh := store.DevIdPClient{
+		WorkspaceID: res.ws.ID, MembershipID: res.ws.MembershipID, ClientID: "afdev-" + strings.ToLower(devIdPRandom(12)),
+		SecretEnc: enc, KeyRef: ref, CreatedAt: time.Now().Unix(),
+	}
+	if err := a.mgr.store.ReplaceDevIdPClient(ctx, fresh); err != nil {
+		writeAPIErr(w, internalErr(err))
+		return
+	}
+	// The cached runtime holds the env of the old registration.
+	a.mgr.evictMembershipCache(res.ws.MembershipID)
+	writeJSON(w, http.StatusOK, devIdPRotated{ClientID: fresh.ClientID, RestartRequired: true})
 }
 
 // addDevIdP appends the dev IdP block to the ws-settings answer. The secret is not in it: the
 // container receives it as AF_DEV_IDP_CLIENT_SECRET, and a screen that displayed it would
 // put it in one more place for no gain.
-func (a wsSettingsAPI) addDevIdP(r *http.Request, res *resolved, st wsSettings, out map[string]any) {
+func (a wsSettingsAPI) addDevIdP(r *http.Request, res *resolved, out map[string]any) {
 	issuer := a.mgr.devIdPIssuer(r.Context())
-	// Members are offered the IdP only with preview subdomains; see devIdPOfferedToMembers.
-	offered := issuer != "" && a.mgr.devIdPOfferedToMembers()
-	out["devIdpAvailable"] = offered
-	out["devIdp"] = st.DevIdP && offered
-	if !offered || !st.DevIdP {
+	out["devIdpAvailable"] = issuer != ""
+	if issuer == "" {
 		return
 	}
 	out["devIdpIssuer"] = issuer

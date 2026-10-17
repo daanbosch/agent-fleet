@@ -497,8 +497,8 @@ func (a devIdPAPI) consent(w http.ResponseWriter, r *http.Request) {
 		consentRefuse(w, r, http.StatusBadRequest, "client")
 		return
 	}
-	// Everything authorize decided is decided again: the member, the redirect and the opt-in
-	// may have changed in the minutes the page was open.
+	// Everything authorize decided is decided again: the member, the redirect and the deployment
+	// switch may have changed in the minutes the page was open.
 	ident, mv, aerr := a.mgr.resolveMembership(ctx, id.key, id.email, cc.ws.TenantID)
 	if aerr != nil || mv.MembershipID != g.MembershipID || ident.ID != g.IdentityID {
 		consentRefuse(w, r, http.StatusForbidden, "ticket belongs to another member")

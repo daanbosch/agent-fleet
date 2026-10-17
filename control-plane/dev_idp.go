@@ -8,8 +8,9 @@
 //
 // It never claims to be Google: the issuer is its own, every token carries `af_dev: true`, and
 // the audience is the one workspace's client id. Served while the deployment switch is on (on
-// unless a super admin turned it off or AF_DEV_IDP=0 locked it) and the workspace opts in; while
-// off, every route answers 404.
+// unless a super admin turned it off or AF_DEV_IDP=0 locked it) and the deployment has a preview
+// domain; every workspace's client is served, with no per-workspace opt-in. While not served, every
+// route answers 404.
 //
 // The preview host serves none of this (ADR 0062 decision 8): those hostnames are relayed to
 // the user's app, so this code is reachable on the Console origin only.
@@ -151,7 +152,7 @@ type devIdPClientCtx struct {
 }
 
 // loadClient resolves a client id to its workspace. ok is false for an unknown client AND for
-// one whose workspace has not opted in (or no longer exists): callers do not tell them apart.
+// one whose workspace no longer exists: callers do not tell them apart.
 func (a devIdPAPI) loadClient(r *http.Request, clientID string) (devIdPClientCtx, bool) {
 	ctx := r.Context()
 	if clientID == "" {
@@ -166,9 +167,6 @@ func (a devIdPAPI) loadClient(r *http.Request, clientID string) (devIdPClientCtx
 		return devIdPClientCtx{}, false
 	}
 	st := parseWSSettings(mustSettings(ctx, a.mgr, ws.ID))
-	if !st.DevIdP {
-		return devIdPClientCtx{}, false
-	}
 	return devIdPClientCtx{row: row, ws: ws, st: st}, true
 }
 
@@ -550,7 +548,7 @@ func (a devIdPAPI) userinfo(w http.ResponseWriter, r *http.Request) {
 		deny()
 		return
 	}
-	// The client must still be registered and opted in.
+	// The client must still be registered.
 	if _, ok := a.loadClient(r, grant.ClientID); !ok {
 		deny()
 		return

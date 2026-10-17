@@ -402,12 +402,12 @@ func TestDevIdPConsentRechecksTheRedirect(t *testing.T) {
 	if rec.Code == http.StatusFound {
 		t.Errorf("a redirect that is no longer allowed was followed: %s", rec.Header().Get("Location"))
 	}
-	// And so does turning the opt-in off.
+	// And so does the deployment switch going off.
 	d.setPreviewSettings(t, func(st *wsSettings) { st.PreviewPorts = []int{3000, 8080} })
 	_, ticket = d.askAs(t, "preview-user", d.authQuery(redirect, ""))
-	d.setDevIdP(t, false)
+	setDevIdPDeployment(t, d.mgr, false)
 	if rec := d.postConsent("preview-user", url.Values{"ticket": {ticket}, "choice": {"self"}}, nil); rec.Code == http.StatusFound {
-		t.Errorf("consent after the opt-in was turned off: %s", rec.Header().Get("Location"))
+		t.Errorf("consent after the deployment switch was turned off: %s", rec.Header().Get("Location"))
 	}
 }
 
@@ -465,6 +465,7 @@ func TestDevIdPConsentIsNotServedOnAPreviewHost(t *testing.T) {
 func TestDevIdPConsentIsA404WhereTheIdPIsOff(t *testing.T) {
 	cfg := oauthTestConfig(t)
 	cfg.mgr.publicBaseURL = "https://af.example.com"
+	cfg.mgr.previewDomain = "pv.example.com" // the IdP is offered only with preview subdomains
 	cfg.mgr.store = brandTestStore(t)
 	setDevIdPDeployment(t, cfg.mgr, false)
 	mux := http.NewServeMux()

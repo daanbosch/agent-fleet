@@ -82,11 +82,15 @@ type DevIdPStore interface {
 
 	GetDevIdPClient(ctx context.Context, workspaceID string) (DevIdPClient, bool, error)
 	GetDevIdPClientByID(ctx context.Context, clientID string) (DevIdPClient, bool, error)
-	// CountDevIdPClients is the number of workspaces registered, i.e. opted in.
+	// CountDevIdPClients is the number of workspaces holding a registration. Registrations are
+	// created at workspace start whether or not the workspace opted in.
 	CountDevIdPClients(ctx context.Context) (int, error)
 	// CreateDevIdPClient inserts the registration and reports false when the workspace
 	// already has one (the existing row stands).
 	CreateDevIdPClient(ctx context.Context, c DevIdPClient) (bool, error)
+	// ReplaceDevIdPClient swaps the workspace's registration for c in one statement (inserting
+	// when there is none), so a start racing a rotation never sees the row missing.
+	ReplaceDevIdPClient(ctx context.Context, c DevIdPClient) error
 	DeleteDevIdPClient(ctx context.Context, workspaceID string) error
 
 	// InsertDevIdPGrant stores a grant and drops every grant that has expired by `now`.
@@ -190,6 +194,17 @@ func (s *SQL) CreateDevIdPClient(ctx context.Context, c DevIdPClient) (bool, err
 	}
 	n, err := res.RowsAffected()
 	return n == 1, err
+}
+
+func (s *SQL) ReplaceDevIdPClient(ctx context.Context, c DevIdPClient) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO dev_idp_client(workspace_id, membership_id, client_id, secret_enc, key_ref, created_at)
+		 VALUES(?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(workspace_id) DO UPDATE SET membership_id=excluded.membership_id,
+		   client_id=excluded.client_id, secret_enc=excluded.secret_enc, key_ref=excluded.key_ref,
+		   created_at=excluded.created_at`,
+		c.WorkspaceID, c.MembershipID, c.ClientID, c.SecretEnc, c.KeyRef, c.CreatedAt)
+	return err
 }
 
 func (s *SQL) DeleteDevIdPClient(ctx context.Context, workspaceID string) error {

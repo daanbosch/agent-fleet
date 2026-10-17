@@ -326,3 +326,28 @@ only `img-src 'self'` for the icon. A **Cancel** button posts to the same `/dev-
 `action=cancel`: after the same origin checks and the same ticket consumption and re-checks as Continue it
 returns `error=access_denied` and the parked `state` to the parked, re-vetted `redirect_uri`; neither value is
 read from the form. The form contract (`ticket`, `choice`) and the `same-origin` referrer policy are unchanged.
+
+## Note (2026-10-16): the client exists before the opt-in, and there is no per-workspace switch (#2242)
+
+This supersedes decision 5's "created at opt-in; off then on rotates" and decision 3's per-workspace
+opt-in. Opting in cost a workspace restart because the client's values reached the container only as env
+at start, and each off and on issued a new secret. The switch is then removed outright: env is fixed at
+start while a switch is not, so a switch could only break apps that follow the guide (an app that selects
+the dev issuer whenever `AF_DEV_IDP_ISSUER` is set would fail while it was off).
+
+- While the deployment offers the IdP (enabled, not locked, `PUBLIC_BASE_URL`, preview domain), every
+  workspace's client is served by `authorize` / `token` / `userinfo`, and has been created lazily at start
+  if missing (`CreateDevIdPClient` is insert-or-keep, so concurrent starts settle on one row).
+  `AF_DEV_IDP_*` is injected at every start. Where the deployment does not offer it, nothing is injected and
+  every route answers 404, as when it is off. The preview-domain rule of the note above is folded into
+  "offers": `devIdPIssuer` is empty without a preview domain.
+- `devIdp` in `PUT /api/env/ws-settings` is accepted and ignored (old clients do not get a 400) and is no
+  longer reported; a stored `devIdp` value is inert. `devIdpAvailable` is true only when the deployment
+  offers the IdP.
+- `POST /api/env/ws-settings/dev-idp/rotate` issues a new client id and secret in one upsert
+  (`ReplaceDevIdPClient`), audited as `workspace.dev_idp_rotate`; the old pair stops working at once and the
+  container gets the new one at its next start, which the Console says.
+- The admin status field `opted_in` is now `clients`: it counts registrations, which exist for every
+  started workspace.
+- Unchanged: personas, tenant-shared previews, the redirect allow-list, PKCE, single-use codes, `af_dev`.
+- Not verified: a live run on a deployment.

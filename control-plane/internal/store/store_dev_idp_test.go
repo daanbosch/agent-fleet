@@ -316,3 +316,29 @@ func TestDevIdPPersonaRefusedForMissingWorkspace(t *testing.T) {
 		}
 	}
 }
+
+// Both dialects: replacing swaps the registration in place, and inserts when there is none.
+func TestReplaceDevIdPClient(t *testing.T) {
+	ctx := context.Background()
+	for name, st := range homeOpStores(t) {
+		ws := homeOpWorkspace(t, st)
+		c := DevIdPClient{WorkspaceID: ws.ID, MembershipID: ws.MembershipID, ClientID: "afdev-a", SecretEnc: "s1", CreatedAt: 1}
+		if err := st.ReplaceDevIdPClient(ctx, c); err != nil {
+			t.Fatalf("%s: replace into empty: %v", name, err)
+		}
+		c.ClientID, c.SecretEnc = "afdev-b", "s2"
+		if err := st.ReplaceDevIdPClient(ctx, c); err != nil {
+			t.Fatalf("%s: replace: %v", name, err)
+		}
+		if _, ok, _ := st.GetDevIdPClientByID(ctx, "afdev-a"); ok {
+			t.Errorf("%s: the old client id still resolves", name)
+		}
+		got, ok, _ := st.GetDevIdPClient(ctx, ws.ID)
+		if !ok || got.ClientID != "afdev-b" || got.SecretEnc != "s2" {
+			t.Errorf("%s: after replace: %+v", name, got)
+		}
+		if n, _ := st.CountDevIdPClients(ctx); n != 1 {
+			t.Errorf("%s: count = %d, want 1", name, n)
+		}
+	}
+}

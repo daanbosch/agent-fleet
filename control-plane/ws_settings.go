@@ -58,12 +58,6 @@ type wsSettings struct {
 	// default that any third-party page that knows the URL can reach the preview through
 	// the user's browser.
 	PreviewCrossOrigin bool `json:"previewCrossOrigin,omitempty"`
-
-	// DevIdP opts this workspace in to the development OIDC IdP (ADR 0116). Off by default, and
-	// inert while the deployment switch is off (admin modal, or AF_DEV_IDP=0). Turning it off deletes the
-	// workspace's client registration, so turning it on again issues a new client id and secret:
-	// that is the only way to rotate the secret.
-	DevIdP bool `json:"devIdp,omitempty"`
 }
 
 // parseWSSettings unmarshals the stored JSON blob ("" => zero value).
@@ -110,7 +104,7 @@ func (a wsSettingsAPI) get(w http.ResponseWriter, r *http.Request, res *resolved
 		"allowAgentUpdate": a.tenantAllowsAgentUpdate(r, res.ws),
 	}
 	a.addPreview(r, res, st, out)
-	a.addDevIdP(r, res, st, out)
+	a.addDevIdP(r, res, out)
 	// The upstream CLI release watcher's liveness (cli_release_watch.go). It is not a
 	// workspace setting at all — it is deployment-wide — but it rides here because this
 	// is the one CP-owned response the environment tab already reads, and it answers
@@ -334,22 +328,8 @@ func (a wsSettingsAPI) put(w http.ResponseWriter, r *http.Request, res *resolved
 		st.PreviewTenantShare = v
 		auditPreviewShare(r.Context(), a.mgr, res, v)
 	}
-	if v, ok := body["devIdp"].(bool); ok && v != st.DevIdP {
-		// A deployment that does not serve the IdP cannot opt in: a stored "on" there would
-		// light up the day the flag is set, without anyone having decided it for that day.
-		if v && a.mgr.devIdPIssuer(r.Context()) == "" {
-			writeAPIErr(w, &apiError{http.StatusConflict, "not_configured", "the development OIDC IdP is not enabled on this deployment"})
-			return
-		}
-		// Turning it off stays possible without a preview domain, so an earlier opt-in can be undone.
-		if v && !a.mgr.devIdPOfferedToMembers() {
-			writeAPIErr(w, &apiError{http.StatusConflict, "no_preview_domain", "the development OIDC IdP needs preview subdomains, and this deployment has no preview domain"})
-			return
-		}
-		if !a.setDevIdP(w, r, res, &st, v) {
-			return
-		}
-	}
+	// "devIdp" (the removed per-workspace opt-in, ADR 0116) is accepted and ignored so an old
+	// client's PUT does not fail.
 	out, _ := json.Marshal(st)
 	if err := a.store.SetWorkspaceSettings(r.Context(), res.ws.ID, string(out)); err != nil {
 		http.Error(w, "save failed", http.StatusInternalServerError)
@@ -362,6 +342,6 @@ func (a wsSettingsAPI) put(w http.ResponseWriter, r *http.Request, res *resolved
 		"allowAgentUpdate": a.tenantAllowsAgentUpdate(r, res.ws),
 	}
 	a.addPreview(r, res, st, body2)
-	a.addDevIdP(r, res, st, body2)
+	a.addDevIdP(r, res, body2)
 	writeJSON(w, http.StatusOK, body2)
 }
