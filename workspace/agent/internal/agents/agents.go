@@ -207,6 +207,33 @@ type GracefulStopper interface {
 	GracefulStop(m session.Meta) bool
 }
 
+// ManagedRuntime is an optional Agent capability: the kind keeps Managed runtime handles, keyed
+// by session name, and sessionx reaches them only through this. Every kind with a Managed route
+// (Caps().ManagedOnly / ManagedDefault, or a managedDrivers entry) must implement it — a kind
+// that does not reads as stopped and idle, and stop / halt / archive leave its runtime running
+// (sessionx's TestManagedRuntimeFollowsCaps).
+type ManagedRuntime interface {
+	ManagedRuntime() ManagedRuntimeOps
+}
+
+// ManagedRuntimeOps are the kind package's own handle functions. They are function values
+// rather than methods so a test can pin, by identity, which package each kind dispatches to.
+// Every field is required.
+type ManagedRuntimeOps struct {
+	// Alive: a live runtime handle exists (the Managed counterpart of tmux has-session).
+	Alive func(name string) bool
+	// Busy: a turn is running or queued — the refusal condition for an exclusive driver switch.
+	Busy func(name string) bool
+	// InFlight: the handle holds an entry it took from its queue and has not settled; input
+	// still queued does not count.
+	InFlight func(name string) bool
+	// Drop aborts the running turn and forgets the handle; the conversation's own store stays,
+	// so a resume reconnects to it.
+	Drop func(name string)
+	// RemoveLedger drops the ClientMessageID ledger, and the slot's identity with it.
+	RemoveLedger func(name string)
+}
+
 // ModelChoice is one launch-time model option for the Console's model picker:
 // ID is what the launch command receives (`codex -m` / `opencode --model`),
 // Label what the picker shows. Served by GET /agents/{kind}/models.
