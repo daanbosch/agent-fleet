@@ -528,7 +528,7 @@ func (s *Supervisor) waitDaemon(cmd *exec.Cmd, tail *agents.StderrTail, gen int)
 		})
 		h.runtimeLost()
 	}
-	go reconcileAll("daemon death")
+	goReconcile("daemon death")
 }
 
 // Restart is the path that applies an auth or config change (§7): generation++ → drain →
@@ -567,7 +567,7 @@ func (s *Supervisor) Restart(reason string) (replaced bool) {
 	}
 	stopProcess(cmd, addr)
 	s.finishTeardown(cmd)
-	go reconcileAll("restart: " + reason)
+	goReconcile("restart: " + reason)
 	ClearPendingRestart()
 	return true
 }
@@ -748,7 +748,7 @@ func (s *Supervisor) monitorEvents(addr string, gen int) {
 				for _, h := range liveHandles() {
 					h.runtimeLost()
 				}
-				go reconcileAll("adopted daemon lost")
+				goReconcile("adopted daemon lost")
 			}
 			return
 		}

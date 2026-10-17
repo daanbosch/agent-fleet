@@ -34,6 +34,19 @@ func optInHome(t *testing.T) string {
 	return home
 }
 
+// stubTerminalSlots replaces terminalSlots for the test. The restore waits for the reconciles the
+// code under test started in the background (goReconcile): they read terminalSlots, and restoring
+// it under them is a data race.
+func stubTerminalSlots(t *testing.T, fn func() []session.Meta) {
+	t.Helper()
+	old := terminalSlots
+	terminalSlots = fn
+	t.Cleanup(func() {
+		reconcileInflight.Wait()
+		terminalSlots = old
+	})
+}
+
 // installFakeV2 lays out the private prefix the way `install-opencode2` leaves it.
 func installFakeV2(t *testing.T) string {
 	t.Helper()
@@ -527,14 +540,12 @@ func TestDrainSeesABusyV2PaneAfterTheSwitchWentToV1(t *testing.T) {
 	markSlotMode(sid, modeShared)
 	sids.Write(sid, "ses_busy")
 	t.Cleanup(func() { slotModes.Remove(sid); sids.Remove(sid) })
-	oldSlots := terminalSlots
-	terminalSlots = func() []session.Meta {
+	stubTerminalSlots(t, func() []session.Meta {
 		if sharedSlot(m) {
 			return []session.Meta{m}
 		}
 		return nil
-	}
-	t.Cleanup(func() { terminalSlots = oldSlots })
+	})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"ses_busy":{"type":"running"}}}`))
@@ -618,9 +629,7 @@ func TestRetiringAnAdoptedDaemonDrainsItsBusyTerminals(t *testing.T) {
 	markSlotMode(sid, modeShared)
 	sids.Write(sid, "ses_busy")
 	t.Cleanup(func() { slotModes.Remove(sid); sids.Remove(sid) })
-	oldSlots := terminalSlots
-	terminalSlots = func() []session.Meta { return []session.Meta{m} }
-	t.Cleanup(func() { terminalSlots = oldSlots })
+	stubTerminalSlots(t, func() []session.Meta { return []session.Meta{m} })
 
 	s := &Supervisor{} // not up: the Agent just restarted
 	if err := s.retireAdopted(srv.URL); err != nil {
