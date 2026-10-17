@@ -116,8 +116,11 @@ export function MoveSessionModal({ session, onClose }: MoveSessionModalProps) {
   // Some states end without anything the user does: a move another tab (or a request whose
   // answer was lost) is running, and a first prompt being typed into a Terminal target. Read
   // the preview again while one holds, or the buttons stay disabled on a state long gone.
+  // A stale preview is one too: it may predate the very action that changed the phase (a
+  // move answered move_create_uncertain, a cancel, a reopen), so it is read until a read works.
+  const stale = load.state === "ready" && !!load.stale;
   const transient =
-    !busy && !!preview && (!!preview.pending?.busy || preview.delivery?.initialPromptState === "pending");
+    !busy && !!preview && (stale || !!preview.pending?.busy || preview.delivery?.initialPromptState === "pending");
   useEffect(() => {
     if (!transient) return;
     const id = setTimeout(() => void reload(), MOVE_POLL_MS);

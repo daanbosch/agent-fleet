@@ -358,4 +358,31 @@ describe("MoveSessionModal: states that move on by themselves", () => {
     expect(document.querySelector(".move-delivery")?.textContent).toContain(t("move.delivery_failed", { target: "t9" }));
     expect(document.querySelector(".move-deliver")).toBeTruthy();
   });
+
+  it("keeps reading after a failed read that followed the action changing the phase", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let stage = "fresh";
+    let afterMove = 0;
+    routes["POST api/sessions/s1/move"] = () => {
+      stage = "moved";
+      return { error: { code: "move_create_uncertain", message: "timeout", target: "t9", file: "/f.md" } };
+    };
+    routes[PREVIEW] = () => {
+      if (stage === "fresh") return preview();
+      // The read right after the move fails once; the next one shows the pending move.
+      if (++afterMove === 1) return { error: { code: "http_502", message: "unreachable", status: 502 } };
+      return preview({ moving: "t9", pending: { target: "t9", targetExists: false, state: "uncertain" } });
+    };
+    await render();
+    await click(confirmBtn());
+    // Still the pre-move form, marked stale: the kept preview is from before the move.
+    expect(document.querySelector(".move-stale")).toBeTruthy();
+    expect(document.querySelector(".move-pending")).toBeNull();
+    await tick();
+    expect(afterMove).toBe(2);
+    expect(document.querySelector(".move-stale")).toBeNull();
+    expect(document.querySelector(".move-pending")).toBeTruthy();
+    expect(document.querySelector<HTMLButtonElement>(".move-retry")?.disabled).toBe(false);
+  });
 });
+
