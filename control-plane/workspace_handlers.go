@@ -236,6 +236,15 @@ func (a workspaceAPI) workspacePayload(ctx context.Context, res *resolved, state
 	if why := runtime.BrowserUnavailable(rt); why != "" {
 		m["browserUnavailable"] = why
 	}
+	// Where this runtime serves the user guide from when that is not the image's fixed path
+	// (native without a rootfs stages it under the data dir, and the agent refuses any other
+	// path). Emitted only then, so every other runtime keeps the Console's fixed path. It is
+	// the owner's own data dir: native is single-user (AUTH=dev) and the payload is theirs.
+	if dr, ok := rt.(interface{ DocsRoot() string }); ok {
+		if root := dr.DocsRoot(); root != "" {
+			m["docsRoot"] = root
+		}
+	}
 	// An administrator has reserved the slot this workspace's home is on for replacement
 	// (ecs-ec2, #1473): the next start moves it to a new slot and takes longer. Emitted only
 	// when true. Not while starting: that start is already the one doing the move.

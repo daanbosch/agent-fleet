@@ -261,6 +261,21 @@ func (n *nativeRuntime) startingMarker() agentStartingMarker {
 // own environment carries deployment secrets (AF_MASTER_KEY, oauth secrets, DB
 // URLs) that must never leak into a workspace process that runs arbitrary user
 // sessions.
+// DocsRoot is the path the agent serves the user guide from when it is not the image's
+// fixed one: the staged <dataDir>/docs of the traditional (host-agent) launch, which is what
+// AGENT_DOCS_DIR points at. Empty in rootfs mode (the docs are ro-bound onto the fixed path)
+// and before the first start has staged anything. The workspace payload hands it to the
+// Console so the guide opens at a path the agent's file API allows.
+func (n *nativeRuntime) DocsRoot() string {
+	if n.rootfs != "" {
+		return ""
+	}
+	if docs := filepath.Join(n.dataDir, "docs"); isDirPath(docs) {
+		return docs
+	}
+	return ""
+}
+
 // mountsStagedDocs: native ro-binds (or points AGENT_DOCS_DIR at) <dataDir>/docs, so it
 // needs the same per-start staging as docker (runtime.go DocsMounter).
 func (n *nativeRuntime) mountsStagedDocs() {}
@@ -630,7 +645,7 @@ func (n *nativeRuntime) processEnv(home, claudeCfg string) []string {
 	// The user guide staged by the CP (stageWorkspaceDocs); the agent's fixed
 	// container path is overridden via AGENT_DOCS_DIR (agent fs.go — NOT the
 	// CP-side AF_DOCS_DIR, which names the staging source).
-	if docs := filepath.Join(n.dataDir, "docs"); isDirPath(docs) {
+	if docs := n.DocsRoot(); docs != "" {
 		env["AGENT_DOCS_DIR"] = docs
 	}
 	n.overlayWorkspaceEnv(env)

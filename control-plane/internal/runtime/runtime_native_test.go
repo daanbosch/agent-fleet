@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -590,5 +591,29 @@ func TestNativeBootPhase(t *testing.T) {
 			t.Fatalf("BootPhase not cleared after mirror stopped (got %q)", n.BootPhase())
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// The traditional launch serves the guide from the staged <dataDir>/docs (AGENT_DOCS_DIR);
+// rootfs mode ro-binds it onto the fixed path, so it names no other root.
+func TestNativeDocsRoot(t *testing.T) {
+	dir := t.TempDir()
+	n := &nativeRuntime{name: "af-ws-docs", dataDir: dir}
+	if got := n.DocsRoot(); got != "" {
+		t.Fatalf("DocsRoot before staging = %q, want empty", got)
+	}
+	docs := filepath.Join(dir, "docs")
+	if err := os.MkdirAll(docs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := n.DocsRoot(); got != docs {
+		t.Fatalf("DocsRoot = %q, want %q", got, docs)
+	}
+	if !slices.Contains(n.processEnv(dir, dir), "AGENT_DOCS_DIR="+docs) {
+		t.Error("AGENT_DOCS_DIR does not match DocsRoot")
+	}
+	n.rootfs = t.TempDir()
+	if got := n.DocsRoot(); got != "" {
+		t.Fatalf("rootfs mode DocsRoot = %q, want empty", got)
 	}
 }
