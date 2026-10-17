@@ -286,7 +286,7 @@ af_ecr_has() {
 # --- The engine tools image (af-engine-tools, ADR 0072) --------------------------------
 #
 # Three callers put this image into ECR — `standup.sh` (a stand-up), `dev-deploy.sh` (today's
-# develop) and `update.sh` / `release-ecr.sh` (a release) — and they disagree about only one
+# main) and `update.sh` / `release-ecr.sh` (a release) — and they disagree about only one
 # thing: what to do when GHCR does not have the tag either. dev-deploy bakes it; the release
 # path stops and hands it back. Everything before that decision is the same, so it lives here:
 # get it wrong in one caller and that route silently deploys task definitions naming an image

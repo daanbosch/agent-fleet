@@ -397,9 +397,9 @@ def main(argv=None):
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument('--dry-run', action='store_true')
     mode.add_argument('--apply', action='store_true')
-    mode.add_argument('--lint-spaces', metavar='BASE_REF', nargs='?', const='origin/develop',
+    mode.add_argument('--lint-spaces', metavar='BASE_REF', nargs='?', const='origin/main',
                       help='list stray half-width spaces between Japanese characters that BASE_REF '
-                           '(default origin/develop) did not have; exit 1 on any hit. Deliberate ones '
+                           '(default origin/main) did not have; exit 1 on any hit. Deliberate ones '
                            '(menu paths, ・ separators) already exist, so only new ones are reported')
     ap.add_argument('--force', action='store_true', help='apply to reviewed dirty catalogue files')
     ap.add_argument('--allow-terms-out', type=Path)
@@ -515,7 +515,7 @@ def main(argv=None):
         for key, old, new, n in rows:
             lines.append(f'ALLOW {key}\t{old}\t{new}\t{n}')
         allowance_arg = str(args.allow_terms_out) if args.allow_terms_out else '<emitted-file>'
-        command = 'python3 scripts/catalog-diff-check.py origin/develop --allow-labels'
+        command = 'python3 scripts/catalog-diff-check.py origin/main --allow-labels'
         if rows or args.allow_terms_out:
             command += ' --allow-terms-file ' + (shlex.quote(allowance_arg) if args.allow_terms_out else allowance_arg)
         lines.extend(['FOLLOW-UP ' + command, 'FOLLOW-UP ' + command + ' --list-citations',

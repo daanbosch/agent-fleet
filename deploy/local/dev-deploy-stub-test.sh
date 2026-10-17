@@ -104,7 +104,7 @@ echo "git $*" >> "$STUB_LOG"
 # drop the leading `-C <dir>`
 [ "${1:-}" = "-C" ] && shift 2
 case "$1" in
-  ls-remote) echo -e "${STUB_SHA:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}\trefs/heads/develop" ;;
+  ls-remote) echo -e "${STUB_SHA:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}\trefs/heads/main" ;;
   fetch|status) : ;;
   rev-parse) echo "${STUB_SHA:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}" ;;
   cat-file) [ -n "${STUB_NO_BASE:-}" ] && exit 1; exit 0 ;;

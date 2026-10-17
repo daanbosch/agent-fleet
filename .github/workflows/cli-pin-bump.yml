@@ -48,11 +48,11 @@ jobs:
     env:
       BRANCH: automation/cli-pin-bump
     steps:
-      # Always develop, never the triggering run's ref: a contract run on a PR must not
+      # Always main, never the triggering run's ref: a contract run on a PR must not
       # decide what the bump is based on.
       - uses: actions/checkout@v7
         with:
-          ref: develop
+          ref: main
           persist-credentials: false
 
       - name: rewrite the pins
@@ -105,7 +105,7 @@ jobs:
           # A human closed a PR carrying this exact edit without merging it: that is a
           # "no", and re-proposing it after every contract run would override it. Matched
           # on the edit id in the body, so a deleted branch or an unrelated Dockerfile
-          # change on develop does not bring it back; a new version does.
+          # change on main does not bring it back; a new version does.
           declined="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state closed \
             --json number,mergedAt,body \
             --jq "[.[] | select(.mergedAt == null and (.body | contains(\"<!-- cli-pin-bump edit=$EDIT_ID -->\"))) | .number] | first // empty")"
@@ -139,7 +139,7 @@ jobs:
             gh pr edit "$num" --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$BODY_FILE"
             echo "Updated PR #$num." >> "$GITHUB_STEP_SUMMARY"
           else
-            gh pr create --repo "$GITHUB_REPOSITORY" --base develop --head "$BRANCH" \
+            gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" \
               --title "$TITLE" --body-file "$BODY_FILE"
           fi
           cat "$BODY_FILE" >> "$GITHUB_STEP_SUMMARY"

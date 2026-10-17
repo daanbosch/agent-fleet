@@ -203,7 +203,7 @@ case "$cmd" in
     kind="$(kind_of_workflow "$wf")"
     # Newest first. Cancelled and skipped runs say nothing about the harness, so they are
     # neither red nor green: only the newest N that finished decide.
-    conclusions="$(gh run list --workflow "$wf.yml" --branch develop --status completed --limit 30 \
+    conclusions="$(gh run list --workflow "$wf.yml" --branch main --status completed --limit 30 \
       --json conclusion,url,createdAt --jq '[.[] | select(.conclusion == "success" or .conclusion == "failure")]')"
     total="$(jq 'length' <<< "$conclusions")"
     reds="$(jq --argjson n "$n" '[.[:$n][] | select(.conclusion == "failure")] | length' <<< "$conclusions")"
@@ -213,9 +213,9 @@ case "$cmd" in
     # (re)created and an existing one is dropped.
     fresh="$(jq --argjson d "${STREAK_MAX_AGE_DAYS:-14}" '(.[0].createdAt // "1970-01-01T00:00:00Z" | fromdateiso8601) > (now - $d * 86400)' <<< "$conclusions")"
     if [ "$total" -ge "$n" ] && [ "$reds" -eq "$n" ] && [ "$fresh" = true ]; then
-      row="- \`$wf\` failed its last $n runs on \`develop\`, whatever the version — [latest run]($url) <!-- cli-contract-streak $wf -->"
+      row="- \`$wf\` failed its last $n runs on \`main\`, whatever the version — [latest run]($url) <!-- cli-contract-streak $wf -->"
       set_row() { grep -v "<!-- cli-contract-streak $wf -->" "$1" || true; printf '%s\n' "$row"; }
-      mutate "$kind" set_row "$kind CLI: contract fails on develop"
+      mutate "$kind" set_row "$kind CLI: contract fails on main"
     else
       clear_row() { grep -v "<!-- cli-contract-streak $wf -->" "$1" || true; }
       mutate "$kind" clear_row

@@ -40,7 +40,7 @@ AWS=(aws "${PROFILE_ARG[@]+"${PROFILE_ARG[@]}"}" --region "$REGION")
 # which parallelise. The box lives for under an hour, and the difference between
 # large and 2xlarge here is a few cents against 20 minutes of waiting.
 TYPE="m8g.2xlarge"
-REF="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --abbrev-ref HEAD 2>/dev/null || echo develop)"
+REF="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
 REPO="https://github.com/k-k1/agent-fleet"
 BUDGET_SEC=3600
 RUN_TAG="af-armbuild-$$-$(date +%s)"

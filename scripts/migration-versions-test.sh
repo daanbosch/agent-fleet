@@ -8,7 +8,7 @@
 # The PR modes run in a throwaway origin/clone pair whose PR heads are real commits under
 # refs/pull/<n>/head, with a stub gh that answers `pr list` from a JSON fixture through the
 # script's own --jq filter and records every status it is asked to set. A hook the stub runs
-# on each post moves develop under the script, to race it the way a concurrent run does.
+# on each post moves main under the script, to race it the way a concurrent run does.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,7 +19,7 @@ fail() {
   FAILED=1
 }
 
-base=dc3ebb497 # develop after #2043 (member_ui_state), before #2039 (handoff_take)
+base=dc3ebb497 # main after #2043 (member_ui_state), before #2039 (handoff_take)
 git cat-file -e "$base^{commit}" 2>/dev/null || {
   echo "FAIL: $base is not in this clone (fetch-depth too shallow?)"
   exit 1
@@ -66,13 +66,13 @@ check 2 "$M/0096_a.sql\n" no-such-ref
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 g() { git -c core.hooksPath=/dev/null -c commit.gpgsign=false -c user.name=t -c user.email=t@example.invalid "$@"; }
-g init -q --bare -b develop "$T/origin.git"
+g init -q --bare -b main "$T/origin.git"
 g clone -q "$T/origin.git" "$T/work" 2>/dev/null
 mkdir -p "$T/work/$M" "$T/work/$P" "$T/work/docs"
 touch "$T/work/$M/0001_a.sql" "$T/work/$P/0001_a.sql" "$T/work/docs/seed.sql" "$T/work/$M/0004_データ.sql"
 g -C "$T/work" add -A
 g -C "$T/work" commit -qm base
-g -C "$T/work" push -q origin HEAD:develop
+g -C "$T/work" push -q origin HEAD:main
 BASE="$(git -C "$T/work" rev-parse HEAD)"
 
 # mkpr <n> <from> <shell commands>: a commit on <from> made by the commands, pushed as
@@ -143,11 +143,11 @@ esac
 EOF
 chmod +x "$T/bin/gh"
 
-run() { # run <want-exit> <args...>; develop reset to BASE first, output in $T/out
+run() { # run <want-exit> <args...>; main reset to BASE first, output in $T/out
   local want="$1" rc=0
   shift
   : > "$T/fx/statuses"
-  git -C "$T/origin.git" update-ref refs/heads/develop "$BASE"
+  git -C "$T/origin.git" update-ref refs/heads/main "$BASE"
   (cd "$T/work" && PATH="$T/bin:$PATH" FX="$T/fx" GITHUB_REPOSITORY=o/r "$SCRIPT" "$@") > "$T/out" 2>&1 || rc=$?
   [ "$rc" = "$want" ] || fail "want exit $want, got $rc for $*: $(cat "$T/out")"
   rm -f "$T/fx/on-post" "$T/fx/post-fails"
@@ -159,7 +159,7 @@ statuses() { # statuses <want>: the recorded "sha state" lines, in order
   ! grep -qv '^[^ ]* [^ ]* migration-version ' "$T/fx/statuses" || fail "a status with another context: $(cat "$T/fx/statuses")"
 }
 has() { grep -qF -- "$2" "$1" || fail "$1 lacks: $2 ($(cat "$1"))"; }
-# mover [keep]: an on-post hook that pushes one more commit to develop; one-shot unless keep.
+# mover [keep]: an on-post hook that pushes one more commit to main; one-shot unless keep.
 # Extra lines on stdin are run in the mover's tree before it commits.
 mover() {
   {
@@ -171,7 +171,7 @@ mover() {
     echo 'echo "$RANDOM" >> docs/moves'
     echo "git -c core.hooksPath=/dev/null -c commit.gpgsign=false -c user.name=t -c user.email=t@example.invalid add -A"
     echo "git -c core.hooksPath=/dev/null -c commit.gpgsign=false -c user.name=t -c user.email=t@example.invalid commit -qm move"
-    echo 'git push -q origin HEAD:develop'
+    echo 'git push -q origin HEAD:main'
   } > "$T/fx/on-post"
 }
 
@@ -181,8 +181,8 @@ run 0 --pr 2 "$S2"
 statuses "$S2 success"
 run 1 --pr 3 "$S3"
 statuses "$S3 failure"
-has "$T/fx/statuses" "migrations/0001_c.sql collides with 0001_a.sql on develop; renumber it"
-has "$T/out" "#3: $M/0001_c.sql: version 1 is already $M/0001_a.sql on develop"
+has "$T/fx/statuses" "migrations/0001_c.sql collides with 0001_a.sql on main; renumber it"
+has "$T/out" "#3: $M/0001_c.sql: version 1 is already $M/0001_a.sql on main"
 run 1 --pr 4 "$S4"
 statuses "$S4 failure"
 has "$T/fx/statuses" "migrations/0002_x.sql collides with 0002_y.sql in this PR (+1 more); renumber it"
@@ -194,17 +194,17 @@ run 1 --pr 9 "$S9"
 statuses "$S9 failure"
 run 1 --pr 10 "$S10"
 statuses "$S10 failure"
-has "$T/out" "#10: $M/0001_日本.sql: version 1 is already $M/0001_a.sql on develop"
-has "$T/fx/statuses" "migrations/0001_日本.sql collides with 0001_a.sql on develop; renumber it"
+has "$T/out" "#10: $M/0001_日本.sql: version 1 is already $M/0001_a.sql on main"
+has "$T/fx/statuses" "migrations/0001_日本.sql collides with 0001_a.sql on main; renumber it"
 run 1 --pr 11 "$S11"
 statuses "$S11 failure"
 has "$T/fx/statuses" "(+5 more)"
 [ "$(grep -c '^#11: ' "$T/out")" = 6 ] || fail "want 6 one-line collisions for #11: $(cat "$T/out")"
 has "$T/out" "\$'control-plane/internal/store/migrations/0002_n\\nl.sql'"
-# develop's own non-ASCII name is read too.
+# main's own non-ASCII name is read too.
 run 1 --pr 12 "$S12"
 statuses "$S12 failure"
-has "$T/fx/statuses" "migrations/0004_n.sql collides with 0004_データ.sql on develop; renumber it"
+has "$T/fx/statuses" "migrations/0004_n.sql collides with 0004_データ.sql on main; renumber it"
 run 1 --pr 13 "$S13"
 statuses "$S13 failure"
 run 0 --pr 14 "$S14"
@@ -227,21 +227,21 @@ statuses ''
 touch "$T/fx/post-fails"
 run 2 --pr 1 "$S1"
 
-# develop takes 0002 while PR 2's check runs: the first verdict is stale, the re-run flags it.
+# main takes 0002 while PR 2's check runs: the first verdict is stale, the re-run flags it.
 echo "touch $M/0002_other.sql" | mover
 run 1 --pr 2 "$S2"
 statuses "$S2 success\n$S2 failure"
-has "$T/out" "develop moved past"
-# A sweep that started on the older develop crosses the PR's own run on the newer one: the
+has "$T/out" "main moved past"
+# A sweep that started on the older main crosses the PR's own run on the newer one: the
 # sweep's stale success is followed by its own re-check, so the newer verdict is the last.
 echo '[{"number": 2, "headRefOid": "'"$S2"'"}]' > "$T/fx/prs.json"
 {
   echo "touch $M/0002_other.sql"
-  echo "echo '$S2 failure migration-version (PR run on the newer develop)' >> '$T/fx/statuses'"
+  echo "echo '$S2 failure migration-version (PR run on the newer main)' >> '$T/fx/statuses'"
 } | mover
 run 0 --open-prs
 statuses "$S2 success\n$S2 failure\n$S2 failure"
-# develop never holds still: no verdict stands, and error replaces the successes.
+# main never holds still: no verdict stands, and error replaces the successes.
 mover keep < /dev/null
 run 2 --pr 1 "$S1"
 statuses "$S1 success\n$S1 success\n$S1 success\n$S1 error"

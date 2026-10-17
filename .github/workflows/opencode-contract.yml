@@ -16,8 +16,8 @@
 #   - latest: the version the fleet actually runs
 #
 # A second job (contract-v2) runs the opencode 2 (@opencode/cli) contract tests: no model, no
-# credentials, nothing beyond the npm install. It needs no quota, so unlike the job above it also
-# runs on PRs to develop.
+# credentials, nothing beyond the npm install. It needs no quota, so unlike the job above it runs
+# on every relevant PR, not only on the cron and dispatch.
 #
 # Note: no image build is needed (just node+tmux+Go on the runner), so this is
 # independent of e2e.yml and finishes in minutes.
@@ -39,12 +39,11 @@ permissions:
   issues: write
 
 on:
-  # Not run on pushes to develop (billing spread; CONTRIBUTING "Commits & PRs").
+  # Not run on pushes to main (billing spread; CONTRIBUTING "Commits & PRs").
   # Contract checks are concentrated on PRs to main (when relevant paths changed)
-  # and the weekly cron. The one exception is contract-v2, which spends nothing and so
-  # also runs on PRs to develop; the job below that spends the Zen quota stays off them.
+  # and the weekly cron.
   pull_request:
-    branches: [develop, main]
+    branches: [main]
     paths:
       - "workspace/agent/internal/agents/opencode/**"
       - "workspace/agent/internal/chatx/**"
