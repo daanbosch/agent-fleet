@@ -403,6 +403,7 @@ export const sessions: Record<keyof typeof jaSessions, string> = {
   "move.size": "Handover file size: {size}",
   "move.size_over": "Over the target size; written as it is anyway. The target reads only what it needs.",
   "move.usage_five": "short window {pct}%",
+  "move.quota_left": "quota left",
   "move.usage_week": "week {pct}%",
   "move.confirm": "Move",
   "move.busy_move": "Moving (starting the target)…",

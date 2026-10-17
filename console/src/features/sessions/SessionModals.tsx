@@ -28,12 +28,13 @@ export function SessionModals() {
   const cleanupOpen = useSessionUI((s) => s.cleanupOpen);
   const budget = useSessionUI((s) => s.budget);
   const move = useSessionUI((s) => s.move);
+  const moveFromLimit = useSessionUI((s) => s.moveFromLimit);
   const close = useSessionUI((s) => s.close);
 
   return (
     <>
       {budget && <SpendBudgetModal s={budget} onClose={close} />}
-      {move && <MoveSessionModal key={move.name} session={move} onClose={close} />}
+      {move && <MoveSessionModal key={move.name} session={move} fromLimit={moveFromLimit} onClose={close} />}
       {ssmResume && (
         <SsmLoginModal
           name={ssmResume.name}

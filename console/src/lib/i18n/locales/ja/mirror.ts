@@ -53,6 +53,9 @@ export const mirror = {
   "mirror.skip_continue": "スキップして続行",
   "mirror.compacting": "コンテキストを圧縮中…",
   "mirror.retrying": "プロバイダがエラーを返し、エージェントが再試行しています（{n} 回目）: {msg}",
+  "mirror.move_limit": "このセッションはエージェントの利用上限で止まっています。リセットを待つか、別のエージェントで続けられます。",
+  "mirror.move_limit_left": "このセッションはエージェントの利用上限で止まっています。{kinds} は利用枠が残っているので、待たずにそちらで続けられます。",
+  "mirror.move_limit_action": "別のエージェントへ移す",
   "mirror.retry_failed": "プロバイダのエラーは再試行しても直らないため、ターンを停止しました: {msg}",
   // タイトル提案
   "mirror.title_suggestion": "タイトル案: <0>{title}</0>",

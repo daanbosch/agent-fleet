@@ -140,3 +140,27 @@ export function readMoveUsage(d: unknown): MoveUsage | null {
   const u = { fiveHour: pct(r.fiveHour), sevenDay: pct(r.sevenDay) };
   return u.fiveHour === undefined && u.sevenDay === undefined ? null : u;
 }
+
+/** Where a candidate stands on quota: some reading and none at 100% is "left". */
+export type QuotaState = "left" | "full" | "unknown";
+
+/** A kind with no usage source or no reading is "unknown": it is never judged, only left unmarked. */
+export function quotaState(u: MoveUsage | undefined): QuotaState {
+  const w = [u?.fiveHour, u?.sevenDay].filter((n): n is number => n !== undefined);
+  if (w.length === 0) return "unknown";
+  return w.some((n) => n >= 100) ? "full" : "left";
+}
+
+/**
+ * The candidates for a move off a usage limit: quota left first (least used first), then the
+ * kinds nobody can judge, then those at their cap. Nothing is dropped; the sort is stable, so
+ * the Agent's own order decides between equals.
+ */
+export function orderByQuota(kinds: SessionKind[], usage: Partial<Record<SessionKind, MoveUsage>>): SessionKind[] {
+  const rank = { left: 0, unknown: 1, full: 2 } as const;
+  const used = (k: SessionKind) => Math.max(usage[k]?.fiveHour ?? 0, usage[k]?.sevenDay ?? 0);
+  return kinds
+    .map((k, i) => ({ k, i, q: quotaState(usage[k]) }))
+    .sort((a, b) => rank[a.q] - rank[b.q] || (a.q === "left" ? used(a.k) - used(b.k) : 0) || a.i - b.i)
+    .map((e) => e.k);
+}
