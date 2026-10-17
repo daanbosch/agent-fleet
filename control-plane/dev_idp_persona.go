@@ -295,7 +295,9 @@ func (a devIdPAPI) askConsent(w http.ResponseWriter, r *http.Request, cc devIdPC
 		data.Personas = append(data.Personas, row{ID: p.ID, Label: pr.Name, Email: pr.Email})
 	}
 	noStore(w)
-	w.Header().Set("Referrer-Policy", "no-referrer")
+	// Never no-referrer: it makes the browser send "Origin: null" on this page's own form POST, which
+	// sameOrigin refuses (observed: every submit got 403). same-origin still sends no Referer to the app.
+	w.Header().Set("Referrer-Policy", "same-origin")
 	// The page is a click target: refuse framing so it cannot be clicked through. No form-action:
 	// Chromium applies it to the 302 that follows the POST too, so 'self' would block the return
 	// to the app on its preview host (measured in headless Chromium). The page has no script and

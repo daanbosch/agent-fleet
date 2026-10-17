@@ -308,3 +308,12 @@ deployment, so the option would also have been unreachable. Showing the switch e
 - Unchanged: the `/dev-idp/*` endpoints, stored opt-ins, the redirect allow-list (localhost stays
   allowed) and personas.
 - Not verified: a live run on a deployment without a preview domain.
+
+## Note (2026-10-16): the consent page's referrer policy is `same-origin` (#2243)
+
+The personas note above says the consent page is sent with `no-referrer`. That value makes a browser send
+`Origin: null` on the page's own form POST, which the strict `sameOrigin` check refuses, so every submit
+got 403 on a deployment (the Go tests set `Origin` by hand and never saw it). The page now sends
+`Referrer-Policy: same-origin`: the same-origin POST carries the real Console origin, and no `Referer`
+reaches the app it redirects to. `sameOrigin` is unchanged (`Origin: null` is still refused). The
+authorization redirect keeps `no-referrer`; it hosts no form.
