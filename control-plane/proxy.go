@@ -147,6 +147,12 @@ func auditActionTarget(r *http.Request) (action, target string, ok bool) {
 			return "session.create", "", true
 		case name != "" && strings.HasSuffix(p, "/fork"):
 			return "session.fork", name, true
+		case name != "" && p == "/api/sessions/"+name+"/move":
+			return "session.move", name, true
+		case name != "" && strings.HasPrefix(p, "/api/sessions/"+name+"/move/"):
+			// retry, cancel, reopen and deliver (ADR 0115 decisions 1, 11.4 and 11.6); the preview
+			// is a GET.
+			return "session.move." + strings.TrimPrefix(p, "/api/sessions/"+name+"/move/"), name, true
 		case name != "" && strings.HasSuffix(p, "/stop"):
 			// /stop is the old name of deleting a session (it moves it to the trash, ADR 0101),
 			// so it is recorded as the delete it is.

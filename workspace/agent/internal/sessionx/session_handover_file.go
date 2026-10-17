@@ -176,3 +176,36 @@ func syncDir(dir string) error {
 	}
 	return d.Close()
 }
+
+// RemoveHandoverFiles undoes what a move that created no target wrote into target's directory
+// (ADR 0115 decision 11.4): the named handover files, then the directory when that empties it,
+// since a target that never existed owns nothing else there. Only names of the handover form
+// are removed, so a caller cannot reach any other file through it. A file already gone is not
+// an error; every other failure is returned, because a file left behind would be the record
+// of a move that did not happen, waiting in the directory of a session that does not exist.
+func RemoveHandoverFiles(target string, names []string) error {
+	dir := paths.SessionWorkDir(target)
+	if dir == "" || !session.ValidName(target) {
+		return fmt.Errorf("handover: bad target name %q", target)
+	}
+	if err := requireRealDir(dir); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	var errs []error
+	for _, n := range names {
+		if !handoverNameRe.MatchString(n) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, n)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	_ = os.Remove(dir) // fails, harmlessly, when anything else is in it
+	return nil
+}

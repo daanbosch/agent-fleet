@@ -77,8 +77,11 @@ type HandoverInput struct {
 	Proposals []string
 	// Earlier lists the handover files the source itself owns (HandoverChain), by file name.
 	Earlier []string
-	Now     time.Time
-	Loc     *time.Location
+	// Instructions are the project instruction files the source's kind read and the target's
+	// kind does not, relative to the working folder (decision 14).
+	Instructions []string
+	Now          time.Time
+	Loc          *time.Location
 }
 
 // HandoverGit is the working copy at the moment of the move. Available is false when Dir is
@@ -115,6 +118,7 @@ type HandoverHeader struct {
 	MovedAt                          time.Time
 	Loc                              *time.Location
 	Earlier                          []string
+	Instructions                     []string
 }
 
 type HandoverStopped struct {
@@ -151,6 +155,7 @@ func BuildHandover(in HandoverInput) (Handover, error) {
 			Source: in.Source.Name, Kind: in.Source.Kind, Model: in.Source.Model,
 			Dir: in.Source.Dir, Branch: in.Source.Branch,
 			MovedAt: in.Now, Loc: in.Loc, Earlier: slices.Clone(in.Earlier),
+			Instructions: slices.Clone(in.Instructions),
 		},
 		Git:        in.Git,
 		Changed:    in.ChangedFiles,
@@ -465,6 +470,9 @@ func renderHandover(h Handover, lang string) string {
 	}
 	for _, f := range hd.Earlier {
 		bullet("Earlier history (same folder as this file)", f)
+	}
+	for _, f := range hd.Instructions {
+		bullet("Project instructions the source's agent followed and yours does not load (read it yourself)", f)
 	}
 	b.WriteString("\nThis file is the whole record of the source session: work from it, " +
 		"and do not open the source's own session files or its CLI's state directories.\n\n")

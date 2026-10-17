@@ -3,7 +3,7 @@
 English | [日本語](0115-move-session-to-another-agent.ja.md)
 
 - Status: **proposed** (2026-10-15). Nothing is implemented.
-  Follow-ups: #2236
+  Follow-ups: #2236, #2252, #2254
 - Tracking: #2182. Builds on #2183 (the shared Markdown renderer, `transcript.Markdown`).
 - See also: [0039](0039-fork-at-message.md) (fork) /
   [0049](0049-session-changed-files.md) (the changed-files list) /
@@ -373,3 +373,54 @@ it is not yet.
   `session_moved`: the change would land on a session whose conversation has gone. `GET` holds
   the lease through `Resume` on an open session, and on a moving or moved one answers from the
   meta's model, effort and mode without starting a runtime.
+
+## Addendum (2026-10-17) — the move endpoint as built (P2a step 3a, #2182)
+
+- **Routes** (Agent, and the same paths in the CP allow-list): `POST /sessions/{name}/move
+  {kind, model?, driver?}`, `GET …/move/preview`, `POST …/move/retry`, `POST …/move/cancel`,
+  and `POST …/move/reopen` for decision 11.6's "resume here anyway". The move and the retry
+  create a session, so the CP sends them through fork's quota check. All but the preview are
+  audited as `session.move[.retry|.cancel|.reopen]`.
+- **The target's name is booked before begin**, so that `moving` can name it and the file can be
+  written into `~/.af-work/<target>` before the create. The create runs in-process through the
+  same path as `POST /sessions`, with the booked name in an unexported field that no client can
+  set.
+- **Targets:** claude, codex, opencode, copilot, agy and muse. lcpp is left out (decision 9). cursor
+  and kiro stay off behind `moveUnmeasuredAllowed` until the decision 9 measurement is done
+  (#2252). A request for the source's own kind is refused with `move_same_kind`, and `canFork`
+  says whether to offer fork instead.
+- **Uncertain create:** a create is rolled back only when it answered and left nothing under the
+  target's name (no meta, no pane). An unknown outcome, or a failure after the target's meta was
+  written, keeps `moving` and the file. The move is recorded in the state dir (`session-move`)
+  with the request, the file and the spooled peer ids, so retry and cancel work after an Agent
+  restart. Retry commits when the target exists, and otherwise creates it again under the same
+  name from the same file. Cancel refuses while the target exists.
+- **The target's meta decides.** A move commits only once the target's meta is on disk: the move's
+  create writes it checked, before the first prompt is sent, and a 2xx without it leaves the move
+  pending. A target that runs under the name without a meta (an orphan pane or runtime) is not
+  created again by retry; cancel stops it. The booked name is held against every allocation, in
+  memory and through the pending move's record, until the move ends.
+- **A meta file that exists and does not read** is never taken for absent: retry and cancel
+  refuse it, and only a target with no meta file at all is stopped as an orphan. The source's
+  `moving` holds the target's name as well as the record does, so an Agent that stopped between
+  begin and the first record write does not hand the name out again.
+- **The first prompt is part of the move.** It is recorded by target (`session-move-delivery`)
+  before the create, and kept until the target's `InitialPromptState` says delivered. While it
+  does not, the move's answer and the source's preview report it, and
+  `POST /sessions/{target}/move/deliver` sends it again on the user's word. It is never resent
+  by itself, since an unknown delivery may have arrived. On a Terminal target the resend runs
+  the create's own delivery in the background (readiness wait, Enter nudge, evidence of a started
+  turn), and typed keys without evidence stay unknown. While the source's move has not created
+  the target, the record is kept and deliver is refused.
+- **After the commit**, the record stays, marked `committed`, until the spooled peer messages are
+  taken and the source is stopped. An Agent that stops in between finishes those steps at boot
+  (`RecoverMoves`), on retry, or before a reopen. Reopen runs under the move's operation lock.
+- **The preview is scrubbed** like the file, and the git reads are bounded in time and bytes, with
+  the cut stated.
+- **Decision 14's header:** each kind's project instruction files are a fixed table
+  (`projectInstructionFiles`). It lists only files a kind is known to load, so a target is never
+  wrongly assumed to have read one. The header names those of the source's files that exist in
+  the working folder and that the target's kind does not load.
+- **Not built here:** archiving the handover files with a trashed target, and putting them back
+  on restore (P2a step 3b). Also not built: the Console dialog, and `moving` / `movedTo` on the
+  session row (#2254).

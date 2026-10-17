@@ -64,6 +64,12 @@ var Entries = []string{
 	// Usage-limit bookings whose cancellation the CP has not confirmed (sessionx
 	// rate_limit_cleanup.go). Introduced directly under AgentStateDir.
 	"session-rate-limit-cleanup",
+	// Moves between begin and their end, for retry and cancel (sessionx session_move.go).
+	// Introduced directly under AgentStateDir.
+	"session-move",
+	// A move target's first prompt until it is known to have arrived (session_move_deliver.go).
+	// Introduced directly under AgentStateDir.
+	"session-move-delivery",
 	"session-report",
 	"session-resume",
 	"session-translations",
