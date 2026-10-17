@@ -5,7 +5,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
+	"sync/atomic"
 	"testing"
+
+	"github.com/k-k1/agent-fleet/control-plane/internal/runtime"
 )
 
 // Sign-in to a loopback redirect is a supported use of the dev IdP, also while the member's
@@ -13,12 +17,44 @@ import (
 // tests pin that no step of the flow asks whether the workspace is running, so a later
 // "refuse clients of stopped workspaces" check turns them red (ADR 0116, 2026-10-18 note).
 
-// stopWorkspace puts the workspace in the state a stop leaves: state "stopped" and no preview
-// slug. d.slug keeps the old value so a test can still build the (now stale) preview host.
+// stoppableFactory hands out runtimes whose State follows one flag, so a stop moves the
+// runtime the way rt.Stop does in workspace_lifecycle.go and not only the database row.
+type stoppableFactory struct {
+	endpoint string
+	stopped  *atomic.Bool
+}
+
+type stoppableRuntime struct {
+	previewTestRuntime
+	stopped *atomic.Bool
+}
+
+func (f stoppableFactory) New(ws runtime.Workspace, _ runtime.SecretKeys, _ []string) runtime.Runtime {
+	return stoppableRuntime{previewTestRuntime{endpoint: f.endpoint, token: "tok-" + ws.ID}, f.stopped}
+}
+
+func (r stoppableRuntime) Stop(context.Context) error { r.stopped.Store(true); return nil }
+func (r stoppableRuntime) State(context.Context) string {
+	if r.stopped.Load() {
+		return "stopped"
+	}
+	return "running"
+}
+
+// stopWorkspace does what a stop does: rt.Stop, then the state row (which also clears the
+// preview slug). It asserts the runtime, the row and the slug all say stopped, so a check on
+// any of the three would turn these tests red. d.slug keeps the old value to build the stale
+// preview host.
 func (d *devIdPTestEnv) stopWorkspace(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
-	if err := d.mgr.store.SetWorkspacePreviewSlug(ctx, d.ws.ID, ""); err != nil {
+	stopped := &atomic.Bool{}
+	d.mgr.rtFactory = stoppableFactory{endpoint: "http://127.0.0.1:1", stopped: stopped}
+	rt := d.mgr.runtimeFor(d.ws, noSecretKeys)
+	if got := rt.State(ctx); got != "running" {
+		t.Fatalf("runtime before the stop: %q", got)
+	}
+	if err := rt.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.mgr.store.SetWorkspaceState(ctx, d.ws.ID, "stopped"); err != nil {
@@ -28,25 +64,67 @@ func (d *devIdPTestEnv) stopWorkspace(t *testing.T) {
 	if err != nil || !ok || ws.State != "stopped" || ws.PreviewSlug != "" {
 		t.Fatalf("workspace is not stopped: %+v ok=%v err=%v", ws, ok, err)
 	}
+	if got := d.mgr.runtimeFor(ws, noSecretKeys).State(ctx); got != "stopped" {
+		t.Fatalf("runtime state = %q, want stopped", got)
+	}
 }
 
 func loopbackRedirects() []string {
 	return []string{"http://localhost:5173/cb", "http://127.0.0.1:8080/cb"}
 }
 
-func (d *devIdPTestEnv) userinfoOK(t *testing.T, tok *httptest.ResponseRecorder) {
+// completeFlow takes a successful authorize/consent redirect through token and userinfo and
+// returns the verified ID token claims. It checks where the browser is sent, the ID token's
+// signature, issuer, audience and nonce, and that userinfo names the same subject.
+func (d *devIdPTestEnv) completeFlow(t *testing.T, rec *httptest.ResponseRecorder, redirect, verifier string, basic bool) map[string]any {
 	t.Helper()
+	code := codeFrom(t, rec)
+	loc, _ := url.Parse(rec.Header().Get("Location"))
+	want, _ := url.Parse(redirect)
+	if loc.Scheme != want.Scheme || loc.Host != want.Host || loc.Path != want.Path {
+		t.Fatalf("redirected to %q, want %q", rec.Header().Get("Location"), redirect)
+	}
+	if loc.Query().Get("state") != "st-1" || loc.Query().Get("iss") != devIdPTestIssuer {
+		t.Errorf("state / iss: %v", loc.Query())
+	}
+	var tok *httptest.ResponseRecorder
+	if basic {
+		tok = d.exchange(code, redirect, verifier)
+	} else {
+		f := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {redirect},
+			"client_id": {d.clientID}, "client_secret": {d.secret}}
+		if verifier != "" {
+			f.Set("code_verifier", verifier)
+		}
+		tok = d.tokenReq(f, "", "")
+	}
 	if tok.Code != http.StatusOK {
 		t.Fatalf("token: %d %s", tok.Code, tok.Body)
 	}
+	body := idpJSON(t, tok)
+	idToken, _ := body["id_token"].(string)
+	claims, err := verifyIDToken(idToken, d.jwks(t), devIdPTestIssuer, d.clientID, d.now())
+	if err != nil {
+		t.Fatalf("ID token: %v", err)
+	}
+	sub, _ := claims["sub"].(string)
+	if sub == "" || claims["nonce"] != "nonce-1" || claims["af_dev"] != true {
+		t.Fatalf("claims: %v", claims)
+	}
 	req := httptest.NewRequest(http.MethodGet, "https://af.example.com"+devIdPUserinfoPath, nil)
-	req.Header.Set("Authorization", "Bearer "+idpJSON(t, tok)["access_token"].(string))
+	req.Header.Set("Authorization", "Bearer "+body["access_token"].(string))
 	ui := httptest.NewRecorder()
 	d.mux.ServeHTTP(ui, req)
-	if ui.Code != http.StatusOK || idpJSON(t, ui)["sub"] == "" {
+	if ui.Code != http.StatusOK {
 		t.Fatalf("userinfo: %d %s", ui.Code, ui.Body)
 	}
+	if got, _ := idpJSON(t, ui)["sub"].(string); got != sub {
+		t.Fatalf("userinfo sub = %q, ID token sub = %q", got, sub)
+	}
+	return claims
 }
+
+const devIdPTestIssuer = "https://af.example.com/dev-idp"
 
 func TestDevIdPStoppedWorkspaceOwnerSignsInToLoopback(t *testing.T) {
 	for _, redirect := range loopbackRedirects() {
@@ -58,19 +136,11 @@ func TestDevIdPStoppedWorkspaceOwnerSignsInToLoopback(t *testing.T) {
 				if pkce {
 					verifier, challenge = pkcePair()
 				}
-				code := codeFrom(t, d.authorizeAs(t, "preview-user", d.authQuery(redirect, challenge)))
-				var tok *httptest.ResponseRecorder
-				if basic {
-					tok = d.exchange(code, redirect, verifier)
-				} else {
-					f := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {redirect},
-						"client_id": {d.clientID}, "client_secret": {d.secret}}
-					if verifier != "" {
-						f.Set("code_verifier", verifier)
-					}
-					tok = d.tokenReq(f, "", "")
+				rec := d.authorizeAs(t, "preview-user", d.authQuery(redirect, challenge))
+				claims := d.completeFlow(t, rec, redirect, verifier, basic)
+				if sub, _ := claims["sub"].(string); !strings.HasPrefix(sub, "af-") {
+					t.Errorf("owner subject is not a member subject: %v", claims)
 				}
-				d.userinfoOK(t, tok)
 			}
 		}
 	}
@@ -84,15 +154,17 @@ func TestDevIdPStoppedWorkspaceOwnerSignsInToLoopbackThroughConsent(t *testing.T
 		verifier, challenge := pkcePair()
 		_, ticket := d.askAs(t, "preview-user", d.authQuery(redirect, challenge))
 		rec := d.postConsent("preview-user", url.Values{"ticket": {ticket}, "choice": {d.personaID(t, "admin")}}, nil)
-		code := codeFrom(t, rec)
-		if loc, _ := url.Parse(rec.Header().Get("Location")); loc.Scheme+"://"+loc.Host+loc.Path != redirect {
-			t.Errorf("consent redirected to %q, want %q", rec.Header().Get("Location"), redirect)
+		c := d.completeFlow(t, rec, redirect, verifier, true)
+		if c["sub"] != "persona:admin" || c["email"] != "admin@example.test" || c["name"] != "Admin User" {
+			t.Errorf("persona claims: %v", c)
 		}
-		d.userinfoOK(t, d.exchange(code, redirect, verifier))
-		// Choosing myself works the same.
+		// Choosing myself is the owner's own subject, not the persona's.
 		_, ticket = d.askAs(t, "preview-user", d.authQuery(redirect, ""))
-		self := codeFrom(t, d.postConsent("preview-user", url.Values{"ticket": {ticket}, "choice": {"self"}}, nil))
-		d.userinfoOK(t, d.exchange(self, redirect, ""))
+		rec = d.postConsent("preview-user", url.Values{"ticket": {ticket}, "choice": {"self"}}, nil)
+		self := d.completeFlow(t, rec, redirect, "", true)
+		if self["sub"] == "persona:admin" || self["sub"] == "" {
+			t.Errorf("self claims: %v", self)
+		}
 	}
 }
 
@@ -119,8 +191,11 @@ func TestDevIdPStoppedWorkspaceColleagueFollowsTheShareRules(t *testing.T) {
 			t.Errorf("colleague, sharing off, %s: %d loc=%q", redirect, rec.Code, rec.Header().Get("Location"))
 		}
 		d.setPreviewSettings(t, func(st *wsSettings) { st.PreviewTenantShare = true })
-		code := codeFrom(t, d.authorizeAs(t, "colleague", d.authQuery(redirect, "")))
-		d.userinfoOK(t, d.exchange(code, redirect, ""))
+		colleague := d.completeFlow(t, d.authorizeAs(t, "colleague", d.authQuery(redirect, "")), redirect, "", true)
+		owner := d.completeFlow(t, d.authorizeAs(t, "preview-user", d.authQuery(redirect, "")), redirect, "", true)
+		if colleague["sub"] == owner["sub"] {
+			t.Errorf("colleague and owner share a subject: %v", owner["sub"])
+		}
 		d.setPreviewSettings(t, func(st *wsSettings) { st.PreviewTenantShare = false })
 		if rec := d.authorizeAs(t, "colleague", d.authQuery(redirect, "")); rec.Code != http.StatusBadRequest {
 			t.Errorf("colleague after sharing was turned off, %s: %d", redirect, rec.Code)
