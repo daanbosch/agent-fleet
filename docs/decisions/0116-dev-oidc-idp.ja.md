@@ -280,3 +280,11 @@ Preview タブもそのような配備では隠れるので、選択肢として
 `Origin` を手で付けるので気づけなかった）。ページは `Referrer-Policy: same-origin` で返すようにした：同一オリジンの
 POST には本物の Console オリジンが付き、リダイレクト先のアプリには `Referer` が渡らない。`sameOrigin` は変えない
 （`Origin: null` は今も拒否）。認可のリダイレクトは `no-referrer` のまま（フォームを持たない）。
+
+## 追記（2026-10-17）：Agent Fleet の画面としての同意ページと「キャンセル」（#2245）
+
+同意ページを Console の見た目に合わせた（インライン CSS のみ。既定はダーク、ライト版あり、アクセントはデプロイの
+ブランド色、ヘッダにブランドのアイコンとラベル、「DEV IdP」バッジ）。CSP が増えるのはアイコン用の `img-src 'self'`
+だけ。**キャンセル**は同じ `/dev-idp/consent` に `action=cancel` を POST する。続ける と同じオリジン検査・チケット消費・
+再検証のあと、保管済みで再検証した `redirect_uri` に `error=access_denied` と保管済みの `state` を返す。どちらもフォームからは
+読まない。フォームの契約（`ticket`、`choice`）と `same-origin` の referrer policy は変えていない。
