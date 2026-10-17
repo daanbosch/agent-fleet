@@ -218,7 +218,7 @@ export const tools: Record<keyof typeof jaTools, string> = {
   "env.devidp_act_next_env": "read by Next.js",
   "env.devidp_act_next": "read by next dev",
   "env.devidp_act_go_get": "add the modules it imports with go get",
-  "env.devidp_act_dotenv": "load with dotenv-expand, or source it in the shell",
+  "env.devidp_act_dotenv": "load with dotenv-expand, or in the shell: set -a; source .env.devidp; set +a",
   "env.devidp_note_commit_yes": "Safe to commit: it holds no secret and nothing specific to this workspace. Keep dev-only settings out of the file production uses where you can.",
   "env.devidp_note_commit_no": "Do not commit this: it carries this workspace's client id (or lives only in the shell). The secret is still only a reference.",
   "env.devidp_note_shared": "Production reads this same file. It falls back to Google only while AF_DEV_IDP_* is unset, so never set those variables in production.",

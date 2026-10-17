@@ -58,6 +58,13 @@ describe("dev IdP snippets", () => {
     expect(all(fillSpring)).toContain("issuer-uri: https://af.example.invalid/dev-idp");
   });
 
+  it("Spring one-file defaults never nest a placeholder without its own default (Spring Framework <= 6.1)", () => {
+    const t = all(combos.find((x) => x.name === "spring/onefile/env/plain")!);
+    expect(t).toContain("${AF_DEV_IDP_CLIENT_ID:${GOOGLE_CLIENT_ID:}}");
+    expect(t).toContain("${AF_DEV_IDP_CLIENT_SECRET:${GOOGLE_CLIENT_SECRET:}}");
+    expect(t).not.toMatch(/\$\{[A-Z_]+\}\}/);
+  });
+
   it("the port changes the preview URL in the snippet", () => {
     for (const k of combos.filter((x) => x.c.preview && x.c.values === "env")) {
       const a = all({ ...k, c: { ...k.c, port: 8080 } });

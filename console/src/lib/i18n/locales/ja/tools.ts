@@ -215,7 +215,7 @@ export const tools = {
   "env.devidp_act_next_env": "Next.js が読み込みます",
   "env.devidp_act_next": "next dev が読み込みます",
   "env.devidp_act_go_get": "import しているモジュールを go get で追加",
-  "env.devidp_act_dotenv": "dotenv-expand で読み込むか、シェルで source",
+  "env.devidp_act_dotenv": "dotenv-expand で読み込むか、シェルで set -a; source .env.devidp; set +a",
   "env.devidp_note_commit_yes": "コミットして大丈夫です：秘密もこのワークスペース固有の値も入っていません。開発専用の設定は、本番が読むファイルから分けておくのがおすすめです。",
   "env.devidp_note_commit_no": "コミットしないでください：このワークスペースの client id が入っています（またはシェルだけで使います）。secret は参照のままです。",
   "env.devidp_note_shared": "本番も同じファイルを読みます。AF_DEV_IDP_* が未設定のときだけ Google に戻るので、本番ではこの変数を絶対に設定しないでください。",

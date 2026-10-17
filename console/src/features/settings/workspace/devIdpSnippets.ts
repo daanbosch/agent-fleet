@@ -75,8 +75,8 @@ function previewRef(c: SnippetCtx, style: "shell" | "ts"): string {
 // ---- Spring Boot -------------------------------------------------------------------------
 
 function springYaml(c: SnippetCtx, oneFile: boolean): SnippetLine[] {
-  const id = fill(c) ? c.clientId : oneFile ? "${AF_DEV_IDP_CLIENT_ID:${GOOGLE_CLIENT_ID}}" : "${AF_DEV_IDP_CLIENT_ID}";
-  const secret = oneFile ? `\${${SECRET_ENV}:\${GOOGLE_CLIENT_SECRET}}` : `\${${SECRET_ENV}}`;
+  const id = fill(c) ? c.clientId : oneFile ? "${AF_DEV_IDP_CLIENT_ID:${GOOGLE_CLIENT_ID:}}" : "${AF_DEV_IDP_CLIENT_ID}";
+  const secret = oneFile ? `\${${SECRET_ENV}:\${GOOGLE_CLIENT_SECRET:}}` : `\${${SECRET_ENV}}`;
   const issuer = fill(c) ? c.issuer : oneFile ? `\${AF_DEV_IDP_ISSUER:${GOOGLE}}` : "${AF_DEV_IDP_ISSUER}";
   return [
     L(oneFile ? "# Falls back to Google when AF_DEV_IDP_* is not set" : "# Only in the workspace: activate with SPRING_PROFILES_ACTIVE=devidp"),
