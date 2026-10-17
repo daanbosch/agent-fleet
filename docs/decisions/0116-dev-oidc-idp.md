@@ -351,3 +351,21 @@ the dev issuer whenever `AF_DEV_IDP_ISSUER` is set would fail while it was off).
   started workspace.
 - Unchanged: personas, tenant-shared previews, the redirect allow-list, PKCE, single-use codes, `af_dev`.
 - Not verified: a live run on a deployment.
+
+## Note (2026-10-17): the browser-facing error pages share the consent page's shell (#2262)
+
+`authorize` and `consent` answer a refusal with an HTML page in the consent page's shell (header with the
+branded icon, deployment label and "DEV IdP" badge, the brand colour, dark and light, phone widths), not a
+plain-text body. The shell is one set of templates (`dev_idp_page.go`); the consent page's output is
+byte-identical (pinned by a golden test). Each page is a title, one sentence of what happened and one line of
+what to do next, from a ja / en table that follows `Accept-Language`; this replaces the `Refused` string of
+`devIdPConsentText`. Status codes are unchanged; the headers are the consent page's (`no-store`, the same CSP,
+`same-origin` referrer policy), and nothing on a page posts, links or redirects.
+
+- The internal reason stays in the log. An unknown client and a non-member still get the same page. A
+  `redirect_uri` the client may not use is only reached by a member of the client's workspace, so that page
+  names the rejected callback's **host** (only a plain ASCII host name, never cut, otherwise left out; never the
+  path, query or `client_id`).
+- A store failure on consent (500) says the sign-in is unavailable; every other consent refusal says the
+  confirmation is no longer valid. A wrong method on `authorize` or `consent` is a page; on `token`, `userinfo`
+  and `jwks` it stays the plain 405 / OAuth JSON, and the bare 404 while the IdP is not offered is unchanged.
