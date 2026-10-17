@@ -368,7 +368,8 @@ art as it serves it.
   codex, cursor, copilot, kiro and opencode only a pane repaint does (a spinner or elapsed-time
   counter counts), so a silent tool under a pane that stays static for an hour can lapse, while a
   stuck session whose spinner keeps animating keeps holding. Use the "do not auto-stop" pin for
-  long silent work on those kinds. Managed sessions and the other kinds (muse, lcpp, shell, ssm) are not yet bounded this way, and background
+  long silent work on those kinds. Managed sessions are not yet bounded this way. shell and ssm sessions never show "working", and
+  muse and lcpp have no Terminal mode, so there is nothing of those kinds to bound. Background
   work and the "do not auto-stop" pin are never subject to it.
 - **force-stop (brute force)**: `docker compose down` **does not stop user Workspaces** (they
   are outside compose management). To stop a specific Workspace for sure, a super_admin

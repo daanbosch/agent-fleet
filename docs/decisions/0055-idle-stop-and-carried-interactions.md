@@ -256,3 +256,23 @@ measured per kind. Measured on the CLIs baked into the Workspace image (codex 0.
   static for an hour can lapse, and a stuck session whose spinner keeps animating is held
   indefinitely (the safe side). The pane must also be captured successfully on the current poll; a
   failed capture gives no answer rather than a stale age.
+
+## Note (2026-10-17): muse, lcpp, shell and ssm have no Terminal row to bound (#1943)
+
+The 2026-10-09 addendum left Terminal muse, lcpp, shell and ssm unmeasured. Read from the code, none
+of them can be a busy Terminal row, so there is no pane or tool signal to measure:
+
+- shell and ssm: `shellAgent.WireLive` / `ssmAgent.WireLive` (`sessionx/agent_shell_ssm.go`) return
+  `LiveInfo{Resumable: true}`, so the listed `State` is always empty. The optimistic "working" mark
+  that `/input` writes (`markSessionWorking`, not kind-gated) is never read back for them. A row
+  that cannot be busy does not hold a Workspace on the busy path.
+- muse and lcpp: `Caps.ManagedOnly` and an unconditional `BuildLaunch` refusal (ADR 0093 decision 2,
+  ADR 0095); a create defaults to Managed and a switch to Terminal is refused
+  (`session_handlers.go`, `session_driver.go`). They are only ever Managed rows, which is #1942.
+  Nothing was measured: lcpp needs a local LLM, and a muse pane does not exist to repaint.
+
+`progressTrusted` is unchanged, and stays false for all four, so the fail-safe is the existing
+behaviour. Tests pin the premises (`progress_untrusted_kinds_test.go`): shell/ssm list no busy state
+even with a stored "working" mark, muse/lcpp stay managed-only, and a stale-everything row with a
+long silent tool gets no progress answer for any of the four. Re-open this note if a Terminal route
+or a busy state is ever added to one of them: it then needs its own measurement.
