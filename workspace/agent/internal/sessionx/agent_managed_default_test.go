@@ -1,7 +1,12 @@
 package sessionx
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -38,19 +43,38 @@ func TestManagedDefaultKindRefusesAlternateSpellings(t *testing.T) {
 	}
 }
 
-// A CP newer than its Agent may name a kind the Agent has not registered yet. The Agent folds
-// it to claude (NormalizeKind), which has no managed driver: an empty driver would start a
-// claude TUI under the wrong kind, while driver=managed is refused with driver_unsupported
-// (HandleCreateSession). Pinned so the managed request stays the fail-closed answer.
-func TestUnregisteredKindFoldsToClaudeWhichHasNoManagedDriver(t *testing.T) {
+// A CP newer than its Agent may name a kind the Agent has not registered yet. The Agent folds it
+// to claude (NormalizeKind), which has no managed driver: driver=managed is refused with 400
+// driver_unsupported, where an empty driver would go on to start a claude TUI under the wrong
+// kind. Driven through HandleCreateSession, because the refusal is a branch of the handler, not
+// a property of the registry.
+func TestUnregisteredKindWithManagedDriverIsRefused(t *testing.T) {
+	logPath := fakeTmux(t)
+	// allocSessionName asks tmux has-session; the default stub says every name is taken, which
+	// would hang a request that gets past the driver check instead of failing it.
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TMUX_TEST_LOG\"\ncase \"$1\" in has-session) exit 1 ;; esac\n"
+	if err := os.WriteFile(filepath.Join(filepath.Dir(logPath), "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	const unknown = "kind-this-agent-has-not-registered"
-	if got := NormalizeKind(unknown); got != "claude" {
-		t.Fatalf("NormalizeKind(%q) = %q, want claude", unknown, got)
+	post := func(body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		HandleCreateSession(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body)))
+		return rec
 	}
-	if _, ok := managedDrivers[NormalizeKind(unknown)]; ok {
-		t.Fatalf("claude has a managed driver; an unregistered kind named with driver=managed would no longer be refused")
+
+	rec := post(`{"kind":"` + unknown + `","driver":"managed"}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "driver_unsupported") {
+		t.Fatalf("unknown kind + managed: status = %d, body = %s, want 400 driver_unsupported", rec.Code, rec.Body.String())
 	}
-	if AgentOf(unknown).Caps().ManagedOnly {
-		t.Fatalf("an unregistered kind must not inherit ManagedOnly from the claude fallback")
+
+	// Control: the same kind with no driver is not refused for its driver. It stops later, on
+	// the directory that does not exist, before any session starts.
+	rec = post(`{"kind":"` + unknown + `","dir":"/nonexistent-af-test-dir"}`)
+	if strings.Contains(rec.Body.String(), "driver_unsupported") {
+		t.Fatalf("unknown kind + no driver was refused for its driver: %d %s", rec.Code, rec.Body.String())
+	}
+	if got, _ := os.ReadFile(logPath); strings.Contains(string(got), "new-session") {
+		t.Fatalf("the control request started a tmux session: %q", got)
 	}
 }
