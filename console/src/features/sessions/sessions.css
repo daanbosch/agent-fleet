@@ -374,6 +374,47 @@
   font-size: 11px;
   line-height: 16px;
 }
+/* A move's line (ADR 0115 decision 11.7), indented like the links line under the title. */
+.sess-move-line {
+  flex: 1 0 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 6px 3px 31px;
+  margin-top: -2px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--muted);
+}
+.sess-move-line.pending {
+  color: var(--warn, #e0a030);
+}
+.sess-move-line > .codicon {
+  flex: none;
+  font-size: 12px;
+}
+.sess-move-line > span,
+.sess-move-link {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sess-move-link {
+  padding: 0 3px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.sess-move-link:hover {
+  background: var(--btn);
+  color: var(--fg);
+}
 .sess-pr,
 .sess-port {
   flex: none;
@@ -974,4 +1015,55 @@
   color: var(--muted);
   font-size: 11px;
   line-height: 1.35;
+}
+
+/* The move dialog (ADR 0115). Each phase's view is one child of the modal body, so it spaces
+   its own fields the way the body spaces its children. */
+.move-form,
+.move-pending,
+.move-moved,
+.move-done {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.move-not-offered,
+.move-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.move-list {
+  max-height: 120px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  color: var(--fg);
+}
+.move-pre {
+  margin: 4px 0 0;
+  max-height: 140px;
+  overflow: auto;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--panel2);
+  font-size: 11px;
+  white-space: pre;
+}
+.move-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0;
+}
+.move-progress,
+.move-loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.move-progress {
+  margin-right: auto;
+  font-size: 12px;
+  color: var(--muted);
 }

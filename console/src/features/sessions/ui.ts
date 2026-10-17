@@ -14,12 +14,14 @@ interface SessionUI {
   archivedDir: string | null; // …scoped to one working copy's folder, when opened from its row
   cleanupOpen: boolean; // the cleanup panel (docs/log/32)
   budget: Session | null; // spend budget / "raise and resume" target (#1054)
+  move: Session | null; // move to another agent kind, and its retry / cancel / reopen (ADR 0115)
   openRename(s: Session): void;
   openBranchRename(s: Session): void;
   openSsmResume(name: string, force: boolean): void;
   openArchived(dir?: string): void;
   openCleanup(): void;
   openBudget(s: Session): void;
+  openMove(s: Session): void;
   close(): void; // clears every session dialog
 }
 
@@ -31,12 +33,14 @@ export const useSessionUI = create<SessionUI>((set) => ({
   archivedDir: null,
   cleanupOpen: false,
   budget: null,
+  move: null,
   openRename: (s) => set({ rename: s }),
   openBranchRename: (s) => set({ branchRename: s }),
   openSsmResume: (name, force) => set({ ssmResume: { name, force } }),
   openArchived: (dir) => set({ archivedOpen: true, archivedDir: dir || null }),
   openCleanup: () => set({ cleanupOpen: true }),
   openBudget: (s) => set({ budget: s }),
+  openMove: (s) => set({ move: s }),
   close: () =>
-    set({ rename: null, branchRename: null, ssmResume: null, archivedOpen: false, archivedDir: null, cleanupOpen: false, budget: null }),
+    set({ rename: null, branchRename: null, ssmResume: null, archivedOpen: false, archivedDir: null, cleanupOpen: false, budget: null, move: null }),
 }));
