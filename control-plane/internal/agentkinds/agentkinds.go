@@ -61,3 +61,18 @@ func MCPClientKinds() map[string]bool {
 	}
 	return m
 }
+
+// ManagedDefaultKinds is the set of kinds a caller that cannot drive a pane (MCP
+// create_session, the scheduler) asks the managed driver for when it names none: the
+// snapshot's managedDefault, which already includes the managed-only kinds. Matching is
+// exact — the Agent registers a kind under one spelling and falls an unknown one back to
+// claude, so a variant spelling must get no driver here, not "managed".
+func ManagedDefaultKinds() map[string]bool {
+	m := map[string]bool{}
+	for _, e := range entries {
+		if e.ManagedDefault {
+			m[e.Kind] = true
+		}
+	}
+	return m
+}

@@ -73,6 +73,13 @@ var mcpReservedNames = map[string]bool{"af": true, "agent-fleet": true}
 // what left muse and lcpp refused here while the Agent accepted them (#1075).
 var mcpKnownKinds = agentkinds.MCPClientKinds()
 
+// mcpManagedDefaultKinds are the kinds create_session starts on the managed driver when the
+// caller names none, derived from the same snapshot. lcpp and muse (managed-only) are in it:
+// the Agent defaults them to managed anyway, so naming it changes nothing there. An older Agent that does not
+// register them folds the kind to claude: an empty driver would have launched a claude TUI,
+// managed is refused (driver_unsupported) — a refusal is the right answer to a kind it cannot run.
+var mcpManagedDefaultKinds = agentkinds.ManagedDefaultKinds()
+
 // mcpServerStore is the narrow store view this feature needs: the definitions plus the
 // audit ledger (every admin mutation is recorded, docs/log/48 §9).
 type mcpServerStore interface {

@@ -3266,17 +3266,12 @@ func mcpStdioCall(req mcpReq) []byte {
 			}
 		}
 		driver := ""
-		// This list is "kinds where tui vs managed is a REAL choice, and MCP wants to bias
-		// toward managed" (an MCP caller has no way to drive a tui pane). claude and agy are
-		// deliberately absent: both have managedDriver:false (no managed route exists at all,
-		// so there is no choice to bias). lcpp and muse are absent for the mirror-image reason —
-		// neither has a tui route at all (ADR 0093 決定 2, ADR 0095 decision 2), so there is
-		// equally no choice to bias for them: the
-		// Agent's own create handler already defaults an unspecified driver to managed for any
-		// Caps().ManagedOnly kind (session_handlers.go's driver == "" && ManagedOnly branch),
-		// unconditionally, regardless of what this list contains. Adding lcpp here would be a
-		// no-op, not a fix.
-		if a.Kind == "codex" || a.Kind == "opencode" || a.Kind == "copilot" || a.Kind == "cursor" || a.Kind == "kiro" {
+		// An MCP caller has no way to drive a tui pane, so it asks for managed wherever the
+		// registry says that is the default (sessionx.ManagedDefaultKind). claude and agy are
+		// absent because no managed route exists for them. lcpp and muse have no tui route
+		// at all; the Agent's create handler defaults them to managed anyway, so naming it
+		// here is the same launch spelled out.
+		if managedDefaultKind(a.Kind) {
 			driver = "managed"
 		}
 		// The worktree default differs by surface: the operator's is false (a person can say

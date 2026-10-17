@@ -55,7 +55,7 @@ unless they name another tree.
 | Capabilities | `Caps()` in your package; `Capabilities()` on your `Driver` | **Do not set a capability the member sees until you have driven it end to end.** `Capabilities()` declares what the driver implements (§20.4). `Caps()` is also what `GET /agents/kinds` serves (§20.7); a `Tri` field left unset reads `unverified`, never `no` |
 | Terminal launch | your package's `BuildLaunch`, returning `agents.LaunchPlan` | Environment goes in `LaunchPlan.Env`, **never prefixed onto the command** (§20.3). A managed-only kind returns `ErrNoTerminalRoute` |
 | Managed runtime | your `Driver`: `Resume` returns a `ThreadHandle` | Its shape follows the process model ([04 §4.3](04-agent.md)) |
-| Which driver a caller picks | The in-container MCP `create_session` (`mcpStdioCall`). The CP: `create_session` in `control-plane/internal/mcpsrv/mcp.go` and `injectDriver` in `control-plane/scheduler_wake.go` | The agent defaults an unspecified driver to `tui`, so **a kind with both drivers that should start Managed sets `Caps().ManagedDefault` and is added to every caller** (these callers do not derive it yet; the Console does, from the catalog). A managed-only kind is defaulted by the agent |
+| Which driver a caller picks | Nothing to add by hand. The agent defaults an unspecified driver to `tui`, so **a kind with both drivers that should start Managed sets `Caps().ManagedDefault`**. The in-container `create_session` reads the registry, the CP's `create_session` and `injectDriver` read the catalog snapshot (`agentkinds.ManagedDefaultKinds`), and the Console reads `GET /api/agents/kinds` (`managedDriver` / `terminalDriver` in `console/src/agents/registry.ts` are getters over it, with `FALLBACK_KIND_FACTS` in `console/src/agents/kindCatalog.ts` answering until it loads) | A managed-only kind is defaulted by the agent and the Console derives `terminalDriver: false` from `managedOnly` |
 | Live state | hooks, a plugin, a poll of the CLI's store, or runtime events | Normalise into the status store: working / idle / question, plus `plan` and `permission` ([04 §4.4](04-agent.md)) |
 | Transcript | a reader behind `Agent.Transcript` | **Where the CLI keeps a readable, stable native store, read it; never copy the conversation into a store of ours.** The parsers stay separate. A kind with no such store owns one, as the two exceptions in [04 §4.3](04-agent.md) do |
 | Sign-in | the agent's `/connections/<kind>/…` handlers, **and** each route relayed by name in `control-plane/routes.go` (`restLogin` for a login flow) | No kind needs a CP callback ([08 §8.6](08-integrations.md)); a kind with nothing to sign in to has no flow |
@@ -238,7 +238,9 @@ cd workspace/agent && go test -run TestKindCatalogSnapshot -update-kind-catalog 
 - [ ] `Kind*` constant in `internal/session/session.go` and an `agentRegistry` entry; the
       key equals `Kind()` (`TestRegisteredKindsSpellTheirOwnKind`)
 - [ ] `Caps()` with every field decided, `MCPClient` included (`TestMCPClientKindsMatchRegistry`
-      fails on `unverified`)
+      fails on `unverified`) and `ManagedDefault` for a kind that should start Managed (the
+      CP and in-container callers follow it; `TestManagedDefaultKindFollowsTheRegistry` pins
+      the set)
 - [ ] the catalog snapshot regenerated (`TestKindCatalogSnapshot`), and
       `testdata/wire.golden` if the catalog's shape changed
 - [ ] the column in [ref/agents.md](../../guide/ref/agents.md) — `scripts/docs-check.py`
@@ -257,9 +259,6 @@ cd workspace/agent && go test -run TestKindCatalogSnapshot -update-kind-catalog 
 - [ ] Terminal: `BuildLaunch`, the bracketed-paste list in `internal/sessionx/session_io.go`
 - [ ] Managed: a `Driver`, `managedDrivers`, the `ManagedAlive` / `managedBusy` /
       `dropManagedRuntime` switches in `internal/sessionx/session_handlers.go`
-- [ ] Managed by default (`ManagedDefault`): the hand lists in
-      `control-plane/internal/mcpsrv/mcp.go` (`create_session`),
-      `control-plane/scheduler_wake.go` (`injectDriver`) and the in-container `mcpStdioCall`
 - [ ] sign-in handlers and their CP relays; credentials hidden by `fsDeny`
 - [ ] usage: `usageMeasuredForKind` (`usage_fold.go`)
 - [ ] a pinned CLI: the version pin, a contract workflow and the release-watcher

@@ -55,6 +55,8 @@ func testDeps() Deps {
 		ShellSendTarget:   func(name, prompt string) string { return name + " " + prompt },
 		SessionIsShell:    func(string) bool { return false },
 
+		ManagedDefaultKind: func(k string) bool { return k == "codex" },
+
 		ReadUIPrefs:                func() map[string]any { return map[string]any{} },
 		EnsureClaudeSettingsWiring: func(string) {},
 

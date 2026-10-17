@@ -121,3 +121,41 @@ func TestHandleAgentKinds(t *testing.T) {
 		t.Errorf("cursor = %+v", c)
 	}
 }
+
+// The CP derives create_session's and the scheduler's managed default from the embedded snapshot
+// (agentkinds.ManagedDefaultKinds), so for every registered kind the snapshot must say what the
+// registry says: a kind missing from it, one it has extra, or a managedDefault that differs
+// would send the CP callers a different driver than the in-container create_session picks.
+// TestKindCatalogSnapshot already compares bytes; this names the failure for this one field.
+func TestCPManagedDefaultSnapshotMatchesRegistry(t *testing.T) {
+	b, err := os.ReadFile(kindCatalogSnapshotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snap struct {
+		Kinds []struct {
+			Kind           string `json:"kind"`
+			ManagedDefault bool   `json:"managedDefault"`
+		} `json:"kinds"`
+	}
+	if err := json.Unmarshal(b, &snap); err != nil {
+		t.Fatal(err)
+	}
+	inSnap := map[string]bool{}
+	for _, e := range snap.Kinds {
+		inSnap[e.Kind] = true
+		if !slices.Contains(sessionx.RegisteredKinds(), e.Kind) {
+			t.Errorf("snapshot lists %q, which is not a registered kind", e.Kind)
+			continue
+		}
+		if e.ManagedDefault != sessionx.ManagedDefaultKind(e.Kind) {
+			t.Errorf("%s: snapshot managedDefault=%v, registry says %v; regenerate the snapshot",
+				e.Kind, e.ManagedDefault, sessionx.ManagedDefaultKind(e.Kind))
+		}
+	}
+	for _, k := range sessionx.RegisteredKinds() {
+		if !inSnap[k] {
+			t.Errorf("registered kind %q is missing from the CP snapshot; regenerate it", k)
+		}
+	}
+}
