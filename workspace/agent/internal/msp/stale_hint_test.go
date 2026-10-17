@@ -52,7 +52,7 @@ func TestMusePinStateRefusesWhatItCannotCompare(t *testing.T) {
 	}
 }
 
-// installedMuseAgainstPin runs the binary it is given; a fake one stands in for muse.
+// A fake binary keeps the comparison independent of whichever muse the host has installed.
 func TestInstalledMuseAgainstPinWithFakeBinaries(t *testing.T) {
 	df, err := os.ReadFile("../../../Dockerfile")
 	if err != nil {
