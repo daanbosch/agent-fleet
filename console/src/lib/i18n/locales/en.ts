@@ -16,6 +16,8 @@ import { errors } from "./en/errors.ts";
 import { fleetgraph } from "./en/fleetgraph.ts";
 import { gallery } from "./en/gallery.ts";
 import { imggen } from "./en/imggen.ts";
+import { limits } from "./en/limits.ts";
+import { inbox } from "./en/inbox.ts";
 import { memo } from "./en/memo.ts";
 import { mirror } from "./en/mirror.ts";
 import { notifications } from "./en/notifications.ts";
@@ -47,6 +49,7 @@ export const en: Record<keyof typeof ja, string> = {
   ...usage,
   ...notifications,
   ...workitems,
+  ...limits,
   ...sharing,
   ...schedules,
   ...memo,
@@ -54,4 +57,5 @@ export const en: Record<keyof typeof ja, string> = {
   ...imggen,
   ...engines,
   ...fleetgraph,
+  ...inbox,
 };

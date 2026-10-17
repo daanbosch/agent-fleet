@@ -354,6 +354,17 @@ func MessageTextFrom(lines [][]byte, start time.Time) (string, bool) {
 // Console reconciles that from the whole-transcript CollectInteractionAnswers map, which
 // the /messages handler sends alongside these turns and patches on by qid.
 func CollectTurns(lines [][]byte, lo, hi int) []transcript.Turn {
+	return collectTurns(lines, lo, hi, false)
+}
+
+// CollectAllTurns is CollectTurns over the whole file for an export (#2183): no 1 MiB cap,
+// which would silently drop the oldest turns, and every tool call carries its result as
+// Output. The mirror never shows ordinary tool results, so only this path pays for them.
+func CollectAllTurns(lines [][]byte) []transcript.Turn {
+	return collectTurns(lines, 0, len(lines), true)
+}
+
+func collectTurns(lines [][]byte, lo, hi int, all bool) []transcript.Turn {
 	if lo < 0 {
 		lo = 0
 	}
@@ -403,6 +414,9 @@ func CollectTurns(lines [][]byte, lo, hi int) []transcript.Turn {
 			// tool_use immediately and the tool_result ~30 s later — in which case nothing is
 			// appended here and the /messages handler holds the cursor short of this line so
 			// the turn comes back once the file exists.
+			if all && t.Parts[pi].Kind == "tool" && t.Parts[pi].Output == "" && t.Parts[pi].CallID != "" {
+				t.Parts[pi].Output = transcript.CapOutput(answers[t.Parts[pi].CallID].Text)
+			}
 			if t.Parts[pi].Kind == "tool" && t.Parts[pi].QID != "" {
 				if result := answers[t.Parts[pi].QID].Text; result != "" {
 					// The call is SETTLED, whether or not it produced a file. Dropping the id
@@ -424,7 +438,7 @@ func CollectTurns(lines [][]byte, lo, hi int) []transcript.Turn {
 		}
 		t.Parts = transcript.SplicePendingImages(t.Parts, gen)
 		turns = append(turns, t)
-		if budget += len(t.Text); budget > 1<<20 { // cap a single response at 1 MiB (newest kept)
+		if budget += len(t.Text); !all && budget > 1<<20 { // cap a single response at 1 MiB (newest kept)
 			break
 		}
 	}
@@ -763,7 +777,7 @@ func assistantParts(raw json.RawMessage) (parts []transcript.Part, text string) 
 					}
 				}
 			}
-			part := transcript.Part{Kind: "tool", Tool: b.Name, Info: toolInfo(b.Name, b.Input)}
+			part := transcript.Part{Kind: "tool", Tool: b.Name, Info: toolInfo(b.Name, b.Input), CallID: b.ID}
 			if f, es := toolEdits(b.Name, b.Input); len(es) > 0 {
 				part.File, part.Edits = f, es
 			}

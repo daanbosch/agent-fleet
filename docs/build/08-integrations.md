@@ -141,6 +141,50 @@ as git**, and it self-heals across rotation because it fetches each time.
   (capped at 500, most recently updated first). The old `?role=member` listing answers
   410.
 
+### Making `bkt` work without a separate login
+
+`bkt` (the Bitbucket CLI, [avivsinai/bitbucket-cli](https://github.com/avivsinai/bitbucket-cli))
+is the Bitbucket counterpart of `gh` and is wrapped the same way: the real binary is
+`/usr/local/libexec/bkt`, and `/usr/local/bin/bkt` is `workspace/bkt-auth-wrapper.sh`. It has
+no keychain to log in to in a container, but it takes `BKT_TOKEN` / `BKT_HOST` /
+`BKT_AUTH_METHOD` / `BKT_USERNAME` from the environment, which is what the wrapper fills in
+for one `exec` of the real binary:
+
+- **OAuth connection**: `git credential fill` for `bitbucket.org` (the helper has refreshed
+  the token if it was within two minutes of expiry) answers `x-token-auth` + the access token,
+  and the wrapper sets `BKT_AUTH_METHOD=bearer`.
+- **Pasted API token**: git cannot carry this one — the helper rewrites the Atlassian email
+  to `x-bitbucket-api-token-auth`, and the REST API accepts only email + token as Basic. When
+  the helper answers that username, the wrapper asks `workspace-agent bkt-cred`
+  (`workspace/agent/bkt_cred.go`), which prints the stored email and token for the
+  `bitbucket.org` API-token connection and nothing else (no OAuth connection, no other host,
+  no app password), and sets `BKT_AUTH_METHOD=basic` + `BKT_USERNAME`.
+- **Fails closed**: if either helper errors or answers nothing, `bkt` runs with no injected
+  auth. The token is never an argument, never written to a file, and exists only in the
+  environment of that one `bkt` process.
+
+**Limits worth knowing:**
+
+- **Scopes**: the token carries what the tenant's OAuth consumer (or the pasted API token)
+  was granted; `bkt` cannot widen it. For `bkt pr` and `bkt pipeline` to work, the OAuth
+  consumer needs `repository`, `pullrequest:write` (for creating and merging; `pullrequest`
+  reads only) and `pipeline` (read), plus `account`; starting or stopping a pipeline also needs `pipeline:write`. A pasted API token
+  needs the granular equivalents (`read:repository:bitbucket`, `read:pullrequest:bitbucket` /
+  `write:pullrequest:bitbucket`, `read:pipeline:bitbucket`, `read:user:bitbucket`, and `write:pipeline:bitbucket` to start or stop a pipeline — write does not imply read); one without
+  the pull-request scopes lists repositories and branches but answers 403 to `bkt pr list`.
+- **Data Center and any other host are the user's own setup**, the same as GitHub Enterprise.
+  Connections accept only `bitbucket.org`, so nothing is injected for them. Because
+  injecting `BKT_HOST` would override a user's contexts, the wrapper runs `bkt` unchanged
+  when `BKT_TOKEN` or `BKT_HOST` is already set **or** bkt's own `config.yml` exists
+  (`bkt auth login`, `bkt context create`).
+- **Cloud only**: injection is for `https://bitbucket.org`.
+- **Unverified**: whether Bitbucket Cloud accepts a *user* OAuth access token as a bearer for
+  user-scoped commands (`bkt`'s README only shows bearer with resource access tokens) has not
+  been exercised against a real OAuth connection; the API-token path has.
+- **Pin**: `BKT_VERSION` in the Dockerfile; the tarball must match the release's
+  `checksums.txt`. It is not in the agent-CLI drift/pin-bump tooling, like `gh`; the image
+  smoke (`deploy/local/e2e-smoke.sh`) checks the pinned version.
+
 ### 8.4.1 The OAuth apps belong to **the tenant**
 
 The apps are rows in `tenant_git_oauth` — one each for `github`, `bitbucket` and `jira`
@@ -189,6 +233,75 @@ not git, but shares the machinery above.
 The inbox is fetched **by the agent with credentials it already holds** — the GitHub
 token, the Bitbucket connection, the Jira connection — on a schedule the CP drives. The
 CP keeps only non-secret metadata (`work_item_cache`); nothing is a webhook.
+
+#### Making `jira` work without a separate login
+
+`jira` ([ankitpokhrel/jira-cli](https://github.com/ankitpokhrel/jira-cli)) gives every agent
+kind the Jira counterpart of `gh` / `bkt`: viewing, listing, creating, editing, commenting on
+and transitioning issues, plus boards, sprints and epics. The real binary is
+`/usr/local/libexec/jira`, and `/usr/local/bin/jira` is `workspace/jira-auth-wrapper.sh`.
+jira-cli takes its token from `JIRA_API_TOKEN`, and the environment overrides its config
+file key by key (`JIRA_SERVER`, `JIRA_LOGIN`, `JIRA_AUTH_TYPE`, `JIRA_INSTALLATION`). On each
+run the wrapper asks `workspace-agent jira-cred` (`workspace/agent/jira_cred.go`) and fills
+those variables in for one `exec`:
+
+- **API-token connection**: `auth_type` basic, the site as the server, and the stored email
+  as the login.
+- **OAuth connection**: `auth_type` bearer against `api.atlassian.com/ex/jira/{cloudId}`. The
+  site's own host refuses a 3LO token. `jira-cred` renews a token with less than five minutes
+  left before handing it out, because the token has to last a whole jira run, not one
+  request. The login is the email `/myself` reported at connect time (`JiraCreds.Login`). It
+  is absent when the account hides its email, and then `jira me` prints nothing.
+- **The refresh is serialized across processes.** The Agent and every `jira-cred` hold the
+  same rotating refresh token, so `jiraRefreshNow` takes the `jira-refresh` store lock
+  (the same pattern as the GitHub refresh) and re-reads the store inside it. Presenting a
+  spent refresh token twice can revoke the authorization.
+- **Config, decided by location, never by contents**: a config's `server` can be spelt in more
+  ways than a shell can parse (quoted keys, comments, other formats), and a wrong guess would
+  send this connection's token to another Jira. So the credential goes only to a config under
+  `~/.config/agent-fleet/jira/` (the managed directory) or to a generated one:
+  - `jira init --project KEY --board NAME [--force]` (or any alias: `configure`, `config`,
+    `setup`, `initialize`) run through the wrapper writes `~/.config/agent-fleet/jira/config.yml`
+    and gets `--installation`, `--server`, `--login` and `--auth-type` from the connection, so it
+    does not prompt. Another board is `jira init -c ~/.config/agent-fleet/jira/<board>.yml …`,
+    then `jira -c` that file. The files hold no secret.
+  - With no config named, the wrapper uses the managed `config.yml`, or else points
+    `JIRA_CONFIG_FILE` at `~/.cache/agent-fleet/jira/config.yml`, which holds only
+    `installation: Cloud`: enough for `issue view` and `issue list -p KEY`. `issue create`,
+    `sprint list` and the epic commands need the issue types, board and epic fields that only
+    `jira init` writes.
+- **The user's own setup wins**: an explicit `JIRA_API_TOKEN` or `JIRA_SERVER`, a `jira init`
+  given its own `--server` / `--login` / `--installation` / `--auth-type`, or any config outside
+  the managed directory (`-c` in any spelling, `JIRA_CONFIG_FILE`, or jira's own default
+  `~/.config/.jira/.config.yml`) makes the wrapper exec jira unchanged. A misread argv can only
+  make a config look like someone else's, which runs jira without the token.
+- **No credential for a debug run**: `jira --debug` dumps every request, Authorization header
+  included, so `--debug` or `JIRA_DEBUG` runs jira without the token and says why on stderr.
+  A config's own `debug:` cannot be read reliably (YAML tags, flow style, JSON), so every
+  injected run sets `JIRA_DEBUG=false`, which jira ranks above the config file.
+- **Fails closed**: if `jira-cred` errors or answers without a token, jira runs with no
+  injected auth. The token is never an argument, never written to a file, and exists only in
+  the environment of that one jira process: the wrapper switches off an inherited xtrace and
+  allexport before it holds the token. `jira version` skips the helper, so the
+  Toolchains probe takes no store lock.
+
+**Limits worth knowing:**
+
+- **Scopes on OAuth**: boards, sprints, epics and `jira init` call `/rest/agile/1.0`, which
+  accepts no classic scope. The tenant's Jira app has to grant read:board-scope:jira-software,
+  read:project:jira, read/write:sprint:jira-software, read/write:epic:jira-software,
+  read:issue-details:jira and read:jql:jira. The administrator then ticks the
+  `jira_software` scope group on the app (`tenant_git_oauth.scope_groups`), and only then does
+  the authorize URL ask for them: Atlassian refuses an authorization that names a scope the
+  app lacks. Members already connected reconnect to receive them. An API-token connection has
+  whatever the account can do.
+- **Links on OAuth**: jira-cli builds browse URLs from its server, so with OAuth they point at
+  `api.atlassian.com/ex/jira/...` rather than the site.
+- **Pin**: `JIRA_CLI_VERSION` in the Dockerfile (v1.7.0, the latest release). The tarball must
+  match the release's `checksums.txt`. Measured against a stub: v1.7.0 garbles multi-byte text
+  only on the Data Center path (`/rest/api/2`, wiki markup). The Cloud path (`/rest/api/3`,
+  ADF) renders Japanese correctly, so there is no reason to build `main` from source while the
+  connection is Cloud-only. The image smoke checks the pinned version.
 
 ## 8.5 Claude authentication and onboarding
 
@@ -354,6 +467,13 @@ CP**):
 - The profiles are rows in the CP (`ssm_profile`, plus `ssm_host` for SSM targets;
   [06 §6.2](06-data.md)). The workspace fetches them from `GET /internal/aws-profiles`
   (`AF_AWS_PROFILES_TOKEN`) and writes a managed block into `~/.aws/config`.
+- A profile has a kind: `sso`, or `assume_role` (issue #1109), which holds a role ARN, the id of the
+  `sso` profile it assumes from and optional external ID, session name and duration, and no portal. The
+  managed block writes it as `role_arn` + `source_profile` only while that source is itself exported;
+  the bridge wire carries `kind`, `roleArn`, `sourceProfile`, `externalId`, `sessionName` and
+  `durationSeconds` for these and leaves them out for `sso` rows, so an `sso` profile's export is
+  unchanged. The store refuses a source that is not an `sso` profile of the same member and a delete
+  or kind change that would orphan a chain.
 - **An SSM session** runs `aws sso login --use-device-code --no-browser` and then
   `aws ssm start-session` inside the workspace; the Console polls
   `GET /api/sessions/{name}/ssm-login` for the device code.

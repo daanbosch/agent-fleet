@@ -232,7 +232,7 @@ func parseDockerBytes(s string) (int64, error) {
 	return n * mult, nil
 }
 
-func (f *kubeFactory) New(ws Workspace, secretKey string, extraEnv []string) Runtime {
+func (f *kubeFactory) New(ws Workspace, keys SecretKeys, extraEnv []string) Runtime {
 	mem := f.cfg.defaultMemBytes
 	if ws.MemBytes > 0 {
 		mem = ws.MemBytes
@@ -255,7 +255,7 @@ func (f *kubeFactory) New(ws Workspace, secretKey string, extraEnv []string) Run
 		wsName:     ws.ContainerName,
 		base:       kubeObjectName(ws.ContainerName),
 		token:      ws.AgentToken,
-		secretKey:  secretKey,
+		keys:       keys,
 		extraEnv:   append([]string(nil), extraEnv...),
 		memBytes:   mem,
 		cpuMilli:   cpuMilli,
@@ -297,19 +297,22 @@ func kubeObjectName(name string) string {
 
 // kubeRuntime is one workspace on the kubernetes profile.
 type kubeRuntime struct {
-	cfg        *kubeConfig
-	c          *kubeClient
-	pins       imageResolver
-	wsName     string // the CP's name for the workspace (Workspace.ContainerName)
-	base       string // the Kubernetes name of the StatefulSet and the Service
-	token      string
-	secretKey  string
-	extraEnv   []string
-	memBytes   int64
-	cpuMilli   int64
-	homeGiB    int
-	poll       time.Duration
-	stopMargin time.Duration
+	// homeDestroyed is set by Destroy when it deleted the StatefulSet, which it does only once
+	// every recorded claim and volume is confirmed gone (home_gone.go).
+	homeDestroyed bool
+	cfg           *kubeConfig
+	c             *kubeClient
+	pins          imageResolver
+	wsName        string // the CP's name for the workspace (Workspace.ContainerName)
+	base          string // the Kubernetes name of the StatefulSet and the Service
+	token         string
+	keys          SecretKeys
+	extraEnv      []string
+	memBytes      int64
+	cpuMilli      int64
+	homeGiB       int
+	poll          time.Duration
+	stopMargin    time.Duration
 	// editTemplate changes the pod template before Start writes it (tests only: a
 	// template the namespace's Pod Security level refuses, for the boot phase).
 	editTemplate func(*kPodTemplateSpec)
@@ -736,8 +739,8 @@ func (k *kubeRuntime) secretEnv() map[string]string {
 	if k.token != "" {
 		env["AGENT_TOKEN"] = k.token
 	}
-	if k.secretKey != "" {
-		env["AF_SECRET_KEY"] = k.secretKey
+	for _, kv := range k.keys.envPairs() {
+		env[kv[0]] = kv[1]
 	}
 	return env
 }

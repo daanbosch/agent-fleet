@@ -28,20 +28,21 @@ import (
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/testguard"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/tmuxx"
 )
 
-// tmuxSession starts prog in a detached pane on the DEFAULT tmux server under an isolated
-// HOME. The name is test-specific and killed on cleanup, so a live fleet's sessions are
-// untouched. A private server would also work — product tmux calls go through tmuxx.Cmd,
-// which honours AF_TMUX_SOCKET (shutdown_isolation_test.go) — but this test does not use one.
+// tmuxSession starts prog in a detached pane under an isolated HOME. The caller isolates the
+// tmux server first (testguard.IsolateTmux): a send-keys on the default socket would reach the
+// workspace's live sessions, and the test guard fails the run for it.
 func tmuxSession(t *testing.T, name, dir, prog string) {
 	t.Helper()
-	_ = exec.Command("tmux", "kill-session", "-t", name).Run()
-	cmd := exec.Command("tmux", "new-session", "-d", "-s", name, "-x", "120", "-y", "40", "-c", dir, prog)
+	_ = tmuxx.Cmd("kill-session", "-t", name).Run()
+	cmd := tmuxx.Cmd("new-session", "-d", "-s", name, "-x", "120", "-y", "40", "-c", dir, prog)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("tmux new-session: %v: %s", err, out)
 	}
-	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", name).Run() })
+	t.Cleanup(func() { _ = tmuxx.Cmd("kill-session", "-t", name).Run() })
 }
 
 func requireBins(t *testing.T, bins ...string) {
@@ -53,6 +54,23 @@ func requireBins(t *testing.T, bins ...string) {
 			}
 			t.Skipf("%s not on PATH — TUI contract test skipped (set E2E_REQUIRE=1 to demand it)", b)
 		}
+	}
+}
+
+// opencodeIs2 reports whether the opencode on PATH is 2.x ("opencode v2.0.29"; 1.x prints "1.19.0").
+func opencodeIs2(t *testing.T) bool {
+	t.Helper()
+	return strings.HasPrefix(strings.TrimPrefix(opencodeVer(t), "opencode v"), "2.")
+}
+
+// skipOnOpencode2 skips a test of the opencode 1.x contract when PATH has 2.x: OPENCODE_CONFIG
+// is ignored there (af passes OPENCODE_CONFIG_CONTENT, pinned by the 2.x contract tests in
+// internal/agents/opencode), so a failure would say nothing about drift. It runs again if the
+// image is re-pinned to 1.x.
+func skipOnOpencode2(t *testing.T, why string) {
+	t.Helper()
+	if opencodeIs2(t) {
+		t.Skipf("opencode 1.x contract, not applicable to %s: %s", opencodeVer(t), why)
 	}
 }
 
@@ -86,11 +104,18 @@ func isolatedHomeEnv(home string) []string {
 // (the launch-seed readiness signal) and that it tracks the live agent (the mode chip).
 func TestContractOpencodeTUIPaneMode(t *testing.T) {
 	requireBins(t, "opencode", "tmux")
+	testguard.IsolateTmux(t)
 	home, dir := t.TempDir(), t.TempDir()
 	name := "af-contract-opencode"
 	// Prefix the env onto the command itself: tmux -e sets the session environment, which
 	// does NOT reach the pane's process (the same reason buildProgram prefixes env).
-	tmuxSession(t, name, dir, strings.Join(isolatedHomeEnv(home), " ")+" opencode --auto")
+	launch := " opencode --auto"
+	if opencodeIs2(t) {
+		// buildProgram launches a 2.x TUI with --standalone; a bare one would start the per-user
+		// background service on its fixed port.
+		launch = " opencode --standalone --auto"
+	}
+	tmuxSession(t, name, dir, strings.Join(isolatedHomeEnv(home), " ")+launch)
 
 	ver := opencodeVer(t)
 	// Boot is slow (splash → composer, ~30s cold); paneMode is exactly the readiness
@@ -104,7 +129,7 @@ func TestContractOpencodeTUIPaneMode(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 	}
 	if got == "" {
-		pane, _ := exec.Command("tmux", "capture-pane", "-p", "-t", name).Output()
+		pane, _ := tmuxx.Cmd("capture-pane", "-p", "-t", name).Output()
 		t.Fatalf("paneMode never resolved for opencode %s — opencodeStatusAgentRe no longer matches the composer "+
 			"status line, so the Console shows no mode chip and the launch seed falls back to a fixed beat.\npane:\n%s", ver, pane)
 	}
@@ -112,8 +137,13 @@ func TestContractOpencodeTUIPaneMode(t *testing.T) {
 		t.Errorf("paneMode = %q on a default launch, want \"Build\" (opencode's non-plan agent) — opencode %s", got, ver)
 	}
 
-	// Tab cycles the agent; the chip must follow the TUI's own state.
-	if err := exec.Command("tmux", "send-keys", "-t", name, "Tab").Run(); err != nil {
+	// Tab cycles the agent on 1.x; the chip must follow the TUI's own state. On 2.0.29 Tab does
+	// nothing at the start screen (measured), so there is no key to drive and only the first
+	// reading above applies.
+	if opencodeIs2(t) {
+		return
+	}
+	if err := tmuxx.Cmd("send-keys", "-t", name, "Tab").Run(); err != nil {
 		t.Fatalf("send-keys Tab: %v", err)
 	}
 	deadline = time.Now().Add(15 * time.Second)
@@ -123,7 +153,7 @@ func TestContractOpencodeTUIPaneMode(t *testing.T) {
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	pane, _ := exec.Command("tmux", "capture-pane", "-p", "-t", name).Output()
+	pane, _ := tmuxx.Cmd("capture-pane", "-p", "-t", name).Output()
 	t.Errorf("after Tab paneMode = %q, want \"Plan\" — the agent/mode readout moved in opencode %s.\npane:\n%s", got, ver, pane)
 }
 
@@ -140,6 +170,7 @@ func TestContractOpencodeTUIPaneMode(t *testing.T) {
 //	go test -tags contract -run TestContractOpencodeEnvConfig ./
 func TestContractOpencodeEnvConfig(t *testing.T) {
 	requireBins(t, "opencode")
+	skipOnOpencode2(t, "OPENCODE_CONFIG (a file) is ignored in 2.x")
 	home, dir := t.TempDir(), t.TempDir()
 	// The project config defines NO server: anything `mcp list` reports can only have
 	// come from the env-pointed file.
@@ -189,6 +220,7 @@ func TestContractOpencodeEnvConfig(t *testing.T) {
 //	go test -tags contract -run TestContractOpencodeConfigPrecedence ./
 func TestContractOpencodeConfigPrecedence(t *testing.T) {
 	requireBins(t, "opencode")
+	skipOnOpencode2(t, "it resolves colliding MCP names through the v1 `mcp` config shape")
 	home, dir := t.TempDir(), t.TempDir()
 	write := func(path, body string) {
 		t.Helper()

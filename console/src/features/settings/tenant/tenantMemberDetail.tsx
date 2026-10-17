@@ -27,7 +27,7 @@ import { fmtDateTime, DATETIME_FULL } from "../../../lib/intl.ts";
 import { useTenantStore } from "../../../core/store/tenant.ts";
 import { stateInfo, stripLabelTag } from "../../../lib/sessionview.ts";
 import type { HomeResize, Member, WsSizing, WsSlot } from "../parts/adminShared.ts";
-import { fmtG, fmtPct, fmtGbHint, ladderFor, slotFor, slotMemLabel, WS_SIZE_PRESETS, WS_SIZING_FALLBACK } from "../parts/adminShared.ts";
+import { fmtG, fmtPct, fmtGbHint, ladderFor, memberClassID, slotFor, slotMemLabel, WS_SIZE_PRESETS, WS_SIZING_FALLBACK } from "../parts/adminShared.ts";
 import { MemberAutoStopDetail, MemberIdleDetail, MemberSizeChips } from "./tenantMembers.tsx";
 import { MemberEngineAccessPanel } from "./tenantEngineAccess.tsx";
 
@@ -231,14 +231,19 @@ export function MemberView({
   // switching class re-draws them and "you land on" recomputes — the same number can
   // land on a different box in a different class, and that is the whole point.
   const classes = onSlots ? (sizing.slot_classes ?? []) : [];
-  const ladder = onSlots ? ladderFor(sizing, slotClass) : undefined;
+  // The class the editor's current pick lands on. "" is drawn from what the CP says "follow the
+  // tenant default" resolves to; the unchanged stored value is drawn from the effective class,
+  // because a stored id the deployment no longer offers is substituted by the CP.
+  const pickedClass = slotClass === (cur.slot_class ?? "") ? memberClassID(cur) : slotClass || (cur.slot_class_default ?? "");
+  const ladder = onSlots ? ladderFor(sizing, pickedClass) : undefined;
   const landed = onSlots ? slotFor(ladder, +memMb || 0) : null;
   // Warn only when there is a home to migrate. A member who has never started has
   // nothing architecture-dependent on disk yet, so the warning would be noise.
   const classChanged = classes.length > 0 && slotClass !== (cur.slot_class ?? "");
   const archOf = (id: string) => classes.find((c) => c.id === id)?.arch ?? "";
   const archChanged =
-    classChanged && archOf(slotClass || (sizing.default_slot_class ?? "")) !== archOf(cur.slot_class || (sizing.default_slot_class ?? ""));
+    classChanged && archOf(pickedClass || (sizing.default_slot_class ?? "")) !==
+      archOf(memberClassID(cur) || (sizing.default_slot_class ?? ""));
   const memHint = !landed
     ? +memMb > 0
       ? tr("admin.eq_hint", { hint: fmtGbHint(+memMb) })
@@ -371,6 +376,7 @@ export function MemberView({
       // the substitution (when there is one) is reported separately rather than
       // silently rewritten into the control.
       slot_class: typeof res?.slot_class === "string" ? res.slot_class : slotClass,
+      slot_class_effective: typeof res?.slot_class_effective === "string" ? res.slot_class_effective : undefined,
     });
     setResize(res?.home_resize ?? null);
     setLimitOpen(false);
@@ -416,8 +422,9 @@ export function MemberView({
       // pending: removing the EFS home is a Fargate task; the outcome goes to the audit log.
       if (res?.pending) toast(tr("admin.destroy_started"));
       if (res?.leftovers?.length) toast(tr("admin.destroy_leftovers", { list: res.leftovers.join(", ") }));
-      onChanged();
-      poll();
+      // The detail holds a snapshot of the member (has_workspace included), so going back to the
+      // list and reloading is what lets the next open offer "Delete member for good".
+      onRemoved();
     } finally {
       setBusy(false);
     }
@@ -425,9 +432,10 @@ export function MemberView({
   // The third cleanup step (docs/log/61 §61.18): removal (a soft delete), then destroying the
   // Workspace, then this.
   //
-  // Offered only once the Workspace is gone. member.state is what the CP returns from
-  // workspaceStateByMembership, and is "none" when there is no workspace row. The server also
-  // refuses with 409, but there is no reason to show a button that can only ever fail.
+  // Offered only once the workspace ROW is gone (member.has_workspace === false). member.state
+  // cannot say that: it is the runtime's live state, and "none" there also covers a row that
+  // survives (ecs-ec2 after Clean home, native when stopped). The server refuses with 409
+  // workspace_present on the row, so a button keyed on state can only ever fail.
   const deleteMemberRow = async () => {
     setBusy(true);
     try {
@@ -784,14 +792,21 @@ export function MemberView({
               <button className="danger-btn" disabled={busy} onClick={() => setConfirmRemove(true)}>
                 <Icon name="close" /> {tr("admin.remove_member")}
               </button>
-            ) : member.state !== "none" ? (
-              <button className="danger-btn" disabled={busy} onClick={() => setConfirmDestroy(true)}>
-                <Icon name="trash" /> {tr("admin.destroy_ws")}
-              </button>
             ) : (
-              <button className="danger-btn" disabled={busy} onClick={() => setConfirmPurgeRow(true)}>
-                <Icon name="trash" /> {tr("admin.delete_member_row")}
-              </button>
+              <>
+                {/* has_workspace is absent from an older CP: unknown offers both, since Destroy is
+                    a no-op without a row and the delete is refused with a clear 409 with one. */}
+                {member.has_workspace !== false && (
+                  <button className="danger-btn" disabled={busy} onClick={() => setConfirmDestroy(true)}>
+                    <Icon name="trash" /> {tr("admin.destroy_ws")}
+                  </button>
+                )}
+                {member.has_workspace !== true && (
+                  <button className="danger-btn" disabled={busy} onClick={() => setConfirmPurgeRow(true)}>
+                    <Icon name="trash" /> {tr("admin.delete_member_row")}
+                  </button>
+                )}
+              </>
             )}
           </div>
           {!homeErase && <p className="muted">{tr("admin.clean_home_unavailable")}</p>}

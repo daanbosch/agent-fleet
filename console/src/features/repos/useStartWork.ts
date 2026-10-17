@@ -5,6 +5,7 @@
 // `dir: ""` launches in the home directory (repo-less session) — worktree options
 // and repo-scoped bookkeeping (repoLast / prompt history) are skipped there.
 import { apiJSON, errDetail, errText, pasteImage } from "../../core/api/client.ts";
+import { AUTH_EXPIRED_CODE, toastSendFailure } from "../../lib/authExpiredToast.tsx";
 import { t } from "../../lib/i18n/index.ts";
 import { buildImagePrompt } from "../../lib/pastedImages.ts";
 import { useToast } from "../../ui/ToastProvider.tsx";
@@ -15,6 +16,7 @@ import { pushPromptHistory } from "../../lib/promptHistory.ts";
 import { setLaunchSeed } from "../../lib/launchSeed.ts";
 import { useLaunchSeed, useReposStore } from "./store.ts";
 import { useFilesStore } from "../files/store.ts";
+import { useInboxStore } from "../inbox/store.ts";
 import { useSessionsStore } from "../sessions/store.ts";
 import { openSessionChat, openSessionTerminal } from "../sessions/open.ts";
 import type { LaunchOpts, LaunchResult } from "./LaunchModal.tsx";
@@ -26,12 +28,21 @@ export interface StartTarget {
   repo: string;
 }
 
-export function useStartWork(): (target: StartTarget, opts: LaunchOpts) => Promise<LaunchResult> {
+/** The handoff take a launch from another member's offer carries (acceptHandoff.ts). */
+export interface HandoffTake {
+  offerId: string;
+  token: string;
+  /** Gives this take up and takes the offer again, for a second create: the CP lets a take
+   *  start one create only (#2040). null when the offer could not be taken again. */
+  renew?: () => Promise<HandoffTake | null>;
+}
+
+export function useStartWork(): (target: StartTarget, opts: LaunchOpts, take?: HandoffTake) => Promise<LaunchResult> {
   const toast = useToast();
   const refreshRepos = useReposStore((s) => s.refresh);
   const refreshSessions = useSessionsStore((s) => s.refresh);
 
-  return async ({ dir, repo }, { kind, driver, model, effort, startMode, skipPermissions, prompt, title, images, worktree, subdir, base, newBranch, useExisting, spendCapUsd }) => {
+  return async ({ dir, repo }, { kind, driver, model, effort, startMode, skipPermissions, prompt, title, images, worktree, subdir, base, newBranch, useExisting, spendCapUsd }, take) => {
     const hasModel = agentOf(kind).caps.model;
     // With attachments the first prompt's text cannot be fixed until the session exists,
     // because the saved paths have to be woven into it and the upload target IS that
@@ -83,13 +94,34 @@ export function useStartWork(): (target: StartTarget, opts: LaunchOpts) => Promi
     if (workItem) {
       body.work_item = { provider: workItem.provider, key: workItem.key, title: workItem.title, type: workItem.type, labels: workItem.labels };
     }
+    // A launch from another member's offer carries its take (#2020). The CP confirms it
+    // immediately before the Agent is asked and strips it from the body, so a take that was
+    // lost meanwhile (handoff_take_lost) creates nothing.
+    if (take) body.handoff_take = { offerId: take.offerId, token: take.token };
     if (worktree) {
       body.worktree = true;
       body.branch = base;
       body.new_branch = newBranch;
       if (useExisting) body.use_existing = true;
     }
-    let res = await apiJSON("api/sessions", "POST", body);
+    // A launch from an inbox request goes through the CP's request launch: the same create
+    // body, but the CP checks the claim first and records the session on the request.
+    const { inboxItemId, inboxMemoId } = useLaunchSeed.getState();
+    // The memo a launch was seeded from: the Control Plane turns it into the session's
+    // provenance badge when the memo was taken in from the inbox. It names the memo, never
+    // the origin itself, which the server alone sets.
+    if (inboxMemoId) body.inbox_memo_id = inboxMemoId;
+    const createPath = inboxItemId ? `api/inbox/items/${encodeURIComponent(inboxItemId)}/launch` : "api/sessions";
+    // A launch from an offer must tell "nothing was created" from "nobody knows": the first
+    // gives the take back, the second keeps it so the next press can ask the Agent (#2040).
+    // No answer, or an answer that is not the server's own JSON error (a gateway page, the
+    // proxy's "unreachable"), is the second.
+    const post = () =>
+      apiJSON(createPath, "POST", body).catch((e: unknown) => {
+        if (take) return { lost: true };
+        throw e;
+      });
+    let res = await post();
     // Fleet rebuild lag: a P1.5-generation Agent rejects an explicit driver:"managed"
     // (driver_unsupported). If managed cannot be started, starting on tui is kinder than
     // failing — drop it once, resend, and say so in a toast.
@@ -98,10 +130,18 @@ export function useStartWork(): (target: StartTarget, opts: LaunchOpts) => Promi
       delete body.driver;
       if (!agentOf(kind).caps.tuiEffort) delete body.effort;
       if (!agentOf(kind).caps.tuiStartMode) delete body.mode;
-      res = await apiJSON("api/sessions", "POST", body);
+      if (take) {
+        const next = take.renew ? await take.renew() : null;
+        if (!next) return { ok: false };
+        take = next;
+        body.handoff_take = { offerId: next.offerId, token: next.token };
+      }
+      res = await post();
     }
+    if (res?.lost) return { ok: false, unknown: true };
     if (res && res.error) {
       const code = typeof res.error === "object" ? res.error.code : "";
+      if (take && (String(code).startsWith("http_") || code === "create_in_progress")) return { ok: false, unknown: true };
       if (code === "branch_exists") return { ok: false, conflict: "local" as const };
       if (code === "branch_exists_remote") return { ok: false, conflict: "remote" as const };
       // The branch is checked out in another working copy (git allows only one). The
@@ -152,7 +192,10 @@ export function useStartWork(): (target: StartTarget, opts: LaunchOpts) => Promi
         prompt: seed,
         when_ready: true,
       }).catch(() => ({ error: { message: t("err.network") } }));
-      if (del?.error) toast(t("rp.first_prompt_failed", { err: errText(del.error) }));
+      if (del?.error) {
+        if (del.error.code === AUTH_EXPIRED_CODE) toastSendFailure(toast, { code: del.error.code }, "");
+        else toast(t("rp.first_prompt_failed", { err: errText(del.error) }));
+      }
     }
     if (seed) {
       // The send itself runs on the Agent side; the mirror only shows the submitted text as
@@ -166,6 +209,8 @@ export function useStartWork(): (target: StartTarget, opts: LaunchOpts) => Promi
       useFilesStore.getState().bump();
     }
     void refreshSessions();
+    // The request card shows the session the CP just recorded on it.
+    if (inboxItemId) void useInboxStore.getState().refresh();
     (chat ? openSessionChat : openSessionTerminal)(res.name);
     // The created session's name is returned so that accepting a handoff (docs/log/77) can
     // tell the owner WHICH session took it. Callers may look at ok alone.

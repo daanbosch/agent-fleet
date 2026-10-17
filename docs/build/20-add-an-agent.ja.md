@@ -151,14 +151,14 @@ lcpp は例外です。ベンダーの CLI を動かさず、話し相手の lla
 実エンジンに対して手で走らせるオプトインの live テスト（`internal/harness/live_contract_test.go`、
 ビルドタグ `contract_manual`）です。
 
-毎日のリリース監視 `cli-release-watch.yml` に登録し、公開版が変わったら dispatch されるようにします。
+2 時間ごとのリリース監視 `cli-release-watch.yml` に登録し、公開版が変わったら dispatch されるようにします。
 `cli-drift.yml` はピンの遅れを報告するだけで、何も dispatch しません。登録は 4 か所です。
 
 - `deploy/local/cli-release-edges.sh` の `KINDS` に種別を足す。
 - `deploy/local/cli-drift-check.sh` に行を足す。
 - ワークフローの状態・エッジ・dispatch の各ステップに行を足す。
 - contract 自身に、成功時に `deploy/local/cli-release-state.sh set tested <kind> <version>` を
-  走らせるステップを置く。**これが無いと、監視はそのリリースを毎日新しいと見て、毎日 dispatch します。**
+  走らせるステップを置く。**これが無いと、監視はそのリリースを実行のたびに新しいと見て、2 時間ごとに dispatch します。** 無人で dispatch される contract は、失敗も `cli-contract-report.sh failure <kind> <version>` で報告してください（ほかの contract を参照）。赤い版の再 dispatch を止めるのがこれです。
   記録する版は、監視がその種別の最新として読む版と同じ形にします。muse の版はビルド ID を含む
   （`1.4.0-R4302.1`）ので、`1.4.0` に削るとエッジが閉じません。
 
@@ -168,9 +168,18 @@ lcpp は例外です。ベンダーの CLI を動かさず、話し相手の lla
 照合する `resolve_<kind>` も）、`cli-pin-bump.yml` の `workflow_run` の一覧に contract の
 `name:` を足します。
 
+人が要るときに更新 issue が開くように（10 §10.2.2）、`deploy/local/cli-update-issues.sh` の
+`ALL_KINDS`、`deploy/local/cli-contract-report.sh` の `prune` の種別一覧（watcher が無人で
+dispatch するなら `RED_KINDS` も）に種別を足し、`cli-drift.yml` の streak のループに contract を
+足します。contract のファイル名が `<kind>-contract.yml` でない、または `cli_version` 入力を
+取らないなら、`cli-update-issues.sh` の `workflow_of` と `dispatch_cmd` も広げます。これが無いと
+その種別はずっと `waiting` のままで、issue は開きません。
+
 無人で dispatch するのは、資格情報を無人で供給できる場合だけです。**対話的な refresh で回転する
-資格情報のものは「seen」として記録し、手で dispatch**します。資格情報が未設定のうちに来たリリースも
-同じ扱いです。「seen」は「tested」を進めません——「新しい版に気づいた」と「テストが通った」を
+資格情報のものは手で dispatch**します。資格情報が未設定のうちに来たリリースも同じ扱いです。
+`deploy/local/cli-update-issues.sh` の `dispatch` か `credential` の状態に種別を足し、更新 issue が
+人に実行を頼むようにします（[10 §10.2.2](10-development.ja.md#1022-エージェント-cli-の版上げの自動化cli-pin-bumpyml)）。
+リリースに気づいただけで「tested」は進みません——「新しい版に気づいた」と「テストが通った」を
 混同すると、そのまま回帰が出荷されます。
 
 ## 20.6 完了の条件

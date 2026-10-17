@@ -61,6 +61,15 @@ var Entries = []string{
 	"session-abort-resume",
 	"session-managed-abort",
 	"session-rate-limit",
+	// Usage-limit bookings whose cancellation the CP has not confirmed (sessionx
+	// rate_limit_cleanup.go). Introduced directly under AgentStateDir.
+	"session-rate-limit-cleanup",
+	// Moves between begin and their end, for retry and cancel (sessionx session_move.go).
+	// Introduced directly under AgentStateDir.
+	"session-move",
+	// A move target's first prompt until it is known to have arrived (session_move_deliver.go).
+	// Introduced directly under AgentStateDir.
+	"session-move-delivery",
 	"session-report",
 	"session-resume",
 	"session-translations",
@@ -75,21 +84,46 @@ var Entries = []string{
 	// The reply claude is still streaming (status/livetext.go). Introduced directly under
 	// AgentStateDir; it never existed under .config.
 	"live-text",
+	// The durable outcome of a create under an idempotency key (sessionx
+	// session_idempotency.go). Introduced directly under AgentStateDir.
+	"session-create-outcomes",
+	// Archives being built for a folder download (fs_zip.go). Introduced directly under
+	// AgentStateDir, and empty between requests; listed only so the drift check stays honest.
+	"zip-export",
+	// The opencode 2 opt-in's switch and the record of how the serve was started
+	// (opencode/optin.go, optin_serve.go). Introduced directly under AgentStateDir.
+	"opencode-major",
+	"opencode-serve.json",
+	// The lock that serialises the first opencode 2 start on a 1.x database
+	// (opencode/migrate.go). Introduced directly under AgentStateDir.
+	"opencode-v2-migration.lock",
 	"plan-file",
 	"plan-review",
 	// Per-agent id ledgers and message rings (agents.NewSidStore / NewMsgLedger).
 	"claude-sid",
+	// Slots whose claude conversation has had a finished turn (claude.NoteTalked). Introduced
+	// directly under AgentStateDir.
+	"claude-talked",
 	"codex-sid",
 	// An open PreCompact on a Terminal codex session (codex.MarkCompacting). Introduced
 	// directly under AgentStateDir; it never existed under .config.
 	"codex-compacting",
 	"opencode-sid",
+	// How each opencode Terminal slot was launched (opencode.slotModes). Introduced directly under
+	// AgentStateDir.
+	"opencode-mode",
+	// One file per opencode session a pane has claimed, holding the slot sid (opencode.claimSession).
+	// Introduced directly under AgentStateDir.
+	"opencode-claim",
 	"copilot-sid",
 	"cursor-sid",
 	"kiro-sid",
 	"agy-sid",
 	"agy-prelaunch",
 	"agy-brain-prelaunch",
+	"agy-hook",
+	"agy-launch",
+	"agy-hooks.lock",
 	"codex-msgledger",
 	"opencode-msgledger",
 	"copilot-msgledger",
@@ -112,6 +146,9 @@ var Entries = []string{
 	// The past-session search index (sessionsearch, ADR 0110), a rebuildable cache. Introduced
 	// directly under AgentStateDir; it never existed under .config.
 	"session-search",
+	// The limit board's login-epoch ledger and its HMAC key (internal/limitepoch, ADR 0111
+	// decision 6). Introduced directly under AgentStateDir; it never existed under .config.
+	"limit-epochs.json",
 	// Chat bridge: the outbound queue and the per-provider binding ledgers.
 	"bridge-queue",
 	"bridge-sent",

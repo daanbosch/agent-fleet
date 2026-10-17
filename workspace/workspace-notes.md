@@ -40,6 +40,9 @@ skip and say so.
 - Leave uncommitted changes; store credentials in plaintext (connections live under Settings >
   Connections); read or touch the agents' internal state (`~/.config/agent-fleet`, `~/.claude`,
   `~/.codex`, `~/.local/share/opencode` hold credentials and the encrypted store).
+  This binds you, the agent; your user's own personal `skills/`, `agents/` and hooks in
+  `$CLAUDE_CONFIG_DIR` are theirs to manage (`member/06-agents.md`) and you edit them only when
+  they ask, never the credentials or Fleet's own hook entries.
 - Run host-wide destructive commands (runaway `rm -rf`, fork bombs, mining, port scans), or hog
   the shared, memory-constrained host with heavy parallel builds.
 - Paste `env` output anywhere — it contains live `AF_*` secrets. Never run `workspace-agent`
@@ -92,7 +95,7 @@ directory belongs to someone else.
   with `ls … | head -1`, `amd64` sorts before `arm64`): `notes/build.md`.
 
 ## Browsers
-- **`$AF_BROWSER_UNAVAILABLE` set (e.g. `kubernetes`) means no browser at all** — no headless
+- **`$AF_BROWSER_UNAVAILABLE` set (`kubernetes` or `ecs`, i.e. Fargate) means no browser at all** — no headless
   Chromium, no `attach_chromium`, no pane; never add `--no-sandbox`. `notes/browser.md` says what
   to do instead. The rest of this section applies only where it is empty.
 - Headless `chromium` is baked in (`/usr/bin/chromium`); no display, keep runs short and close
@@ -136,9 +139,19 @@ directory belongs to someone else.
   `git -C <dir> …`, or a `cd ../other && …` is followed by a commit on the wrong branch.
 - `GIT_EDITOR=true` and `GIT_TERMINAL_PROMPT=0` are set: always pass `-m`/`-F`; credential
   failures fail fast. Interactive commands (`gh auth login`, `rebase -i`) are for the user's shell.
-- `gh` is pre-authenticated through a wrapper — use it freely, never run `gh auth login`. Other
+- `gh` is pre-authenticated through a wrapper — use it freely, never run `gh auth login`. So is
+  `bkt` (Bitbucket Cloud: PRs, pipelines) for a bitbucket.org connection — use it rather than a
+  Bitbucket / Atlassian MCP tool, for the same reason as `jira` below, and never `bkt auth login`;
+  a Data Center host is the user's own `BKT_HOST` / `BKT_TOKEN`. Other
   commands are shims too: when output looks impossible, check `type <cmd>` and re-run the real
   binary.
+- **Jira: use the `jira` CLI, not a Jira / Atlassian MCP tool.** With a Jira connection it is
+  pre-authenticated for every agent kind and renews an OAuth token on each call, while an MCP
+  connector serves one CLI and its expired login needs a session restart. `jira issue view KEY-1`,
+  `jira issue list -p KEY`, `jira issue create -p KEY`, `jira issue comment add KEY-1 "…"`,
+  `jira issue move KEY-1 "In Progress"`; boards, sprints and epics after one
+  `jira init --project KEY --board NAME`. Never paste a token, run `jira init` with your own
+  `--server`, or add `--debug` (it gets no credential).
 - The clock is the workspace's local timezone (`date`), not UTC. Outbound network may be
   restricted; an unreachable host is not necessarily an error.
 - **AWS: the default credential chain is not the user.** A bare `aws` / SDK / build-tool call

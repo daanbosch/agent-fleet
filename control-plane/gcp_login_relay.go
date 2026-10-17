@@ -55,6 +55,8 @@ func gcpLoginAudit(r *http.Request, p string, q url.Values) (action, target stri
 	switch {
 	case strings.HasPrefix(rest, "profiles/") && strings.HasSuffix(rest, "/code"):
 		return "gcp.login.code", "profile: " + name + ", attempt: " + gcpAttemptRef(r.PathValue("attempt")), true
+	case strings.HasPrefix(rest, "profiles/") && strings.HasSuffix(rest, "/logout"):
+		return "gcp.logout", "profile: " + name, true
 	case strings.HasPrefix(rest, "profiles/") && strings.HasSuffix(rest, "/start"):
 		if q.Get("force") == "1" {
 			return "gcp.login.start", "profile: " + name + " (log in again)", true
@@ -83,10 +85,11 @@ func relayLogPath(p string) string {
 }
 
 // relayLogErr is err as the CP's log may show it for path: a transport error quotes the
-// Agent URL it was sending to, which for a gcp-login attempt holds the id.
+// Agent URL it was sending to, which for a gcp-login attempt holds the id; for the memory import routes it holds the
+// query (a slug or working copy name the Agent has not scanned yet).
 func relayLogErr(path string, err error) error {
 	var ue *url.Error
-	if strings.HasPrefix(path, "/api/gcp-login/") && errors.As(err, &ue) {
+	if (strings.HasPrefix(path, "/api/gcp-login/") || strings.HasPrefix(path, "/api/agents/memory/")) && errors.As(err, &ue) {
 		return fmt.Errorf("%s: %w", ue.Op, ue.Err)
 	}
 	return err

@@ -815,7 +815,7 @@ func (opencodeChat) Send(ctx context.Context, c *ChatConversation, prompt string
 	call := usagex.Call{Kind: session.KindOpencode, ModelReq: pinned} // usage ledger (ADR 0029 §3)
 	defer usagex.RecordCall(ctx, &call, time.Now())
 	dir := opencodeChatDir(c)
-	args := []string{"run", "--format", "json", "--dir", dir}
+	args := opencodeRunArgs(dir)
 	if c.OpencodeSessionID != "" {
 		args = append(args, "--session", c.OpencodeSessionID)
 	}
@@ -823,12 +823,14 @@ func (opencodeChat) Send(ctx context.Context, c *ChatConversation, prompt string
 		args = append(args, "--model", pinned)
 	}
 	args = append(args, headlessPrompt(c.personaOf(), c.knowledgeDirs(), prompt))
-	cmd := exec.CommandContext(ctx, "opencode", args...)
-	cmd.Dir = dir
-	env := opencode.Env()
-	if cfg := opencodeChatConfig(c); cfg != "" {
-		env = append(env, "OPENCODE_CONFIG="+cfg)
+	spec := opencode.CurrentLaunch()
+	if err := opencode.EnsureMigrated(spec); err != nil {
+		return "", err
 	}
+	cmd := exec.CommandContext(ctx, spec.Bin, args...)
+	cmd.Dir = dir
+	env := spec.Env()
+	env = append(env, opencodeConfigEnv(opencodeChatConfig(c))...)
 	cmd.Env = envWith(env...)
 	out, err := cmd.Output()
 	// Parse BEFORE the error branch: a failed run still prints its events, and both the
@@ -881,6 +883,79 @@ func (opencodeChat) Send(ctx context.Context, c *ChatConversation, prompt string
 // deny also beats whatever the user's global opencode config says.
 func opencodeChatPolicy() map[string]any {
 	return map[string]any{"edit": "deny", "bash": "deny"}
+}
+
+// opencodeRunArgs is the head of every headless `opencode run` af starts. opencode 1 takes the
+// project directory as --dir. opencode 2's `run` has no such flag (measured on 2.0.29: "Unrecognized
+// flag: --dir", exit 1, so every chat and one-shot failed) and works in the process's directory,
+// which both callers set (cmd.Dir). A bare 2.x `run` also talks to the per-user background service
+// on a fixed port; --standalone gives the run a private server whatever service.json says.
+func opencodeRunArgs(dir string) []string {
+	if opencode.InstalledMajor() >= 2 {
+		return []string{"run", "--format", "json", "--standalone"}
+	}
+	return []string{"run", "--format", "json", "--dir", dir}
+}
+
+// opencodeConfigEnv hands a config file to `opencode run`. opencode 1 reads it from
+// OPENCODE_CONFIG. opencode 2 ignores that variable (measured on 2.0.28: a `model` in it is
+// not used, and a deny rule in it does not stop the shell tool) but reads
+// OPENCODE_CONFIG_CONTENT, so there the same JSON also rides inline. Without it a one-shot,
+// which has no project config, would run with the read-only posture silently gone, and a chat
+// would lose its af MCP server. Empty path: no variables.
+func opencodeConfigEnv(path string) []string {
+	if path == "" {
+		return nil
+	}
+	env := []string{"OPENCODE_CONFIG=" + path}
+	if opencode.InstalledMajor() < 2 {
+		return env
+	}
+	if inline := opencodeInlineConfig(path); inline != "" {
+		env = append(env, "OPENCODE_CONFIG_CONTENT="+inline)
+	}
+	return env
+}
+
+// opencodeHardDenyPolicies are the opencode 2 `experimental.policies` that keep a chat or
+// one-shot from editing or running a shell. The `permission` deny of the file is a plain
+// permission rule, and a project or agent rule (`agents.build.permissions`) that comes later
+// wins over it: measured on 2.0.28, an agent-level allow brought shell/edit/write back and a
+// shell call created a file. A policy is evaluated after every permission rule and cannot be
+// lifted by a project, agent or session. `tool.use` matches `<action>:<resource>`; a bare
+// tool name matches nothing, `<action>:*` does (measured). Code Mode cannot reach the
+// built-in shell in this build (measured), so it needs no entry of its own.
+func opencodeHardDenyPolicies() []any {
+	var out []any
+	for _, action := range []string{"shell", "edit", "write", "subagent"} {
+		out = append(out, map[string]any{"action": "tool.use", "resource": action + ":*", "effect": "deny"})
+	}
+	return out
+}
+
+// opencodeInlineConfig is the config file's JSON for OPENCODE_CONFIG_CONTENT with the hard
+// deny policies added to its experimental block; "" when the file cannot be read as an object.
+func opencodeInlineConfig(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var cfg map[string]any
+	if json.Unmarshal(b, &cfg) != nil || cfg == nil {
+		return ""
+	}
+	exp, _ := cfg["experimental"].(map[string]any)
+	if exp == nil {
+		exp = map[string]any{}
+	}
+	pol, _ := exp["policies"].([]any)
+	exp["policies"] = append(pol, opencodeHardDenyPolicies()...)
+	cfg["experimental"] = exp
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		return ""
+	}
+	return string(out)
 }
 
 // opencodeChatDir prepares the working dir for a chat's opencode run, with an
@@ -1095,7 +1170,10 @@ func parseOpencodeRunEvents(out []byte) (reply, sesID, model, turnErr string, us
 			} `json:"message"`
 			Error struct {
 				Name string `json:"name"`
-				Data struct {
+				// opencode 2 flattens the error: {"type":"compaction.failed","message":"…"}.
+				Type    string `json:"type"`
+				Message string `json:"message"`
+				Data    struct {
 					Message string `json:"message"`
 					Ref     string `json:"ref"`
 				} `json:"data"`
@@ -1108,7 +1186,14 @@ func parseOpencodeRunEvents(out []byte) (reply, sesID, model, turnErr string, us
 			sesID = ev.SessionID
 		}
 		if ev.Type == "error" {
-			if msg := opencodeErrText(ev.Error.Name, ev.Error.Data.Message, ev.Error.Data.Ref); msg != "" {
+			name, text := ev.Error.Name, ev.Error.Data.Message
+			if name == "" {
+				name = ev.Error.Type
+			}
+			if text == "" {
+				text = ev.Error.Message
+			}
+			if msg := opencodeErrText(name, text, ev.Error.Data.Ref); msg != "" {
 				turnErr = msg // the last error wins (later ones tend to be more specific)
 			}
 		}
@@ -2050,16 +2135,15 @@ func OneShotHeadlessRun(ctx context.Context, feature string, tier OneShotTier, p
 		return reply, "", "", err
 	case session.KindOpencode:
 		call.Kind = session.KindOpencode
-		args := []string{"run", "--format", "json", "--dir", chatWorkdir()}
-		env := opencode.Env()
+		args := opencodeRunArgs(chatWorkdir())
+		spec := opencode.CurrentLaunch()
+		env := spec.Env()
 		// read-only posture (docs/log/44 §1.3): unlike a chat, a one-shot runs in the bare
 		// chatWorkdir with no project config (opencode.json), so OPENCODE_CONFIG's deny is the
 		// one that takes effect (merge precedence measured on 1.18.7: project >
 		// OPENCODE_CONFIG > global — see opencodeChatDir). If it cannot be written the run
 		// goes bare as before, degrading on a broken home rather than breaking title/reply.
-		if cfg := OpencodeOneShotConfig(); cfg != "" {
-			env = append(env, "OPENCODE_CONFIG="+cfg)
-		}
+		env = append(env, opencodeConfigEnv(OpencodeOneShotConfig())...)
 		// NOTE: deliberately NOT auto-picking a cheap model here (docs/log/46 §1-a-2). opencode's
 		// catalog is a LISTING, not an entitlement: `opencode/claude-haiku-4-5` is listed and
 		// selectable, yet running it returns "Unexpected server error" on an account without
@@ -2075,7 +2159,10 @@ func OneShotHeadlessRun(ctx context.Context, feature string, tier OneShotTier, p
 			call.ModelReq = m
 		}
 		args = append(args, headlessPrompt(persona, nil, prompt))
-		cmd := exec.CommandContext(ctx, "opencode", args...)
+		if err := opencode.EnsureMigrated(spec); err != nil {
+			return "", "", "", err
+		}
+		cmd := exec.CommandContext(ctx, spec.Bin, args...)
 		cmd.Dir = chatWorkdir()
 		cmd.Env = envWith(env...)
 		out, err := cmd.Output()
@@ -2095,9 +2182,13 @@ func OneShotHeadlessRun(ctx context.Context, feature string, tier OneShotTier, p
 		// from ctx (the reply is already in hand; cleanup shouldn't be cancelled).
 		if sesID != "" {
 			go func() {
-				cl := exec.Command("opencode", "session", "delete", sesID)
+				delArgs := []string{"session", "delete", sesID}
+				if spec.Maj >= 2 {
+					delArgs = []string{"session", "delete", "--standalone", sesID} // not the background service
+				}
+				cl := exec.Command(spec.Bin, delArgs...)
 				cl.Dir = chatWorkdir()
-				cl.Env = envWith(opencode.Env()...)
+				cl.Env = envWith(spec.Env()...)
 				_ = cl.Run()
 			}()
 		}
@@ -2169,8 +2260,7 @@ func OneShotHeadlessRun(ctx context.Context, feature string, tier OneShotTier, p
 		if err != nil {
 			return "", "", "", fmt.Errorf("agy execution failed: %s", cliErr(err))
 		}
-		call.OK = true
-		return strings.TrimRight(strings.TrimSpace(string(out)), "\n"), "", "", nil
+		return agyOneShotReply(&call, out), "", "", nil
 	case session.KindMuse:
 		call.Kind, call.Measured = session.KindMuse, usagex.MeasuredNone
 		m := selected
@@ -2215,6 +2305,15 @@ func OneShotHeadlessRun(ctx context.Context, feature string, tier OneShotTier, p
 	}
 	call.OK = true
 	return strings.TrimRight(r.Result, "\n"), "", "", nil
+}
+
+// agyOneShotReply trims agy's stdout and records the call. agy exits 0 with an empty stdout when
+// the model declines a prompt, so an empty reply is not a success: OK stays false and the ledger
+// can tell "answered" from "returned nothing".
+func agyOneShotReply(call *usagex.Call, out []byte) string {
+	reply := strings.TrimRight(strings.TrimSpace(string(out)), "\n")
+	call.OK = reply != ""
+	return reply
 }
 
 // argValue returns the value following a flag in argv ("" when not found). It puts "which

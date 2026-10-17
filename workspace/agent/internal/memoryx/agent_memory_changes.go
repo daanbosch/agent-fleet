@@ -31,22 +31,22 @@ const (
 	agentMemChangesMax     = 300
 )
 
-// agentMemMember is the author of a change made from the Console. The CP's relay header is
-// only a hint an agent could also send, so this records the route the change came by, not a
-// verified person.
+// agentMemMember is the author of a change made from the Console. pin, revert and member-save
+// write as it only behind the CP's member-origin mark (memberorigin, ADR 0113); the claude and
+// muse imports still write as it unsigned (#2014), so there it names the route, not a person.
 var agentMemMember = agentMemCaller{Session: "console", Kind: "member"}
 
 var (
-	agentMemRepoPathRe = regexp.MustCompile(`^af/(user|projects/[a-z0-9._-]{1,80})/([a-z0-9][a-z0-9-]{0,63})\.md$`)
+	agentMemRepoPathRe = regexp.MustCompile(`^af/(user|projects/[a-z0-9._-]{1,80})/([a-z0-9_][a-z0-9._-]{0,63})\.md$`)
 	agentMemCommitRe   = regexp.MustCompile(`^[0-9a-f]{7,64}$`)
-	agentMemOps        = map[string]bool{"create": true, "update": true, "forget": true, "revert": true}
+	agentMemOps        = map[string]bool{"create": true, "update": true, "forget": true, "revert": true, "import": true, "pin": true}
 )
 
 // agentMemChangeView is one published change as the Console lists it.
 type agentMemChangeView struct {
 	Commit        string           `json:"commit"`
 	At            string           `json:"at"`
-	Op            string           `json:"op"` // create | update | forget | revert
+	Op            string           `json:"op"` // create | update | forget | revert | import | pin
 	Scope         string           `json:"scope"`
 	Project       *agentMemProject `json:"project,omitempty"`
 	Name          string           `json:"name"`
@@ -59,6 +59,9 @@ type agentMemChangeView struct {
 	Latest     bool `json:"latest"`
 	Live       bool `json:"live"`
 	Revertible bool `json:"revertible"`
+	// PurgedBefore: the memory's earlier revisions were purged from the history (#1982), so
+	// this change cannot be undone; forgetting the memory still can.
+	PurgedBefore bool `json:"purgedBefore,omitempty"`
 }
 
 // agentMemChangesWire is the change list. Withheld counts rows left out because a value in
@@ -73,7 +76,7 @@ func agentMemCleanText(s string) bool { return len(agentMemScanText("", s)) == 0
 // agentMemParseRepoPath splits af/<scope dir>/<name>.md.
 func agentMemParseRepoPath(p string) (rel, scope, projectID, name string, ok bool) {
 	m := agentMemRepoPathRe.FindStringSubmatch(p)
-	if m == nil {
+	if m == nil || !agentMemValidName(m[2]) {
 		return "", "", "", "", false
 	}
 	rel = strings.TrimPrefix(p, agentMemRepoPrefix+"/")
@@ -111,6 +114,9 @@ func agentMemProjectInfo(id string) *agentMemProject {
 		return p
 	}
 	p.Display, p.Root, p.VCS = v.Display, v.Root, v.VCS
+	if agentMemRemoteOK(v.Remote) {
+		p.Remote = v.Remote
+	}
 	return p
 }
 
@@ -214,15 +220,21 @@ func agentMemListChanges(limit int) (agentMemChangesWire, error) {
 			v.Project = projects[pid]
 		}
 		if first {
-			v.Latest = true
-			_, live, _ := agentMemReadFile(filepath.Join(agentMemDir(), filepath.FromSlash(rel)))
-			v.Live = live
-			_, beforeOK, _, afterOK, err := agentMemSides(v.Commit, rel)
-			v.Revertible = err == nil && (beforeOK || afterOK)
+			agentMemMarkLatest(&v, rel)
 		}
 		out.Changes = append(out.Changes, v)
 	}
 	return out, nil
+}
+
+// agentMemMarkLatest sets what only the newest change of a memory carries: that it is the newest,
+// whether the memory exists now, and whether the history holds a text to go back to.
+func agentMemMarkLatest(v *agentMemChangeView, rel string) {
+	v.Latest = true
+	_, live, _ := agentMemReadFile(filepath.Join(agentMemDir(), filepath.FromSlash(rel)))
+	v.Live = live
+	_, beforeOK, _, afterOK, err := agentMemSides(v.Commit, rel)
+	v.Revertible = err == nil && (beforeOK || afterOK)
 }
 
 // agentMemChangeFrom builds a row from one commit, or ok=false when anything in it is not in the
@@ -253,6 +265,7 @@ func agentMemChangeFrom(commit, at, body string) (v agentMemChangeView, rel, pid
 	v = agentMemChangeView{
 		Commit: commit, At: at, Op: tr["AF-Op"], Scope: scope, Name: name,
 		AuthorKind: tr["AF-Author-Kind"], AuthorSession: tr["AF-Author-Session"], RevertOf: tr["AF-Revert-Of"],
+		PurgedBefore: tr[agentMemPurgedTrailer] != "",
 	}
 	return v, rel, pid, true
 }
@@ -367,12 +380,54 @@ func agentMemLatestChange(rel string) (string, error) {
 	return "", nil
 }
 
+// agentMemImportState is what the history says about the AF copy of rel ("projects/<id>/<name>.md",
+// whose bytes are current) relative to the import that created it.
+type agentMemImportState int
+
+const (
+	// agentMemImportUnknown: the history cannot say (no change recorded, a git error, a missing
+	// blob). It is never evidence that AF moved on, nor that it did not.
+	agentMemImportUnknown agentMemImportState = iota
+	// agentMemImportIntact: the newest published change is an import and the file is byte for
+	// byte its text; no AF save, pin or revert has touched the memory since.
+	agentMemImportIntact
+	// agentMemImportChanged: the newest change is not an import, or the file differs from the
+	// import's text (a hand edit).
+	agentMemImportChanged
+)
+
+func agentMemImportStateOf(rel string, current []byte) agentMemImportState {
+	commit, err := agentMemLatestChange(rel)
+	if err != nil || commit == "" {
+		return agentMemImportUnknown
+	}
+	msg, err := memoryGitRun("log", "-1", "--format=%B", commit)
+	if err != nil {
+		return agentMemImportUnknown
+	}
+	if agentMemTrailers(msg)["AF-Op"] != "import" {
+		return agentMemImportChanged
+	}
+	b, ok, err := agentMemBlob(commit, rel)
+	switch {
+	case err != nil || !ok:
+		return agentMemImportUnknown
+	case bytes.Equal(b, current):
+		return agentMemImportIntact
+	}
+	return agentMemImportChanged
+}
+
 // agentMemRevertReq undoes one published change, or (Forget) removes the memory as that change
 // left it. Ack lets a body that fails the secret scan through; it covers this request only.
 type agentMemRevertReq struct {
 	Commit string `json:"commit"`
 	Forget bool   `json:"forget"`
 	Ack    bool   `json:"ack"`
+	// ExpectRevision, when set, pins the request to the revision the caller saw: the memory must
+	// still be at it, or the request is refused. The list and the change list are read apart, so
+	// "the newest change" alone does not prove it is the row the member looked at. 0 = unchecked.
+	ExpectRevision int `json:"expectRevision,omitempty"`
 }
 
 func agentMemRevOf(b []byte, ok bool) int {
@@ -399,6 +454,18 @@ func agentMemRevert(req agentMemRevertReq, now time.Time) (agentMemWriteResult, 
 		return agentMemWriteResult{}, err
 	}
 	_, scope, _, name, _ := agentMemParseRepoPath(agentMemRepoPrefix + "/" + rel)
+	if !req.Forget {
+		body, err := memoryGitRun("log", "-1", "--format=%B", commit)
+		if err != nil {
+			return agentMemWriteResult{}, err
+		}
+		if agentMemTrailers(body)[agentMemPurgedTrailer] != "" {
+			// Without this the missing earlier side would read as "this change created the
+			// memory", and undoing it would delete the memory instead of restoring anything.
+			return agentMemWriteResult{}, memoryErrf(http.StatusConflict, errCodeMemoryConflict,
+				"the earlier revisions of this memory were purged from the history; there is nothing to go back to (forgetting it still works)")
+		}
+	}
 	// Compared by commit, not only by content: after create → forget → create → forget, the
 	// first forget and the live store agree that the memory is absent, yet reverting it would
 	// bring back the older text.
@@ -426,6 +493,10 @@ func agentMemRevert(req agentMemRevertReq, now time.Time) (agentMemWriteResult, 
 	if liveOK != afterOK || !bytes.Equal(live, after) {
 		return agentMemWriteResult{}, memoryErrf(http.StatusConflict, errCodeMemoryConflict,
 			"the memory has changed since this change; only its newest change can be reverted")
+	}
+	if req.ExpectRevision > 0 && (!liveOK || agentMemRevOf(live, liveOK) != req.ExpectRevision) {
+		return agentMemWriteResult{}, memoryErrf(http.StatusConflict, errCodeMemoryConflict,
+			"the memory is no longer at revision %d; reload the list and try again", req.ExpectRevision)
 	}
 	tomb, err := agentMemTombRevision(scopeDir, name)
 	if err != nil {
@@ -456,6 +527,7 @@ func agentMemRevert(req agentMemRevertReq, now time.Time) (agentMemWriteResult, 
 		if err != nil {
 			return agentMemWriteResult{}, err
 		}
+		agentMemClearUsage(scopeDir, name)
 		return agentMemWriteResult{Name: name, Scope: scope, Revision: agentMemRevOf(live, liveOK), Commit: rev, Deleted: true}, nil
 	}
 
@@ -464,6 +536,8 @@ func agentMemRevert(req agentMemRevertReq, now time.Time) (agentMemWriteResult, 
 		return agentMemWriteResult{}, memoryErrf(http.StatusConflict, errCodeMemoryConflict, "the earlier version cannot be read as a memory")
 	}
 	e.Name, e.Scope = name, scope
+	// The pin comes back as `before` had it. Only the newest change can be reverted, so live is
+	// that change's result, and a change that moved the pin is a pin change alone.
 	e.Revision = floor + 1
 	e.AuthorKind, e.AuthorSession = agentMemMember.Kind, agentMemMember.Session
 	e.Updated = now.UTC().Format(time.RFC3339)
@@ -480,6 +554,7 @@ func agentMemRevert(req agentMemRevertReq, now time.Time) (agentMemWriteResult, 
 	}
 	if !liveOK {
 		agentMemRemoveTomb(scopeDir, name)
+		agentMemClearUsage(scopeDir, name)
 	}
 	return agentMemWriteResult{Name: name, Scope: scope, Revision: e.Revision, Commit: rev, Created: !liveOK}, nil
 }

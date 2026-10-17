@@ -628,10 +628,30 @@ func (a workspaceAPI) ensureWorkspaceStartedRTLocked(ctx context.Context, res *r
 	// idea of where it lives" state. Where preview is disabled for the deployment, or no
 	// slug could be prepared, use rt as-is — not getting a preview is no reason to block
 	// the start.
-	if armed := a.mgr.armPreviewForStart(ctx, res, extraEnv); armed != nil {
+	//
+	// The credential-store keys are resolved here, for this start, and a failure fails it.
+	// The runtime handed in may be a memo built long ago, holding keys a since-disabled KMS
+	// key would no longer open; starting it would defeat the fail-closed rule in dek.go.
+	keys, home, err := a.mgr.resolveStartKeys(ctx, res.ws, res.ident.UserKey)
+	if err != nil {
+		return internalErr(fmt.Errorf("credential-store keys for ws %s: %w", res.ws.ID, err))
+	}
+	var homeStart string
+	if home != nil {
+		if homeStart, err = newHomeKeyStart(); err != nil {
+			return internalErr(err)
+		}
+		extraEnv = append(append([]string(nil), extraEnv...), homeKeyStartEnv+"="+homeStart)
+	}
+	if armed := a.mgr.armPreviewForStart(ctx, res, keys, extraEnv); armed != nil {
 		rt = armed
-	} else if fresh := a.mgr.refreshGitTokenForStart(ctx, res, extraEnv); fresh != nil {
+	} else if fresh := a.mgr.refreshGitTokenForStart(ctx, res, keys, extraEnv); fresh != nil {
 		rt = fresh // armPreviewForStart built its env just now; this covers the other starts
+	} else if a.mgr.rtFactory != nil {
+		// Rebuilt for this start, keys or not: the memo's env was fixed when it was built,
+		// and what the deployment switches at runtime (the dev IdP's env) must be read now.
+		ws := a.mgr.withResolvedSize(ctx, res.ws)
+		rt = a.mgr.runtimeFor(ws, keys, append(a.mgr.workspaceExtraEnv(ctx, ws), extraEnv...)...)
 	}
 	// The previous automatic stop stops describing this workspace once a new launch is
 	// attempted, whether or not it succeeds: a Start that fails (secrets, home, launch)
@@ -655,6 +675,9 @@ func (a workspaceAPI) ensureWorkspaceStartedRTLocked(ctx context.Context, res *r
 	}
 	if f, ok := rt.(runtime.StartFencer); ok {
 		f.CommitStart()
+	}
+	if home != nil {
+		go a.mgr.watchHomeDEK(rt, *home, homeStart)
 	}
 	_ = a.mgr.store.SetWorkspaceState(ctx, res.ws.ID, "running")
 	// A start IS activity: reset the in-memory idle clock too (SetWorkspaceState
@@ -769,6 +792,18 @@ type sessionWire struct {
 	// "shell"), which only picks the badge's wording. Dropping it here would not hide the
 	// badge, just silently pin every session to the generic "running in background" wording.
 	BackgroundBusyReason string `json:"backgroundBusyReason,omitempty"`
+	// ProgressAt passes through the Agent's last sign of progress for a busy row (RFC3339).
+	// Dropped here, the reaper never sees it and a frozen "working" row holds the Workspace
+	// forever. Not persisted to the DB mirror (a stopped workspace has no busy row).
+	ProgressAt string `json:"progressAt,omitempty"`
+	// ProgressAgeSec is the Agent-computed age of ProgressAt, the value the reaper compares
+	// with its threshold (the CP's clock may disagree with the Workspace's). Dropped here,
+	// nothing ever lapses.
+	ProgressAgeSec int `json:"progressAgeSec,omitempty"`
+	// StateSince passes through when the row's busy state began (RFC3339, approximate: the
+	// Agent's first observation or its status file). Dropped here, the admin forecast cannot say
+	// how long a session has been holding the Workspace. Not persisted to the DB mirror.
+	StateSince string `json:"stateSince,omitempty"`
 	// RateLimitResumeAt passes through the Agent's scheduled auto-resume time (RFC3339,
 	// present only while state == "limited"). Dropped, the Console's chip can only say it
 	// is waiting for the limit to lift and not when work will resume. No DB-mirror column
@@ -880,6 +915,10 @@ type sessionWire struct {
 	// carries a lineage too). The Console's "don't notify when a child session is waiting for
 	// input" setting reads it; absent here that setting silently does nothing.
 	Origin string `json:"origin,omitempty"`
+	// InboxOrigin: the inbox item a session was launched from and its sender (ADR 0111
+	// decision 3). Filled from the CP's own record (applyInboxOrigins), never relayed from the
+	// workspace; the Console's provenance badge reads it.
+	InboxOrigin json.RawMessage `json:"inboxOrigin,omitempty"`
 	// GeneratedImages / GeneratedImagesPath: how many images this session has generated and
 	// the folder holding them, browse-root relative (ADR 0080 decision 8). They are what the
 	// Console's "Generated images (N)" entry turns on, so a gap here does not degrade the
@@ -901,6 +940,12 @@ type sessionWire struct {
 	// while it is pending. No DB-mirror column: a delivery only happens in a running
 	// Workspace, and the Agent turns a pending it can no longer finish into unknown on start.
 	InitialPromptState string `json:"initialPromptState,omitempty"`
+	// Moving / MovedTo: the session this one is being moved to, or was moved to (ADR 0115
+	// decision 11.7). Dropped here, a moved source's row cannot say where the conversation
+	// went or offer "resume here anyway", and a pending move offers neither retry nor cancel.
+	// No DB-mirror column: every action on them needs the running Agent.
+	Moving  string `json:"moving,omitempty"`
+	MovedTo string `json:"movedTo,omitempty"`
 }
 
 func fmtStarted(createdAt string) string {
@@ -931,7 +976,7 @@ func (a workspaceAPI) sessionsPayload(ctx context.Context, res *resolved) map[st
 				})
 			}
 			_ = a.mgr.store.ReplaceSessions(ctx, res.ws.ID, rows)
-			return map[string]any{"sessions": list}
+			return map[string]any{"sessions": a.applyInboxOrigins(ctx, res.mv, list)}
 		}
 		// Agent unreachable (e.g. mid-start): fall through to the DB mirror.
 	}
@@ -954,7 +999,7 @@ func (a workspaceAPI) sessionsPayload(ctx context.Context, res *resolved) map[st
 			Resumable: true,
 		})
 	}
-	return map[string]any{"sessions": out}
+	return map[string]any{"sessions": a.applyInboxOrigins(ctx, res.mv, out)}
 }
 
 func (a workspaceAPI) sessionsList(w http.ResponseWriter, r *http.Request, res *resolved) {
@@ -964,11 +1009,60 @@ func (a workspaceAPI) sessionsList(w http.ResponseWriter, r *http.Request, res *
 // sessionCreate enforces the per-user session quota (docs/16 P3-4) then
 // proxies POST /api/sessions to the Agent.
 func (a workspaceAPI) sessionCreate(w http.ResponseWriter, r *http.Request, res *resolved) {
+	take, aerr := takeHandoffFence(r)
+	if aerr != nil {
+		writeAPIErr(w, aerr)
+		return
+	}
+	if take == nil {
+		a.sessionCreateThen(w, r, res, nil)
+		return
+	}
+	confirmed := false
+	var snap store.SessionHandoffOffer
+	tw := &teeWriter{ResponseWriter: w}
+	a.sessionCreateThen(tw, r, res, func(ctx context.Context) *apiError {
+		// Confirm, then reserve: the confirm is the atomic claim that this take sends its one
+		// create, so a resend under a used take never reaches the Agent, not even to reserve
+		// (a reservation there would vouch for a key an older Agent created under).
+		if aerr := confirmHandoffTake(ctx, a.mgr.store, res.mv, *take); aerr != nil {
+			return aerr
+		}
+		// What the late report falls back on if the offer is deleted before the Agent answers.
+		snap = store.SessionHandoffOffer{ID: take.OfferID, RecipientMembershipID: res.mv.MembershipID}
+		if o, ok, err := a.mgr.store.GetSessionHandoffOffer(ctx, take.OfferID); err == nil && ok {
+			snap = o
+		}
+		if aerr := reserveHandoffCreate(ctx, res, *take); aerr != nil {
+			// No create was sent under the take, so it goes back.
+			if _, err := a.mgr.store.ReleaseSessionHandoffOffer(context.WithoutCancel(ctx), take.OfferID, res.mv.MembershipID, take.Token); err != nil {
+				log.Printf("handoff: offer %s: releasing the take after a failed reserve: %v", take.OfferID, err)
+			}
+			return aerr
+		}
+		confirmed = true
+		return nil
+	})
+	if confirmed {
+		settleHandoffCreate(r.Context(), a.mgr, res, *take, snap, tw.status, tw.Header(), tw.buf)
+	}
+}
+
+// sessionCreateThen is sessionCreate with one last check, run once the workspace is ready and
+// the quota has passed, immediately before the Agent is asked. A non-nil answer is written
+// instead and the Agent is not called. The inbox's request launch confirms its claim there
+// (inbox_launch.go): any earlier, and a workspace start can outlast the claim.
+func (a workspaceAPI) sessionCreateThen(w http.ResponseWriter, r *http.Request, res *resolved, before func(context.Context) *apiError) {
 	ctx := r.Context()
 	// SSM sessions (docs/log/p3-ssm-session.md): resolve the host bookmark
 	// server-side and rewrite the body with the (non-secret) instance/document/SSO
 	// coordinates before proxying — the client only sends ssm_host_id.
 	if aerr := a.rewriteSSMCreate(ctx, res, r); aerr != nil {
+		writeAPIErr(w, aerr)
+		return
+	}
+	origin, aerr := a.stampInboxOrigin(ctx, res, r)
+	if aerr != nil {
 		writeAPIErr(w, aerr)
 		return
 	}
@@ -984,7 +1078,22 @@ func (a workspaceAPI) sessionCreate(w http.ResponseWriter, r *http.Request, res 
 		writeAPIErr(w, aerr)
 		return
 	}
-	a.proxy.rest(w, r, res)
+	if before != nil {
+		if aerr := before(ctx); aerr != nil {
+			writeAPIErr(w, aerr)
+			return
+		}
+	}
+	// A request launch records its provenance with the request's session record
+	// (FinishInboxLaunch), on the normal answer and on a recovered one alike; here only a
+	// launch seeded from a taken-in memo is recorded.
+	if _, fromRequest := ctx.Value(inboxOriginKey{}).(inboxOriginRef); origin == nil || fromRequest {
+		a.proxy.rest(w, r, res)
+		return
+	}
+	tw := &teeWriter{ResponseWriter: w}
+	a.proxy.rest(tw, r, res)
+	a.recordInboxOrigin(ctx, res, origin, tw)
 }
 
 // sessionFork forks a session's conversation into a new one (POST
@@ -1085,10 +1194,17 @@ func (a workspaceAPI) ssmInstances(w http.ResponseWriter, r *http.Request, res *
 			return
 		}
 	}
-	body, _ := json.Marshal(map[string]string{
-		"Profile": ssmProfileName(p.Label), "Region": p.Region, "StartURL": p.StartURL,
-		"SSORegion": p.SSORegion, "AccountID": p.AccountID, "RoleName": p.RoleName,
-	})
+	src, aerr := ssmLoginSource(r.Context(), a.mgr.store, p)
+	if aerr != nil {
+		writeAPIErr(w, aerr)
+		return
+	}
+	req := map[string]any{
+		"Profile": ssmProfileName(p.Label), "Region": ssmProfileRegion(p, src), "StartURL": src.StartURL,
+		"SSORegion": src.SSORegion, "AccountID": src.AccountID, "RoleName": src.RoleName,
+	}
+	ssmChainJSON(p, src, req, [5]string{"SourceProfile", "RoleARN", "ExternalID", "RoleSessionName", "DurationSeconds"})
+	body, _ := json.Marshal(req)
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))
 	r.Header.Set("Content-Length", strconv.Itoa(len(body)))

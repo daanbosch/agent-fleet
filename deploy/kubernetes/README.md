@@ -9,7 +9,7 @@ file refer to it.
 > **Preview.** This runtime profile is a preview: accepted on a GKE Standard cluster, not yet
 > supported for production. Known limits: no browser features on this runtime (below), and the
 > regional SSD quota on GKE ("Disk quota (GKE)" under Preconditions). Still being measured: the
-> bill ("The bill"), and the load balancer's 24-hour WebSocket cut ("7. The load balancer").
+> load balancer's 24-hour WebSocket cut ("7. The load balancer"). What it costs is "The bill".
 > The rest of the acceptance run is tracked in issue #1468.
 
 | Path | What it is |
@@ -19,7 +19,7 @@ file refer to it.
 | `components/gke/` | What GKE adds: the Cloud SQL Auth Proxy sidecar, Workload Identity, the workspace node pool, the global external Application Load Balancer (Gateway API) and the CP namespace's ingress policy |
 | `overlays/gke/` | The overlay to copy for a GKE deployment |
 | `overlays/generic/` | The overlay to copy for any other cluster |
-| [`../gcp/gke/`](../gcp/gke/) | Terraform for everything around a GKE cluster |
+| [`../gcp/gke/`](https://github.com/k-k1/agent-fleet/tree/develop/deploy/gcp/gke) | Terraform for everything around a GKE cluster |
 
 > **No browser features on this runtime.** Chromium's sandbox cannot start in a workspace pod
 > (Pod Security `restricted`: NoNewPrivs stops the setuid helper, RuntimeDefault seccomp refuses
@@ -217,21 +217,75 @@ Do the same in every new shell before the procedures under "Operating it".
 ### 4. The database, once
 
 The CP's database user is an IAM user with no password and, at first, no rights. Give it the
-database, as the built-in `postgres` user, through a Cloud SQL Auth Proxy:
+database, as the built-in `postgres` user, from a temporary pod inside the cluster:
 
 ```bash
 gcloud sql users set-password postgres --instance "$PREFIX-pg" --project "$PROJECT" --prompt-for-password
 DBUSER="$($TF output -raw cp_database_user)"
-cloud-sql-proxy --private-ip "$($TF output -raw cloud_sql_instance)" &   # from inside the VPC
-psql "host=127.0.0.1 user=postgres dbname=agentfleet" <<SQL
-GRANT "$DBUSER" TO postgres;
-ALTER DATABASE agentfleet OWNER TO "$DBUSER";
-ALTER SCHEMA public OWNER TO "$DBUSER";
-SQL
+DBHOST="$(gcloud sql instances describe "$PREFIX-pg" --project "$PROJECT" --format='value(ipAddresses[0].ipAddress)')"
+# The statements to paste into psql below (the pod knows nothing of $DBUSER):
+echo "GRANT \"$DBUSER\" TO postgres; ALTER DATABASE agentfleet OWNER TO \"$DBUSER\"; ALTER SCHEMA public OWNER TO \"$DBUSER\";"
+# The CP namespace does not exist yet (step 6 creates it); `default` does.
+kubectl -n default run psql-grant -it --rm --restart=Never --image=postgres:17-alpine \
+  --override-type=strategic \
+  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":70,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"psql-grant","securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' \
+  -- psql "host=$DBHOST user=postgres dbname=agentfleet sslmode=require" -W
 ```
 
-The instance has no public IP, so the proxy runs from a machine in the VPC (a short-lived VM,
-or Cloud Shell with a VPC connection). Keep the `postgres` password in your vault, not here.
+At the `Password:` prompt type the postgres password, paste the printed statements at the `psql`
+prompt and expect `GRANT ROLE`, `ALTER DATABASE` and `ALTER SCHEMA` back; any `ERROR` means the
+grant is not done. Then `\q`. (Interactive `psql` does not exit on a SQL error, so read the
+replies.) The password goes to `psql` over the pod's terminal only: it is in no command
+line, pod spec or API object. The pod is removed on exit (`--rm`); if the session dropped, delete
+it with `kubectl -n default delete pod psql-grant`.
+
+**Without a tty (a script, CI, an agent's shell).** `-it` and `-W` need a terminal, so the
+command above cannot run there. The alternative keeps the password out of argv and out of the
+pod spec by reading it from a Secret: store the password in a temporary Secret, run a
+non-interactive pod that takes `PGPASSWORD` from it and the statements from `-c`, then delete
+both. The variant below is **not verified as written**; only the interactive pod above has been
+run.
+
+```bash
+PWDIR="$(mktemp -d)"; chmod 700 "$PWDIR"
+cleanup() {
+  rm -rf "$PWDIR"                                   # the local copy first: it needs no API
+  kubectl -n default delete pod psql-grant --ignore-not-found --wait=false --request-timeout=30s \
+    || echo "could not delete pod psql-grant: delete it by hand"
+  kubectl -n default delete secret psql-grant-pw --ignore-not-found --request-timeout=30s \
+    || echo "WARNING: secret psql-grant-pw may remain (it holds the postgres password): delete it by hand"
+}
+trap cleanup EXIT                                   # runs under `set -e` too
+read -rs -p 'postgres password: ' PGPW; echo        # or read it from your vault
+printf '%s' "$PGPW" > "$PWDIR/PGPASSWORD"; unset PGPW   # printf is a builtin: not in any argv
+kubectl -n default create secret generic psql-grant-pw --from-file=PGPASSWORD="$PWDIR/PGPASSWORD"
+kubectl -n default run psql-grant --restart=Never --image=postgres:17-alpine \
+  --override-type=strategic \
+  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":70,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"psql-grant","securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},"env":[{"name":"PGPASSWORD","valueFrom":{"secretKeyRef":{"name":"psql-grant-pw","key":"PGPASSWORD"}}}]}]}}' \
+  -- psql -v ON_ERROR_STOP=1 "host=$DBHOST user=postgres dbname=agentfleet sslmode=require" \
+  -c "GRANT \"$DBUSER\" TO postgres; ALTER DATABASE agentfleet OWNER TO \"$DBUSER\"; ALTER SCHEMA public OWNER TO \"$DBUSER\";"
+kubectl -n default wait --for=jsonpath='{.status.phase}'=Succeeded pod/psql-grant --timeout=120s \
+  || echo "grant pod did not succeed"
+kubectl -n default logs psql-grant        # expect GRANT ROLE, ALTER DATABASE, ALTER SCHEMA
+```
+
+The `EXIT` trap removes the password file first, then tries each delete on its own, so one
+failing `kubectl delete` (expired login, no connection) does not skip the rest; if the Secret
+could not be deleted it says so and you delete it by hand. It runs even when `wait` times out
+or a command fails under `set -e`; the `|| echo` keeps `logs` reachable so the `ERROR` can be
+read before the trap fires. (The password file is a mode-700 directory's file on your machine
+for the length of the run; use a FIFO or your vault's own file mechanism if that is not
+acceptable.)
+
+If the pod ends `Failed`, `logs` shows the `ERROR` and the grant is not done. Afterwards set a
+new `postgres` password (`gcloud sql users set-password … --prompt-for-password`, or a random
+value you do not keep): the old one was in a Secret object for the length of the run.
+
+The instance has a private IP only, a workspace is outside the VPC, and `cloud-sql-proxy` is not
+installed there, so the grant runs from a pod on the cluster's nodes (a short-lived pod with a
+restricted security context, `postgres:17-alpine`). Keep the `postgres` password in your
+vault, not here. Only the working of a psql pod of this kind was confirmed on a real run; the exact
+command above (including `--override-type=strategic`) was not run as written.
 
 ### 5. The overlay
 
@@ -249,7 +303,20 @@ Then edit, in the copy:
 - `base/cp-data.yaml` asks 20 GiB for the CP's own disk; patch it in the copy if the internal
   git provider will hold more.
 
-Keep this copy in your own repository or vault, not in a working copy of this one.
+Keep this copy in your own repository or vault, not in a working copy of this one. Moved
+out of the clone, two things in `kustomization.yaml` must change:
+
+- **The paths.** `resources: ../../base` and `components: ../../components/gke` and
+  `../../components/params` are relative to `deploy/kubernetes/overlays/<name>/` inside this
+  repository and resolve to nothing elsewhere. Point them at the clone's `deploy/kubernetes/base`
+  and `deploy/kubernetes/components/…` with **relative** paths from your overlay: `kubectl
+  kustomize` rejects an absolute directory reference (`new root '…' cannot be absolute`). Check
+  with `kubectl kustomize <your overlay>` before applying. Rewriting them by hand is what a
+  stand-up outside the clone needed.
+- **`newName`.** The copied `images:` entry carries a placeholder `newName` (an Artifact
+  Registry path). With the public images (`ghcr.io/k-k1/agent-fleet/…`, step 1) delete the
+  `newName` line and keep `newTag`, so the name stays the public one; with your own Artifact
+  Registry repository set `newName` to it.
 
 ### 6. Secrets
 
@@ -267,8 +334,11 @@ kubectl -n "$PREFIX-cp" create secret generic af-cp-secrets \
 
 Until it exists the CP pod waits in `CreateContainerConfigError` and starts by itself once it
 does. Generate `AF_MASTER_KEY` with `head -c 32 /dev/urandom | base64`, as for compose
-([deploy/compose/README.md](../compose/README.md)), and keep its only other copy in your vault
-(P14). Other sign-in secrets (`AF_OIDC_<ID>_CLIENT_SECRET`, `GITHUB_OAUTH_CLIENT_SECRET`) go in
+([deploy/compose/README.md](../compose/README.md)), and keep it somewhere durable that
+outlives this cluster (for example Secret Manager or your vault), not only in the Kubernetes
+Secret or a file on your machine (P14). It is needed again whenever the CP is recreated — a
+new cluster, or `af-cp-secrets` deleted — and a different key cannot read what the old one
+encrypted. Other sign-in secrets (`AF_OIDC_<ID>_CLIENT_SECRET`, `GITHUB_OAUTH_CLIENT_SECRET`) go in
 the same Secret; rotate one with `kubectl create secret … --dry-run=client -o yaml | kubectl
 apply -f -` and `kubectl -n "$PREFIX-cp" rollout restart deployment/af-cp`.
 
@@ -312,6 +382,19 @@ kubectl -n "$PREFIX-cp" get pvc af-cp-data    # Bound
 kubectl -n "$PREFIX-cp" get gateway af-cp     # PROGRAMMED True, ADDRESS = lb_address
 curl -sS https://<fqdn>/readyz
 ```
+
+**Wait for the Gateway to be `PROGRAMMED True` before judging `/readyz`.** A rollout that is
+done does not mean the load balancer is: on a second stand-up it took about 5 more minutes
+after the CP was ready before `/readyz` returned 200, and `curl` printed `000` (no connection)
+in the meantime, although DNS already pointed at the new address. Poll the Gateway, then
+retry the request:
+
+```bash
+kubectl -n "$PREFIX-cp" wait --for=condition=Programmed gateway/af-cp --timeout=15m
+```
+
+The `wait` command is **not verified as written** (the observation above is from the
+`get gateway` column); `kubectl -n "$PREFIX-cp" get gateway af-cp -w` shows the same state.
 
 What the CP's account may do — every line must answer as shown:
 
@@ -891,14 +974,56 @@ container logs, and every pod's `/tmp` and ephemeral storage. Container logs are
 checked periodically, not enforced as it is written, so a fast writer can still fill the disk
 before it is evicted — the disk-pressure alert above is what tells you.
 
+### Pausing
+
+An idle deployment can sleep with its data kept. `deploy/gcp/gke/pause.sh` does it in the order
+that matters, in a shell whose kubectl points at this cluster (step 3):
+
+```bash
+deploy/gcp/gke/pause.sh --project "$PROJECT" --location "$REGION" --prefix "$PREFIX" --status
+deploy/gcp/gke/pause.sh --project "$PROJECT" --location "$REGION" --prefix "$PREFIX" --yes
+deploy/gcp/gke/pause.sh --project "$PROJECT" --location "$REGION" --prefix "$PREFIX" --up
+```
+
+`--location` is the cluster's zone for a zonal cluster (`zonal_cluster = true`). Down: the CP to
+0 replicas, the workspace pods gone, the workspace pool to 0 nodes, the system pool to 0, Cloud SQL
+stopped (activation policy `NEVER`; unlike RDS it does not restart itself after 7 days). `--up`
+reverses it: Cloud SQL, system pool, workspace pool autoscaling, CP (`--up` starts at once, with
+no `--yes`). Without `--yes` a pause prints the plan; `--dry-run` echoes every write. It stops
+before any write when a read fails, or when the kubectl context's server and CA are not this
+cluster's (so `get-credentials` first; a DNS-endpoint context is refused). A running workspace makes it refuse; `--stop-workspaces`
+scales them to 0 (their sessions end), `--keep-db` leaves Cloud SQL running.
+
+- The workspace pool has no taint: with the system pool at 0 the autoscaler would start a
+  workspace node for kube-system's pending pods. The script therefore switches that pool's
+  autoscaling off and resizes it to 0 itself. `terraform plan` shows the pool's autoscaling and
+  the system pool's size as drift while paused; `--up` closes it.
+- The node counts (per zone) are read from the pools' instance groups and kept in one annotation
+  step on the CP namespace (`agent-fleet.io/pause-*`); an existing record is never overwritten, so
+  pausing again after an interruption keeps the original sizes. `--up` restores them in full,
+  finishing a half-done resize, and removes the record once the CP is back. If the namespace was deleted,
+  `--up` needs `--system-nodes N` (and optionally `--workspace-min` / `--workspace-max`).
+- Still billing while paused, and only deletion stops them: the GKE management fee, the load
+  balancer's forwarding rule, the Private Service Connect endpoint, Cloud NAT and its reserved
+  address, persistent disks (every workspace's two claims, the CP's `af-cp-data`) and Cloud SQL
+  storage. Measured in [deploy/gcp/gke, "Cost"](../gcp/gke/README.md#cost).
+- Tested against stub `gcloud` / `kubectl` (`deploy/local/gke-pause-stub-test.sh`); it has not
+  yet been run on a real cluster.
+
 ### The bill
 
 Its shape follows [docs/build/09 §9.8](../../docs/build/09-deploy.md): a **floor** (the cluster
 management fee, the system pool, Cloud SQL, Cloud NAT and its address, the load balancer),
 **per-workspace capacity while running** (the workspace pool scales with the running
 workspaces), and **two persistent disks per workspace that bill while stopped**, as an EBS home
-does. A cluster you already run removes the cluster from the floor. The measured numbers come
-with the acceptance run (#1468).
+does. A cluster you already run removes the cluster from the floor.
+
+Measured on GKE with `deploy/gcp/gke`'s defaults (asia-northeast1, list prices): **~¥2,140/day
+running with no workspace, ~¥600/day paused, plus ~¥78 per workspace node-hour** — idle, roughly
+four times the ECS floor at ¥150 to the dollar, mostly from the high-availability choices. The
+table per item, the measurement conditions, what keeps billing while paused, and the levers are
+in
+[deploy/gcp/gke, "Cost"](https://github.com/k-k1/agent-fleet/blob/develop/deploy/gcp/gke/README.md#cost).
 
 ## The live harness
 
@@ -1040,6 +1165,46 @@ deployment:
    $TF destroy
    ```
 
+Three resources are set so the destroy does not trip over Google Cloud behaviour:
+
+- `google_sql_database.agentfleet` and `google_sql_user.cp` have `deletion_policy = "ABANDON"`.
+  The CP's database user owns the database it creates on first start, so Terraform cannot drop
+  either; both are removed with the Cloud SQL instance, and nothing is left of them.
+- `google_service_networking_connection.private_service_access` has
+  `deletion_policy = "REMOVE_PEERING"`: Service Networking keeps reporting the connection in use
+  for a long time after the instance is gone, and this removes the VPC peering from the network
+  instead, so the VPC delete is not blocked. (`ABANDON` would leave the peering in place and block
+  it.)
+
+`ABANDON` skips the API call whenever Terraform deletes the resource, not only in a full destroy.
+Removing the database or user from the configuration, destroying either alone, or renaming one
+(which replaces it) while the instance stays leaves the old database, its data and the old IAM
+database user in Cloud SQL, no longer managed by Terraform. To delete one on purpose, resolve its
+ownership and dependencies, set `deletion_policy = "DELETE"` and apply first, or clean up by hand
+(and `terraform import` if it should be managed again).
+
+A deployment created before these settings needs the `$TF apply` above to record them in state
+before `$TF destroy`. If the VPC delete is still refused because of the peering, delete it by hand
+and destroy again:
+`gcloud compute networks peerings delete servicenetworking-googleapis-com --network "$PREFIX-vpc" --project "$PROJECT"`.
+
+Things seen on a real teardown (one zonal cluster, small profile):
+
+- With the deletion policies above, the destroy skipped the database and user (0 s), removed the
+  Cloud SQL instance in about 2.5 minutes, and deleted the service networking connection, the
+  address range, the subnet and the VPC without the long stall and without a manual peering delete.
+- The first `$TF destroy` can fail once on `google_certificate_manager_certificate_map` ("already
+  being used by" a target HTTPS proxy). The Gateway controller removes that proxy asynchronously
+  after the cluster is gone; run `$TF destroy` again after a minute or so.
+- `kubectl delete -k` exits 1 with `NotFound` for the workspace namespace's network policies when
+  that namespace was deleted first. Nothing is left behind; it is harmless.
+- The KMS key ring and the key's name cannot be used again after a destroy: the key's versions
+  are only scheduled for destruction (30 days) and a key ring can never be deleted. Anyone who
+  re-creates a stack with the same `name_prefix` hits an "already exists" error on `kms.tf`; use
+  another prefix, or import the key ring and key into the new state.
+
 KMS keys are not deleted by Google Cloud, only their versions are scheduled for destruction. The
 snapshots of the CP's disk and the snapshot schedule outlive the destroy; delete them with
 `gcloud compute snapshots delete` and `gcloud compute resource-policies delete` once unwanted.
+Those are the only manual leftovers: the database and user go with the instance, and the reserved
+private-service-access address range is a Terraform resource that the destroy deletes.

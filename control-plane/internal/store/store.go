@@ -563,11 +563,26 @@ type EngineModelStore interface {
 // It maps to one ~/.aws named profile; `aws sso login` authenticates it. Personal
 // scope. NON-SECRET: the CP never sees AWS credentials — the in-container aws CLI logs
 // in directly against StartURL and caches the token in the workspace home.
+//
+// Kind is SSMKindSSO (the default; "" reads as it) or SSMKindAssumeRole: a profile with no
+// portal of its own that assumes RoleARN from the login of the sso profile SourceProfileID
+// (issue #1109). ExternalID, SessionName and DurationSeconds are its optional assume-role
+// parameters. Also non-secret. An assume-role profile's AccountID is derived from RoleARN
+// by the CP, never entered apart from it.
 type SSMProfile struct {
 	ID, MembershipID, Label                  string
 	StartURL, SSORegion, AccountID, RoleName string
 	Region, CreatedAt                        string
+	Kind, SourceProfileID, RoleARN           string
+	ExternalID, SessionName                  string
+	DurationSeconds                          int
 }
+
+// The values of SSMProfile.Kind.
+const (
+	SSMKindSSO        = "sso"
+	SSMKindAssumeRole = "assume_role"
+)
 
 // SSMHost is a per-member bookmark for one SSM Session Manager target: which instance,
 // which run-as SSM document, an optional region override, and which profile to
@@ -594,6 +609,10 @@ type Memo struct {
 	Attachments       string
 	Position          int
 	CreatedAt, SentAt string
+	// The inbox item this memo was taken in from and its sender (ADR 0111 decision 3), set
+	// by the CP at take-in and by nothing else: CreateMemo from a client leaves them empty,
+	// and UpdateMemo never writes them, so an edit cannot remove or forge an origin.
+	OriginItemID, OriginSenderMembershipID, OriginSenderKey string
 }
 
 // WorkItemQuery is one saved search that feeds the work item inbox (docs/log/80). af holds
@@ -908,6 +927,12 @@ type SessionHandoffOffer struct {
 	RepoRemote, Branch, HeadSha                                       string
 	SourceSessionName, SourceSessionKind                              string
 	Status, CreatedAt, ExpiresAt, DecidedAt, AcceptedSessionName      string
+	// TakenAt is set while the recipient holds the offer for a launch in progress
+	// (TakeSessionHandoffOffer), TakeConfirmedAt once that launch's create reached the Agent
+	// (ConfirmSessionHandoffTake). The take's token is read back only by
+	// ConfirmedSessionHandoffTake, for the CP to look its create up on the recipient's Agent;
+	// it never leaves the CP.
+	TakenAt, TakeConfirmedAt string
 }
 
 // GitRepo is one internal bare repository owned by a tenant (docs/reference/
@@ -960,8 +985,14 @@ type Store interface {
 	TenantGitOAuthStore
 	EngineAccessStore
 	TenantBranchRulesStore
+	PreviewTempPortStore
+	DevIdPStore
+	MemberUIStateStore
+	TenantMemberDefaultsStore
 	HomeOperationStore
 	CPLeaseStore
+	LimitBoardStore
+	InboxStore
 
 	// Ping backs GET /readyz. Not in a sub-interface: "is the database reachable"
 	// belongs to the store as a whole, not to a feature.
@@ -978,6 +1009,7 @@ type SessionShareStore interface {
 	DeleteSessionSharesByScope(ctx context.Context, ownerMembershipID, scopeType, scopeKey string) error
 	UpdateSessionSharePermission(ctx context.Context, id, ownerMembershipID, permission, updatedAt string) (bool, error)
 	ReplaceSharedSessionCatalog(ctx context.Context, workspaceID, ownerMembershipID string, rows []SharedSessionCatalog) error
+	ApplySharedSessionCatalogDelta(ctx context.Context, workspaceID, ownerMembershipID string, upserts []SharedSessionCatalog, deleted []string) error
 	GetSharedSessionCatalog(ctx context.Context, id string) (SharedSessionCatalog, bool, error)
 	ListSharedSessionCatalogByOwner(ctx context.Context, membershipID string) ([]SharedSessionCatalog, error)
 	CreateSessionShareProposal(ctx context.Context, row SessionShareProposal) error
@@ -996,6 +1028,14 @@ type SessionShareStore interface {
 	ListSessionHandoffOffersByOwner(ctx context.Context, membershipID string) ([]SessionHandoffOffer, error)
 	ListSessionHandoffOffersByRecipient(ctx context.Context, membershipID string) ([]SessionHandoffOffer, error)
 	TransitionSessionHandoffOffer(ctx context.Context, id, from, to, decidedAt, acceptedSessionName string) (bool, error)
+	TakeSessionHandoffOffer(ctx context.Context, id, recipientMembershipID, token, now string) (bool, error)
+	ConfirmSessionHandoffTake(ctx context.Context, id, recipientMembershipID, token, now string) (bool, error)
+	ReleaseSessionHandoffOffer(ctx context.Context, id, recipientMembershipID, token string) (bool, error)
+	ReleaseUnconfirmedSessionHandoffTake(ctx context.Context, id, recipientMembershipID, token string) (bool, error)
+	ConfirmedSessionHandoffTake(ctx context.Context, id, recipientMembershipID string) (string, bool, error)
+	GiveBackUnknownSessionHandoffTake(ctx context.Context, id, recipientMembershipID, token string, now time.Time) (bool, error)
+	ListReceivedSessionHandoffOffers(ctx context.Context, membershipID string) ([]ReceivedHandoffOffer, error)
+	AcceptSessionHandoffOffer(ctx context.Context, id, recipientMembershipID, token, decidedAt, acceptedSessionName string) (bool, error)
 	ExpireSessionHandoffOffers(ctx context.Context, now string) ([]SessionHandoffOffer, error)
 	AcquireSessionShareOwnerLease(ctx context.Context, ownerMembershipID, operationID, now, leaseUntil string) (bool, error)
 	RenewSessionShareOwnerLease(ctx context.Context, ownerMembershipID, operationID, now, leaseUntil string) (bool, error)
@@ -1128,8 +1168,11 @@ type TenantGitOAuth struct {
 	Source                 string
 	AppType, AppTypeBy     string
 	InstallURL             string
-	UpdatedBy              string
-	CreatedAt, UpdatedAt   string
+	// ScopeGroups is the comma-separated optional scope groups the administrator confirmed
+	// the app grants (migration 0100); "" is none.
+	ScopeGroups          string
+	UpdatedBy            string
+	CreatedAt, UpdatedAt string
 }
 
 // TenantGitOAuthStore is the per-tenant git provider OAuth app registry (docs/log/71).
@@ -1389,6 +1432,27 @@ type QuotaStore interface {
 type DEKStore interface {
 	GetWrappedDEK(ctx context.Context, workspaceID string) (ciphertext, keyRef string, ok bool, err error)
 	PutWrappedDEK(ctx context.Context, workspaceID, ciphertext, keyRef string) error
+	// GetHomeDEK reads the random key of a member's home (store_home_dek.go).
+	GetHomeDEK(ctx context.Context, membershipID string) (HomeDEK, bool, error)
+	// InsertHomeDEK stores d unless the home already has a key, and returns the key the home
+	// has afterwards, which is the other writer's when two raced.
+	InsertHomeDEK(ctx context.Context, d HomeDEK) (HomeDEK, error)
+	// ConfirmHomeDEK marks a migrating home 'random' once its Agent reported the store sealed
+	// under its key; false when the row is not the one read (key, scheme, confirm epoch).
+	ConfirmHomeDEK(ctx context.Context, read HomeDEK) (bool, error)
+	// RemigrateHomeDEK puts a confirmed home back to 'migrating', so the derived key is
+	// handed out beside its key again (a home restored from before its store moved).
+	RemigrateHomeDEK(ctx context.Context, membershipID string) (bool, error)
+	// CountHomeDEKs is the home_dek tally an operator checks the migration against.
+	CountHomeDEKs(ctx context.Context) (HomeDEKCounts, error)
+	// DeleteHomeDEK drops the key of a home proven gone for the holder of the membership's
+	// lifecycle lease; conditional on the lease, the row read, the 'random' scheme and no
+	// workspace row for the membership (store_home_dek.go).
+	DeleteHomeDEK(ctx context.Context, read HomeDEK, leaseToken string) (bool, error)
+	// ListOrphanHomeDEKs lists the keys no workspace row names, DeleteOrphanHomeDEK is the
+	// operator's removal of one (any scheme, still only while no workspace names it).
+	ListOrphanHomeDEKs(ctx context.Context) ([]OrphanHomeDEK, error)
+	DeleteOrphanHomeDEK(ctx context.Context, membershipID string) (bool, error)
 }
 
 // SessionIndexStore mirrors the Agent's session list: ReplaceSessions swaps the
@@ -1607,11 +1671,23 @@ type CloudCostStore interface {
 // member does not have.
 var ErrSSMProfileNotFound = errors.New("ssm profile not found")
 
+// ErrSSMSourceInvalid is Create/UpdateSSMProfile refusing an assume-role profile whose source is
+// not an sso profile of the same member: missing, someone else's, or itself an assume-role
+// profile, a chain the exported AWS config does not express.
+var ErrSSMSourceInvalid = errors.New("ssm profile source must be an sso profile of the same member")
+
 // SSMProfileInUseError is DeleteSSMProfile refusing a profile that hosts still reference.
 // Hosts lists them, ordered by alias, so the caller can name them.
-type SSMProfileInUseError struct{ Hosts []SSMHost }
+type SSMProfileInUseError struct {
+	Hosts []SSMHost
+	// Dependents are the assume-role profiles that take this one as their source (issue #1109).
+	Dependents []SSMProfile
+}
 
 func (e *SSMProfileInUseError) Error() string {
+	if len(e.Dependents) > 0 {
+		return fmt.Sprintf("ssm profile is used by %d host(s) and %d assume-role profile(s)", len(e.Hosts), len(e.Dependents))
+	}
 	return fmt.Sprintf("ssm profile is used by %d host(s)", len(e.Hosts))
 }
 
@@ -1695,6 +1771,10 @@ type NotificationStore interface {
 	SweepNotifications(ctx context.Context, retainBefore string) error
 	GetUsageNotificationState(ctx context.Context, membershipID, source, windowKey string) (UsageNotificationState, bool, error)
 	PutUsageNotificationState(ctx context.Context, state UsageNotificationState) error
+	// ApplyUsageObservation is the reset notification's whole read-decide-write for one post,
+	// in one transaction fenced by the source's login generation (store_limit_board.go).
+	ApplyUsageObservation(ctx context.Context, membershipID, source, epoch, epochSince string, windowKeys []string,
+		decide func(windowKey string, prev UsageNotificationState, found bool) (UsageNotificationState, *Notification)) (accepted bool, err error)
 }
 
 // ScheduleStore is the scheduled-execution definition store (docs/log/38 + ADR0021).

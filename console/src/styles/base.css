@@ -75,6 +75,13 @@ input[type="radio"] {
   accent-color: var(--accent);
 }
 
+/* Textareas stretch vertically only. The browser default (`both`) lets a drag to the
+   right push the field past its modal; component rules that say `resize: none` still
+   win, since any class selector outranks this one. */
+textarea {
+  resize: vertical;
+}
+
 /* Text utilities shared app-wide (old styles.css globals — the verbatim-ported
    components use them as-is). */
 .muted {

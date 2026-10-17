@@ -978,3 +978,235 @@ func TestFSFileGetMetaSharesErrorContract(t *testing.T) {
 		}
 	}
 }
+
+func TestFSFileMarksNestedGitRoot(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("AF_BROWSE_ROOT", root)
+	write := func(rel, content string) {
+		t.Helper()
+		full := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("repos/outer/.git", "gitdir: x") // the working copy's own root is not "nested"
+	write("repos/outer/CHANGELOG.md", "#1\n")
+	write("repos/outer/vendor/inner/.git", "gitdir: y") // a submodule: .git is a file
+	write("repos/outer/vendor/inner/CHANGELOG.md", "#2\n")
+	write("repos/outer/vendor/inner/docs/a.md", "#3\n")
+	write("repos/outer/vendor/plain/a.md", "#4\n")
+	write("notes/a.md", "#5\n")
+
+	for rel, want := range map[string]bool{
+		"repos/outer/CHANGELOG.md":              false,
+		"repos/outer/vendor/inner/CHANGELOG.md": true,
+		"repos/outer/vendor/inner/docs/a.md":    true,
+		"repos/outer/vendor/plain/a.md":         false,
+		"notes/a.md":                            false,
+	} {
+		rec := httptest.NewRecorder()
+		handleFSFile(rec, httptest.NewRequest(http.MethodGet, "/fs/file?path="+url.QueryEscape(rel), nil))
+		var got struct {
+			NestedRepo bool `json:"nestedRepo"`
+		}
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &got) != nil {
+			t.Fatalf("GET %q: status=%d body=%s", rel, rec.Code, rec.Body.String())
+		}
+		if got.NestedRepo != want {
+			t.Errorf("%s: nestedRepo=%v, want %v", rel, got.NestedRepo, want)
+		}
+	}
+}
+
+// The changed-files strip links to the agent memory a session wrote. Those files open
+// read-only; everything else under the same agent state (transcripts, credentials,
+// settings, codex's auth) stays refused, and the memory roots are not enumerable.
+func TestAgentMemoryFilesAreReadOnlyAndNothingElseOpens(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AF_BROWSE_ROOT", home)
+	claudeDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+
+	write := func(p, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	claudeMem := filepath.Join(claudeDir, "projects", "-home-dev-repos-x", "memory", "note.md")
+	write(claudeMem, "claude memory\n")
+	codexMem := filepath.Join(home, ".codex", "memories", "MEMORY.md")
+	write(codexMem, "codex memory\n")
+	refused := map[string]string{
+		"transcript":  filepath.Join(claudeDir, "projects", "-home-dev-repos-x", "abc.jsonl"),
+		"credentials": filepath.Join(claudeDir, ".credentials.json"),
+		"settings":    filepath.Join(claudeDir, "settings.json"),
+		"codex auth":  filepath.Join(home, ".codex", "auth.json"),
+		"codex git":   filepath.Join(home, ".codex", "memories", ".git", "config"),
+	}
+	for _, p := range refused {
+		write(p, "secret\n")
+	}
+
+	for _, c := range []struct{ query, want string }{
+		{claudeMem, "claude memory\n"},
+		{codexMem, "codex memory\n"},
+		{".codex/memories/MEMORY.md", "codex memory\n"}, // the strip's home-relative spelling
+	} {
+		rec := httptest.NewRecorder()
+		handleFSFile(rec, httptest.NewRequest(http.MethodGet, "/fs/file?path="+url.QueryEscape(c.query), nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s: status=%d body=%s", c.query, rec.Code, rec.Body.String())
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["content"] != c.want || payload["path"] != c.query || payload["editabilityReason"] != "read_only_root" {
+			t.Errorf("GET %s = %#v", c.query, payload)
+		}
+	}
+
+	for name, p := range refused {
+		rec := httptest.NewRecorder()
+		handleFSFile(rec, httptest.NewRequest(http.MethodGet, "/fs/file?path="+url.QueryEscape(p), nil))
+		if rec.Code == http.StatusOK {
+			t.Errorf("GET %s (%s) was served: body=%s", name, p, rec.Body.String())
+		}
+	}
+
+	put := doAgentFSPut(t, putJSONBody(".codex/memories/MEMORY.md", "new\n", fileRevision([]byte("codex memory\n"))), "application/json")
+	if put.Code != http.StatusForbidden || responseErrorCode(t, put) != errCodeFSDenied {
+		t.Errorf("PUT codex memory: status=%d body=%s", put.Code, put.Body.String())
+	}
+
+	for _, dir := range []string{filepath.Dir(claudeMem), filepath.Dir(codexMem)} {
+		tree := httptest.NewRecorder()
+		handleFSTree(tree, httptest.NewRequest(http.MethodGet, "/fs/tree?path="+url.QueryEscape(dir), nil))
+		if tree.Code == http.StatusOK {
+			t.Errorf("tree %s was listed: body=%s", dir, tree.Body.String())
+		}
+		search := httptest.NewRecorder()
+		handleFSSearch(search, httptest.NewRequest(http.MethodGet, "/fs/search?q=note&path="+url.QueryEscape(dir), nil))
+		if search.Code == http.StatusOK {
+			t.Errorf("search %s was served: body=%s", dir, search.Body.String())
+		}
+	}
+
+	link := filepath.Join(filepath.Dir(claudeMem), "linked.md")
+	if err := os.Symlink(refused["credentials"], link); err != nil {
+		t.Fatal(err)
+	}
+	sym := httptest.NewRecorder()
+	handleFSFile(sym, httptest.NewRequest(http.MethodGet, "/fs/file?path="+url.QueryEscape(link), nil))
+	if sym.Code != http.StatusBadRequest || responseErrorCode(t, sym) != errCodeFSSymlinkNotAllowed {
+		t.Errorf("GET symlink in memory: status=%d body=%s", sym.Code, sym.Body.String())
+	}
+}
+
+// A memory root that is a symlink is not trusted: ~/.codex/memories -> ~/.codex must not
+// turn codex's auth.json into readable "memory".
+func TestAgentMemorySymlinkedRootDoesNotExposeItsTarget(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AF_BROWSE_ROOT", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	codexHome := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(codexHome, filepath.Join(codexHome, "memories")); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		filepath.Join(codexHome, "auth.json"),
+		filepath.Join(codexHome, "memories", "auth.json"),
+		".codex/auth.json",
+		".codex/memories/auth.json",
+	} {
+		rec := httptest.NewRecorder()
+		handleFSFile(rec, httptest.NewRequest(http.MethodGet, "/fs/file?path="+url.QueryEscape(q), nil))
+		if rec.Code == http.StatusOK {
+			t.Errorf("GET %s was served: body=%s", q, rec.Body.String())
+		}
+	}
+}
+
+// Memory that already sits on a browsable path (a CLAUDE_CONFIG_DIR under home, outside the
+// denylist) keeps the ordinary browse treatment, so GET does not call it read-only while a
+// PUT to the same path succeeds.
+func TestAgentMemoryOnABrowsablePathStaysEditable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AF_BROWSE_ROOT", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude-state"))
+	rel := "claude-state/projects/-x/memory/note.md"
+	if err := os.MkdirAll(filepath.Join(home, filepath.Dir(rel)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, rel), []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{rel, filepath.Join(home, rel)} {
+		path, aerr := resolveFDReadPath(q)
+		if aerr != nil || !path.browseRoot || path.readOnly {
+			t.Errorf("resolveFDReadPath(%s) = %+v, %v; want the ordinary browse path", q, path, aerr)
+		}
+	}
+	rec := httptest.NewRecorder()
+	handleFSFile(rec, httptest.NewRequest(http.MethodGet, "/fs/file?path="+url.QueryEscape(rel), nil))
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK || payload["editable"] != true {
+		t.Errorf("GET %s: status=%d payload=%#v", rel, rec.Code, payload)
+	}
+}
+
+// A CLAUDE_CONFIG_DIR under home that links out of it puts a home-relative memory path in the
+// strip. The ordinary browse read refuses the symlink, so the memory root serves it instead,
+// and only the memory: the settings file behind the same link stays refused.
+func TestAgentMemoryThroughASymlinkedConfigDirUnderHome(t *testing.T) {
+	home, outside := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AF_BROWSE_ROOT", home)
+	if err := os.Symlink(outside, filepath.Join(home, "claude-state")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude-state"))
+	mem := filepath.Join(outside, "projects", "-x", "memory", "note.md")
+	if err := os.MkdirAll(filepath.Dir(mem), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mem, []byte("memory\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "settings.json"), []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{"claude-state/projects/-x/memory/note.md", filepath.Join(home, "claude-state/projects/-x/memory/note.md"), mem} {
+		rec := httptest.NewRecorder()
+		handleFSFile(rec, httptest.NewRequest(http.MethodGet, "/fs/file?path="+url.QueryEscape(q), nil))
+		var payload map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &payload)
+		if rec.Code != http.StatusOK || payload["content"] != "memory\n" || payload["editabilityReason"] != "read_only_root" {
+			t.Errorf("GET %s: status=%d body=%s", q, rec.Code, rec.Body.String())
+		}
+	}
+	rec := httptest.NewRecorder()
+	handleFSFile(rec, httptest.NewRequest(http.MethodGet, "/fs/file?path="+url.QueryEscape("claude-state/settings.json"), nil))
+	if rec.Code == http.StatusOK {
+		t.Errorf("settings behind the link was served: %s", rec.Body.String())
+	}
+}

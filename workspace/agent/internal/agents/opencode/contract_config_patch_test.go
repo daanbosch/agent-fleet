@@ -68,6 +68,7 @@ func servesProvider(t *testing.T, addr, id string) bool {
 }
 
 func TestContractConfigPatchAppliesWithoutARestart(t *testing.T) {
+	skipOnOpencode2(t, "PATCH /global/config does not exist in 2.x (PushEngineProviders answers ErrLiveConfigUnsupported there)")
 	home := t.TempDir()
 	cfg := filepath.Join(home, ".config", "opencode")
 	if err := os.MkdirAll(cfg, 0o700); err != nil {

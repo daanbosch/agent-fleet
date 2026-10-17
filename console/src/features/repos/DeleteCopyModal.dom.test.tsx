@@ -215,6 +215,21 @@ describe("作業コピー削除モーダル", () => {
     expect(sent()).toEqual(["POST api/sessions/s1/archive", "DELETE api/repos/app%40a"]);
   });
 
+  it("止めると要確認になる行にも停止のチェックを出し、入れても自動では選ばず、選べば force 付きで消す", async () => {
+    await render(node(repo("app@a", { ahead: 2 })), [sess("s1", "app@a", { alive: true })]);
+    expect(optBoxes()).toHaveLength(1);
+    await click(optBoxes()[0]);
+    // Work would go with it, so the user has to tick the row themselves.
+    expect(rowFor("app@a").disabled).toBe(false);
+    expect(rowFor("app@a").checked).toBe(false);
+    expect(document.querySelector(".wcdel-why")?.textContent).toBeTruthy();
+    await click(runButton());
+    expect(sent()).toEqual([]);
+    await click(rowFor("app@a"));
+    await click(runButton());
+    expect(sent()).toEqual(["POST api/sessions/s1/archive", "DELETE api/repos/app%40a?force=true"]);
+  });
+
   it("削除ロック中のセッションがいる行は、停止にチェックしても触らない", async () => {
     await render(node(repo("app@a")), [
       sess("s1", "app@a", { alive: true }),

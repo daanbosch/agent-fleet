@@ -52,6 +52,7 @@ import { DangerTab } from "./workspace/DangerTab.tsx";
 import { InternalReposTab } from "./workspace/InternalReposTab.tsx";
 import { BackupTab } from "./workspace/BackupTab.tsx";
 import { NotificationsTab } from "./personal/NotificationsTab.tsx";
+import { LimitBoardView } from "../limits/LimitBoardView.tsx";
 import { MemoryTab } from "./memory/MemoryTab.tsx";
 // The usage tab is a thin wrapper around the features/usage view, kept independent of the modal
 // so the same view can be promoted to a pane unchanged (docs/log/46 §5).
@@ -76,6 +77,9 @@ export const GROUPS: { key: string; label: string; items: [string, string][] }[]
       ["keys", "set.tab_keys"],
       ["tts", "set.tab_tts"],
       ["notifications", "set.tab_notifications"],
+      // The limit board (ADR 0111 decision 6): what the member publishes is a personal choice,
+      // made per tenant, so it sits with the personal settings rather than under the workspace.
+      ["limits", "limits.tab"],
       ["assistant", "set.tab_assistant"],
       // AI assist (docs/log/84). Next to the assistant because both are "settings that call an
       // LLM", but a different thing: one-shot generation in the session, mirror and File panes
@@ -148,7 +152,9 @@ export function SettingsDialog() {
   // Mobile drill-down: `entered` = viewing a section's content. Settings always opens
   // to the rail on a phone; the selected/remembered section only marks the active item.
   // Ignored by the desktop two-pane layout (CSS).
-  const [entered, setEntered] = useState(false);
+  // A request with a scroll target opens straight into its section: the target lives inside
+  // the detail view, and scrolling to an element under display:none does nothing.
+  const [entered, setEntered] = useState(() => useSettingsUI.getState().settingsTarget !== null);
   // A detail view gets its own history layer above Modal's close layer. Therefore the
   // first device/browser back returns to this list and the second closes the modal.
   useBackClose(() => setEntered(false), mobileMatches() && entered);
@@ -237,6 +243,7 @@ export function SettingsDialog() {
             {section === "instructions" && <InstructionsTab />}
             {section === "tts" && <TtsTab />}
             {section === "notifications" && <NotificationsTab />}
+            {section === "limits" && <LimitBoardView />}
             {section === "git" && <GitTab />}
             {section === "usage" && <UsageView />}
             {section === "cost" && costProfile?.available && <MyCloudCostView />}

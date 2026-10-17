@@ -15,6 +15,7 @@ import { SignInMethodRegister } from "../tenant/tenantSignInMethods.tsx";
 import { TenantScopeBody, tenantScopeGroups } from "../tenant/tenantScope.tsx";
 import { BrandAdminView } from "./adminBrand.tsx";
 import { EgressView } from "./adminEgress.tsx";
+import { DevIdpAdminView } from "./adminDevIdp.tsx";
 import { TtsAdminView } from "./adminTts.tsx";
 import { EnginesAdminView } from "./adminEngines.tsx";
 import { EngineTokensAdminView } from "./adminEngineTokens.tsx";
@@ -63,6 +64,9 @@ function rootGroups(opts: { pool: boolean; cost: boolean; engines: boolean }): R
         // works the same on every runtime, and it is the one item here that is about
         // telling this deployment from the next one.
         ["brand", "admin.mode_brand"],
+        // Whether members can use the development OIDC IdP (ADR 0116): deployment-wide, on by
+        // default, so it is listed unconditionally like the appearance item.
+        ["dev-idp", "admin.mode_dev_idp"],
         // Self-hosted inference (ADR 0071) is opt-in, and this item used to be hidden unless
         // the deployment actually ran an engine — an empty one would have read as "my engines
         // disappeared". 🔴 Since ADR 0072 decision 11 the panel has something to say with zero
@@ -245,6 +249,7 @@ export function AdminTab() {
     if (shownRootSection === "egress") return <EgressView />;
     if (shownRootSection === "tts") return <TtsAdminView />;
     if (shownRootSection === "brand") return <BrandAdminView />;
+    if (shownRootSection === "dev-idp") return <DevIdpAdminView />;
     if (shownRootSection === "engines" && hasEngines) return <EnginesAdminView />;
     if (shownRootSection === "engine-tokens" && hasEngines) return <EngineTokensAdminView />;
     if (shownRootSection === "pool" && hasPool) return <PoolView />;
@@ -300,6 +305,11 @@ export function AdminTab() {
         {warnings.includes("plaintext_secrets") && (
           <p className="admin-hint warn" role="alert">
             {tr("admin.deploy_warn_plaintext_secrets")}
+          </p>
+        )}
+        {warnings.includes("efs_backup_missing") && (
+          <p className="admin-hint warn" role="alert">
+            {tr("admin.deploy_warn_efs_backup_missing")}
           </p>
         )}
         <div className="admin">{body()}</div>

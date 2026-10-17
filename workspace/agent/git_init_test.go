@@ -148,3 +148,29 @@ func TestInitRepoRejectsBadName(t *testing.T) {
 		t.Errorf("a rejected name still created %d entries under ~/repos", len(entries))
 	}
 }
+
+// A read error on ~/repos other than "does not exist" must not be answered as an empty list: the
+// Console takes a 200 as the whole truth and would blank the rail.
+func TestListReposReadErrorIs5xx(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	get := func() *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		gitx.HandleListRepos(rec, httptest.NewRequest("GET", "/repos", nil))
+		return rec
+	}
+
+	// Missing root: still the genuine empty list.
+	if rec := get(); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"repos":[]`) {
+		t.Fatalf("missing ~/repos: status %d body %s, want 200 with an empty list", rec.Code, rec.Body.String())
+	}
+
+	// ~/repos is a file: ReadDir fails with ENOTDIR, which is not ErrNotExist.
+	if err := os.WriteFile(filepath.Join(home, "repos"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if rec := get(); rec.Code < 500 {
+		t.Fatalf("unreadable ~/repos: status %d body %s, want 5xx", rec.Code, rec.Body.String())
+	}
+}

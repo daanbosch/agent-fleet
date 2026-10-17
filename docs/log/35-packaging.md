@@ -394,7 +394,7 @@ GitHub API の license 表示で確認）:
 | copilot（@github/copilot） | `SEE LICENSE IN LICENSE.md` = プロプライエタリ（再配布許諾の明示なし。2026-07-21 確認） | **不可扱い** |
 | codex（@openai/codex） | Apache-2.0 | 可（NOTICE 帰属） |
 | opencode（opencode-ai） | MIT | 可（同上） |
-| rtk（rtk-ai/rtk） | Apache-2.0 | 可（同上） |
+| rtk（rtk-ai/rtk） | Apache-2.0（1.0.0 以降、既定 asset `rtk-*` は BUSL-1.1 のエンジンをリンクするため、Apache-2.0 のみの `rtk-oss-*` を取得する — #2114） | 可（同上） |
 | chromium / git / tmux / node / go / フォント / Debian ベース | 各種 OSS（BSD/GPL/ISC/OFL 等） | 可（GPL 系はソース入手手段の案内・帰属表示の義務 — NOTICE を P1 で整備） |
 
 帰結:

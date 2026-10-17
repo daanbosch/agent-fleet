@@ -8,7 +8,7 @@
 import { createPortal } from "react-dom";
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as RMouseEvent, DragEvent as RDragEvent, KeyboardEvent as RKeyboardEvent } from "react";
-import { api, uploadFiles, downloadURL, fsMkdir, fsNewFile, fsRename, fsDelete, fsSearch, isTransientErr } from "../../core/api/client.ts";
+import { api, uploadFiles, fsMkdir, fsNewFile, fsRename, fsDelete, fsSearch, isTransientErr } from "../../core/api/client.ts";
 import { useRetryLoad } from "../../lib/retryLoad.ts";
 import FileIcon, { DirIcon } from "../../ui/FileIcon.tsx";
 import { Icon } from "../../ui/Icon.tsx";
@@ -18,23 +18,24 @@ import { t, useT } from "../../lib/i18n/index.ts";
 import { useToast } from "../../ui/ToastProvider.tsx";
 import { placeFixed } from "../../lib/placeFixed.ts";
 import { useDismiss } from "../../lib/useDismiss.ts";
+import { useLongPressMenu } from "../../lib/useLongPressMenu.ts";
 import { useLayoutStore } from "../../layout/store.ts";
 import { activePane } from "../../layout/ops.ts";
 import { useWorkspaceStore } from "../../core/store/workspace.ts";
+import { useTenantStore } from "../../core/store/tenant.ts";
 import { useFilesStore } from "../files/store.ts";
 import { REVALIDATE_GAP_MS } from "../files/refreshPolicy.ts";
 import { MiddleEllipsis } from "../files/MiddleEllipsis.tsx";
 import { useReposStore } from "../repos/store.ts";
+import { openRepoLog } from "../scm/open.ts";
+import { splitRepoPath } from "../scm/svnLog.ts";
 import { useFilesFilter } from "./filesFilter.ts";
 import { normQuery } from "./filter.ts";
-import { useActiveWorkingSet, folderBase, autoAddToActiveWorkingSet } from "../../lib/workingSetsStore.ts";
+import { useActiveWorkingSet, folderBase } from "../../lib/workingSetsStore.ts";
 import { WorkingCopyLabel } from "./WorkingCopyLabel.tsx";
 import { isContextMenuKey, menuAnchor } from "./contextMenuKey.ts";
 import { stickyAncestors } from "./stickyTree.ts";
-import { chatCreate } from "../chat/api.ts";
-import { openChat } from "../chat/open.ts";
-import { openGallery } from "../gallery/open.ts";
-import { imageFormat } from "../../lib/filemeta.ts";
+import { PathMenuItems } from "./PathMenuItems.tsx";
 
 interface Entry {
   name: string;
@@ -152,6 +153,7 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
   const running = useWorkspaceStore((s) => s.state) === "running";
   const reveal = useFilesStore((s) => s.reveal);
   const filesTick = useFilesStore((s) => s.tick);
+  const tenant = useTenantStore((s) => s.tenant);
   const scopedRefresh = useFilesStore((s) => s.scoped);
   const q = useFilesFilter((s) => s.q);
   const nq = normQuery(q);
@@ -164,6 +166,9 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
   const askConfirm = useConfirm();
   const tr = useT();
   const toast = useToast();
+  // iOS never fires a native contextmenu on a long press of a row, and a folder row is the one
+  // that has the zip download in its menu (ADR 0111): the press opens the same menu.
+  const longPress = useLongPressMenu();
 
   const ac = activePane(layout)?.content;
   const activeFile = ac && ac.kind === "file" ? ac.filePath : "";
@@ -196,6 +201,11 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
   const revalidatingRef = useRef<Set<string>>(new Set());
+  // The tenant right now. Every read below that writes back after an await compares it with the
+  // tenant it started under: an answer from the previous tenant's workspace must not land in a
+  // cache the switch just emptied (fetchInto would then keep it over the new answer).
+  const tenantRef = useRef(tenant);
+  tenantRef.current = tenant;
   const mountedScopedRef = useRef(scopedRefresh.n);
   const lastAutoAtRef = useRef(0);
   // Rows that appeared in the last auto-refresh, held for FRESH_MS so the reader
@@ -206,40 +216,33 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
   const showFile = useCallback((p: string) => openTarget({ content: { kind: "file", filePath: p } }), [openTarget]);
   const showFileSplit = useCallback((p: string) => openTargetInNew({ content: { kind: "file", filePath: p } }), [openTargetInNew]);
 
-  // Open an ad-hoc assistant chat for a Files verb (docs/log/30 ②): translate / summarize
-  // the file with the verb persona baked in — no standing assistant. The Agent attaches
-  // the file's dir as knowledge and returns a seed prompt; openChat prefills the composer
-  // (never auto-sent — the user reviews and hits Enter).
-  const openVerbChat = useCallback(
-    async (filePath: string, verb: "translate" | "summarize") => {
-      try {
-        const title =
-          verb === "translate"
-            ? t("proj.verb_title.translate", { name: baseName(filePath) })
-            : t("proj.verb_title.summarize", { name: baseName(filePath) });
-        const c = await chatCreate("", title, { attachPath: filePath, seedVerb: verb });
-        if (c && c.id) {
-          autoAddToActiveWorkingSet("convs", c.id); // docs/log/52 §1
-          openChat(c.id, c.seed);
-        } else toast(t("send.chat_create_failed"));
-      } catch {
-        toast(t("send.chat_create_failed"));
-      }
-    },
-    [toast],
-  );
-
   // Load (mount / manual refresh via files tick): fetch the root folder's children
   // and re-fetch every currently-open dir, preserving expansion + selection.
   // Right after a WS start the agent is unreachable and fsList returns {error: http_5xx}
   // (fsList's .catch only takes real exceptions). A transient failure while running is retried
   // with backoff; while stopped the result is settled as empty, to avoid pointless polling.
+  // A tenant switch is a different workspace: its listing replaces the old one, and the old
+  // expansion, selection and cached dirs name paths that may not exist there.
+  const loadedTenantRef = useRef(tenant);
   useRetryLoad(async (signal) => {
+    const switched = loadedTenantRef.current !== tenant;
+    if (switched) {
+      loadedTenantRef.current = tenant;
+      setEntries(null);
+      setOpen(new Set());
+      setCache({});
+      setSelected(null);
+      setDropTarget(null);
+      setSearchRows(null);
+      setSearchTrunc(false);
+      setCollapsedRepos(new Set());
+      revalidatingRef.current = new Set(); // an old re-read of the same path must not block the new one
+    }
     const r = await fsList(root);
     if (signal.aborted) return true;
     if (isTransientErr(r) && running) return false; // WS agent still booting — retry
     setEntries(r.entries || []);
-    const opened = [...open];
+    const opened = switched ? [] : [...open];
     if (opened.length) {
       const pairs = await Promise.all(opened.map(async (p) => [p, (await fsList(p)).entries || []] as const));
       if (signal.aborted) return true;
@@ -250,7 +253,7 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
       });
     }
     return true;
-  }, [root, filesTick, running]);
+  }, [root, filesTick, running, tenant]);
 
   // Hold the rows that just appeared, then let them go. Each path keeps its own
   // timer so a second batch does not cut the first one's highlight short.
@@ -321,8 +324,11 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
       const inFlight = revalidatingRef.current;
       if (inFlight.has(path)) return;
       inFlight.add(path);
+      const started = tenantRef.current;
       void fsListFresh(path)
-        .then((e) => applyFresh([[path, e] as const]))
+        .then((e) => {
+          if (tenantRef.current === started) applyFresh([[path, e] as const]);
+        })
         .finally(() => inFlight.delete(path));
     },
     [applyFresh],
@@ -339,9 +345,10 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
         revalidate(path);
         return cache[path];
       }
+      const started = tenantRef.current;
       const d = await fsList(path);
       const e = d.entries || [];
-      setCache((c) => (c[path] ? c : { ...c, [path]: e }));
+      if (tenantRef.current === started) setCache((c) => (c[path] ? c : { ...c, [path]: e }));
       return e;
     },
     [cache, revalidate],
@@ -351,10 +358,12 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
   const expand = useCallback(
     async (path: string) => {
       const toOpen: string[] = [];
+      const started = tenantRef.current;
       let cur = path;
       for (let i = 0; i < 64; i++) {
         toOpen.push(cur);
         const e = await fetchInto(cur);
+        if (tenantRef.current !== started) return cur; // the paths belong to the previous tenant
         const child = soleChildDir(e);
         if (!child) break;
         cur = cur + "/" + child.name;
@@ -424,13 +433,14 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
   const runRefresh = useCallback(
     (targets: string[], withRoot: boolean) => {
       let alive = true;
+      const started = tenantRef.current;
       lastAutoAtRef.current = Date.now();
       void (async () => {
         const [rootFresh, pairs] = await Promise.all([
           withRoot ? fsListFresh(root) : Promise.resolve<Fresh>(null),
           Promise.all(targets.map(async (p) => [p, await fsListFresh(p)] as const)),
         ]);
-        if (!alive) return;
+        if (!alive || tenantRef.current !== started) return;
         if (Array.isArray(rootFresh)) {
           markFresh(addedPaths(entriesRef.current, rootFresh, root));
           setEntries((cur) => (sameEntries(cur ?? undefined, rootFresh) ? cur : rootFresh));
@@ -554,7 +564,7 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
       clearTimeout(t);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchMode, q, root, filesTick]);
+  }, [searchMode, q, root, filesTick, tenant]);
 
   // The rows actually shown / navigated: flat search hits in search mode, else
   // the (tree-)filtered rows — both scoped to the active working set (docs/log/52)
@@ -844,14 +854,21 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
 
   // --- upload (drag-drop) ---
   const refreshDir = useCallback(
-    async (dir: string) => {
+    // false: the tenant changed while it was reading, nothing was written and the caller must not
+    // go on to select or open a path of the previous tenant's workspace.
+    // `started` is the tenant the operation began under: it is captured by the caller, before the
+    // mutation's own await, so a switch during the mutation is caught too.
+    async (dir: string, started: string) => {
+      if (tenantRef.current !== started) return false;
       const d = await fsList(dir);
+      if (tenantRef.current !== started) return false;
       const e = d.entries || [];
       if (dir === root) setEntries(e);
       else {
         setCache((c) => ({ ...c, [dir]: e }));
         setOpen((s) => new Set(s).add(dir));
       }
+      return true;
     },
     [root],
   );
@@ -859,6 +876,7 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
     async (dir: string, fileList: FileList | null) => {
       const files = Array.from(fileList || []).filter((f) => f && f.name);
       if (!files.length) return;
+      const started = tenantRef.current;
       let res = await uploadFiles(dir, files);
       if (res.status === 409 && Array.isArray(res.conflicts) && (res.conflicts as string[]).length) {
         const ok = await askConfirm({
@@ -867,10 +885,11 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
           confirmLabel: t("proj.overwrite_confirm"),
           danger: true,
         });
+        if (tenantRef.current !== started) return; // never send the overwrite to another tenant's workspace
         if (ok) res = await uploadFiles(dir, files, { overwrite: true });
       }
       if (res.error) toast(t("proj.upload_failed", { msg: (res.error as { message?: string }).message || String(res.error) }));
-      await refreshDir(dir);
+      if (!(await refreshDir(dir, started))) return;
       setDropTarget(null);
     },
     [refreshDir, askConfirm, toast],
@@ -901,18 +920,20 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
     const name = window.prompt(t("proj.new_folder_prompt", { parent: baseName(parent) }), "");
     if (!name || !name.trim()) return;
     const p = joinPath(parent, name.trim());
+    const started = tenantRef.current;
     const res = await fsMkdir(p);
     if (res.error) return toast(t("proj.create_failed", { msg: (res.error as { message?: string }).message || String(res.error) }));
-    await refreshDir(parent);
+    if (!(await refreshDir(parent, started))) return;
     setSelected(p);
   };
   const newFile = async (parent: string) => {
     const name = window.prompt(t("proj.new_file_prompt", { parent: baseName(parent) }), "");
     if (!name || !name.trim()) return;
     const p = joinPath(parent, name.trim());
+    const started = tenantRef.current;
     const res = await fsNewFile(p);
     if (res.error) return toast(t("proj.create_failed", { msg: (res.error as { message?: string }).message || String(res.error) }));
-    await refreshDir(parent);
+    if (!(await refreshDir(parent, started))) return;
     setSelected(p);
     showFile(p);
   };
@@ -922,33 +943,26 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
     if (!name || !name.trim() || name.trim() === base) return;
     const parent = parentOf(row.path);
     const to = joinPath(parent, name.trim());
+    const started = tenantRef.current;
     const res = await fsRename(row.path, to);
     if (res.error) return toast(t("proj.rename_failed", { msg: (res.error as { message?: string }).message || String(res.error) }));
-    await refreshDir(parent);
+    if (!(await refreshDir(parent, started))) return;
     setSelected(to);
   };
   const deleteRow = async (row: Row) => {
+    const started = tenantRef.current;
     const ok = await askConfirm({
       title: t("proj.delete_title"),
       body: t("proj.delete_body", { path: row.path, dirNote: row.type === "dir" ? t("proj.delete_dir_note") : "" }),
       confirmLabel: t("common.delete_do"),
       danger: true,
     });
-    if (!ok) return;
+    if (!ok || tenantRef.current !== started) return; // the path names the previous tenant's file
     const res = await fsDelete(row.path);
     if (res.error) return toast(t("proj.delete_failed", { msg: (res.error as { message?: string }).message || String(res.error) }));
-    await refreshDir(parentOf(row.path));
+    if (!(await refreshDir(parentOf(row.path), started))) return;
     setSelected(parentOf(row.path) || null);
   };
-  const copyText = (text: string, label: string) => {
-    if (navigator.clipboard?.writeText)
-      navigator.clipboard.writeText(text).then(
-        () => toast(t("proj.copied", { label }), { kind: "success" }),
-        () => toast(t("common.copy_failed")),
-      );
-    else toast(t("common.copy_failed"));
-  };
-
   // Context menu: open at the cursor; close on outside click / Escape / blur.
   useDismiss(menuRef, !!menu, () => setMenu(null));
   useEffect(() => {
@@ -969,17 +983,10 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
     fn();
   };
   const menuDir = menu ? (menu.row.type === "dir" ? menu.row.path : parentOf(menu.row.path)) : root;
-  // "Open in gallery" is offered for a folder and for an image file — never for anything
-  // else, and `imageFormat` is the only thing allowed to decide that (ADR 0080 decision 3):
-  // a second extension table here would make a file the viewer shows as an image invisible
-  // in the gallery. A file row opens menuDir (already its parent) focused on itself.
-  const galleryRow = menu && (menu.row.type === "dir" || !!imageFormat(menu.row.path)) ? menu.row : null;
-  const openGalleryFromMenu = (e: RMouseEvent) => {
-    // Modifier / middle click lands in another pane, the same rule the tree rows follow.
-    const newPane = e.ctrlKey || e.metaKey || e.button === 1;
-    const focus = galleryRow?.type === "file" ? galleryRow.path : undefined;
-    runMenu(() => openGallery(menuDir, { focus, newPane }));
-  };
+  // Show log for a folder or file inside an SVN working copy (#1705): the path becomes the
+  // log's path filter. A row outside ~/repos, or in a git copy, offers nothing.
+  const menuRepoPath = menu ? splitRepoPath(menu.row.path) : null;
+  const svnLogTarget = menuRepoPath && repos.find((r) => r.name === menuRepoPath.repo)?.vcs === "svn" ? menuRepoPath : null;
 
   return (
     <div ref={wrapRef} className="proj-files fstree-wrap">
@@ -1088,6 +1095,7 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
               // the one place it reads whole.
               title={isDir ? r.path : r.path + "\n" + tr("proj.open_new_pane")}
               onClick={(e) => {
+                if (isDir && longPress.clickSwallowed()) return; // the lift of the press that opened the menu
                 if (!isDir && (e.ctrlKey || e.metaKey)) {
                   setSelected(r.path);
                   showFileSplit(r.path);
@@ -1098,8 +1106,10 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
               onContextMenu={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
+                if (isDir) longPress.onContextMenu(e);
                 setMenu({ x: e.clientX, y: e.clientY, row: r });
               }}
+              {...(isDir ? longPress.props((x, y) => setMenu({ x, y, row: r })) : {})}
               onDragOver={isDir ? onDragOverTo(r.path) : undefined}
               onDrop={isDir ? onDropTo(r.path) : undefined}
               {...(isDir ? {} : onAuxOpen(r.path))}
@@ -1175,61 +1185,25 @@ export function ProjectFiles({ root, markRepos, searchable, groupByRepo, seconda
                 <Icon name="new-folder" /> {tr("proj.new_folder")}
               </button>
             </li>
-            <li>
-              <button type="button" className="ui-menu-item" onClick={() => runMenu(() => copyText(baseName(menu.row.path), t("proj.name")))}>
-                <Icon name="copy" /> {tr("proj.copy_name")}
-              </button>
-            </li>
-            <li>
-              <button type="button" className="ui-menu-item" onClick={() => runMenu(() => copyText(menu.row.path, t("proj.rel_path")))}>
-                <Icon name="copy" /> {tr("proj.copy_rel_path")}
-              </button>
-            </li>
-            {galleryRow && (
-              <li>
-                <button
-                  type="button"
-                  className="ui-menu-item"
-                  onMouseDown={(e) => e.button === 1 && e.preventDefault()}
-                  onAuxClick={(e) => e.button === 1 && openGalleryFromMenu(e)}
-                  onClick={openGalleryFromMenu}
-                >
-                  <Icon name="file-media" /> {tr("proj.open_gallery")}
-                </button>
-              </li>
-            )}
-            {menu.row.type === "file" && (
-              <li>
-                <button
-                  type="button"
-                  className="ui-menu-item"
-                  onClick={() => runMenu(() => openTarget({ content: { kind: "read", filePath: menu.row.path } }))}
-                >
-                  <Icon name="book" /> {tr("proj.open_reader")}
-                </button>
-              </li>
-            )}
-            {menu.row.type === "file" && (
-              <li>
-                <a className="ui-menu-item files-ctx-a" href={downloadURL(menu.row.path)} download onClick={() => setMenu(null)}>
-                  <Icon name="cloud-download" /> {tr("proj.download")}
-                </a>
-              </li>
-            )}
-            {menu.row.type === "file" && (
-              <li>
-                <button type="button" className="ui-menu-item" onClick={() => runMenu(() => void openVerbChat(menu.row.path, "translate"))}>
-                  <Icon name="globe" /> {tr("proj.translate")}
-                </button>
-              </li>
-            )}
-            {menu.row.type === "file" && (
-              <li>
-                <button type="button" className="ui-menu-item" onClick={() => runMenu(() => void openVerbChat(menu.row.path, "summarize"))}>
-                  <Icon name="list-selection" /> {tr("proj.summarize")}
-                </button>
-              </li>
-            )}
+            <PathMenuItems
+              path={menu.row.path}
+              type={menu.row.type === "dir" ? "dir" : "file"}
+              runMenu={runMenu}
+              closeMenu={() => setMenu(null)}
+              afterCopy={
+                svnLogTarget && (
+                  <li>
+                    <button
+                      type="button"
+                      className="ui-menu-item"
+                      onClick={() => runMenu(() => openRepoLog(svnLogTarget.repo, svnLogTarget.sub))}
+                    >
+                      <Icon name="history" /> {tr("proj.svn_show_log")}
+                    </button>
+                  </li>
+                )
+              }
+            />
             <li>
               <button type="button" className="ui-menu-item" onClick={() => runMenu(() => void renameRow(menu.row))}>
                 <Icon name="edit" /> {tr("proj.rename")}

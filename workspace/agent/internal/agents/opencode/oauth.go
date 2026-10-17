@@ -102,7 +102,7 @@ var oauthProbe = func() (string, bool) {
 
 // oauthClient is the short-timeout HTTP client for control calls (same character as
 // serveClient).
-var oauthClient = &http.Client{Timeout: 15 * time.Second}
+var oauthClient = &http.Client{Timeout: 15 * time.Second, Transport: authTransport{}}
 
 // --- daemon calls -----------------------------------------------------------
 
@@ -272,7 +272,7 @@ func waitOAuthMethod(addr string, timeout time.Duration) error {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return errors.New("opencode serve の初期化が終わらず、アカウントのサインインを開始できませんでした（少し待って再試行してください）")
+			return errors.New("opencode serve の初期化が終わらず、アカウントのログインを開始できませんでした（少し待って再試行してください）")
 		}
 		time.Sleep(oauthReadyPoll)
 	}

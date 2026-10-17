@@ -17,6 +17,7 @@ import { autoGrowTextarea } from "../../lib/autoGrow.ts";
 import { prettyModel } from "../../lib/modelName.ts";
 import { MirrorToggle } from "./MirrorToggle.tsx";
 import { MirrorBanners } from "./parts/MirrorBanners.tsx";
+import { MoveLimitBanner } from "./parts/MoveLimitBanner.tsx";
 import { useMirrorTts } from "./parts/useMirrorTts.tsx";
 import { useMirrorScroll } from "./parts/useMirrorScroll.ts";
 import { useSkillPicker } from "./parts/useSkillPicker.ts";
@@ -63,6 +64,7 @@ import { MarkStrip } from "./transcript/MarkStrip.tsx";
 import { targetLang } from "./translate.ts";
 import { useTranslate } from "./useTranslate.ts";
 import { SessionLinkMenuHost } from "../sessions/SessionLinkMenu.tsx";
+import { PathLinkMenuHost } from "../viewer/PathLinkMenu.tsx";
 import { useMirrorState } from "./parts/useMirrorState.ts";
 import { useOlderHistory, useTranscriptPoll } from "./parts/useTranscriptPoll.ts";
 import { useMirrorActions } from "./parts/useMirrorActions.ts";
@@ -74,6 +76,7 @@ import { useFinalizeHold } from "./parts/useFinalizeHold.ts";
 import { useTranscriptCaps } from "./parts/useTranscriptCaps.ts";
 import { MirrorPendingCards } from "./parts/MirrorPendingCards.tsx";
 import { MirrorComposer } from "./parts/MirrorComposer.tsx";
+import { useSendQueue } from "./sendQueue/useSendQueue.ts";
 import { MirrorOverlays } from "./parts/MirrorOverlays.tsx";
 
 const q = encodeURIComponent;
@@ -91,10 +94,13 @@ export type { MirrorSignal } from "./parts/composerInput.ts";
 // not token-by-token. Prompts typed in the raw terminal DO appear (they're logged as
 // user turns), just at the next poll.
 export function MirrorView(props: Parameters<typeof MirrorViewBody>[0]) {
-  // Session slugs in the transcript open the session context menu (SessionLinkMenu.tsx).
+  // Session slugs in the transcript open the session context menu (SessionLinkMenu.tsx), file
+  // and folder links the path menu (PathLinkMenu.tsx).
   return (
     <SessionLinkMenuHost>
-      <MirrorViewBody {...props} />
+      <PathLinkMenuHost>
+        <MirrorViewBody {...props} />
+      </PathLinkMenuHost>
     </SessionLinkMenuHost>
   );
 }
@@ -163,7 +169,7 @@ function MirrorViewBody({
   const modSend = settings.mirrorSend !== "enter";
   const st = useMirrorState({ session, sessionMeta, settings });
   const {
-    turns, pendingSends, applyEchoes, loaded, handoffs, updateHandoff, termState, compactProg, status, bgBusy,
+    turns, pendingSends, applyEchoes, loaded, handoffs, updateHandoff, termState, compactProg, retry, status, bgBusy,
     bgBusyReason, finalizing, busy, tasks, files, queuedPrompts, pendingPeers, queueShown, discardView, alive,
     dirGone, pending, liveText, pendingPlan, pendingPerm, pendingApproval, carried, mode, agentCtx,
     suggestedTitle, titleActing, setManagedSettingsOpen, managedSettings, setForkAtTarget, draft, setDraft,
@@ -246,7 +252,7 @@ function MirrorViewBody({
   }, [turns, pending, pendingPlan, pendingPerm, pendingApproval, status, bgBusy, finalizing, pendingSends, queuedPrompts, liveText]);
 
 
-  const loadOlder = useOlderHistory({ session, st, scroll });
+  const loadOlder = useOlderHistory({ session, st, scroll, toast });
 
   // Auto-grow the composer to fit its content (up to ~10 lines via the CSS max-height,
   // then it scrolls). Runs on every draft change, including the per-session draft restored
@@ -299,6 +305,14 @@ function MirrorViewBody({
     composerLocked,
   });
 
+
+  // Pre-send queue (#1083): drains when the session is idle and nothing blocks a send.
+  const sendQueue = useSendQueue({
+    session,
+    busy: st.busy,
+    canSend: alive && !readOnly && !composerLocked && !st.sending && running,
+    sendItem: input.sendQueued,
+  });
 
   const plan = usePlanActions({
     session,
@@ -393,6 +407,7 @@ function MirrorViewBody({
     history,
     modSend,
     send,
+    queue: input.queueDraft,
     histSearch,
     skillPicker,
     suggest,
@@ -548,6 +563,7 @@ function MirrorViewBody({
         isPlan={isPlan}
         termState={termState}
         compactProg={compactProg}
+        retry={retry}
         suggestedTitle={suggestedTitle}
         titleActing={titleActing}
         onOpenTerminal={() => onToggleMirror(false)}
@@ -557,6 +573,11 @@ function MirrorViewBody({
         }}
         onAcceptTitle={acceptTitle}
         onDismissTitle={dismissTitle}
+      />
+      <MoveLimitBanner
+        session={sessionRow ?? sessionMeta}
+        state={status || sessionRow?.state || sessionMeta?.state}
+        running={running}
       />
 
       <div
@@ -573,6 +594,8 @@ function MirrorViewBody({
         // a wheel.
         onWheelCapture={scroll.endRestoreOnInput}
         onTouchStartCapture={scroll.endRestoreOnInput}
+        onPointerDownCapture={scroll.noteReaderInput}
+        onKeyDownCapture={scroll.noteReaderInput}
       >
         {/* Wrapper whose height == the transcript's total height, so a ResizeObserver can
             re-pin a bottom-stuck view to the true bottom as late content lays out — that's
@@ -732,6 +755,7 @@ function MirrorViewBody({
           suggest={suggest}
           skillPicker={skillPicker}
           histSearch={histSearch}
+          sendQueue={sendQueue}
         />
       )}
       <MirrorOverlays

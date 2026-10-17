@@ -34,6 +34,20 @@ const change = (over: Partial<FsChange> = {}): FsChange => ({
 });
 
 describe("joinChanges", () => {
+  it("keeps a memory row apart from an edit outside the working copy", () => {
+    const rows = joinChanges(
+      [
+        file({ path: "/c/projects/-x/memory/note.md", repo: undefined, rel: undefined, scope: "memory", memoryKind: "claude" }),
+        file({ path: ".bashrc", repo: undefined, rel: undefined }),
+      ],
+      [],
+    );
+    expect(rows.map((r) => [r.state, r.memoryKind])).toEqual([
+      ["memory", "claude"],
+      ["outside", undefined],
+    ]);
+  });
+
   it("joins on (repo, rel) rather than on path representations that disagree", () => {
     // /fs/changes always reports repos/<repo>/<rel>, while the transcript's path is relative to
     // the browse root (which AF_BROWSE_ROOT moves). They agree by default, so an implementation
@@ -191,6 +205,13 @@ describe("stateBadge", () => {
     expect(stateBadge("workdir").cls).toBe("st-muted");
     expect(stateBadge("workdir").label).not.toBe(stateBadge("outside").label);
     expect(stateBadge("unstaged").cls).toBe("st-mod");
+  });
+
+  it("names whose memory a memory row is, and falls back for a kind it does not know", () => {
+    expect(stateBadge("memory", "claude").label).toBe("mirror.files.st_memory_claude");
+    expect(stateBadge("memory", "codex").label).toBe("mirror.files.st_memory_codex");
+    expect(stateBadge("memory", "muse").label).toBe("mirror.files.st_memory");
+    expect(stateBadge("memory", "claude").label).not.toBe(stateBadge("outside").label);
   });
 
   it("styles committed differently from No diff (the same grey would erase what P2 means)", () => {

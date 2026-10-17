@@ -799,3 +799,6 @@
   border-radius: 6px;
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
 }
+/* A memo taken in from the member inbox (ADR 0111): whose text it started as. */
+.memo-origin { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); border: 1px solid var(--border2, var(--border)); border-radius: 9px; padding: 0 6px; margin-bottom: 2px; }
+.memo-origin-hint { color: var(--warn, var(--muted)); }

@@ -1,7 +1,7 @@
 // Repos store (zustand): working copies under ~/repos. Replaces the old
 // reposKey bump counter — sections call refresh() directly.
 import { create } from "zustand";
-import { api, isTransientErr } from "../../core/api/client.ts";
+import { api, getTenant, isTransientErr } from "../../core/api/client.ts";
 import { useWorkspaceStore, wsRunning } from "../../core/store/workspace.ts";
 
 // A working copy from GET /api/repos.
@@ -51,41 +51,74 @@ export interface Repo {
   };
 }
 
+/** Outcome of the last load: "loading" until the first answer (or after clear()), "ok" once a
+ * 2xx result carrying a repos array was committed, "unreachable" when the last attempt could
+ * not produce one (transient 5xx, dropped fetch, 4xx, a non-JSON body). */
+export type ReposLoadState = "loading" | "ok" | "unreachable";
+
 interface ReposStore {
   repos: Repo[];
-  /** Loads GET /api/repos. Resolves false when the load failed TRANSIENTLY — the CP's
-   * plain-text 502 while the workspace agent is still booting, or a dropped fetch — and
-   * leaves `repos` untouched: a 502 carries no repos, which is NOT the same as "there are
-   * no repos", and committing its empty body is what used to wedge the rail on the
-   * "no repositories" empty state. Resolves true once a real result is committed.
-   * A *stopped* workspace answers with the very same 502 (control-plane/proxy.go), so only
-   * a caller that knows the workspace state can tell "booting → retry" from "stopped →
-   * show empty"; see ProjectTree's useRetryLoad + clear(). */
+  loadState: ReposLoadState;
+  /** Loads GET /api/repos. Only a 2xx result whose `repos` is an array replaces the list; every
+   * other outcome leaves `repos` untouched and records loadState "unreachable", because "could
+   * not read the list" is not "there are no repos" — committing it is what used to drop the
+   * whole rail into the empty state and every session into "Other sessions".
+   * Resolves false when the failure is TRANSIENT (the CP's plain-text 502 while the agent is
+   * still booting, a 5xx, a dropped fetch) so the caller retries; true once the answer is
+   * terminal (a committed list, or a 4xx / non-JSON body that retrying will not change).
+   * A *stopped* workspace answers with the same 502 (control-plane/proxy.go), so only a caller
+   * that knows the workspace state can tell "booting" from "stopped". */
   refresh(): Promise<boolean>;
   /** Reflect a successful deletion-lock toggle before the next list refresh. */
   setLocked(name: string, locked: boolean): void;
-  /** Settle to empty. For a caller that knows the repos really are gone/unreachable
-   * (a stopped workspace), since refresh() alone never blanks the list. */
+  /** Forget the list and go back to "loading". For a tenant switch, where the rail's repos
+   * belong to the previous workspace; never for a failed load. */
   clear(): void;
 }
 
+// Bumped by every refresh() and by clear(). A response only counts when no later refresh
+// started (or clear ran) while it was in flight: refreshes run concurrently from the rail's
+// retry loop, the 60s poll, SSE and the SCM view, and a slow old failure must not overwrite the
+// outcome of a newer success (nor an old tenant's answer the new tenant's).
+let generation = 0;
+
 export const useReposStore = create<ReposStore>((set) => ({
   repos: [],
+  loadState: "loading",
   async refresh() {
-    let d: { repos?: Repo[] };
+    const tenant = getTenant();
+    const mine = ++generation;
+    let d: { repos?: unknown; error?: unknown };
     try {
       d = await api("api/repos");
     } catch {
-      return false; // network drop — transient; keep what the rail has.
+      // network drop — transient; keep what the rail has.
+      if (mine === generation && getTenant() === tenant) set({ loadState: "unreachable" });
+      return false;
     }
-    if (isTransientErr(d)) return false;
-    set({ repos: d.repos || [] });
+    // The answer describes the workspace of the tenant that was active when it was asked; one
+    // landing after a tenant switch would put the previous tenant's repos back on the rail.
+    if (getTenant() !== tenant || mine !== generation) return false;
+    if (isTransientErr(d)) {
+      set({ loadState: "unreachable" });
+      return false;
+    }
+    // A 4xx body carries `error`; an HTML page from an auth gateway resolves as {}. Neither is
+    // a list.
+    if (!d || d.error || !Array.isArray(d.repos)) {
+      set({ loadState: "unreachable" });
+      return true;
+    }
+    set({ repos: d.repos as Repo[], loadState: "ok" });
     return true;
   },
   setLocked(name, locked) {
     set((s) => ({ repos: s.repos.map((r) => (r.name === name ? { ...r, locked } : r)) }));
   },
-  clear: () => set({ repos: [] }),
+  clear: () => {
+    generation++;
+    set({ repos: [], loadState: "loading" });
+  },
 }));
 
 /** Reveal-a-repo-in-the-rail signal (mirrors useFilesStore.revealInFiles): the
@@ -163,7 +196,20 @@ interface LaunchSeedStore {
 	 *  suggestion (branchForItem), used when the Agent has no branch-name resolver; title, type
 	 *  and labels are what the resolver names the branch from (ADR 0103 decision 8). */
 	workItem: LaunchWorkItem | null;
+	/** The inbox request this launch comes from (ADR 0111); "" = none. The launch then goes
+	 *  through the CP's request launch, which checks that the caller is still the assignee
+	 *  before the session is created and records the session on the request. */
+	inboxItemId: string;
+	/** The memo taken in from the inbox this launch was seeded from (ADR 0111); "" = none. The
+	 *  Control Plane looks it up and stamps the session's provenance from the memo's origin. */
+	inboxMemoId: string;
 	set(p: string, title?: string, handoffSession?: string, handoffId?: string, handoffOfferId?: string, workItem?: LaunchWorkItem | null): void;
+	/** Runs once, after a launch seeded from this store has created its session (never on
+	 *  cancel). Gets the new session's name ("" when the launch did not report one). Dropped by set()/clear(), so a cancelled dialog leaves nothing behind. */
+	onLaunched: ((sessionName: string) => void) | null;
+	setOnLaunched(fn: ((sessionName: string) => void) | null): void;
+	setInboxItem(id: string): void;
+	setInboxMemo(id: string): void;
   clear(): void;
 }
 
@@ -174,9 +220,17 @@ export const useLaunchSeed = create<LaunchSeedStore>((set) => ({
 	handoffId: "",
 	handoffOfferId: "",
 	workItem: null,
+	inboxItemId: "",
+	inboxMemoId: "",
+	onLaunched: null,
+	setOnLaunched: (onLaunched) => set({ onLaunched }),
+	// set() drops inboxItemId: a seed left over from a cancelled inbox launch must not send an
+	// unrelated launch through the request route. The inbox calls setInboxItem after set().
 	set: (prompt, title = "", handoffSession = "", handoffId = "", handoffOfferId = "", workItem = null) =>
-		set({ prompt, title, handoffSession, handoffId, handoffOfferId, workItem }),
-	clear: () => set({ prompt: "", title: "", handoffSession: "", handoffId: "", handoffOfferId: "", workItem: null }),
+		set({ prompt, title, handoffSession, handoffId, handoffOfferId, workItem, inboxItemId: "", inboxMemoId: "", onLaunched: null }),
+	setInboxItem: (inboxItemId) => set({ inboxItemId }),
+	setInboxMemo: (inboxMemoId) => set({ inboxMemoId }),
+	clear: () => set({ prompt: "", title: "", handoffSession: "", handoffId: "", handoffOfferId: "", workItem: null, inboxItemId: "", inboxMemoId: "", onLaunched: null }),
 }));
 
 /** Poll every 60s while the tab is visible AND the workspace is running, so the

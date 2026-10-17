@@ -20,6 +20,7 @@ import { RepoRowConnected } from "../repos/RepoRowConnected.tsx";
 import { useRepoReveal } from "../repos/store.ts";
 import type { RepoRailContext } from "../repos/useRepoRail.ts";
 import type { Session } from "../../types/session.ts";
+import { displayName } from "../../lib/sessionview.ts";
 import { sessionsInFolder } from "../../lib/project.ts";
 import type { RepoTreeNode } from "../../lib/project.ts";
 import { usePersistedOpen } from "../../lib/usePersistedOpen.ts";
@@ -108,6 +109,13 @@ export function RepoNode({ node: n, depth, ctx, actions }: RepoNodeProps) {
   const unread =
     !open &&
     [...mine, ...below.flatMap((f) => sessionsInFolder(sessions, f))].some((s) => unreadSessions.has(s.name));
+  // A folded node summarises its own sessions on the repo row: the newest live one, else the
+  // newest stopped one (shown muted), plus the names of the other live ones for the badge tooltip.
+  // Own folder only — descendants stay behind the tally. `mine` is newest-first like the open
+  // list; filtering forces every node open, so the summary never competes with filtered rows.
+  const live = mine.filter((s) => s.alive);
+  const top = live[0] ?? mine[0];
+  const peek = !open && top ? { s: top, others: live.slice(1).map(displayName) } : undefined;
   // A root's header height sets where its worktrees' headers pin (project.css). Only roots:
   // deeper worktree headers do not pin, and a nested value would shadow the root's.
   const headRef = usePublishedHeight<HTMLDivElement>("--proj-base-head-h", depth === 0);
@@ -151,6 +159,7 @@ export function RepoNode({ node: n, depth, ctx, actions }: RepoNodeProps) {
             onToggle={openState.toggle}
             sess={{ alive: sessAlive, total: sessTotal }}
             unread={unread}
+            peek={peek}
             stoppedCount={stoppedMine.length}
             onArchiveStopped={() => void actions.archiveStopped(stoppedMine)}
           />

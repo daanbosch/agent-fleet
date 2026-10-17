@@ -3,7 +3,7 @@
 // account, role, who asks — always comes from GET /api/aws-login, which the Agent joins
 // with Settings. An id the Agent does not list shows nothing.
 import { create } from "zustand";
-import { api } from "../../core/api/client.ts";
+import { api, getTenant } from "../../core/api/client.ts";
 
 export interface AwsLoginWaiter {
   session?: string;
@@ -37,8 +37,14 @@ export interface AwsProfileState {
   label: string;
   accountId: string;
   roleName: string;
-  /** "signed_in" | "renew" | "none" — the Agent's reading of the profile's token cache. */
+  /**
+   * "signed_in" | "renew" | "none" — the Agent's reading of the profile's token cache; a
+   * role-chaining profile carries its source's. "source_unavailable": a chain whose source is
+   * missing or not exported, so there is no login to follow.
+   */
   state: string;
+  /** The Settings profile a role-chaining profile follows; absent on an SSO profile and from an older Agent. */
+  source?: string;
   /** The login's end when it cannot renew, RFC 3339 UTC; "" when no end is known. */
   expiresAt: string;
   expiring: boolean;
@@ -62,6 +68,8 @@ interface AwsLoginState {
   /** The request whose login modal is open, if any. */
   modal: string | null;
   refresh(): Promise<void>;
+  /** Back to the never-asked state: everything here describes the previous tenant's workspace. */
+  reset(): void;
   hide(id: string): void;
   open(id: string): void;
   close(): void;
@@ -93,10 +101,11 @@ interface AwsLoginState {
 
 /**
  * The Agent's answer to a logout. revoked is false when AWS could not be told (the workspace
- * is signed out all the same) or when there was no login to revoke (noToken).
+ * is signed out all the same), when there was no login to revoke (noToken), or when the session
+ * at AWS had already ended (alreadyEnded: AWS refused to renew the expired login).
  */
 export type AwsLogoutResult =
-  | { ok: true; revoked: boolean; noToken: boolean; message: string }
+  | { ok: true; revoked: boolean; alreadyEnded: boolean; noToken: boolean; message: string }
   | { ok: false; code: string; message: string };
 
 export const useAwsLoginStore = create<AwsLoginState>((set, get) => ({
@@ -104,6 +113,7 @@ export const useAwsLoginStore = create<AwsLoginState>((set, get) => ({
   hidden: {},
   modal: null,
   async refresh() {
+    const tenant = getTenant();
     let d: { requests?: AwsLoginRequest[]; error?: unknown } | null = null;
     try {
       d = await api("api/aws-login");
@@ -111,7 +121,11 @@ export const useAwsLoginStore = create<AwsLoginState>((set, get) => ({
       return; // a dropped connection proves nothing; the next poll asks again
     }
     if (!d || d.error || !Array.isArray(d.requests)) return;
+    if (getTenant() !== tenant) return; // asked under the previous tenant
     set({ requests: d.requests });
+  },
+  reset() {
+    set({ requests: [], hidden: {}, modal: null, profiles: null, expiring: [], hiddenExpiry: {}, profileModal: null });
   },
   hide(id) {
     set((s) => ({ hidden: { ...s.hidden, [id]: true } }));
@@ -127,6 +141,7 @@ export const useAwsLoginStore = create<AwsLoginState>((set, get) => ({
   hiddenExpiry: {},
   profileModal: null,
   async refreshExpiry() {
+    const tenant = getTenant();
     let d: { profiles?: unknown[]; error?: unknown } | null = null;
     try {
       d = await api("api/aws-login/profiles");
@@ -134,6 +149,7 @@ export const useAwsLoginStore = create<AwsLoginState>((set, get) => ({
       return null;
     }
     if (!d || d.error || !Array.isArray(d.profiles)) return null;
+    if (getTenant() !== tenant) return null; // asked under the previous tenant
     const profiles: AwsProfileState[] = [];
     for (const raw of d.profiles) {
       const p = raw as Record<string, unknown>;
@@ -144,6 +160,7 @@ export const useAwsLoginStore = create<AwsLoginState>((set, get) => ({
         accountId: String(p.accountId ?? ""),
         roleName: String(p.roleName ?? ""),
         state: String(p.state ?? ""),
+        source: typeof p.source === "string" ? p.source : "",
         expiresAt: typeof p.expiresAt === "string" ? p.expiresAt : "",
         expiring: p.expiring === true,
       });
@@ -175,7 +192,7 @@ export const useAwsLoginStore = create<AwsLoginState>((set, get) => ({
     // === true, not truthiness: a profile named "constructor" would read Object.prototype's.
     if (get().loggingOut[name] === true) return { ok: false, code: "busy", message: "" };
     set((s) => ({ loggingOut: { ...s.loggingOut, [name]: true } }));
-    let d: { revoked?: unknown; noToken?: unknown; message?: unknown; error?: { code?: string; message?: string } } | null;
+    let d: { revoked?: unknown; alreadyEnded?: unknown; noToken?: unknown; message?: unknown; error?: { code?: string; message?: string } } | null;
     try {
       d = await api(`api/aws-login/profiles/${encodeURIComponent(name)}/logout`, { method: "POST" });
     } catch (e) {
@@ -189,7 +206,7 @@ export const useAwsLoginStore = create<AwsLoginState>((set, get) => ({
     // Whatever the answer, the cache may have changed under the list.
     void get().refreshExpiry();
     if (!d || d.error) return { ok: false, code: d?.error?.code || "", message: d?.error?.message || "" };
-    return { ok: true, revoked: d.revoked === true, noToken: d.noToken === true, message: String(d.message ?? "") };
+    return { ok: true, revoked: d.revoked === true, alreadyEnded: d.alreadyEnded === true, noToken: d.noToken === true, message: String(d.message ?? "") };
   },
 }));
 

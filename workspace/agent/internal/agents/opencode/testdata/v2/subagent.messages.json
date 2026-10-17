@@ -1,0 +1,123 @@
+{
+ "data": [
+  {
+   "id": "msg_1377162b5001g0viKfNUULljzA",
+   "time": {
+    "created": 1791931540149
+   },
+   "type": "model-switched",
+   "model": {
+    "id": "m",
+    "providerID": "stub"
+   }
+  },
+  {
+   "id": "msg_13771670a001Di1AQsEZF3FEkG",
+   "time": {
+    "created": 1791931541291
+   },
+   "text": "go SUBAG",
+   "type": "user"
+  },
+  {
+   "id": "msg_13771673b001bQbH1TVwvylobw",
+   "time": {
+    "created": 1791931541341,
+    "streamed": 1791931541382,
+    "completed": 1791931541525
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "m",
+    "providerID": "stub",
+    "variant": "default"
+   },
+   "content": [
+    {
+     "type": "tool",
+     "id": "call_s",
+     "name": "subagent",
+     "executed": false,
+     "state": {
+      "status": "completed",
+      "input": {
+       "agent": "general",
+       "description": "do sub",
+       "prompt": "subagent task: say hi"
+      },
+      "content": [
+       {
+        "type": "text",
+        "text": "<subagent sessionID=\"ses_ec88e986fffe51smfnUwMapsAo\" state=\"completed\">\nworking ok:You are a subagent spawned by another se\n</subagent>"
+       }
+      ],
+      "metadata": {
+       "sessionID": "ses_ec88e986fffe51smfnUwMapsAo",
+       "status": "completed",
+       "truncated": false
+      }
+     },
+     "time": {
+      "created": 1791931541369,
+      "ran": 1791931541378,
+      "completed": 1791931541521
+     }
+    }
+   ],
+   "finish": "tool-calls",
+   "rawFinish": "tool_calls",
+   "cost": 0.00014,
+   "tokens": {
+    "input": 100,
+    "output": 20,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_137716828001OUHJrbsGHibJTi",
+   "time": {
+    "created": 1791931541563,
+    "streamed": 1791931541580,
+    "completed": 1791931541583
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "m",
+    "providerID": "stub",
+    "variant": "default"
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "working tool done"
+    }
+   ],
+   "finish": "stop",
+   "rawFinish": "stop",
+   "cost": 0.00014,
+   "tokens": {
+    "input": 100,
+    "output": 20,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_137716855001mko0FjHV65uygP",
+   "time": {
+    "created": 1791931541589
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  }
+ ]
+}

@@ -625,3 +625,42 @@ cursor の TUI 転写 JSONL は**存在しない**ことを確認済み（`find 
 `permission` の答えだけになる**（それも事実は残る）。逆に、**現状で最も静かに損をしているのは
 `plan` と `backgroundBusy` の 2 つ** — どちらも tier2 が止める側なのに、止めた事実を利用者に伝える
 経路が無い。
+
+## 75.12 Addendum (2026-10-07): bounding `machineBusy` for a frozen working row (#1818)
+
+`sessionActivity` treated `working` / `compacting` as busy without limit. It now consults the
+Agent's `progressAgeSec` (age of `progressAt` on the Workspace's clock; newest of status mtime, the
+kind's state source mtime, pane repaint, a live tool process): a busy row older than one hour is
+`unknown`, so tier 2 can stop the workspace. Reported only for Terminal claude / agy; managed and
+other kinds keep holding until a live signal is measured for them.
+`holdersOf` goes through the same `progressLapsed` predicate (decision 11); the pin and
+`backgroundBusy` come first and are exempt. See ADR 0055's 2026-10-07 addendum.
+Follow-ups: #1830.
+
+Note (2026-10-09): Terminal codex / cursor / copilot / kiro / opencode are now bounded too, on the
+pane repaint alone (measured through a 120 s silent tool; see ADR 0055's 2026-10-09 addendum).
+Still unbounded: Managed (#1942) and muse / lcpp / shell / ssm (#1943).
+Follow-ups: #1942, #1943.
+
+Note (2026-10-16): a carried plan can now be reviewed in another session (#2211). `Carried`
+keeps the plan file path (`planFile`) when promoted, because `status.Remove` drops the
+session's path record; `GET /sessions/{name}/plan-file` falls back to the carried plan,
+re-validating the path (symlinks resolved back into the plans dir) and otherwise snapshotting
+the text. The carried card shows a review button that sends nothing to the session (no modal
+is left). Once the reviewer session has been created the card is discarded (`discard` does
+not wake the session), so no reload or pane can approve a plan under review; a cancelled
+launch dialog leaves the card alone, and a failed discard is reported with the card's own
+Discard as the retry. The reviewer's peer message resumes the planner, which may no longer be
+in plan mode, so findings arrive as prose.
+
+Note (2026-10-16): "Review again in <reviewer>" (#2219, piece 1). The Console remembers which
+session reviewed a plan (localStorage, keyed by planner session + plan-file path, claude-written
+paths only) and, while that session still exists, offers a button beside "Review in another
+session" on the live and the carried plan card. It resumes a stopped reviewer, then sends a
+`question` peer message through `POST /input` (`peer_from` = the planner) carrying the unchanged
+path; the live card rejects the planner first, the carried card is discarded only after the send.
+No Agent or Control Plane change.
+Review round (2026-10-16): the follow-up carries a revision id (the Agent drops an identical body
+to the same target for 2 minutes), a press holds a per-card lock, a failed interrupt stops the
+send, a send that fails after the reject offers a retry in the toast, and the reviewer memory
+follows `storage` events and merges onto storage on write.

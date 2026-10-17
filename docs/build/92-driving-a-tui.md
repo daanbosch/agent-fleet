@@ -80,7 +80,12 @@ A typed prompt (`{prompt}`) is paced differently from key steps: the Agent types
 waits `inputSubmitDelay` — 20 ms for claude, 200 ms for the other kinds, overridable
 with `AGENT_INPUT_SUBMIT_DELAY_MS` — and then sends Enter. codex, opencode, copilot,
 cursor and kiro receive the prompt text as a bracketed paste (`load-buffer` +
-`paste-buffer -p`) rather than as `send-keys -l` (`typePromptText`).
+`paste-buffer -p`) rather than as `send-keys -l` (`typePromptText`). claude takes the same
+route when the prompt has a line break (a literal LF is an Enter, so it would be submitted
+line by line) or is 2 KiB or longer, and then waits 200 ms rather than 20 ms before the Enter
+(CRLF is sent as LF, since tmux turns each LF of a paste into CR); a short single-line prompt
+stays on `send-keys -l`. The 200 ms, the 2 KiB threshold and the claim that this fixes
+truncated peer messages (#2195) have not been confirmed on a live claude TUI.
 
 The Agent's own screen readers (`tmuxx.CapturePane`, `ReadPane` and the state probes in
 `internal/tmuxx/tmuxx.go`) capture **without** `-J`, so a line longer than the pane is

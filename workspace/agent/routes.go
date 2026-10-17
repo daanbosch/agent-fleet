@@ -24,6 +24,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/imagegen"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/mcpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin"
 )
 
 // buildMux returns a mux with every Agent route registered (docs/log/23 P0-2). Keeping it
@@ -56,6 +57,8 @@ func buildMux() *http.ServeMux {
 	// Relayed by the CP like the comment above, and like it, only ever on a human's action —
 	// the timer-driven job is /work-items/fetch.
 	mux.HandleFunc("POST /work-items/detail", handleWorkItemsDetail)
+	// The Jira project keys the member can browse, for the mirror's ticket links (docs/log/80 §80.25).
+	mux.HandleFunc("POST /work-items/jira-projects", handleWorkItemsJiraProjects)
 	// The fleet's own inference engines (ADR 0071 decision 9): the CP is the only party
 	// that sees an engine's response, so it counts the tokens and posts the row here, where
 	// every other feature's consumption already lives. CP-called like the two above, so it
@@ -70,8 +73,19 @@ func buildMux() *http.ServeMux {
 	// response was lost to a client timeout, so the caller need not retry into a dup.
 	// Top-level path (not under /sessions/{name}/…) to avoid a mux wildcard collision.
 	mux.HandleFunc("GET /sessions-idempotency/{key}", sessionx.HandleIdempotencyLookup)
+	mux.HandleFunc("POST /sessions-idempotency/{key}/abandon", sessionx.HandleIdempotencyAbandon)
+	mux.HandleFunc("POST /sessions-idempotency/{key}/reserve", sessionx.HandleIdempotencyReserve)
 	mux.HandleFunc("GET /share-operations/{key}", handleShareOperationLookup)
 	mux.HandleFunc("POST /sessions/{name}/fork", sessionx.HandleForkSession)
+	// Move to another agent kind (ADR 0115): the move, its dialog's preview, and the pending
+	// move's retry / cancel, plus "resume here anyway" on a moved source. control-plane/routes.go
+	// needs the same paths registered (the CP proxies by allowlist).
+	mux.HandleFunc("POST /sessions/{name}/move", sessionx.HandleSessionMove)
+	mux.HandleFunc("GET /sessions/{name}/move/preview", sessionx.HandleSessionMovePreview)
+	mux.HandleFunc("POST /sessions/{name}/move/retry", sessionx.HandleSessionMoveRetry)
+	mux.HandleFunc("POST /sessions/{name}/move/cancel", sessionx.HandleSessionMoveCancel)
+	mux.HandleFunc("POST /sessions/{name}/move/reopen", sessionx.HandleSessionMoveReopen)
+	mux.HandleFunc("POST /sessions/{name}/move/deliver", sessionx.HandleSessionMoveDeliver)
 	mux.HandleFunc("POST /sessions/{name}/stop", sessionx.HandleStopSession)
 	mux.HandleFunc("POST /sessions/{name}/halt", sessionx.HandleHaltSession)
 	mux.HandleFunc("POST /sessions/{name}/recreate", sessionx.HandleRecreateSession)
@@ -205,12 +219,15 @@ func buildMux() *http.ServeMux {
 	mux.HandleFunc("POST /gcp-login/{id}/cancel", gcpx.HandleLoginCancel)
 	mux.HandleFunc("GET /gcp-login/profiles", gcpx.HandleProfileLoginStates)
 	mux.HandleFunc("POST /gcp-login/profiles/{name}/start", gcpx.HandleProfileLoginStart)
+	mux.HandleFunc("POST /gcp-login/profiles/{name}/logout", gcpx.HandleProfileLogout)
 	mux.HandleFunc("GET /gcp-login/profiles/{name}/attempts/{attempt}", gcpx.HandleProfileLoginAttempt)
 	mux.HandleFunc("POST /gcp-login/profiles/{name}/attempts/{attempt}/code", gcpx.HandleProfileLoginCode)
 	mux.HandleFunc("POST /ssm/instances", handleSSMInstances)
 	mux.HandleFunc("POST /sessions/{name}/start", sessionx.HandleStartSession)
 	// Structured transcript (role + text + timestamp) for the Console chat view.
 	mux.HandleFunc("GET /sessions/{name}/messages", sessionx.HandleSessionMessages)
+	// The whole conversation as one Markdown file, for download (#2183).
+	mux.HandleFunc("GET /sessions/{name}/export", sessionx.HandleSessionExport)
 	// Session-side MCP may propose the prompt for a follow-up session. Creation itself
 	// remains a user action in the Console launch dialog.
 	mux.HandleFunc("GET /sessions/{name}/handoff-proposal", sessionx.HandleSessionHandoffProposal)
@@ -221,6 +238,10 @@ func buildMux() *http.ServeMux {
 	// branch / HEAD and "is it pushed" carry only facts read from git — never anything the
 	// model or the Console wrote.
 	mux.HandleFunc("GET /sessions/{name}/handoff-context", sessionx.HandleSessionHandoffContext)
+	// "Push, then send" (#2072): the CP pushes the current branch through here, on the owner's
+	// own click inside the offer request, then asks handoff-context again. Only a request the
+	// CP marked gets in: AGENT_TOKEN alone is what every session's shell holds (ADR 0113).
+	mux.Handle("POST /sessions/{name}/handoff-push", memberorigin.Require(sessionx.HandoffPushMaxRequest, http.HandlerFunc(sessionx.HandleSessionHandoffPush)))
 	// Transcript marks (docs/log/69 / ADR 0050). Read and written by the owner's Console and,
 	// through the CP, by a share recipient.
 	mux.HandleFunc("GET /sessions/{name}/marks", sessionx.HandleSessionMarks)
@@ -305,6 +326,9 @@ func buildMux() *http.ServeMux {
 	// Preview — reverse-proxy to a service the user started inside the container
 	// (Spring Boot, dev server, ...). Reached only via the CP's /preview/{port}.
 	mux.HandleFunc("/proxy/{port}/{rest...}", handlePreview)
+	// The listener a temporary preview grant is bound to, and the HTTP probe before one is
+	// made (control-plane/preview_grant.go).
+	mux.HandleFunc("GET /preview-listener/{port}", handlePreviewListener)
 
 	// Repository management — git ops on working copies under ~/repos.
 	mux.HandleFunc("GET /repos", gitx.HandleListRepos)
@@ -341,6 +365,13 @@ func buildMux() *http.ServeMux {
 	// come from the working copy, never from the browser.
 	mux.HandleFunc("GET /repos/{name}/svn-auth", handleGetSvnAuth)
 	mux.HandleFunc("POST /repos/{name}/svn-auth", handleSvnAuth)
+	// Read-only SVN history and local changes (#1705). svn-log / svn-show are NETWORK calls
+	// (stored credential injected, 401 svn_auth_required on refusal); svn-changes / svn-diff are
+	// local and need no credential. The git /log /show /changes /diff handlers stay git-only.
+	mux.HandleFunc("GET /repos/{name}/svn-log", handleSvnLog)
+	mux.HandleFunc("GET /repos/{name}/svn-show", handleSvnShow)
+	mux.HandleFunc("GET /repos/{name}/svn-changes", handleSvnChanges)
+	mux.HandleFunc("GET /repos/{name}/svn-diff", handleSvnDiff)
 	// Launch prompt templates (repo launch modal): .claude/commands, .claude/skills,
 	// .agent-fleet/launch-prompts.md — aggregated read-only from the working copy.
 	mux.HandleFunc("GET /repos/{name}/prompt-templates", handleRepoPromptTemplates)
@@ -397,6 +428,8 @@ func buildMux() *http.ServeMux {
 	// that never touches the fs.
 	mux.HandleFunc("POST /fs/suggest-edit", httpx.HeldOpen(handleFSSuggestEdit))
 	mux.HandleFunc("GET /fs/download", handleFSDownload)
+	// A folder as one zip (ADR 0111): read-only, bounded on every axis, built into a temp file.
+	mux.HandleFunc("GET /fs/download-zip", handleFSDownloadZip)
 	// A picture's width and height from its header, many paths per request (fs_imagesize.go).
 	mux.HandleFunc("POST /fs/imagesize", handleFSImageSize)
 	// Every picture under a folder, a bounded walk, flattened into one list (fs_images.go).
@@ -441,9 +474,13 @@ func buildMux() *http.ServeMux {
 	// memory md into a bare repo, giving history, diffs, rollback to a chosen point and
 	// transfer between environments.
 	// control-plane/routes.go needs the same path registered: the CP is an explicit allowlist.
+	// Only the Console calls the manual snapshot, import and import/apply, so they answer only a
+	// member-origin mark (ADR 0113); import's mark signs the upload's body hash. restore stays
+	// open: the assistant's restore_memory_snapshot tool calls it from the af-mcp process, which
+	// the Agent cannot tell from a session shell.
 	mux.HandleFunc("GET /agents/memory/roots", memoryx.HandleMemoryRoots)
 	mux.HandleFunc("GET /agents/memory/snapshots", memoryx.HandleMemorySnapshots)
-	mux.HandleFunc("POST /agents/memory/snapshots", memoryx.HandleMemorySnapshotCreate)
+	mux.Handle("POST /agents/memory/snapshots", memberorigin.Require(memoryx.MemberWriteMaxRequest, http.HandlerFunc(memoryx.HandleMemorySnapshotCreate)))
 	mux.HandleFunc("GET /agents/memory/diff", memoryx.HandleMemoryDiff)
 	mux.HandleFunc("GET /agents/memory/tree", memoryx.HandleMemoryTree)
 	mux.HandleFunc("POST /agents/memory/restore", memoryx.HandleMemoryRestore)
@@ -451,8 +488,8 @@ func buildMux() *http.ServeMux {
 	// export only lets a download through after the secret scan (★4). import is taken in as
 	// an independent lineage first, and only the selected range is then applied to live (P3).
 	mux.HandleFunc("GET /agents/memory/export", memoryx.HandleMemoryExport)
-	mux.HandleFunc("POST /agents/memory/import", memoryx.HandleMemoryImport)
-	mux.HandleFunc("POST /agents/memory/import/apply", memoryx.HandleMemoryImportApply)
+	mux.Handle("POST /agents/memory/import", memoryx.MemberImportHandler())
+	mux.Handle("POST /agents/memory/import/apply", memberorigin.Require(memoryx.HistoryApplyMaxRequest, http.HandlerFunc(memoryx.HandleMemoryImportApply)))
 	// AF-owned agent memory (ADR 0108): what the af MCP memory tools call. Not proxied by the
 	// CP: agents reach it on loopback, and the Console's view of it is a separate set of routes.
 	mux.HandleFunc("GET /agents/memory/entries", memoryx.HandleAgentMemoryIndex)
@@ -460,11 +497,55 @@ func buildMux() *http.ServeMux {
 	mux.HandleFunc("GET /agents/memory/entries/read", memoryx.HandleAgentMemoryRead)
 	mux.HandleFunc("POST /agents/memory/entries", memoryx.HandleAgentMemorySave)
 	mux.HandleFunc("POST /agents/memory/entries/forget", memoryx.HandleAgentMemoryForget)
-	// The member's after-the-fact view of those writes (ADR 0108 decision 8). These two are
-	// for the Console, so control-plane/routes.go relays them.
+	// The member's after-the-fact view of those writes (ADR 0108 decision 8). These are for the
+	// Console, so control-plane/routes.go relays them. The member writes (revert, pin,
+	// member-save) answer only a request carrying the CP's member-origin mark (ADR 0113).
 	mux.HandleFunc("GET /agents/memory/entries/changes", memoryx.HandleAgentMemoryChanges)
 	mux.HandleFunc("GET /agents/memory/entries/diff", memoryx.HandleAgentMemoryChangeDiff)
-	mux.HandleFunc("POST /agents/memory/entries/revert", memoryx.HandleAgentMemoryRevert)
+	mux.Handle("POST /agents/memory/entries/revert", memberorigin.Require(memoryx.MemberWriteMaxRequest, http.HandlerFunc(memoryx.HandleAgentMemoryRevert)))
+	// The member's list of every memory, and the pin (#1703). No MCP tool
+	// reaches the pin route.
+	mux.HandleFunc("GET /agents/memory/entries/list", memoryx.HandleAgentMemoryList)
+	mux.Handle("POST /agents/memory/entries/pin", memberorigin.Require(memoryx.MemberWriteMaxRequest, http.HandlerFunc(memoryx.HandleAgentMemoryPin)))
+	// The member's read of one body (#1985): names the scope and project directly, not gated by
+	// the agentMemory switch, writes nothing.
+	mux.HandleFunc("GET /agents/memory/entries/member-read", memoryx.HandleAgentMemoryMemberRead)
+	// The member's create/edit (#1997).
+	mux.Handle("POST /agents/memory/entries/member-save", memberorigin.Require(memoryx.MemberWriteMaxRequest, http.HandlerFunc(memoryx.HandleAgentMemoryMemberSave)))
+	mux.HandleFunc("GET /agents/memory/entries/member-search", memoryx.HandleAgentMemoryMemberSearch)
+	// Moving the memories of a project whose working copy is gone into another project (#1984).
+	// The list and the preview write nothing; the move answers only a member-origin mark, and
+	// no MCP tool reaches it.
+	mux.HandleFunc("GET /agents/memory/entries/projects", memoryx.HandleAgentMemoryMemberProjects)
+	mux.HandleFunc("GET /agents/memory/entries/project-move-preview", memoryx.HandleAgentMemoryMemberMovePreview)
+	mux.Handle("POST /agents/memory/entries/project-move", memberorigin.Require(memoryx.MemberWriteMaxRequest, http.HandlerFunc(memoryx.HandleAgentMemoryMemberMove)))
+	mux.HandleFunc("GET /agents/memory/entries/member-latest", memoryx.HandleAgentMemoryMemberLatest)
+	mux.HandleFunc("GET /agents/memory/entries/member-forgotten", memoryx.HandleAgentMemoryMemberForgotten)
+	// The member's purge of one memory's past revisions from the history (#1982): a read-only
+	// preview, and the rewrite behind the mark. No MCP tool reaches either.
+	mux.HandleFunc("GET /agents/memory/entries/purge-preview", memoryx.HandleAgentMemoryPurgePreview)
+	mux.Handle("POST /agents/memory/entries/purge", memberorigin.Require(memoryx.MemberWriteMaxRequest, http.HandlerFunc(memoryx.HandleAgentMemoryPurge)))
+	// One-time import of claude's own auto-memory (ADR 0108 decision 6 step 1). Not
+	// /agents/memory/import: that is the bundle import of the 0022 history.
+	mux.HandleFunc("GET /agents/memory/claude-import", memoryx.HandleAgentMemoryClaudeSources)
+	mux.HandleFunc("GET /agents/memory/claude-import/preview", memoryx.HandleAgentMemoryClaudePreview)
+	mux.HandleFunc("POST /agents/memory/claude-import", memoryx.HandleAgentMemoryClaudeApply)
+	// AF memory out of a memory bundle taken in through POST /agents/memory/import (#1983): a
+	// read-only preview, and the import behind the member-origin mark. No MCP tool reaches it.
+	mux.HandleFunc("GET /agents/memory/af-import/preview", memoryx.HandleAgentMemoryBundlePreview)
+	mux.Handle("POST /agents/memory/af-import", memberorigin.Require(memoryx.MemberWriteMaxRequest, http.HandlerFunc(memoryx.HandleAgentMemoryBundleApply)))
+	mux.HandleFunc("GET /agents/memory/muse-import", memoryx.HandleAgentMemoryMuseSources)
+	mux.HandleFunc("GET /agents/memory/muse-import/preview", memoryx.HandleAgentMemoryMusePreview)
+	mux.HandleFunc("POST /agents/memory/muse-import", memoryx.HandleAgentMemoryMuseApply)
+	// The reverse, explicit and previewed: AF memory copied into claude's own (#1914).
+	mux.HandleFunc("GET /agents/memory/claude-export", memoryx.HandleAgentMemoryClaudeExportSources)
+	mux.HandleFunc("GET /agents/memory/claude-export/preview", memoryx.HandleAgentMemoryClaudeExportPreview)
+	mux.HandleFunc("POST /agents/memory/claude-export", memoryx.HandleAgentMemoryClaudeExportApply)
+	// What the Agent memory switch does by itself with claude's native memory (#1972): where the
+	// reconciler is, the counts the confirmation shows, and the member's retry / give-up.
+	mux.HandleFunc("GET /agents/memory/auto-sync", memoryx.HandleAutoSyncStatus)
+	mux.HandleFunc("GET /agents/memory/auto-sync/preview", memoryx.HandleAutoSyncPreview)
+	mux.Handle("POST /agents/memory/auto-sync", memberorigin.Require(memoryx.MemberWriteMaxRequest, http.HandlerFunc(memoryx.HandleAutoSyncAction)))
 
 	// Toolchain selection (node via nvm / java via pre-baked Temurin) — Console.
 	mux.HandleFunc("GET /env/toolchains", handleToolchainsGet)

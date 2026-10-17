@@ -8,7 +8,7 @@ updated: "2026-09"
 
 English | [日本語](limits.ja.md)
 
-Collected in one place because a limit is only ever met at the worst possible moment,
+This page collects the limits in one place because a limit is only ever met at the worst possible moment,
 and the reader then needs three things at once: what the ceiling is, who can raise it,
 and what happens when it is reached.
 
@@ -18,20 +18,26 @@ These do not vary by deployment.
 
 | Limit | Value | What happens at it |
 |---|---|---|
-| Session title | 80 characters | Control characters are stripped and the title is truncated. **Enforced identically at every layer on purpose** — see below |
+| Session title | 80 characters | Control characters are stripped and the title is truncated. **Enforced identically at every layer on purpose**; see below |
 | Browser pane: Chromium processes | 1 per workspace | — |
 | Browser pane: concurrent pages | 2 per workspace | A third cannot be opened until one is released |
 | Browser pane: viewport | 1600×1200 (DPR 1) | Larger is clamped |
 | Browser pane: frame rate | 12 fps while visible | Not usable for video |
 | Browser pane: hidden page retention | 60 seconds | After that the page is released and rebuilt from the saved port and path on return |
 | Browser pane: console messages kept | 200 | Oldest are dropped; this is not a persistent log |
+| Folder zip download: files / folders / depth | 20,000 / 4,000 / 32 levels | Refused with 413 and a message naming the limit; nothing is truncated (ADR 0111) |
+| Folder zip download: bytes read | 512 MB | Counted on the bytes actually read, not the listing, so a file that grows mid-build is caught; refused with 413 |
+| Folder zip download: entries looked at / summed name length | 100,000 / 4 MiB | Refused with 413 |
+| Folder zip download: reading time | 45 s | Refused with 413 (below the load balancer's 60 s idle timeout, because nothing is sent until the archive is built). Cooperative: checked between reads and after the last one, so a call already stuck on a hung volume holds the build slot until it returns |
+| Folder zip download: transfer time | 15 min | The connection is closed; a stalled client cannot hold the one build slot longer |
+| Folder zip download: concurrent builds | 1 per workspace | A second press waits up to 2 s, then 503 "busy"; each build holds a temp file of up to the byte limit on the home volume |
 
 > **Why the title limit is worth naming.** It used to differ per layer: a handoff
 > proposal accepted 512 bytes, showed it on the card and in the launch dialog and let
-> you edit it — and then session creation alone refused it at 80, surfacing as
+> you edit it, and then session creation alone refused it at 80, surfacing as
 > "failed to start worktree: title is too long". A limit enforced at different values
 > in different layers produces failures that appear only at one specific moment, which
-> is the hardest kind to diagnose. One value, one place.
+> is the hardest kind to diagnose.
 
 ## Set by the deployment
 
@@ -45,9 +51,9 @@ which stays the source of truth.
 | Per-user home volume (EC2 target) | 50 GiB | `AF_ECS_EC2_HOME_GB` |
 | Graceful stop | 30 s | `AF_STOP_GRACE_SEC` |
 | Start timeout (AWS targets) | 300 s | `AF_ECS_START_TIMEOUT_SEC` |
-| Stopped session kept in the list | 7 days | Each user's **Settings → Agents → Session** (1 / 3 / 7 / 14 / 30 days, or off); `AF_SESSION_STOPPED_TTL` is the deployment default for users who leave it at Default — then it moves to the archive, never deleted, and its working copy stays; a session locked against deletion stays in the list |
+| Stopped session kept in the list | 7 days | Each user's **Settings → Agents → Session** (1 / 3 / 7 / 14 / 30 days, or off); `AF_SESSION_STOPPED_TTL` is the deployment default for users who leave it at Default; after that it moves to the archive, never deleted, and its working copy stays; a session locked against deletion stays in the list |
 | Cloud-cost window | 7 days | `AF_CLOUD_COST_WINDOW_DAYS` |
-| Idle sweep | on | `AF_IDLE_SWEEP_INTERVAL` — **`0` switches the reaper off entirely**, so nothing is ever stopped for being idle |
+| Idle sweep | on | `AF_IDLE_SWEEP_INTERVAL`: **`0` switches the reaper off entirely**, so nothing is ever stopped for being idle |
 
 The self-hosted engines' own auto-stop is not in this table: **Stop after** is set per role under
 Admin → Inference engines, and a saved value wins over the engine stack's default from the
@@ -60,16 +66,53 @@ under **Tenant settings → Limits & idle**, and a deployment administrator sets
 Read the screen rather than this page.
 
 - Workspaces per tenant, and sessions per member
-- Workspace size (CPU, memory, disk) where the target supports it —
-  [deploy-targets.md](deploy-targets.md)
+- Workspace size (CPU, memory, disk) where the target supports it;
+  see [deploy-targets.md](deploy-targets.md)
 - Idle auto-stop threshold
 - Whether the tenant's administrators may take engine models in (off unless granted), and whether
-  the tenant may use the self-hosted engines at all, per role (llm / image) — allowed unless
+  the tenant may use the self-hosted engines at all, per role (llm / image): allowed unless
   switched off
+
+## The limit board: what it collects and how it reads
+
+The limit board (**Settings → Limit board**, [09 Working with others](../member/09-collaboration.md))
+shows where members stand on their agents' usage limits. This is its full coverage; anything not
+in the table is **unknown**, never "available".
+
+| Agent | Account quota | Session limit state |
+|---|---|---|
+| Claude | 5-hour and weekly windows | yes |
+| Codex | 5-hour and weekly windows | Managed sessions only |
+| Muse | its windows, with their length | yes |
+| Copilot | credit pools | unknown |
+| Antigravity (agy) | not collected: reading it means scraping the agent's screen | unknown |
+| every other agent | unknown | unknown |
+
+Session limit states are: hit a limit (with the automatic resume time when one was scheduled),
+spend limit (never with a resume time: waiting does not clear it), blocked, and sign-in needed.
+A session that hit a limit says nothing about other models or agents.
+
+| Rule | Value |
+|---|---|
+| A value is | the provider's last real observation, a lower bound: "at least X% (N min ago)" |
+| Marked stale after | 60 minutes |
+| Past the reset time | "reset not yet observed", never 0% |
+| Bands | under 50% / under 80% / under 95% / 95% or more, per unit, never combined |
+| Roster page | 50 members (at most 100) |
+| Members named in one audience | 100 |
+| Default | hidden, per tenant membership; the tenant switch is on |
+
+Where values come from: while a workspace runs, the idle-stop sweep reads what the agents have
+already captured, at its own interval (one minute by default); an open Console tab also sends
+what its usage chips read. **Neither is promised**: a workspace the sweep does not reach (it is
+stopped, the deployment runs no sweep, or the tenant has none of the idle-stop, hibernate or
+backup features on) with no browser open is not updated, and its values turn stale or stay unknown.
+A failed refresh never makes an old value look new, and signing in to another provider account
+drops the previous account's values.
 
 ## Status
 
 Two rules for anyone extending this page. A limit enforced in more than one layer must
 state **every** layer, for the reason above. And a limit nobody measures must say so
-rather than being given a plausible-looking number — an invented default is worse than
+rather than being given a plausible-looking number. An invented default is worse than
 an admitted gap, because it stops people from checking.

@@ -223,7 +223,7 @@ func TestAgentMemoryScopes(t *testing.T) {
 	if _, err := agentMemSave(claudeC, agentMemSaveReq{Name: "pref", Description: "project pref", Body: "project"}, now); err != nil {
 		t.Fatal(err)
 	}
-	idx, err := agentMemListIndex(claudeC)
+	idx, err := agentMemListIndex(claudeC, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,11 +256,11 @@ func TestAgentMemoryKindsFilterAndSearch(t *testing.T) {
 	if _, err := agentMemSave(claudeC, agentMemSaveReq{Name: "shared", Description: "go tests", Body: "Run go test with -p 2 when memory is tight\nunrelated line"}, now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	idx, _ := agentMemListIndex(codexC)
+	idx, _ := agentMemListIndex(codexC, 0)
 	if len(idx.Entries) != 1 || idx.Entries[0].Name != "shared" {
 		t.Errorf("codex index = %+v, want only the shared memory", idx.Entries)
 	}
-	idx, _ = agentMemListIndex(claudeC)
+	idx, _ = agentMemListIndex(claudeC, 0)
 	if len(idx.Entries) != 2 || idx.Entries[0].Name != "shared" {
 		t.Errorf("claude index = %+v, want both, newest first", idx.Entries)
 	}
@@ -407,7 +407,7 @@ func TestAgentMemoryHandEditedFileIsWithheldAndNotCommitted(t *testing.T) {
 	memoryMkdirAll(t, filepath.Join(agentMemDir(), "user"))
 	memoryWrite(t, filepath.Join(agentMemDir(), "user", "manual.md"), "---\nname: manual\ndescription: key "+key+"\n---\nbody\n")
 
-	idx, err := agentMemListIndex(c)
+	idx, err := agentMemListIndex(c, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,7 +565,7 @@ func TestAgentMemoryReadersWaitForWriter(t *testing.T) {
 	c := agentMemCallerT(t, "claude-main")
 	agentMemMu.Lock()
 	done := make(chan struct{})
-	go func() { _, _ = agentMemListIndex(c); close(done) }()
+	go func() { _, _ = agentMemListIndex(c, 0); close(done) }()
 	select {
 	case <-done:
 		agentMemMu.Unlock()
@@ -613,7 +613,7 @@ func TestAgentMemoryPublishedValuesAreScanned(t *testing.T) {
 	memoryMkdirAll(t, filepath.Join(agentMemDir(), "user"))
 	memoryWrite(t, filepath.Join(agentMemDir(), "user", "esc.md"), "---\nname: \"esc\"\ndescription: \"key "+escaped+"\"\n---\nbody\n")
 	memoryWrite(t, filepath.Join(agentMemDir(), "user", agentMemFakeSlackName()+".md"), "---\nname: x\ndescription: safe\n---\nsafe\n")
-	idx, err := agentMemListIndex(c)
+	idx, err := agentMemListIndex(c, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -701,7 +701,7 @@ func TestAgentMemoryFIFODoesNotBlock(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() {
-		_, _ = agentMemListIndex(c)
+		_, _ = agentMemListIndex(c, 0)
 		_, _ = agentMemRead(c, "", "fifo")
 		close(done)
 	}()
@@ -820,7 +820,7 @@ func TestAgentMemoryMalformedFilesAreCounted(t *testing.T) {
 	memoryMkdirAll(t, filepath.Join(agentMemDir(), "user"))
 	memoryWrite(t, filepath.Join(agentMemDir(), "user", "malformed.md"), "no frontmatter\n")
 	memoryWrite(t, filepath.Join(agentMemDir(), "user", "big.md"), "---\nname: big\ndescription: d\n---\n"+strings.Repeat("x\n", agentMemMaxFile))
-	idx, err := agentMemListIndex(c)
+	idx, err := agentMemListIndex(c, 0)
 	if err != nil || idx.Withheld != 2 || len(idx.Entries) != 0 {
 		t.Fatalf("index = %+v, %v", idx, err)
 	}
@@ -895,5 +895,33 @@ func TestAgentMemoryRoutesRefuseWhenSwitchedOff(t *testing.T) {
 	}
 	if _, err := agentMemRead(agentMemCallerT(t, "claude-main"), "", "a"); err != nil {
 		t.Fatalf("the memory itself is kept: %v", err)
+	}
+}
+
+// IndexJSONFor is what lcpp's system prompt is built from: the project's entries for a working
+// copy and a kind, with no session to name, bounded by the budget.
+func TestIndexJSONForServesAWorkingCopyWithoutASession(t *testing.T) {
+	_, clone, wt := agentMemTestEnv(t)
+	now := time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC)
+	c := agentMemCallerT(t, "claude-main")
+	if _, err := agentMemSave(c, agentMemSaveReq{Name: "build-cmd", Description: "how to build", Body: "run make", Type: "project"}, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{clone, wt} { // a worktree shares its clone's memory
+		raw, err := IndexJSONFor(dir, "lcpp", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(raw, `"build-cmd"`) || strings.Contains(raw, "run make") {
+			t.Errorf("%s: want the entry without its body, got %s", dir, raw)
+		}
+	}
+	// Outside ~/repos there is no project: user scope only, so the project's entry is absent.
+	raw, err := IndexJSONFor(t.TempDir(), "lcpp", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(raw, "build-cmd") {
+		t.Errorf("a directory outside ~/repos must not see the project's memory: %s", raw)
 	}
 }

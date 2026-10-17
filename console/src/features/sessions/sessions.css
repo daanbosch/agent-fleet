@@ -216,14 +216,30 @@
 .sess-row .session-state.mini {
   padding: 1px 4px;
 }
-/* On hover/active the ⋯ button overlays the row's right edge (see .sess-menu-wrap),
-   so fade the state chip out to hand that spot over instead of stacking two icons.
+/* The title (flex:1, basis 0) is already at zero width when a long loud chip no longer fits;
+   a flex:none chip then overran the ⋯ button and the ordinal badges. Let it shrink and clip
+   inside its own pill instead. */
+.sess-row .session-state {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+/* On hover the ⋯ button overlays the row's right edge (see .sess-menu-wrap), so fade the
+   state chip out to hand that spot over instead of stacking two icons. The fade is
+   transient; the active row never takes it, because its ⋯ is always shown and would hide
+   the chip for as long as the row stays selected — it makes room instead (next rule).
    :has(.sess-menu-wrap) — a readOnly row (the history rail) draws no ⋯ button, so hiding
    the chip there would leave nothing at all. Limit this to rows that have one. */
-.sess-row:has(.sess-menu-wrap):hover .session-state,
-.sess-row:has(.sess-menu-wrap).hover .session-state,
-.sess-row:has(.sess-menu-wrap).active .session-state {
+.sess-row:has(.sess-menu-wrap):not(.active):hover .session-state,
+.sess-row:has(.sess-menu-wrap):not(.active).hover .session-state {
   opacity: 0;
+}
+/* Active row with a ⋯ button: keep the chip, and pad the button so the chip ends left of
+   the overlaid ⋯ (30px = its 4px inset + the ~24px button + a 2px gap). While split, .sess-ords already
+   reserves that room with its own margin, so the padding applies only when there are none —
+   both would offset the chip twice. Horizontal only: the row height does not change. */
+.sess-row.active:has(.sess-menu-wrap):not(:has(.sess-ords)) .sess-btn {
+  padding-right: 30px;
 }
 .sess-drift {
   flex: none;
@@ -256,6 +272,8 @@
   color: var(--muted);
   font-size: 11px;
 }
+/* Launched from the member inbox (ADR 0111). */
+.sess-inbox-origin { flex: none; font-size: 12px; color: var(--muted); }
 
 /* Keep-awake pin (docs/log/75): marks a row as exempt from the idle auto-stop. Accent
    rather than muted because it means the container is being kept up and is costing money;
@@ -355,6 +373,47 @@
   margin-top: -2px;
   font-size: 11px;
   line-height: 16px;
+}
+/* A move's line (ADR 0115 decision 11.7), indented like the links line under the title. */
+.sess-move-line {
+  flex: 1 0 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 6px 3px 31px;
+  margin-top: -2px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--muted);
+}
+.sess-move-line.pending {
+  color: var(--warn, #e0a030);
+}
+.sess-move-line > .codicon {
+  flex: none;
+  font-size: 12px;
+}
+.sess-move-line > span,
+.sess-move-link {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sess-move-link {
+  padding: 0 3px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.sess-move-link:hover {
+  background: var(--btn);
+  color: var(--fg);
 }
 .sess-pr,
 .sess-port {
@@ -575,6 +634,12 @@
 /* Populated archive list: pin the panel to a stable height and let only the list
    scroll, so filtering doesn't resize/recenter the modal on each keystroke. The
    search toolbar stays put; the panel still clamps to the viewport on short screens. */
+/* Wider than the stock modal in both states: group headings (repo + branch) and row titles
+   are long, and the stock 520px cut them off with an ellipsis. */
+.arch-modal.ui-modal {
+  width: min(880px, 96vw);
+  max-width: min(960px, 96vw);
+}
 .arch-modal-tall.ui-modal {
   height: min(88dvh, 820px);
 }
@@ -864,5 +929,147 @@
   margin: 0 0 6px;
 }
 .spend-budget-spent {
+  color: var(--muted);
+}
+
+/* A port chip with its "⋯" (features/preview/PortOpen.tsx): the ⋯ is the discoverable way to the
+   menu, since long-press and right-click are not. It stays dim until the chip is hovered. */
+.sess-port-wrap {
+  display: inline-flex;
+  align-items: center;
+}
+.sess-port-menu {
+  flex: none;
+  padding: 0 2px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.5;
+}
+.sess-port-wrap:hover .sess-port-menu,
+.sess-port-menu:focus-visible {
+  opacity: 1;
+}
+.sess-port-menu:hover {
+  background: var(--btn);
+  color: var(--fg);
+}
+/* Who else sees the port, before it is opened: the list's public / shared state shows as a
+   coloured underline, an unlisted ("only you") port as a dotted one. */
+.sess-port.port-public {
+  box-shadow: inset 0 -2px 0 var(--warn);
+}
+.sess-port.port-shared {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.sess-port.port-only_you {
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+.port-menu {
+  position: fixed;
+  z-index: 1000;
+  width: 260px;
+  padding: 4px;
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  font-size: 12px;
+}
+.port-menu-badge {
+  padding: 4px 8px 6px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+.port-menu-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.port-menu-item:hover:not(:disabled) {
+  background: var(--btn);
+}
+.port-menu-item:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+.port-menu-def {
+  color: var(--muted);
+}
+.port-menu-hint {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+/* The move dialog (ADR 0115). Each phase's view is one child of the modal body, so it spaces
+   its own fields the way the body spaces its children. */
+.move-form,
+.move-pending,
+.move-moved,
+.move-done {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ui-seg .seg-btn.quota-left {
+  box-shadow: inset 0 0 0 1px var(--ok, #4caf7d);
+}
+.ui-seg .move-quota-left {
+  color: var(--ok, #4caf7d);
+}
+.move-not-offered,
+.move-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.move-list {
+  max-height: 120px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  color: var(--fg);
+}
+.move-pre {
+  margin: 4px 0 0;
+  max-height: 140px;
+  overflow: auto;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--panel2);
+  font-size: 11px;
+  white-space: pre;
+}
+.move-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0;
+}
+.move-progress,
+.move-loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.move-progress {
+  margin-right: auto;
+  font-size: 12px;
   color: var(--muted);
 }

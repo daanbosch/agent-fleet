@@ -28,11 +28,16 @@ export const settings: Record<keyof typeof jaSettings, string> = {
   "display.assistant_theme": "Assistant theme",
   "display.region_theme_note":
     "The session chat and the assistant chat can use their own theme (dark/light), separate from the app itself (“Match app” follows the app). You can also set each one's background color below.",
+  "display.per_tenant": "Separate appearance per tenant",
+  "display.per_tenant_note":
+    "Remember the theme and surface colors separately for each tenant on this device and switch to them with the tenant. Off keeps the look you see now for every tenant; saved looks are kept.",
   "display.cjk_font": "Japanese font",
   "display.cjk_font_sample": "①②③⑩ ㈱ ㍻ Ⅰ Ⅱ Ⅲ と漢字とかなの並び",
   "display.cjk_font_note":
-    "Latin fonts do carry ①②③, Ⅰ and ㈱, so they are drawn as narrow half-width glyphs and look smaller than the kanji next to them. The font chosen here is used for those characters only. ■ ○ ★ follow it in prose but not in the terminal or in width-critical monospace (diffs, code blocks) — the CLI lays its output out counting them as one column. Choose \"Latin font\" to keep the previous look everywhere.",
+    "Latin fonts do carry ①②③, Ⅰ and ㈱, so they are drawn as narrow half-width glyphs and look smaller than the kanji next to them. The font chosen here is used for those characters only. ■ ○ ★ follow it in prose but not in the terminal or in width-critical monospace (diffs, code blocks), because the CLI lays its output out counting them as one column. Choose \"Latin font\" to keep the previous look everywhere.",
   "display.terminal": "Terminal",
+  "display.term_ctrl_cv": "Ctrl+C / Ctrl+V copy and paste",
+  "display.term_ctrl_cv_note": "Ctrl+C copies the selection (with nothing selected it still interrupts the program) and Ctrl+V pastes. Turn off to send both keys to the program. Ctrl+Shift+C / Ctrl+Shift+V always work.",
   "display.font": "Font",
   "display.font_size": "Font size",
   "display.file_viewer": "File viewer",
@@ -44,8 +49,8 @@ export const settings: Record<keyof typeof jaSettings, string> = {
   "display.markdown_wrap": "Wrap code blocks",
   "display.session_mirror": "Session chat",
   "display.send_key": "Send key",
-  "display.send_note_enter": "Enter sends, Shift+Enter for a newline. Applies to every multi-line input — session and assistant chats included.",
-  "display.send_note_mod": "Ctrl+Enter (⌘+Enter) sends, Enter for a newline. For phones. Applies to every multi-line input — session and assistant chats included.",
+  "display.send_note_enter": "Enter sends, Shift+Enter for a newline. Applies to every multi-line input, including the session and assistant chats.",
+  "display.send_note_mod": "Ctrl+Enter (⌘+Enter) sends, Enter for a newline. For phones. Applies to every multi-line input, including the session and assistant chats.",
   "display.reader_view": "Reader view",
   "display.file_icons": "File icons",
   "display.icon_set": "Icon set",
@@ -163,42 +168,41 @@ export const settings: Record<keyof typeof jaSettings, string> = {
   "agents.stopped_archive_days_other": "{count} days",
   "agents.stopped_archive_never": "Off",
   "agents.note_stopped_archive":
-    "How long a session left stopped stays in the session list before it moves to the archive. Nothing is deleted — restore it from the archive at any time — and a session locked against deletion stays in the list. A stopped child session holds its slot until then; with Off, until you archive or delete it. Applies from the next list refresh, so shortening it moves sessions already past the new period to the archive at once. Default is the deployment's period: 7 days unless the deployment changed it.",
+    "How long a session left stopped stays in the session list before it moves to the archive. Nothing is deleted, and you can restore it from the archive at any time. A session locked against deletion stays in the list. A stopped child session still counts toward the child cap until then; with Off, until you archive or delete it. Applies from the next list refresh, so shortening it moves sessions already past the new period to the archive at once. Default is the deployment's period: 7 days unless the deployment changed it.",
   "agents.spend_cap_default": "Budget for new sessions",
   "agents.spend_cap_none": "None",
-  "agents.note_spend_cap_default": "The spend budget a session gets when its launch names none — including sessions started by create_session or a schedule. When its estimated spend (at list price; not your bill) reaches the budget, the session stops after its turn. Change one session's budget from its menu (Spend budget…)",
+  "agents.note_spend_cap_default": "The spend budget a session gets when its launch names none (including sessions started by create_session or a schedule). When its estimated spend (at list price; not your bill) reaches the budget, the session stops after its turn. Change one session's budget from its menu (Spend budget…).",
   "agents.peer_messaging": "Messages between sessions",
   "agents.note_peer_messaging":
     "Lets a session send a short message to another session in this workspace. It reaches a stopped session by resuming it, and the recipient is told this is not an instruction from you. Applies to sessions started from now on. Default OFF.",
   "agents.fleet_spawn": "Starting sessions from sessions",
   "agents.note_fleet_spawn":
-    "Lets a session start another session, hand it a task, and look after the ones it started — listing them, reading their output, stopping and resuming them. It cannot instruct, answer for or delete any session. How many children it may have is set below (deleting or archiving one frees its slot). No grandchildren and no shell sessions. Each child is a whole agent's memory and quota, billed to you. Applies to sessions started from now on. Default OFF.",
+    "Lets a session start another session, hand it a task, and look after the ones it started: listing them, reading their output, stopping, resuming and renaming them. It cannot add instructions to any session, answer a session's questions for it, or delete or archive one. How many children it may have is set below (a child you delete or archive no longer counts toward it). No grandchildren and no shell sessions. Each child takes a whole agent's worth of memory and quota, and the usage is billed to you. Applies to sessions started from now on. Default OFF.",
   "agents.spawn_child_limit": "Children per session",
   "agents.note_spawn_child_limit":
-    "How many children one session may have at a time. It is per parent, not per workspace, so more parents mean more sessions. Each child is a whole agent's memory. 1–10, default 3.",
+    "How many children one session may have at a time. It is per parent, not per workspace, so more parents mean more sessions. Each child uses a whole agent's memory. 1–10, default 3.",
   "agents.session_search": "Past-session search",
   "agents.note_session_search":
-    "Lets a session search what was said in this workspace's past sessions — every kind, stopped and archived included (search_sessions). Read-only, and only conversation text is indexed: no tool output or thinking. The command palette's Conversations mode works whatever this is set to. Turning it on reaches sessions started from now on; turning it off refuses running sessions' searches as soon as it is saved. Default ON.",
-  "agents.agent_memory": "Agent Fleet memory",
-  "agents.note_agent_memory": "Lets sessions read and write a memory every kind of agent shares, with af's memory_* tools. What one session saves is read by every kind in later sessions, without approval (text that looks like a secret is refused). Turning it on reaches sessions started from now on; turning it off refuses running sessions' reads and writes as soon as it is saved. Saved memories are kept, and Settings > Agent memory still lists and reverts them. Default OFF.",
+    "Lets a session search what was said in this workspace's past sessions of every kind, including stopped and archived ones (search_sessions). Read-only, and only conversation text is indexed; tool output and thinking are left out. The command palette's Conversations mode works whatever this is set to. Turning it on reaches sessions started from now on; turning it off refuses running sessions' searches as soon as it is saved. Default ON.",
+  "agents.note_agent_memory_moved": "Agent Fleet memory (the memory every kind of agent shares through af's memory_* tools) is turned on and off in Settings > Agent memory.",
   "agents.image_generation": "Image generation",
   "agents.note_image_generation":
     "Lets a session generate an image from a prompt (the generate_image tool). It uses a connected CLI's own image generation, spending that plan's usage each time. Applies to sessions started from now on. Default OFF.",
   "agents.image_provider_order": "Image provider order",
   "agents.note_image_provider_order":
-    "The order providers are tried in for image generation. The first usable one is used, and a failed call falls through to the next. By default the engine this deployment hosts itself (Agent Fleet (self-hosted)) comes first and external services follow: the self-hosted engine runs on a GPU this deployment pays for, while an external service spends your own plan's usage. A provider added after this list was saved is placed the same way — self-hosted at the front, external at the back — without moving anything you ranked here.",
+    "The order providers are tried in for image generation. The first usable one is used, and a failed call falls through to the next. By default the engine this deployment hosts itself (Agent Fleet (self-hosted)) comes first and external services follow: the self-hosted engine runs on a GPU this deployment pays for, while an external service spends your own plan's usage. A provider added after this list was saved is placed the same way (self-hosted at the front, external at the back) without moving anything you ranked here.",
   "agents.image_kind_comfy": "ComfyUI",
   "agents.image_kind_openai_compat": "OpenAI-compatible",
   "agents.image_provider_order_fallback":
     "Showing the built-in default. Start the workspace to see this deployment's own image engines, each under its own name.",
   "agents.rate_limit_resume": "Auto-resume after a usage limit resets",
   "agents.note_claude_rate_limit_resume":
-    "When a Claude session is interrupted by its usage limit, a one-time resume is booked to send \"please carry on\" to that session when the limit resets. The booking is deleted after use and never repeats. If the workspace stops while waiting, it is started at the booked time for delivery. The resume is skipped if you are already driving the session then. Reaching the limit and a successful automatic resume are also shown in the notification center. Sessions launched directly from Console are included. Default ON.\nEven when OFF, the limit menu (\"1. Stop and wait for limit to reset / 2. Ask your admin for more usage\") is still confirmed automatically. While the menu is open, the session accepts no input, notifications, or reports, and only the no-cost waiting option is chosen automatically. To pick 2, choose it yourself while the menu is on screen.\nThis switch also covers Codex (managed) — it is the same setting as the one on the Codex card.",
+    "When a Claude session is interrupted by its usage limit, a one-time resume is booked to send \"please carry on\" to that session when the limit resets. The booking is deleted after use and never repeats. If the workspace stops while waiting, it is started at the booked time for delivery. The resume is skipped if you are already driving the session then. Reaching the limit and a successful automatic resume are also shown in the notification center. Sessions launched directly from Console are included. Default ON.\nEven when OFF, the limit menu (\"1. Stop and wait for limit to reset / 2. Ask your admin for more usage\") is still confirmed automatically. While the menu is open, the session accepts no input, notifications, or reports, and only the no-cost waiting option is chosen automatically. To pick 2, choose it yourself while the menu is on screen.\nThis switch also covers Codex (managed), and is the same setting as the one on the Codex card.",
   "agents.note_codex_rate_limit_resume":
-    "When a Codex (managed) turn fails on its usage limit, a one-time resume is booked to send \"please carry on\" to that session when the limit resets. Codex has no limit menu like Claude's, so booking is all this does. The instant comes from the quota windows Codex records for itself (5-hour / weekly): the earliest reset among the windows that are full. When no instant can be read, nothing is booked — waking on a guess only walks into the same limit. A Codex whose execution method is Terminal (CLI) is not covered: nothing it leaves behind says which session stopped on the limit. This is the same setting as the one on the Claude card. Default ON.",
+    "When a Codex (managed) turn fails on its usage limit, a one-time resume is booked to send \"please carry on\" to that session when the limit resets. Codex has no limit menu like Claude's, so booking is all this does. The instant comes from the quota windows Codex records for itself (5-hour / weekly): the earliest reset among the windows that are full. When no instant can be read, nothing is booked, because waking on a guess only runs into the same limit. A Codex whose execution method is Terminal (CLI) is not covered: nothing it leaves behind says which session stopped on the limit. This is the same setting as the one on the Claude card. Default ON.",
   "agents.claude_abort_resume": "Auto-resume a cut-off turn",
   "agents.note_claude_abort_resume":
-    "When a Claude turn is cut off by something that clears on its own (a dropped connection, a temporary rate limit, a stream that timed out with no response), the agent waits a moment and sends \"continue (auto-resume)\" to that session so it picks up where it stopped. The prompt is shown in the mirror as an automatic resume. It re-sends up to twice; if the turn keeps getting cut off it stops and reports to the assistant conversation if there is one (otherwise the notification center keeps it). Cut-offs that re-sending cannot fix — usage limits, an empty balance, a too-long prompt, auth errors — are excluded and reported immediately as before. Sessions launched directly from Console are included. Default ON.\nWhen OFF, a cut-off is reported immediately as before and only sessions with an assistant conversation are resumed via the operator (Settings > Assistant, \"Auto-resume on a cut-off\").",
+    "When a Claude turn is cut off by something that clears on its own (a dropped connection, a temporary rate limit, a stream that timed out with no response), the agent waits a moment and sends \"continue (auto-resume)\" to that session so it picks up where it stopped. The prompt is shown in the mirror as an automatic resume. It re-sends up to twice; if the turn keeps getting cut off it stops and reports to the assistant conversation if there is one (otherwise the notification center keeps it). Cut-offs that re-sending cannot fix (usage limits, an empty balance, a too-long prompt, auth errors) are excluded and reported immediately as before. Sessions launched directly from Console are included. Default ON.\nWhen OFF, a cut-off is reported immediately as before and only sessions with an assistant conversation are resumed via the operator (Settings > Assistant, \"Auto-resume on a cut-off\").",
   "agents.ws_required_title": "Settings run inside the workspace",
   "agents.ws_required_hint": "Connections and agent settings go through the agent / CLI inside the container, so the workspace has to be running.",
   "agents.note_apply": "Connection changes are immediate. See each behavior setting for when it takes effect.",
@@ -211,7 +215,7 @@ export const settings: Record<keyof typeof jaSettings, string> = {
   "agents.skip_permissions": "Tool permissions",
   "agents.skip_permissions_sub": "Ask for approval before each tool run",
   "agents.skip_permissions_off_note":
-    "With approvals on, the agent stops before every edit or command. Answer from the mirror's permission card or the terminal. Left unanswered, the session is folded by the interaction timeout (the pending prompt is carried over, not lost). Not suited to unattended launches such as scheduled runs or the operator.",
+    "With approvals on, the agent stops before every edit or command. Answer from the mirror's permission card or the terminal. Left unanswered, the session is folded by the interaction timeout (the pending prompt is carried over). Not suited to unattended launches such as scheduled runs or the operator.",
   "agents.mode_normal": "Normal",
   "agents.note_launch_defaults":
     "The initial values for new sessions. If a repository has settings you last used, those win. Options the driver doesn't support aren't applied at launch.",
@@ -227,7 +231,7 @@ export const settings: Record<keyof typeof jaSettings, string> = {
   "agents.claude_custom_models_remove": "Remove {model} from choices",
   "agents.expand_thinking": "Show thinking expanded",
   "agents.expand_thinking_note":
-    "When on, the mirror's “Thinking” block starts expanded. When off (the default) it stays collapsed — click the heading to read it. Display only; the agent's behavior is unchanged.",
+    "When on, the mirror's “Thinking” block starts expanded. When off (the default), it stays collapsed. Click the heading to read it. Display only; the agent's behavior is unchanged.",
   "agents.stream_replies": "Stream replies in the chat view",
   "agents.stream_replies_lines": "Line by line",
   "agents.stream_replies_typewriter": "Typewriter",
@@ -260,13 +264,13 @@ export const settings: Record<keyof typeof jaSettings, string> = {
     "This host's RDRAND instruction is broken, so agy runs with it masked out of OpenSSL's CPU detection. Its randomness comes from the kernel instead of the FIPS build's hardware source.",
   "agents.agy_unsupported": "Not available on this host ({reason})",
   "agents.copilot_desc":
-    "GitHub Copilot CLI rides the GitHub connection (gh transparent auth) — no separate sign-in. A Copilot subscription on the GitHub account is required (the Free tier has a small monthly quota).",
+    "GitHub Copilot CLI reuses the GitHub connection's authentication (gh transparent auth), so it needs no separate sign-in. A Copilot subscription on the GitHub account is required (the Free tier has a small monthly quota).",
   "agents.copilot_not_connected": "Connect GitHub first.",
   "agents.copilot_open_git": "Open Git hosting",
   "agents.copilot_rtk_note":
-    "copilot routes shell commands through rtk via a preToolUse hook ($COPILOT_HOME/hooks) — deterministic, unlike codex/agy's instruction-based approach. Applies to new sessions.",
+    "copilot routes shell commands through rtk via a preToolUse hook ($COPILOT_HOME/hooks), which applies deterministically, unlike codex/agy's instruction-based approach. Applies to new sessions.",
   "agents.copilot_unsupported": "Not available in this container image ({reason})",
-  "agents.cursor_desc": "Sign in to Cursor. Approve in the browser — no code to paste.",
+  "agents.cursor_desc": "Sign in to Cursor. Approval finishes in the browser, so there is no code to paste.",
   "agents.cursor_connect": "Sign in to Cursor",
   "agents.cursor_connect_note": "Opens an authorize link; approve it in your browser.",
   "agents.cursor_auth_failed": "Failed to start Cursor sign-in: {msg}",
@@ -274,12 +278,12 @@ export const settings: Record<keyof typeof jaSettings, string> = {
   "agents.cursor_dashboard": "Cursor dashboard",
   "agents.cursor_hint_2": ".",
   "agents.cursor_unsupported": "Not available in this container image ({reason})",
-  "agents.kiro_desc": "Sign in to Kiro. Approve in the browser — no code to paste.",
+  "agents.kiro_desc": "Sign in to Kiro. Approval finishes in the browser, so there is no code to paste.",
   "agents.kiro_connect": "Sign in to Kiro",
   "agents.kiro_connect_note": "Shows an authorize link and code; approve it in your browser.",
   "agents.kiro_auth_failed": "Failed to start Kiro sign-in: {msg}",
   "agents.kiro_hint": "You can sign in with a Builder ID (free).",
-  "agents.kiro_install_desc": "Kiro is not installed in this workspace yet — a one-time install is required.",
+  "agents.kiro_install_desc": "Kiro is not installed in this workspace yet, so a one-time install is required.",
   "agents.kiro_install": "Install Kiro",
   "agents.kiro_install_note": "Downloads about 855MB into your home volume (takes a few minutes).",
   "agents.kiro_installing": "Installing Kiro… (about 855MB, a few minutes). The sign-in screen appears automatically when it finishes.",
@@ -292,7 +296,7 @@ export const settings: Record<keyof typeof jaSettings, string> = {
   // --- Muse Code (ADR 0095) ---
   // 🔴 "connected" is not the whole truth on this card: metered / env_key / the API-key refusal
   // all bear directly on what the member is billed (decision 9 / P2-6, measured).
-  "agents.muse_desc": "Sign in to Muse Code. Approve in the browser — no code to paste.",
+  "agents.muse_desc": "Sign in to Muse Code. Approving in the browser is all it takes, so there is no code to paste.",
   "agents.muse_connect": "Sign in with your Meta account",
   "agents.muse_connect_note": "Shows an authorize link and a code; approve it in your browser. This is the subscription route.",
   "agents.muse_use_key": "Use an API key",
@@ -317,8 +321,10 @@ export const settings: Record<keyof typeof jaSettings, string> = {
   "agents.muse_update_note": "Re-downloads the pinned build (about 299MB). Takes a few minutes.",
   "agents.muse_updating": "Updating Muse Code… (about 299MB, a few minutes). Running muse sessions keep working on the old build until they are restarted.",
   "agents.muse_model_note":
-    "Muse Code lists a \"-contributor\" twin of each model. It is the same model at the same price, but Meta may use those conversations — including messages between sessions — to improve the product. It is Muse Code's own default; \"Default\" here means Agent Fleet picks the newest model without that clause.",
+    "Muse Code lists a \"-contributor\" twin of each model. It is the same model at the same price, but Meta may use those conversations, including messages between sessions, to improve the product. It is Muse Code's own default; \"Default\" here means Agent Fleet picks the newest model without that clause.",
   "agents.remote_control": "Remote control",
+  "agents.note_claude_remote_control":
+    "Applies to Claude sessions started after you change it. Remote Control will not start while the workspace's CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set. While this is on, Claude sessions started afterwards are launched without it, so that variable no longer suppresses release notes, PR/MR status and availability checks. Telemetry, error reports and auto-update stay off. A copy of the variable in a Claude settings.json env block, or an organization that requires Trusted Devices, still prevents connecting. See the guide (Agents) for details.",
   "agents.notifications": "Notifications",
   "agents.codex_auth_failed": "Failed to start Codex auth: {msg}",
   "agents.codex_device_disabled": "device-code login may be disabled",
@@ -343,7 +349,7 @@ export const settings: Record<keyof typeof jaSettings, string> = {
   "agents.oc_key_count": "{count} keys",
   "agents.oc_account": "opencode account",
   "agents.oc_account_desc":
-    "Sign in with your opencode.ai account. Approval finishes in the browser — nothing to type back into the Console. It works alongside API keys, and either one alone is enough.",
+    "Sign in with your opencode.ai account. Approval finishes in the browser, so there is nothing to type back into the Console. It works alongside API keys, and either one alone is enough.",
   "agents.oc_account_connect": "Sign in to opencode",
   "agents.oc_account_connect_note": "Opens an authorize link; approve it in your browser.",
   "agents.oc_account_connected": "Account connected",
@@ -361,7 +367,7 @@ export const settings: Record<keyof typeof jaSettings, string> = {
   "agents.oc_hint": " to sign in → billing → issue an API key and paste it (Go and Zen share the one key).",
   "agents.oc_ws_open": "Open Go usage ↗",
   "agents.oc_ws_desc":
-    "Paste the usage page URL (or just the wrk_… id) to open it straight from this card. The usage percentages can't be pulled in — opencode.ai has no API for them and the page needs a browser login. When a limit is hit, what it reported shows up here.",
+    "Paste the usage page URL (or just the wrk_… id) to open it straight from this card. The usage percentages can't be pulled in, because opencode.ai has no API for them and the page needs a browser login. When a limit is hit, what it reported shows up here.",
   "agents.oc_ws_placeholder": "The usage page URL, or wrk_…",
   "agents.oc_ws_edit": "Change",
   "agents.oc_restart_pending":
@@ -380,9 +386,9 @@ export const settings: Record<keyof typeof jaSettings, string> = {
   "agents.oc_enabled_off": "Off",
   "agents.oc_enabled_on": "On",
   "agents.oc_enabled_note_off":
-    "opencode is never used. It won't launch even with a stored API key or a signed-in account (for workspaces whose security policy forbids reaching an outside service without permission). A fresh workspace starts here. It is an explicit, tamper-resistant lock — adding a key later still won't turn it on.",
+    "opencode is never used. It won't launch even with a stored API key or a signed-in account (for workspaces whose security policy forbids reaching an outside service without permission). A fresh workspace starts here. This setting explicitly keeps opencode disabled; adding a key later still won't turn it on.",
   "agents.oc_enabled_note_on":
-    "Choose below what opencode.ai may be billed for. On every choice the directly connected providers (anthropic/… and the like) and the fleet's own engines stay in the list — this picks how opencode.ai is used, nothing else.",
+    "Choose below what opencode.ai may be billed for. On every choice the directly connected providers (anthropic/… and the like) and the fleet's own engines stay in the list. This setting only picks how opencode.ai is used.",
   "agents.oc_usage": "opencode.ai billing",
   "agents.oc_usage_off": "Off",
   "agents.oc_usage_own": "None (my own keys)",
@@ -498,6 +504,7 @@ export const settings: Record<keyof typeof jaSettings, string> = {
   "keys.cmd.openUsageAgy": "Open Antigravity usage",
   "keys.cmd.openResources": "Open resource usage",
   "keys.cmd.openSessions": "Open the sessions overview",
+  "keys.cmd.openHome": "Open Home",
   "keys.cmd.openImagegen": "Open image generation",
   "keys.cmd.openGenerated": "Open generated images",
   "keys.cmd.openFleetGraph": "Open the fleet graph",
@@ -551,6 +558,7 @@ export const settings: Record<keyof typeof jaSettings, string> = {
   "keys.palette.talk_archived": "This session is archived. Restore it from the archive, then open it from the list and it opens at that point",
   "keys.palette.talk_failed": "Could not search ({reason})",
   "keys.palette.talk_retry": "Retry",
+  "keys.palette.child_of": "A child of {parent}",
   "keys.palette.talk_archived_badge": "Archived",
   "keys.palette.talk_role_user": "You",
   "keys.palette.talk_role_agent": "Agent",
@@ -580,7 +588,7 @@ export const settings: Record<keyof typeof jaSettings, string> = {
     "When on, a focused shell or SSM terminal becomes a pure terminal: unlike the option above, even the leader (Ctrl/⌘+K) and palette (Ctrl/⌘+P) are passed through, so Ctrl+K (kill-line), Ctrl+P (previous command) and the like reach the shell. Only shell/SSM terminals are affected; agent terminals are unchanged. To use app shortcuts again, focus another pane. Default off.",
   "keys.kt.quickRepliesLabel": "Show reply suggestions (candidate chips above the composer)",
   "keys.kt.quickRepliesNote":
-    "When on, chips above the composer suggest your frequent short replies (OK, proceed, commit, …) plus candidates tuned to the latest reply. Click to drop one into the input, or Ctrl/⌘/Alt-click to send immediately. Keyboard-only works too: from an empty input press Tab to reach the chips; Tab/Shift+Tab cycle input → chips → input (the ✨ button is part of the ring), while ←/→ cycle among the chips only. Enter inserts, Ctrl(⌘)+Enter sends (the two swap if you send with plain Enter), Enter on ✨ generates candidates, and Escape returns to the input. Suggestions are learned from the short messages you send. Right-click a chip (long-press on touch, Menu key from the keyboard) to pin it — pinned chips always show first, ahead of ranking — or to remove it. Default on.",
+    "When on, chips above the composer suggest your frequent short replies (OK, proceed, commit, …) plus candidates tuned to the latest reply. Click to drop one into the input, or Ctrl/⌘/Alt-click to send immediately. Keyboard-only works too: from an empty input press Tab to reach the chips; Tab/Shift+Tab cycle input → chips → input (the ✨ button is part of the ring), while ←/→ cycle among the chips only. Enter inserts, Ctrl(⌘)+Enter sends (the two swap if you send with plain Enter), Enter on ✨ generates candidates, and Escape returns to the input. Suggestions are learned from the short messages you send. Right-click a chip (long-press on touch, Menu key from the keyboard) to pin it (pinned chips always show first, ahead of ranking) or to remove it. Default on.",
   "keys.kt.qrLearnedTitle": "Learned suggestions ({n})",
   "keys.kt.qrClearAll": "Clear all learned",
   "keys.kt.qrClearOnce": "Clear used-once ({n})",
@@ -677,12 +685,12 @@ export const settings: Record<keyof typeof jaSettings, string> = {
   // Agent instructions (docs/log/60) — the personal layer between the fleet guide and a
   // repository's own instructions.
   "instr.intro":
-    "Whatever you write here is added to the instructions of every agent you start in this workspace. It is the place for how you work — the language and tone of reports, when to stop and ask, which tools to prefer. It is never committed to a repository.",
+    "Whatever you write here is added to the instructions of every agent you start in this workspace. It is the place for how you work: the language and tone of reports, when to stop and ask, which tools to prefer. It is never committed to a repository.",
   "instr.enabled": "Use my instructions",
   "instr.body_label": "Instructions (Markdown)",
   "instr.placeholder": "e.g. Report in English. Always confirm before anything destructive.",
   "instr.bytes": "{bytes} / {max} bytes",
-  "instr.cost_hint": "This rides along in every session's context. Shorter works better.",
+  "instr.cost_hint": "This is a fixed cost in every session's context, so shorter works better.",
   "instr.too_large": "Over the limit. Shorten it to save.",
   "instr.saved": "Saved (applies to new sessions; lcpp from its next turn)",
   "instr.targets_head": "Where it goes",
@@ -701,7 +709,7 @@ export const settings: Record<keyof typeof jaSettings, string> = {
   "instr.reason_no_user_scope": "Unsupported (no user-level place to put it)",
   "instr.reason_not_wired": "Not wired up yet",
   "instr.reason_unverified": "Unverified",
-  "instr.err_config_unreadable": "Cannot apply — its config is not readable",
+  "instr.err_config_unreadable": "Cannot apply because its config is not readable",
   "instr.err_write_failed": "Write failed",
   "instr.fleet_head": "Workspace guide",
   "instr.fleet_hint":

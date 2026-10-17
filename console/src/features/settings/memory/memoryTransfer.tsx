@@ -6,6 +6,7 @@ import { useT } from "../../../lib/i18n/index.ts";
 import { fmtDateTime, DATETIME_FULL } from "../../../lib/intl.ts";
 import { humanSize } from "../../../lib/filemeta.ts";
 import type { SecretFinding, ImportPreview } from "./memoryTypes.ts";
+import { BundleAfPanel } from "./memoryBundleImport.tsx";
 
 // TransferSection — export / import between environments (docs/log/39 item 5, P3).
 //
@@ -104,7 +105,13 @@ export function TransferSection({
     try {
       const fd = new FormData();
       fd.append("file", file, file.name);
-      const res = await raw("api/agents/memory/import", { method: "POST", body: fd });
+      // The header is what keeps another page out: a multipart POST needs no preflight, a custom
+      // header does, and the CP signs this upload for the Agent only when it carries it (ADR 0113).
+      const res = await raw("api/agents/memory/import", {
+        method: "POST",
+        headers: { "X-AF-Console": "1" },
+        body: fd,
+      });
       const body = await res.json().catch(() => null);
       if (!res.ok) {
         toast(body?.error ? errDetail(body.error) : tr("mem.import_failed"));
@@ -333,6 +340,8 @@ export function TransferSection({
               {tr("common.cancel")}
             </button>
           </div>
+          {/* The restore above never writes AF memory (no secret scan); this is where it comes in. */}
+          {preview.format === "bundle" && <BundleAfPanel importId={preview.importId} onChanged={onApplied} parentBusy={busy} />}
         </div>
       )}
     </section>

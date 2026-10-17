@@ -804,3 +804,20 @@ button.mv-path:focus-visible {
 .db-stop-item.db-stop-purge {
   color: var(--err);
 }
+
+/* "Expose this port…" asks before it adds (PreviewTab): a strip above the settings, because the
+   port field saves on blur and prefilling it would persist on the next click anywhere. */
+.pv-add-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  background: var(--panel2, var(--btn));
+}
+.pv-add-strip > span {
+  flex: 1 1 200px;
+}

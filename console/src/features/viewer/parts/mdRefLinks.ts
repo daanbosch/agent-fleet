@@ -9,8 +9,10 @@ import { displayName } from "../../../lib/sessionview.ts";
 import { mergeChatTitles, useChatStore } from "../../chat/store.ts";
 import { openCommit } from "../../scm/open.ts";
 import { wireContextMenu } from "./linkContextMenu.ts";
+import type { OpenPathLinkMenu } from "../PathLinkMenu.tsx";
 import { useReposStore } from "../../repos/store.ts";
 import { useWorkItemStore } from "../../workitems/store.ts";
+import { useJiraProjects } from "../../workitems/jiraProjects.ts";
 import { useWorkItemModal } from "../../workitems/modal.ts";
 import { dedupeWorkItems, sortWorkItems, type WorkItem } from "../../workitems/read.ts";
 import {
@@ -141,8 +143,21 @@ export function linkifyRefs(
 
   for (const node of targets) {
     const text = node.nodeValue!;
-    re.lastIndex = 0;
-    let m = re.exec(text);
+    // A range `#573-#598` whose front end already became a link (or an earlier text node) leaves
+    // `-#598` here; the look-behind needs the front end to accept the back one, so it is matched
+    // with the neighbour's text in front and the matches inside that prefix are ignored.
+    const prev = node.previousSibling;
+    const prefix =
+      wiCtx && text.startsWith("-") && prev && (prev.nodeType === Node.TEXT_NODE || (prev as Element).matches?.("a.md-workitem-link"))
+        ? // One character before the neighbour too: it decides whether the neighbour is itself a
+          // valid front end (`#1-#2-#3` has no third end).
+          (prev.previousSibling?.textContent?.slice(-1) ?? "") + (prev.textContent ?? "")
+        : "";
+    const full = prefix + text;
+    const off = prefix.length;
+    re.lastIndex = off;
+    const nextMatch = () => re.exec(full);
+    let m = nextMatch();
     if (!m) continue;
 
     const out = document.createDocumentFragment();
@@ -164,7 +179,7 @@ export function linkifyRefs(
       }
       if (!a && /^[0-9a-f]{7,40}$/.test(token)) {
         // A hex run wedged between "/" or "-" is a path segment / UUID group, not a sha.
-        if (repo && !inPathLikeContext(text, m.index, m.index + token.length)) {
+        if (repo && !inPathLikeContext(full, m.index, m.index + token.length)) {
           a = makeCommitLink(token, repo, onError);
         }
       } else if (!a && /^s[a-z2-7]{6}$/.test(token)) {
@@ -173,11 +188,11 @@ export function linkifyRefs(
         if (exists) a = makeSessionLink(token, openSession, openSessionMenu);
       }
       if (a) {
-        if (m.index > last) out.appendChild(document.createTextNode(text.slice(last, m.index)));
+        if (m.index - off > last) out.appendChild(document.createTextNode(text.slice(last, m.index - off)));
         out.appendChild(a);
-        last = m.index + token.length;
+        last = m.index - off + token.length;
       }
-      m = re.exec(text);
+      m = nextMatch();
     } while (m);
 
     if (last === 0) continue; // nothing linkified in this node — leave it untouched
@@ -194,6 +209,7 @@ function workItemRefContext(repo: string | null): WorkItemRefContext {
     origin: repo ? originOf(repos.find((r) => r.name === repo)) : null,
     items: cachedWorkItems(),
     known: cloneHosts(repos),
+    jiraProjects: new Set(useJiraProjects.getState().keys),
   };
 }
 
@@ -441,6 +457,7 @@ export async function linkifyPathRefs(
   onOpenFile: (path: string, line?: number, column?: number, openInNew?: boolean) => void,
   onOpenDir: (path: string) => void,
   onError: (message: string) => void,
+  openMenu?: OpenPathLinkMenu,
 ) {
   const candidates: { code: HTMLElement; ref: PathRef }[] = [];
   el.querySelectorAll<HTMLElement>("code").forEach((code) => {
@@ -471,7 +488,7 @@ export async function linkifyPathRefs(
     // nest two anchors, and a click would open both.
     if (!code.isConnected || code.dataset.pathLink || !isPathCandidateCode(code)) continue;
     code.dataset.pathLink = "1";
-    const a = makePathLink(cwd, ref, hit, onOpenFile, onOpenDir, onError);
+    const a = makePathLink(cwd, ref, hit, onOpenFile, onOpenDir, onError, openMenu);
     while (code.firstChild) a.appendChild(code.firstChild);
     code.appendChild(a);
   }
@@ -488,6 +505,7 @@ function makePathLink(
   onOpenFile: (path: string, line?: number, column?: number, openInNew?: boolean) => void,
   onOpenDir: (path: string) => void,
   onError: (message: string) => void,
+  openMenu?: OpenPathLinkMenu,
 ): HTMLAnchorElement {
   const a = document.createElement("a");
   a.className = "md-ref-link md-path-link";
@@ -511,8 +529,30 @@ function makePathLink(
     else if (fresh.path.startsWith("/")) onError(t("view.cannot_open_from_here", { path: fresh.path }));
     else onOpenDir(fresh.path);
   };
+  // Right click / long press / Menu key. Re-resolved like a click, so a file that is gone says
+  // so instead of opening a menu that acts on nothing.
+  const menu = openMenu
+    ? wireContextMenu(a, (x, y) => {
+        if (!a.isConnected) return; // the document was replaced since this link was built
+        void (async () => {
+          const fresh = (await resolvePathRefs(cwd, [ref.ref], { fresh: true })).get(ref.ref);
+          if (!a.isConnected) return; // replaced while the answer was in flight
+          if (!fresh) return onError(t("view.file_not_found", { path: hit.path }));
+          openMenu(
+            {
+              path: fresh.path,
+              type: fresh.type,
+              openFile: (inNew) => onOpenFile(fresh.path, ref.line, ref.column, inNew),
+            },
+            x,
+            y,
+          );
+        })();
+      })
+    : null;
   a.addEventListener("click", (e) => {
     e.preventDefault();
+    if (menu?.clickSwallowed()) return; // the lift of the long press that opened the menu
     void open(e.ctrlKey || e.metaKey);
   });
   a.addEventListener("auxclick", (e) => {

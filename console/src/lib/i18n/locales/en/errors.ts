@@ -8,12 +8,15 @@ import type { errors as jaErrors } from "../ja/errors.ts";
 
 export const errors: Record<keyof typeof jaErrors, string> = {
   // --- API errors (mirror of ERR_TEXT + inline fallbacks) ---
+  "err.not_configured": "That feature is not enabled on this deployment. Ask your operator.",
+  "err.no_preview_domain":
+    "The development OIDC IdP needs preview subdomains, and this deployment has no preview domain. Ask your operator.",
   "err.tts_engine_off":
     "An administrator has switched the read-aloud engine (Zundamon) off for this deployment. Ask them to enable it.",
   "err.tts_engine_unmanaged":
     "The engine on this deployment cannot be started from the Console; it is run externally.",
   "err.tts_wake_rate_limited":
-    "The engine has already been called. It takes about 70 seconds to arrive \u2014 wait a moment before trying again.",
+    "The engine has already been called. It takes about 70 seconds to arrive, so wait a moment before trying again.",
   "err.tts_text_too_long":
     "That is more text than one synthesis request may carry. Send it sentence by sentence.",
   "err.ip_not_allowed":
@@ -23,11 +26,11 @@ export const errors: Record<keyof typeof jaErrors, string> = {
   "err.quota_sessions":
     "You've reached the limit on concurrently running sessions. Stop one of the running sessions before creating another.",
   "err.sessions_running":
-    "This working copy has running sessions. Switching would swap and break the working tree underfoot, so it's blocked here. Open the branch as a separate working copy instead.",
+    "This working copy has running sessions. Switching would swap the files those sessions are using for another branch's and corrupt their work, so it's blocked here. Open the branch as a separate working copy instead.",
   "err.branch_in_use":
-    "Another working copy already has this branch checked out. git allows one working copy per branch — open that copy, or pick a different branch.",
+    "Another working copy already has this branch checked out. git allows one working copy per branch. Open that copy, or pick a different branch.",
   "err.sessions_running_delete":
-    "This working copy has running sessions. Deleting would remove the working directory underfoot and break them, so stop those sessions first.",
+    "This working copy has running sessions. Deleting would remove the working directory those sessions run in and leave them unable to continue, so stop those sessions first.",
   "err.worktree_dirty":
     "This worktree has uncommitted/unpushed changes. Force-deleting it will lose them.",
   "err.has_worktrees":
@@ -50,13 +53,15 @@ export const errors: Record<keyof typeof jaErrors, string> = {
     "The branch has moved since the delete, or there was none, so it can't be put back as it was. Recreate it on a new branch name.",
   "err.worktree_nested_repo":
     "This worktree holds a repository git does not track (a clone inside it), whose contents the trash cannot keep. Move or delete it first; the worktree was left as it is.",
+  "err.git_index_lock_stale":
+    "A stale git lock file (index.lock) is left in this working copy, and no git was found running there.",
   "err.session_resumed": "The session was resumed while it was being moved to the trash, so it was not deleted.",
   "err.sessions_trash_failed":
     "Couldn't move this working copy's shell/ssm sessions to the trash, so the working copy was not deleted (check the free disk space).",
   "err.branch_unmerged":
     "This branch is not fully merged, so it was not deleted. Merge or push it first.",
   "err.branch_not_in_head":
-    "This branch's commits are not in this working copy's current history. Deleting it on the remote too would leave them with nowhere to live — bring them in first.",
+    "This branch's commits are not in this working copy's current history. Deleting it on the remote too would leave them with nowhere to live, so bring them in first.",
   // ADR 0105: the /turn queue ops (remove / dismiss_discard / interrupt with discard_queue).
   "err.already_started": "It has already started, so it can't be taken back.",
   "err.not_queued": "It is no longer in the queue.",
@@ -65,13 +70,13 @@ export const errors: Record<keyof typeof jaErrors, string> = {
   "err.question_pending":
     "The agent is waiting for an answer to its question. Answer it from the question card before sending.",
   "err.plan_pending":
-    "The agent is waiting for a plan decision. Approve or reject it from the plan card (or in the terminal when there is none) before sending — typed text would be swallowed by the dialog and approve the plan.",
+    "The agent is waiting for a plan decision. Approve or reject it from the plan card (or in the terminal when there is none) before sending, because typed text would be swallowed by the dialog and approve the plan.",
   "err.permission_pending":
-    "The agent is waiting for a permission decision. Allow or deny it from the permission card (or in the terminal when there is none) before sending — typed text would be swallowed by the menu and allow it.",
+    "The agent is waiting for a permission decision. Allow or deny it from the permission card (or in the terminal when there is none) before sending, because typed text would be swallowed by the menu and allow it.",
   "err.interaction_pending":
     "The agent is showing an interactive prompt. Answer it from its card (or in the terminal when there is none) before sending.",
   "err.auth_expired":
-    "This workspace's Claude login has expired. Re-authenticate from Settings > Agents before sending (sent now, the terminal would take the text but no turn would ever start).",
+    "This workspace's Claude login has expired. Re-authenticate it (account menu > Settings > Connections > Agents) before sending, because the terminal would take the text but no turn would ever start.",
   "err.codex_releasing":
     "codex has not let go of this conversation yet (usually about a minute after the stop). Try again shortly.",
   "err.driver_switching": "This session is switching its execution method. Try again once the switch is done.",
@@ -81,6 +86,11 @@ export const errors: Record<keyof typeof jaErrors, string> = {
   // that needs the Agent arrived. Not a failure — a "not yet", so it asks for a retry.
   "err.workspace_starting": "The workspace is still starting. Try again once it is ready.",
   "err.driver_unavailable": "Managed execution isn't available for this agent.",
+  "err.member_origin_required": "Only the Console can do this. It was not sent from your signed-in session.",
+  "err.member_origin_invalid": "The request could not be verified as yours (it may have expired). Try again.",
+  "err.member_origin_unavailable": "The workspace's agent just started or needs a restart. Try again in a minute.",
+  "err.too_many_uploads": "Another memory import is already running. Try again when it finishes.",
+  "err.upload_timeout": "The upload stalled or took too long. Try again.",
   "err.runtime_failed": "Couldn't start the agent. Wait a moment and try again.",
   // The line above is for failures that waiting fixes. A shared daemon that was not
   // started because the CLI is not signed in never fixes itself, so it gets its own
@@ -105,12 +115,15 @@ export const errors: Record<keyof typeof jaErrors, string> = {
   "err.user_key_reserved": "This user key is a name the Control Plane uses for its own files, so it cannot be added to the default tenant.",
   "err.user_key_conflict": "This user key is already a tenant's directory, so it cannot be added to the default tenant. Ask an administrator.",
   "err.unknown_provider": "That sign-in method isn't enabled on this deployment.",
-  "err.self_removal": "You can't remove your last membership — it is the way back in. Ask another administrator.",
+  "err.self_removal": "You can't remove your last membership; it is the way back in. Ask another administrator.",
   "err.bad_share": "That share request is invalid.",
   "err.member_not_found": "That recipient isn't a member of this tenant. Pick one from the search results.",
   "err.share_self": "You can't share with yourself.",
   "err.workspace_not_running": "The owner's workspace must be running.",
+  "err.catalog_sync_failed": "The workspace is running, but its session list could not be read. Try again in a moment.",
+  "err.catalog_too_large": "This workspace has too many sessions for the session list to be read. Delete sessions you no longer need (archived ones count too).",
   "err.share_target_not_found": "The share target could not be found.",
+  "err.share_operation_in_progress": "An approved operation is running, so the share could not be changed. Try again in a moment.",
   "err.owner_session_archived": "The owner archived this session, so it is no longer listed for recipients. It comes back if they restore it.",
   "err.settings_change_failed": "Couldn't change the setting.",
   "err.bad_path": "The file path is invalid.",
@@ -124,6 +137,12 @@ export const errors: Record<keyof typeof jaErrors, string> = {
   "err.binary_not_supported": "Binary files and unsupported text encodings can't be edited.",
   "err.unsupported_newline": "Files with CRLF or CR newlines can't be edited yet.",
   "err.read_failed": "Failed to read the file.",
+  "err.zip_too_large": "This folder is too large to download as a zip.",
+  "err.unsafe_name": "A file name in this folder can't be stored in a zip.",
+  "err.changed_during_zip": "The folder changed while the zip was being made. Try again.",
+  "err.zip_no_space": "The workspace has no space left for the zip.",
+  "err.zip_not_dir": "That is not a folder.",
+  "err.zip_busy": "The workspace is busy. Try again in a moment.",
   "err.write_failed": "Failed to save the file.",
   "err.write_state_unknown": "The content is live, but its durability couldn't be confirmed.",
   // docs/log/28 P3: workspace/agent handler stable codes (mirror of errcodes.go).
@@ -165,19 +184,19 @@ export const errors: Record<keyof typeof jaErrors, string> = {
   "err.mcp_url_invalid": "That URL cannot be parsed.",
   "err.mcp_url_scheme": "The URL must be http or https.",
   "err.mcp_url_host": "The URL has no host.",
-  "err.mcp_url_credentials": "Do not embed credentials in the URL — use a header.",
+  "err.mcp_url_credentials": "Do not embed credentials in the URL. Use a header.",
   "err.mcp_http_no_command": "A remote server cannot carry a command, arguments or environment variables.",
   "err.mcp_env_name_invalid": "Invalid environment variable name.",
   "err.mcp_header_name_invalid": "Invalid header name.",
   "err.mcp_header_value_invalid": "A header value cannot contain a newline.",
   "err.mcp_kind_unknown": "Unknown agent kind.",
   "err.mcp_timeout_range": "The timeout must be between 1000 and 120000 ms.",
-  "err.mcp_headers_unreadable": "The stored headers cannot be decrypted — re-enter every header value.",
+  "err.mcp_headers_unreadable": "The stored headers cannot be decrypted. Re-enter every header value.",
   // Egress allowlist requests (docs/log/48 §9 / control-plane/egress_member.go)
   "err.egress_entry_invalid":
-    "An allowlist entry must be a host or a .suffix.example.com — no scheme, port or path.",
-  "err.egress_entry_too_broad": "A whole TLD (.com and the like) cannot be requested — name a domain.",
-  "err.egress_too_many_proposals": "Too many pending requests — ask an administrator to work through the queue.",
+    "An allowlist entry must be a host or a .suffix.example.com, with no scheme, port or path.",
+  "err.egress_entry_too_broad": "A whole TLD (.com and the like) cannot be requested. Name a domain.",
+  "err.egress_too_many_proposals": "Too many pending requests. Ask an administrator to work through the queue.",
   "err.mcp_tenant_bridge_off":
     "Tenant distribution is unavailable in this deployment (the CP public URL / token is unset).",
   "err.mcp_tenant_fetch_failed": "Could not fetch the tenant set.",
@@ -195,8 +214,39 @@ export const errors: Record<keyof typeof jaErrors, string> = {
   "err.fork_missing_dir": "Can't fork: the working folder doesn't exist.",
   "err.fork_at_unsupported": "This session can't branch from a past message (managed sessions only).",
   "err.fork_bad_anchor": "That branch point can't be used. Reload the chat and try again.",
-  "err.title_feature_disabled": "AI suggestions are off (turn on title auto-suggestion in Display settings).",
+  // Move to another agent kind (ADR 0115): workspace/agent/internal/sessionx/session_move*.go.
+  "err.session_moved": "This session was moved to another agent, or is being moved. Continue in the session it moved to.",
+  "err.move_busy": "A move of this session is already running. Wait for it to finish.",
+  "err.move_same_kind": "Pick another kind of agent as the target. The same kind draws on the same account's quota.",
+  "err.move_target_unsupported": "This agent cannot read the handover file, so it cannot be a move target.",
+  "err.move_unsupported_source": "Only a session with a readable conversation can be moved.",
+  "err.move_missing_dir": "The working folder does not exist, so the session cannot be moved.",
+  "err.move_source_state": "This session cannot be moved right now. Let the turn end or stop it, and answer any pending question, plan or approval first.",
+  "err.move_cursor_stopped": "A stopped Managed Cursor session cannot be moved: its conversation is gone.",
+  "err.move_empty_transcript": "The conversation could not be read, so nothing was moved (an empty file is never written).",
+  "err.move_write_failed": "The handover file could not be written, so the move was rolled back.",
+  "err.move_create_uncertain": "Whether the target started is not known. Retry the move or cancel it.",
+  "err.move_commit_failed": "The target exists, but the move could not be recorded. Retry to finish it.",
+  "err.move_rollback_failed": "The move could not be rolled back. Try retry or cancel.",
+  "err.move_failed": "The move failed.",
+  "err.move_not_pending": "This session has no move to finish.",
+  "err.move_record_missing": "The record of this move is gone. Cancel the move.",
+  "err.move_target_exists": "The target session exists, so the move cannot be cancelled. Retry to finish it, or delete the target first.",
+  "err.move_target_unreadable": "The target session's record cannot be read right now. Wait a moment and retry.",
+  "err.move_target_orphaned": "A target started but was never recorded. Cancel stops it and restores this session; then move again.",
+  "err.move_orphan_stop_failed": "Could not stop the unrecorded target.",
+  "err.move_file_missing": "The handover file is gone. Cancel the move and move again.",
+  "err.move_not_moved": "This session has not been moved.",
+  "err.move_delivery_none": "This session has no first prompt to resend.",
+  "err.move_delivery_done": "The first prompt has already arrived (or the session is gone).",
+  "err.move_delivery_in_flight": "The first prompt is being sent right now.",
+  "err.move_target_not_created": "The move has not created this session yet. Finish or cancel it from the source session.",
+  "err.meta_write_failed": "The session started, but its record could not be written to disk.",
+  "err.session_gate": "Could not wait for this session's move to finish. Try again.",
+  "err.bad_kind": "Unknown agent kind.",
+  "err.title_feature_disabled": "This AI feature is off (turn it on under \"Features that use AI assistance\" in Settings > AI assistance).",
   "err.title_no_content": "Not enough conversation yet (try again after a few exchanges).",
+  "err.title_empty": "The model returned no usable title for this conversation (it may have declined this content). Type a title by hand instead.",
   "err.translate_disabled": "Answer translation is off (turn it on in Settings > AI assistance).",
   "err.translate_empty": "There is no text to translate.",
   "err.translate_too_long": "This answer is too long to translate.",
@@ -216,7 +266,7 @@ export const errors: Record<keyof typeof jaErrors, string> = {
   "err.memory_not_found": "That memory does not exist.",
   "err.memory_conflict": "The memory was changed first. Read it again and retry.",
   "err.memory_no_project": "This session has no working copy, so it has no project memory.",
-  "err.memory_disabled": "Agent Fleet memory is turned off in Settings > Agents.",
+  "err.memory_disabled": "Agent Fleet memory is turned off in Settings > Agent memory.",
   "err.tenant_idp_link_claim_required":
     "This deployment already has a sign-in method for the same issuer. That issuer gives each app registration a different subject for the same person, so without \"how the same account is recognised\", everybody already using this deployment would be refused at login as a duplicate address.",
 
@@ -283,13 +333,13 @@ export const errors: Record<keyof typeof jaErrors, string> = {
   "err.engine_vae_unreadable": "The checkpoint's header could not be read, so whether it has a VAE is unknown.",
   "err.engine_no_source": "This row records no source page, so there is nothing to read a name or an example image from.",
   "err.engine_discover_unsupported": "This row is not an external ComfyUI row, so there is nothing to discover.",
-  "err.engine_discover_unreachable": "Could not reach that machine — it may be powered off or unreachable on the network.",
+  "err.engine_discover_unreachable": "Could not reach that machine. It may be powered off or unreachable on the network.",
   "err.gated_not_accepted": "That account has not accepted this repository's terms yet.",
   "err.civitai_login_required": "A Civitai token reached the task, and this deployment's account still cannot have this asset.",
   "err.civitai_gated_no_token": "That asset requires a logged-in account and this deployment has no Civitai token.",
   "err.bad_source": "The source is not a valid one.",
   "err.file_unknown": "The repository does not list that file.",
-  "err.no_checksum": "The source publishes no sha256 — take it in with an explicit url and sha256.",
+  "err.no_checksum": "The source publishes no sha256, so take it in with an explicit url and sha256.",
   "err.source_unreachable": "The source could not be reached.",
   "err.source_forbidden": "The source refused to be read from this deployment.",
   "err.source_error": "The source answered with something unexpected.",
@@ -308,13 +358,13 @@ export const errors: Record<keyof typeof jaErrors, string> = {
   "err.engine_comfy_managed": "The image engine is managed by this deployment's engine stack, which takes precedence over the panel.",
   "err.engine_comfy_unsupported": "This Control Plane has nowhere to keep a ComfyUI URL.",
   "err.engine_comfy_store_failed": "The ComfyUI settings could not be saved or read.",
-  "err.hf_token_unsupported": "This deployment's engine stack has nowhere to keep the token — update 60-engines.",
+  "err.hf_token_unsupported": "This deployment's engine stack has nowhere to keep the token. Update 60-engines.",
   "err.hf_token_empty": "The token is empty.",
   "err.hf_token_store_failed": "The token could not be saved.",
   "err.hf_token_put_failed": "The token could not be written into the deployment's secret.",
-  "err.civitai_token_unsupported": "This deployment's engine stack has nowhere to keep the token — update 60-engines.",
+  "err.civitai_token_unsupported": "This deployment's engine stack has nowhere to keep the token. Update 60-engines.",
   "err.engine_civitai_red_off": "This deployment does not offer the Civitai Red source.",
-  "err.engine_civitai_red_unavailable": "This deployment does not have Civitai Red — set AF_ENGINE_CIVITAI_RED on the Control Plane.",
+  "err.engine_civitai_red_unavailable": "This deployment does not have Civitai Red. Set AF_ENGINE_CIVITAI_RED on the Control Plane.",
   "err.civitai_token_empty": "The token is empty.",
   "err.civitai_token_store_failed": "The token could not be saved.",
   "err.civitai_token_put_failed": "The token could not be written into the deployment's secret.",
@@ -330,7 +380,7 @@ export const errors: Record<keyof typeof jaErrors, string> = {
   // knob at all. Reusing bad_strength/bad_size's own text here would claim "out of range",
   // which is not what happened, hence the separate code.
   "err.bad_strength_family": "This checkpoint's family cannot vary how much of the input changes.",
-  "err.bad_size_family": "This checkpoint's family decides the output size from the input picture — there is no size to choose.",
+  "err.bad_size_family": "This checkpoint's family decides the output size from the input picture, so there is no size to choose.",
   "err.bad_count": "One job can sample at most 4 pictures together.",
   "err.bad_jobs": "The number of pictures is out of range.",
   "err.bad_seed_policy": "That is not a seed policy.",
@@ -348,4 +398,21 @@ export const errors: Record<keyof typeof jaErrors, string> = {
   "err.audit_unavailable": "Nothing was done: the audit log could not record who asked for it. Try again once the database is back.",
   "err.git_repo_create_forbidden": "Your role in this tenant cannot create repositories.",
   "err.git_repo_manage_forbidden": "Only the person who created a repository, or a tenant administrator, can rename or delete it.",
+  "err.handoff_take_lost": "The handoff was withdrawn or taken from another window before the launch. No session was created.",
+  "err.inbox_invalid_recipient": "Some recipients cannot receive items in this tenant.",
+  "err.inbox_recipient_not_accepting": "Some recipients do not accept items from you.",
+  "err.inbox_too_many_recipients": "Too many recipients (20 at most).",
+  "err.inbox_body_too_large": "The message is too long (16 KiB at most).",
+  "err.inbox_rate_limited": "You have sent the most items allowed in one hour (30). Try again later.",
+  "err.inbox_pending_limit": "A recipient already has the most pending items from you (10).",
+  "err.inbox_bad_request": "The inbox request is not valid.",
+  "err.inbox_state_conflict": "This item is already in a different state.",
+  "err.inbox_not_found": "Item not found.",
+  "err.inbox_launch_in_progress": "A session from this request is already starting or has started.",
+  "err.inbox_launch_unknown": "A session may already have started from this request. Check your sessions; to start over, hand the request back and take it again.",
+  "err.inbox_attachment_invalid": "The attachment is not valid, or that session cannot be attached.",
+  "err.inbox_repo_invalid": "Name the repository as owner/repo on github.com or bitbucket.org.",
+  "err.inbox_share_not_owner": "Only a session's owner can share it.",
+  "err.inbox_share_unconfirmed": "Confirm every recipient and the scope before sharing.",
+  "err.memo_origin_alone": "A memo taken in from the inbox cannot be sent together with other memos. Send it on its own.",
 };

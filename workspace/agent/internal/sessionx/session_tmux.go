@@ -14,6 +14,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/afdb"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/fleetgraph"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/lifegate"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/mcpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
@@ -95,7 +96,12 @@ func startSessionTmux(m session.Meta, ssmForce bool) error {
 // Every failure is REPORTED, never swallowed: /start answering {"ok":true} for a
 // launch that never happened is worse than a plain error, because the Console then
 // waits for a session that is not coming and offers the user no way to retry.
-func ensureSessionTmux(name string, ssmForce bool) error {
+//
+// The caller holds the session's lease (ADR 0115 decision 11.1): this starts a process.
+func ensureSessionTmux(lease *lifegate.Lease, name string, ssmForce bool) error {
+	if err := lease.Check(name); err != nil {
+		return err
+	}
 	m, ok := session.ReadMeta(name)
 	if ok && m.DriverKind() == session.DriverManaged {
 		if ManagedAlive(m) {
@@ -191,12 +197,27 @@ func sessionsInDir(metas []session.Meta, alive func(session.Meta) bool, dir stri
 		if m.Archived || !alive(m) {
 			continue
 		}
-		if m.Dir == dir || strings.HasPrefix(m.Dir, dir+string(os.PathSeparator)) {
+		if dirWithin(m.Dir, dir) {
 			names = append(names, session.Display(m))
 		}
 	}
 	sort.Strings(names)
 	return names
+}
+
+// dirWithin reports whether d is dir or sits beneath it, comparing canonical paths: Meta.Dir
+// keeps the spelling the launch request used, so a session started through a symlink or a `..`
+// path (a shared-working-copy child can be) would otherwise be missed by the delete / checkout
+// guards the moment the session that launched it through the canonical spelling stops.
+func dirWithin(d, dir string) bool {
+	if d == dir || strings.HasPrefix(d, dir+string(os.PathSeparator)) {
+		return true
+	}
+	if d == "" || dir == "" {
+		return false
+	}
+	cd, cdir := workingCopyKey(d), workingCopyKey(dir)
+	return cd == cdir || strings.HasPrefix(cd, cdir+string(os.PathSeparator))
 }
 
 // LockedSessionsInDir returns the display names of DELETE-LOCKED sessions (docs/log/45)
@@ -210,7 +231,7 @@ func LockedSessionsInDir(metas []session.Meta, dir string) []string {
 		if !m.Locked {
 			continue
 		}
-		if m.Dir == dir || strings.HasPrefix(m.Dir, dir+string(os.PathSeparator)) {
+		if dirWithin(m.Dir, dir) {
 			names = append(names, session.Display(m))
 		}
 	}

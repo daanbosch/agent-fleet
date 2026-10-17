@@ -7,6 +7,8 @@
 export const errors = {
   // --- API エラー（core/api/client.ts の ERR_TEXT ＋ インライン fallback）---
   // Go 側の安定コード（control-plane/errcodes.go, workspace/agent/errcodes.go）と対。
+  "err.not_configured": "この環境ではその機能が有効になっていません。運用者に確認してください。",
+  "err.no_preview_domain": "開発用 OIDC IdP にはプレビューのサブドメインが必要ですが、この環境にはプレビュー用ドメインがありません。運用者に確認してください。",
   "err.tts_engine_off":
     "この配備では読み上げエンジン（ずんだもん）が管理者によって無効化されています。有効化は管理者に依頼してください。",
   "err.tts_engine_unmanaged":
@@ -22,22 +24,22 @@ export const errors = {
   "err.quota_sessions":
     "同時に稼働できるセッション数の上限に達しています。稼働中のセッションをどれか停止してから作成してください。",
   "err.sessions_running":
-    "この作業コピーでは稼働中のセッションがあります。切り替えると足元の作業ツリーが入れ替わり壊れるため、ここでは切り替えできません。ブランチは別の作業コピーとして開いてください。",
+    "この作業コピーでは稼働中のセッションがあります。切り替えると、稼働中のセッションが使っているファイルが別のブランチの内容に入れ替わって作業が食い違うため、ここでは切り替えできません。ブランチは別の作業コピーとして開いてください。",
   "err.branch_in_use":
-    "このブランチは別の作業コピーが既にチェックアウトしています。git は同じブランチを2つの作業コピーに置けません。そちらの作業コピーを開くか、別のブランチを選んでください。",
+    "このブランチは別の作業コピーがすでにチェックアウトしています。git は同じブランチを2つの作業コピーに置けません。そちらの作業コピーを開くか、別のブランチを選んでください。",
   "err.sessions_running_delete":
-    "この作業コピーでは稼働中のセッションがあります。削除すると足元の作業ディレクトリが消えて壊れるため、先にそれらのセッションを停止してください。",
+    "この作業コピーでは稼働中のセッションがあります。削除すると、稼働中のセッションの作業ディレクトリが消えて動けなくなるため、先にそれらのセッションを停止してください。",
   "err.worktree_dirty":
     "この worktree には未コミット/未pushの変更があります。強制削除すると失われます。",
   "err.has_worktrees":
-    "この作業コピーには派生した worktree がぶら下がっています。先に worktree 側を削除してください。",
+    "この作業コピーには派生した worktree があります。先に worktree 側を削除してください。",
   "err.locked":
     "削除ロックがかかっています。先にロックを解除してから削除してください。",
   "err.locked_sessions":
     "この作業コピーには削除ロック中のセッションがあります。削除すると再開できなくなるため、先にそのセッションのロックを解除してください。",
   "err.worktree_remove_failed": "worktree の削除に失敗しました。",
   "err.recreate_path_exists":
-    "そのパスには既に何かがあります。作り直せるのは消えたフォルダだけです。",
+    "そのパスにはすでに何かがあります。作り直せるのは消えたフォルダだけです。",
   "err.recreate_parent_missing":
     "この worktree の元になった作業コピーが見つからないため、作り直せません。",
   "err.recreate_stale":
@@ -49,6 +51,8 @@ export const errors = {
     "ブランチが削除後に動いたか、削除時にブランチが無かったため、そのままでは戻せません。新しいブランチ名を付けて作り直してください。",
   "err.worktree_nested_repo":
     "この worktree の中に git 管理外のリポジトリ（中で clone したものなど）があり、その中身はごみ箱に残せません。先に移動か削除をしてください。worktree はそのままです。",
+  "err.git_index_lock_stale":
+    "古い git のロックファイル（index.lock）が残っているため実行できませんでした。動いている git は見つかりませんでした。",
   "err.session_resumed": "ごみ箱へ移している間にセッションが再開されたため、削除しませんでした。",
   "err.sessions_trash_failed":
     "作業コピーの shell/ssm セッションをごみ箱へ移せなかったため、作業コピーは削除していません（ディスクの空きを確認してください）。",
@@ -64,13 +68,13 @@ export const errors = {
   "err.question_pending":
     "エージェントが質問への回答を待っています。質問カードから回答してから送信してください。",
   "err.plan_pending":
-    "エージェントがプランの承認待ちです。プランカード（無いときは端末）から承認・却下してから送信してください（テキストは承認ダイアログに飲まれ、そのまま承認になります）。",
+    "エージェントがプランの承認待ちです。プランカード（ないときは端末）から承認・却下してから送信してください（テキストは承認ダイアログに取り込まれ、そのまま承認になります）。",
   "err.permission_pending":
-    "エージェントが許可の判断待ちです。許可カード（無いときは端末）から許可・拒否してから送信してください（テキストは許可メニューに飲まれ、そのまま許可になります）。",
+    "エージェントが許可の判断待ちです。許可カード（ないときは端末）から許可・拒否してから送信してください（テキストは許可メニューに取り込まれ、そのまま許可になります）。",
   "err.interaction_pending":
     "エージェントが対話中のプロンプトを表示しています。カード（無いときは端末）から回答してから送信してください。",
   "err.auth_expired":
-    "このワークスペースの Claude のログインが期限切れです。設定 > エージェント から再認証してから送信してください（この状態で送るとターミナルは文字を受け取りますが、ターンは一つも始まりません）。",
+    "このワークスペースの Claude のログインが期限切れです。再認証（アカウントメニュー > 設定 > 接続 > エージェント）してから送信してください（この状態で送るとターミナルは文字を受け取りますが、ターンは一つも始まりません）。",
   "err.codex_releasing":
     "codex がまだこの会話を手放していません（停止から通常 1 分ほど）。少し待ってからもう一度お試しください。",
   "err.driver_switching": "実行方式を切り替えています。切り替えが終わってからもう一度お試しください。",
@@ -81,6 +85,11 @@ export const errors = {
   // 来たとき。失敗ではなく「まだ」なので、赤くしても再試行を促す言い方にする。
   "err.workspace_starting": "ワークスペースを起動中です。準備ができてからもう一度お試しください。",
   "err.driver_unavailable": "このエージェントではマネージド実行を利用できません。",
+  "err.member_origin_required": "この操作は Console からのみ行えます。ログイン中のセッションから送られた要求ではありません。",
+  "err.member_origin_invalid": "要求があなたのものだと確認できませんでした（期限切れの可能性があります）。もう一度お試しください。",
+  "err.member_origin_unavailable": "ワークスペースのエージェントが起動直後か、再起動が必要です。1 分ほど待ってから再試行してください。",
+  "err.too_many_uploads": "別のメモリのインポートが実行中です。完了してから再度お試しください。",
+  "err.upload_timeout": "アップロードが止まったか、時間がかかりすぎました。もう一度お試しください。",
   "err.runtime_failed": "エージェントを起動できませんでした。しばらく待ってから再試行してください。",
   // ↑ は「待てば直る」失敗のための文言。共有 daemon が未認証で起こされなかった場合は
   // 待っても直らないので、runtime_failed に潰さず専用コードで出す（workspace/agent の
@@ -97,19 +106,22 @@ export const errors = {
   "err.not_provisioned": "所属するテナントがありません。管理者に追加を依頼してください。",
   "err.domain_not_allowed": "このテナントに招待できるメールアドレスのドメインではありません。",
   "err.email_required": "このテナントはドメインで招待を制限しています。メールアドレスで招待してください。",
-  "err.auto_join_conflict": "その自動参加ドメインは既に別のテナントが使っています。",
+  "err.auto_join_conflict": "その自動参加ドメインはすでに別のテナントが使っています。",
   // A tenant slug or a default-tenant user key would share a directory under the data root.
   "err.tenant_slug_reserved": "そのスラグは Control Plane が自身のファイルに使う名前です。別のスラグを選んでください。",
   "err.tenant_slug_conflict": "そのスラグは既定テナントのメンバーのホームディレクトリと同じ名前です。別のスラグを選んでください。",
   "err.user_key_reserved": "このユーザーキーは Control Plane が自身のファイルに使う名前のため、既定テナントに追加できません。",
-  "err.user_key_conflict": "このユーザーキーは既にテナントのディレクトリ名として使われているため、既定テナントに追加できません。管理者に相談してください。",
-  "err.unknown_provider": "そのサインイン方法はこのデプロイで有効になっていません。",
-  "err.self_removal": "自分の最後のメンバーシップは外せません（戻る道が無くなるため）。他の管理者に依頼してください。",
+  "err.user_key_conflict": "このユーザーキーはすでにテナントのディレクトリ名として使われているため、既定テナントに追加できません。管理者に相談してください。",
+  "err.unknown_provider": "そのサインイン方法はこの配備で有効になっていません。",
+  "err.self_removal": "自分の最後のメンバーシップは外せません（戻る方法がなくなるため）。他の管理者に依頼してください。",
   "err.bad_share": "共有リクエストが不正です。",
   "err.member_not_found": "指定した相手は同じテナントのメンバーではありません。検索候補から選び直してください。",
   "err.share_self": "自分自身を共有先に指定することはできません。",
   "err.workspace_not_running": "所有者のワークスペースが起動している必要があります。",
+  "err.catalog_sync_failed": "ワークスペースは起動していますが、セッション一覧を読み取れませんでした。しばらくしてから再度お試しください。",
+  "err.catalog_too_large": "このワークスペースはセッションが多すぎるため、セッション一覧を読み取れません。不要なセッション（アーカイブ済みも含む）を削除してください。",
   "err.share_target_not_found": "共有対象が見つかりませんでした。",
+  "err.share_operation_in_progress": "承認済みの操作を実行中のため、共有を変更できませんでした。少し待ってから再度お試しください。",
   "err.owner_session_archived": "所有者がこのセッションをアーカイブしました。共有先の一覧からは外れています（所有者が復元すればまた表示されます）。",
   "err.settings_change_failed": "設定を変更できませんでした",
   "err.bad_path": "ファイルパスが不正です",
@@ -123,6 +135,12 @@ export const errors = {
   "err.binary_not_supported": "バイナリまたは未対応の文字コードのファイルは編集できません",
   "err.unsupported_newline": "CRLFまたはCR改行のファイルはまだ編集できません",
   "err.read_failed": "ファイルの読み込みに失敗しました",
+  "err.zip_too_large": "このフォルダは大きすぎて zip にできません",
+  "err.unsafe_name": "このフォルダには zip に入れられないファイル名があります",
+  "err.changed_during_zip": "zip の作成中にフォルダが変わりました。もう一度お試しください",
+  "err.zip_no_space": "zip を作る空き容量がワークスペースにありません",
+  "err.zip_not_dir": "フォルダではありません",
+  "err.zip_busy": "ワークスペースが混み合っています。しばらくしてからお試しください",
   "err.write_failed": "ファイルの保存に失敗しました",
   "err.write_state_unknown": "保存内容は反映されていますが、永続化の成否を確認できません",
   // docs/log/28 P3: workspace/agent ハンドラの安定コード（errcodes.go と対）。
@@ -151,15 +169,15 @@ export const errors = {
   "err.conn_slack_app_token_required": "返信の受信には App-level トークン（xapp-）が必要です",
   // MCP レジストリ（docs/log/48 / workspace/agent/mcp_servers.go + internal/mcpreg/def.go）
   "err.mcp_not_found": "MCP サーバーが見つかりません",
-  "err.mcp_read_only": "このサーバーは編集できません（無効化のみ可能です）",
-  "err.mcp_name_taken": "同じ名前のサーバーが既に登録されています",
+  "err.mcp_read_only": "このサーバーは編集できません（無効化だけが可能です）",
+  "err.mcp_name_taken": "同じ名前のサーバーがすでに登録されています",
   "err.mcp_invalid": "MCP サーバーの定義が不正です",
   "err.mcp_name_invalid": "名前は英数字・ハイフン・アンダースコア 48 文字以内で、先頭は英数字にしてください",
   "err.mcp_name_reserved": "その名前は Agent Fleet が使用する予約名です",
-  "err.mcp_transport_unsupported": "未対応の接続方式です（stdio / リモート HTTP のみ）",
+  "err.mcp_transport_unsupported": "未対応の接続方式です（対応しているのは stdio / リモート HTTP だけです）",
   "err.mcp_command_required": "stdio サーバーにはコマンドが必要です",
   "err.mcp_stdio_no_url": "stdio サーバーに URL / ヘッダは指定できません",
-  "err.mcp_tenant_stdio": "テナント配布の MCP サーバーは stdio を使えません（リモートのみ）",
+  "err.mcp_tenant_stdio": "テナント配布の MCP サーバーは stdio を使えません（リモートだけに対応しています）",
   "err.mcp_url_required": "リモートサーバーには URL が必要です",
   "err.mcp_url_invalid": "URL を解釈できません",
   "err.mcp_url_scheme": "URL は http / https で指定してください",
@@ -177,7 +195,7 @@ export const errors = {
     "許可リストにはホスト名か .suffix.example.com の形式を指定してください（スキーム・ポート・パスは使えません）",
   "err.egress_entry_too_broad": "TLD 全体（.com など）は申請できません。ドメイン単位で指定してください",
   "err.egress_too_many_proposals": "承認待ちの申請が多すぎます。管理者に処理を依頼してください",
-  "err.mcp_tenant_bridge_off": "テナント配布はこの環境では利用できません（CP の公開URL/トークンが未設定）",
+  "err.mcp_tenant_bridge_off": "テナント配布はこの環境では利用できません（CP の公開 URL/トークンが設定されていません）",
   "err.mcp_tenant_fetch_failed": "テナント配布を取得できませんでした",
   "err.assistant_not_found": "アシスタントが見つかりません",
   "err.assistant_builtin_readonly_edit": "ビルトインは編集できません",
@@ -188,14 +206,45 @@ export const errors = {
   "err.assistant_integration_unsupported": "未対応の連携です",
   "err.paste_too_large": "ファイルが大きすぎます",
   "err.paste_unsupported_kind": "このセッション種別には画像を渡せません",
-  "err.paste_unsupported_agent": "画像を渡せるのは claude / codex のアシスタントのみです",
+  "err.paste_unsupported_agent": "画像を渡せるのは claude / codex のアシスタントだけです",
   "err.fork_unsupported_kind": "このセッション種別は分岐に対応していません",
   "err.fork_missing_dir": "作業フォルダが存在しないため分岐できません",
-  "err.fork_at_unsupported": "このセッションは発言時点からの分岐に対応していません（managed のセッションでのみ使えます）",
+  "err.fork_at_unsupported": "このセッションは発言時点からの分岐に対応していません（managed のセッションでだけ使えます）",
   "err.fork_bad_anchor": "この分岐点は使えません。チャットを読み込み直してからやり直してください",
-  "err.title_feature_disabled": "AI 提案が無効です（表示設定のタイトル自動提案をオンに）",
+  // Move to another agent kind (ADR 0115): workspace/agent/internal/sessionx/session_move*.go.
+  "err.session_moved": "このセッションは別のエージェントへ移されたか、移動中です。続きは移動先のセッションで行ってください。",
+  "err.move_busy": "このセッションの移動がすでに実行中です。終わるまでお待ちください。",
+  "err.move_same_kind": "移動先には別の種類のエージェントを選んでください。同じ種類は同じアカウントの利用枠を使います。",
+  "err.move_target_unsupported": "このエージェントは引き継ぎファイルを読めないため、移動先にできません。",
+  "err.move_unsupported_source": "会話を読めるセッションだけを移せます。",
+  "err.move_missing_dir": "作業フォルダが存在しないため移せません。",
+  "err.move_source_state": "このセッションはいま移せない状態です。ターンの終了を待つか停止し、質問・計画・承認待ちがあれば先に答えてください。",
+  "err.move_cursor_stopped": "停止したマネージドの Cursor セッションは会話が残っていないため移せません。",
+  "err.move_empty_transcript": "会話を読めなかったため移しませんでした（空のファイルは書きません）。",
+  "err.move_write_failed": "引き継ぎファイルを書けなかったため、移動を取り消しました。",
+  "err.move_create_uncertain": "移動先が起動したかどうか分かりません。やり直すか、移動を取り消してください。",
+  "err.move_commit_failed": "移動先はできましたが、移動の記録を書けませんでした。やり直すと完了します。",
+  "err.move_rollback_failed": "移動を元に戻せませんでした。やり直すか取り消しを試してください。",
+  "err.move_failed": "移動に失敗しました。",
+  "err.move_not_pending": "このセッションには完了待ちの移動がありません。",
+  "err.move_record_missing": "この移動の記録がありません。移動を取り消してください。",
+  "err.move_target_exists": "移動先のセッションがあるため取り消せません。やり直して完了するか、先に移動先を削除してください。",
+  "err.move_target_unreadable": "移動先のセッション情報をいま読めません。少し待ってからやり直してください。",
+  "err.move_target_orphaned": "移動先が起動しましたが記録されていません。取り消すと止めてから元に戻します。その後もう一度移してください。",
+  "err.move_orphan_stop_failed": "記録されていない移動先を止められませんでした。",
+  "err.move_file_missing": "引き継ぎファイルがありません。移動を取り消して、もう一度移してください。",
+  "err.move_not_moved": "このセッションは移動済みではありません。",
+  "err.move_delivery_none": "このセッションには送り直す最初の指示がありません。",
+  "err.move_delivery_done": "最初の指示はすでに届いています（またはセッションがありません）。",
+  "err.move_delivery_in_flight": "最初の指示をいま送っているところです。",
+  "err.move_target_not_created": "移動がまだ移動先を作っていません。移動元のセッションで完了するか取り消してください。",
+  "err.meta_write_failed": "セッションは起動しましたが、その情報をディスクに書けませんでした。",
+  "err.session_gate": "このセッションの移動が終わるのを待てませんでした。もう一度試してください。",
+  "err.bad_kind": "知らないエージェントの種類です。",
+  "err.title_feature_disabled": "この AI 補助機能がオフです（設定 > AI 補助の「AI 補助生成を使う機能」でオンにしてください）",
   "err.title_no_content": "会話がまだ足りません（数往復してから試してください）",
-  "err.translate_disabled": "回答の翻訳が無効です（設定 > AI アシストでオンに）",
+  "err.title_empty": "この会話からはAIが件名を返せませんでした（内容によっては応答を控えることがあります）。件名は手入力してください",
+  "err.translate_disabled": "回答の翻訳がオフです（設定 > AI 補助でオンにしてください）",
   "err.translate_empty": "翻訳する本文がありません",
   "err.translate_too_long": "この回答は長すぎて翻訳できません",
   "err.memory_bad_request": "リクエストの形式が不正です",
@@ -214,21 +263,21 @@ export const errors = {
   "err.memory_not_found": "そのメモリはありません",
   "err.memory_conflict": "メモリが先に更新されています。読み直してからやり直してください",
   "err.memory_no_project": "このセッションには作業コピーが無いため、プロジェクトのメモリを使えません",
-  "err.memory_disabled": "Agent Fleet のメモリは設定でオフになっています（設定 → エージェント）",
+  "err.memory_disabled": "Agent Fleet のメモリは設定でオフになっています（設定 → エージェントメモリ）",
   "err.tenant_idp_link_claim_required":
-    "このデプロイには、同じ発行元のサインイン方法がすでにあります。この発行元はアプリ登録ごとに同じ人へ違う subject を割り当てるため、" +
-    "「同一アカウントの見分け方」を指定しないと、すでにこのデプロイを使っている人が全員ログインできなくなります（メールアドレス重複として拒否されます）。",
+    "この配備には、同じ発行元のサインイン方法がすでにあります。この発行元はアプリ登録ごとに同じ人へ違う subject を割り当てるため、" +
+    "「同一アカウントの見分け方」を指定しないと、すでにこの配備を使っている人が全員サインインできなくなります（メールアドレス重複として拒否されます）。",
 
   // Agent sign-in / OAuth (opencode, kiro, agy, cursor). The codes are shared across
   // drivers on purpose: the wording holds for every one of them, and the driver-specific
   // cause arrives as the server's message, which errDetail appends.
   "err.already_connected": "すでに接続済みです。再認証するには一度切断してください",
   "err.no_url": "エージェントがログイン URL を返しませんでした",
-  "err.no_selector": "エージェントがサインイン方式の選択肢を表示しませんでした",
+  "err.no_selector": "エージェントがログイン方式の選択肢を表示しませんでした",
   "err.serve_unavailable": "エージェントのサービスを起動できませんでした",
   "err.login_failed": "ログインが完了しませんでした",
-  "err.bad_method": "サインイン方式の指定が不正です",
-  "err.method_unsupported": "このサインイン方式はまだ使えません",
+  "err.bad_method": "ログイン方式の指定が不正です",
+  "err.method_unsupported": "このログイン方式はまだ使えません",
   "err.opencode_unsupported": "opencode が見つかりません（イメージが古い可能性があります）",
   "err.kiro_unsupported": "kiro-cli が見つかりません（未導入の可能性があります）",
   "err.cursor_unsupported": "cursor-agent が見つかりません（イメージが古い可能性があります）",
@@ -238,12 +287,12 @@ export const errors = {
   // 🔴 これは拒否であって失敗ではない。`muse auth set` は provider の項目を丸ごと置き換える
   // ので、アカウントのサインインの上に API キーを書くとサインインが消えたうえ従量課金になる。
   "err.account_login_present":
-    "アカウントでサインイン済みです。API キーを保存するとそのサインインが失われ、定額プランから従量課金に切り替わります。API キーを使うなら先に切断してください。",
+    "アカウントでログイン済みです。API キーを保存するとそのログインが失われ、定額プランから従量課金に切り替わります。API キーを使うなら先に切断してください。",
   "err.auth_failed": "API キーを保存できませんでした",
   // These carry err.Error() as the whole message, so the catalogue supplies the human
   // framing and errDetail appends the raw cause after it.
-  "err.oauth_start_failed": "サインインを開始できませんでした",
-  "err.oauth_poll_failed": "サインインの完了を確認できませんでした",
+  "err.oauth_start_failed": "ログインを開始できませんでした",
+  "err.oauth_poll_failed": "ログインの完了を確認できませんでした",
   "err.oauth_disconnect_failed": "切断できませんでした",
   "err.oauth_error": "認可サーバがエラーを返しました",
   "err.logout_failed": "サインアウトできませんでした",
@@ -253,7 +302,7 @@ export const errors = {
     "この opencode serve は別のプロセスが起動したもので、Agent からは入れ替えられません。設定を反映するにはワークスペースを再起動してください",
   "err.serve_not_ready": "エージェントのサービスが応答しませんでした",
   "err.agy_unsupported": "agy が見つかりません（イメージが古い可能性があります）",
-  "err.no_flow": "サインインの手続きが見つからないか期限切れです。やり直してください",
+  "err.no_flow": "ログインの手続きが見つからないか期限切れです。やり直してください",
   "err.bad_code": "コードを入力してください",
   "err.bad_key": "キーを入力してください",
   "err.bad_env": "環境変数名が不正です（ANTHROPIC_API_KEY のように大文字と _ で指定してください）",
@@ -295,13 +344,13 @@ export const errors = {
   "err.ingest_unavailable": "この配備では Console からの取り込みが構成されていません",
   "err.license_not_accepted": "ライセンスへの同意が必要です",
   "err.gated_no_token": "gated のリポジトリですが、この配備に Hugging Face のトークンがありません",
-  "err.model_id_exists": "その id のモデルはこのエンジンに既にあります",
+  "err.model_id_exists": "その id のモデルはこのエンジンにすでにあります",
   // 履歴から 1 行を消すときの 2 つの断り。「まだ走っています」は待てば済む話で、行を消しても
   // ECS のタスクは止まらない（終わったらカタログ行を書く）ことがそのまま理由になる。
   "err.ingest_job_unknown": "その取り込み履歴はこのエンジンにありません",
-  "err.ingest_job_live": "その取り込みはまだ走っているので、履歴だけを消すことはできません",
+  "err.ingest_job_live": "その取り込みはまだ実行中なので、履歴だけを消すことはできません",
   "err.engine_plan_stale": "画面の取り込み計画は最新ではありません。新しい計画で取り込み直してください",
-  "err.engine_comfy_url_invalid": "ホストを含む http:// または https:// の URL を入力してください（クエリやフラグメントは不可）",
+  "err.engine_comfy_url_invalid": "ホストを含む http:// または https:// の URL を入力してください（クエリやフラグメントは使えません）",
   "err.engine_comfy_url_credentials": "URL にユーザー名やパスワードが含まれています。Bearer はキーの欄に入れてください",
   "err.engine_comfy_managed": "画像エンジンはこの配備のエンジンスタックが管理しており、パネルより優先されます",
   "err.engine_comfy_unsupported": "この Control Plane には ComfyUI の URL を保存する場所がありません",
@@ -318,8 +367,8 @@ export const errors = {
   "err.civitai_token_put_failed": "トークンを配備の秘密に書き込めませんでした",
   // --- 画像生成の待ち行列（ADR 0081 レーン A）。これまで proxy されていなかった経路なので、
   // 符号はここが初出になる。Agent の message は英語なので、目録に無いと英語がそのまま出る。
-  "err.queue_full": "画像の待ち行列がいっぱいです。今の分が捌けてから投入してください。",
-  "err.trial_pending": "試走が既に待っています。1 枚見てから次を頼んでください。",
+  "err.queue_full": "画像の待ち行列がいっぱいです。今の分が処理されてから投入してください。",
+  "err.trial_pending": "試走がすでに待っています。1 枚見てから次を頼んでください。",
   "err.bad_params": "steps / cfg / sampler / scheduler のどれかがこのエンジンで使えない値です。",
   "err.bad_prompt": "プロンプトが空です。",
   "err.bad_op": "その操作はできません。",
@@ -336,7 +385,7 @@ export const errors = {
   "err.cancel_failed": "エンジンに取消が届きませんでした。",
   "err.no_browse_root": "ワークスペースのファイル領域を読めませんでした。",
   "err.not_found": "見つかりませんでした。",
-  "err.imagegen_no_provider": "この要求を捌ける画像エンジンがありません。",
+  "err.imagegen_no_provider": "この要求を処理できる画像エンジンがありません。",
   "err.imagegen_unknown_provider": "その画像エンジンはこの配備にありません。",
   "err.home_wipe_unsupported": "この配備では使えない操作です。ホームが Control Plane から届かない場所にあるため、何も停止せずに断りました。",
   "err.home_wipe_while_starting": "ワークスペースがまだ起動中です。何も停止していません。起動し終わってからもう一度実行してください。",
@@ -345,4 +394,21 @@ export const errors = {
   "err.audit_unavailable": "何もしませんでした。誰が依頼したかを監査ログに記録できなかったためです。データベースが復旧してから再度お試しください。",
   "err.git_repo_create_forbidden": "このテナントでのあなたの役割では、リポジトリを作成できません。",
   "err.git_repo_manage_forbidden": "リポジトリの名前の変更と削除は、作成した人かテナント管理者だけができます。",
+  "err.handoff_take_lost": "起動の前に引き継ぎが取り下げられたか、別の画面で確保されました。セッションは作っていません。",
+  "err.inbox_invalid_recipient": "宛先に、このテナントで受け取れないメンバーが含まれています。",
+  "err.inbox_recipient_not_accepting": "宛先に、あなたからは受け取らない設定の人がいます。",
+  "err.inbox_too_many_recipients": "宛先が多すぎます（20 人まで）。",
+  "err.inbox_body_too_large": "本文が長すぎます（16 KiB まで）。",
+  "err.inbox_rate_limited": "1 時間に送れる数（30 件）を超えました。しばらくしてから送ってください。",
+  "err.inbox_pending_limit": "宛先の人への未処理が上限（10 件）に達しています。",
+  "err.inbox_bad_request": "受信箱への要求が正しくありません。",
+  "err.inbox_state_conflict": "この項目は、すでに別の状態になっています。",
+  "err.inbox_not_found": "項目が見つかりません。",
+  "err.inbox_launch_in_progress": "この依頼からのセッションは、すでに起動中か起動済みです。",
+  "err.inbox_launch_unknown": "この依頼からセッションが起動した可能性があります。自分のセッション一覧を確認してください。やり直すときは依頼を手放してから引き受け直してください。",
+  "err.inbox_attachment_invalid": "添付が正しくないか、そのセッションは添付できません。",
+  "err.inbox_repo_invalid": "リポジトリは github.com か bitbucket.org の owner/repo で指定してください。",
+  "err.inbox_share_not_owner": "セッションを共有できるのは、その持ち主だけです。",
+  "err.inbox_share_unconfirmed": "共有する前に、すべての宛先と共有の範囲を確認してください。",
+  "err.memo_origin_alone": "受信箱から取り込んだメモは、ほかのメモと一緒には送れません。1 件ずつ送ってください。",
 };

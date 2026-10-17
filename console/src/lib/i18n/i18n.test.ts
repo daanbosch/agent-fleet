@@ -40,6 +40,12 @@ describe("i18n runtime", () => {
     expect(tMaybe("err.quota_sessions")).toBe(en["err.quota_sessions"]);
   });
 
+  it("has an actionable message for the title_empty code (model returned no title)", () => {
+    // HandleSuggestTitle answers 422 title_empty; errText shows err.<code>.
+    expect(ja["err.title_empty"]).toBeTruthy();
+    expect(en["err.title_empty"]).toBeTruthy();
+  });
+
   it("exposes ja + en as supported locales", () => {
     expect(SUPPORTED_LOCALES).toContain("ja");
     expect(SUPPORTED_LOCALES).toContain("en");
@@ -48,14 +54,28 @@ describe("i18n runtime", () => {
   it("en covers every ja key and adds none (completeness guard at runtime too)", () => {
     expect(Object.keys(en).sort()).toEqual(Object.keys(ja).sort());
   });
+
+  // t() leaves a {placeholder} in place when the call site passes no such var, and a call site
+  // passes one set of vars for both locales. A key whose placeholders differ between ja and en
+  // therefore shows a literal "{name}" in one of them (the spawn badge tooltip did). Measured
+  // today: no key differs. Add an entry to this allowlist only with the reason it is intended.
+  const PLACEHOLDER_PARITY_ALLOWLIST = new Set<string>([]);
+  it("every key has the same {placeholder} names in ja and en", () => {
+    const names = (s: string) => [...new Set([...s.matchAll(/\{(\w+)\}/g)].map((m) => m[1]))].sort().join(",");
+    const differ = Object.keys(ja)
+      .filter((k) => !PLACEHOLDER_PARITY_ALLOWLIST.has(k))
+      .filter((k) => names((ja as Record<string, string>)[k]) !== names((en as Record<string, string>)[k]))
+      .map((k) => `${k}: ja {${names((ja as Record<string, string>)[k])}} vs en {${names((en as Record<string, string>)[k])}}`);
+    expect(differ).toEqual([]);
+  });
 });
 
 describe("tCount (plurals)", () => {
   beforeEach(() => setLocale("ja"));
 
   it("ja is single-form: 1 and 2 both use _other", () => {
-    expect(tCount("common.count_ken", 1)).toBe("1件");
-    expect(tCount("common.count_ken", 2)).toBe("2件");
+    expect(tCount("common.count_ken", 1)).toBe("1 件");
+    expect(tCount("common.count_ken", 2)).toBe("2 件");
   });
 
   it("en selects one/other by Intl.PluralRules", () => {
@@ -68,7 +88,7 @@ describe("tCount (plurals)", () => {
 
   it("count is auto-injected into vars", () => {
     setLocale("ja");
-    expect(tCount("common.days_left", 5)).toBe("あと5日");
+    expect(tCount("common.days_left", 5)).toBe("あと 5 日");
   });
 });
 

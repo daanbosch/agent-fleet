@@ -3,6 +3,33 @@
 Release notes index for [Agent Fleet](https://github.com/k-k1/agent-fleet-dist). Each entry links
 to the release, where the full notes are. 日本語は [CHANGELOG.ja.md](CHANGELOG.ja.md)。
 
+## [0.31.0](https://github.com/k-k1/agent-fleet-dist/releases/tag/v0.31.0) — 2026-10-14
+
+Members of a tenant can send each other messages and requests through a new inbox, opt in to
+sharing their usage limits on a limit board, and land on a Home view that shows what is waiting for
+them. Agent memory gets a browser in Settings with search, edit, restore and purge, and imports from
+muse and memory bundles. The owner of a workspace can open any port it listens on in the preview
+without registering it first.
+
+## [0.30.0](https://github.com/k-k1/agent-fleet-dist/releases/tag/v0.30.0) — 2026-10-09
+
+Follow-up prompts can wait in a per-session queue while a turn runs, folders download as zip,
+and the Console terminal copies and pastes with Ctrl+C and Ctrl+V. Agent Fleet memory takes over
+from claude's own memory while it is on, and can be written back to it. Expiring GitHub App and
+Google Cloud tokens renew themselves, and Chromium works on ecs-ec2 workspaces.
+
+## [0.29.1](https://github.com/k-k1/agent-fleet-dist/releases/tag/v0.29.1) — 2026-10-07
+
+A fix release for 0.29.0: Agent Fleet's own MCP tools work again with the Claude Code version 0.29.0
+ships, and a finished claude session no longer shows as in progress for up to a minute.
+
+## [0.29.0](https://github.com/k-k1/agent-fleet-dist/releases/tag/v0.29.0) — 2026-10-07
+
+SVN working copies get a Show log and a Local changes view, and claude's existing auto-memory can be
+imported into Agent Fleet memory. A Terminal claude or Antigravity session that stops making progress
+no longer keeps its workspace awake. Image generation through Antigravity and codex works again, Muse
+Code questions can be answered, and the Console's Japanese wording follows one glossary.
+
 ## [0.28.0](https://github.com/k-k1/agent-fleet-dist/releases/tag/v0.28.0) — 2026-10-04
 
 Past sessions' conversations can be searched from the command palette and by agents, and sessions can

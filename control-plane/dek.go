@@ -4,9 +4,15 @@ package main
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"log"
+	"strings"
 
+	"github.com/k-k1/agent-fleet/control-plane/internal/runtime"
 	"github.com/k-k1/agent-fleet/control-plane/internal/store"
 )
 
@@ -20,11 +26,42 @@ func (m *manager) legacyDEK(userKey string) []byte {
 	return mac.Sum(nil)
 }
 
-// resolveDEK returns the hex DEK to inject as AF_SECRET_KEY for a workspace,
-// stored wrapped by the tenant KEK (docs/15 P3-3). On first use it mints the
-// legacy DEK, wraps it via the custodian, and persists it. Returns "" in dev
-// (no master/custodian) so the Agent stores secrets in plaintext as before.
-func (m *manager) resolveDEK(ctx context.Context, ws store.Workspace, userKey string) (string, error) {
+// resolveDEK returns the credential-store keys to inject for a workspace's start
+// (resolveStartKeys).
+func (m *manager) resolveDEK(ctx context.Context, ws store.Workspace, userKey string) (runtime.SecretKeys, error) {
+	keys, _, err := m.resolveStartKeys(ctx, ws, userKey)
+	return keys, err
+}
+
+// resolveStartKeys returns the keys a start injects, and the home's home_dek row when it has
+// one. Zero in dev (no master/custodian) so the Agent stores secrets in plaintext as before.
+//
+//   - no home key: Key is the derived DEK stored wrapped by the tenant KEK (docs/15 P3-3).
+//   - 'migrating': Key is the derived DEK and Next the home's key; the Agent re-seals the
+//     store under Next and the CP confirms it from /healthz (home_dek_confirm.go).
+//   - 'random': Key is the home's key and there is no Next. The derived key is not handed
+//     out any more; the confirmed store does not need it.
+func (m *manager) resolveStartKeys(ctx context.Context, ws store.Workspace, userKey string) (runtime.SecretKeys, *store.HomeDEK, error) {
+	if len(m.master32) == 0 || m.custodian == nil {
+		return runtime.SecretKeys{}, nil, nil
+	}
+	home, homeKey, err := m.resolveHomeDEK(ctx, ws)
+	if err != nil {
+		return runtime.SecretKeys{}, nil, err
+	}
+	if home != nil && home.Scheme == store.HomeDEKRandom {
+		return runtime.SecretKeys{Key: homeKey}, home, nil
+	}
+	key, err := m.resolveWrappedDEK(ctx, ws, userKey)
+	if err != nil {
+		return runtime.SecretKeys{}, nil, err
+	}
+	return runtime.SecretKeys{Key: key, Next: homeKey}, home, nil
+}
+
+// resolveWrappedDEK returns the hex derived DEK. On first use it mints the legacy DEK, wraps
+// it via the custodian, and persists it.
+func (m *manager) resolveWrappedDEK(ctx context.Context, ws store.Workspace, userKey string) (string, error) {
 	if len(m.master32) == 0 || m.custodian == nil {
 		return "", nil
 	}
@@ -48,4 +85,123 @@ func (m *manager) resolveDEK(ctx context.Context, ws store.Workspace, userKey st
 		}
 	}
 	return hex.EncodeToString(dek), nil
+}
+
+// resolveHomeDEK returns the home_dek row of the workspace's home and its hex key (ADR 0005
+// addendum 2026-10-10), minting it on the first start after AF_WORKSPACE_DEK=random; nil and
+// "" for a home without one. A home that has
+// one keeps using it whatever the flag says now, because its Agent may already have re-sealed
+// the store under it. Any custodian error fails the start: there is no fallback to the
+// derived key alone, which would leave a re-sealed store unopenable without saying why.
+func (m *manager) resolveHomeDEK(ctx context.Context, ws store.Workspace) (*store.HomeDEK, string, error) {
+	if ws.MembershipID == "" {
+		return nil, "", nil
+	}
+	d, ok, err := m.store.GetHomeDEK(ctx, ws.MembershipID)
+	if err != nil {
+		return nil, "", err
+	}
+	if !ok {
+		if !m.homeDEKRandom {
+			return nil, "", nil
+		}
+		if d, err = m.mintHomeDEK(ctx, ws); err != nil {
+			return nil, "", err
+		}
+	}
+	key, err := m.custodian.Unwrap(ctx, d.KeyRef, d.Ciphertext)
+	if err != nil {
+		return nil, "", fmt.Errorf("open the home's credential-store key: %w", err)
+	}
+	defer clear(key)
+	if len(key) != 32 {
+		return nil, "", errors.New("the home's credential-store key is malformed")
+	}
+	return &d, hex.EncodeToString(key), nil
+}
+
+// mintHomeDEK seals a fresh random key for the home and stores it, or returns the one a
+// concurrent start stored first.
+func (m *manager) mintHomeDEK(ctx context.Context, ws store.Workspace) (store.HomeDEK, error) {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return store.HomeDEK{}, err
+	}
+	defer clear(key)
+	ct, err := m.custodian.Wrap(ctx, ws.TenantID, key)
+	if err != nil {
+		return store.HomeDEK{}, fmt.Errorf("seal the home's credential-store key: %w", err)
+	}
+	return m.store.InsertHomeDEK(ctx, store.HomeDEK{MembershipID: ws.MembershipID, Ciphertext: ct, KeyRef: ws.TenantID})
+}
+
+// homeDEKModeRandom parses AF_WORKSPACE_DEK. "random" is refused unless the custodian is kms:
+// under the local custodian the random key is wrapped by a master-derived KEK, so it would
+// add a migration and buy no crypto-shredding.
+func homeDEKModeRandom(mode, custodianKind string) (bool, error) {
+	switch strings.TrimSpace(mode) {
+	case "", "derived":
+		return false, nil
+	case "random":
+		if custodianKind != "kms" {
+			return false, fmt.Errorf("AF_WORKSPACE_DEK=random needs AF_KEY_CUSTODIAN=kms (it is %q)", custodianKind)
+		}
+		return true, nil
+	default:
+		return false, fmt.Errorf("AF_WORKSPACE_DEK=%q: want derived or random", mode)
+	}
+}
+
+// releaseHomeDEK drops the credential-store key of a home that has just been destroyed, and
+// only when the runtime proves that nothing of the home is left (runtime.ProveHomeGone). Any
+// other answer keeps the key: a key dropped while a byte of the home survives makes that
+// byte unreadable for good, and a key kept costs one row. Callers hold the membership's
+// lifecycle lease, so no start of the same membership is reading the key meanwhile; the
+// delete itself re-checks that the lease is still this destroy's, unexpired, under a database
+// lock that workspace inserts and lease takeovers also take, and is conditional on the row read
+// here and on no workspace row for the membership (store.DeleteHomeDEK). A lease lost since
+// the destroy keeps the key: the proof then may describe a home an earlier generation had. Never an error: the destroy it follows has succeeded.
+//
+// Only a 'random' key goes. A 'migrating' one may already seal a store whose confirm was
+// lost, so it stays for the operator (af-cp home-dek-status).
+func (m *manager) releaseHomeDEK(ctx context.Context, membershipID string, rt runtime.Runtime, lease *workspaceLifecycleLeaseGuard) {
+	if membershipID == "" || m.store == nil {
+		return
+	}
+	if lease == nil || lease.lost.Load() {
+		log.Printf("home key of membership %s: kept, the lifecycle lease is gone, so this destroy's proof may describe an earlier home", membershipID)
+		return
+	}
+	d, ok, err := m.store.GetHomeDEK(ctx, membershipID)
+	if err != nil {
+		log.Printf("home key of membership %s: read before its removal: %v; kept", membershipID, err)
+		return
+	}
+	if !ok {
+		return
+	}
+	if d.Scheme != store.HomeDEKRandom {
+		log.Printf("home key of membership %s: kept, it is %s (af-cp home-dek-status lists it once no workspace names it)", membershipID, d.Scheme)
+		return
+	}
+	if v, why := runtime.ProveHomeGone(ctx, rt); v != runtime.HomeGone {
+		log.Printf("home key of membership %s: kept, the home is not proven gone (%s: %s)", membershipID, v, why)
+		return
+	}
+	switch gone, err := m.store.DeleteHomeDEK(ctx, d, lease.token); {
+	case err != nil:
+		log.Printf("home key of membership %s: remove: %v; kept", membershipID, err)
+	case gone:
+		log.Printf("home key of membership %s: removed with its destroyed home", membershipID)
+	default:
+		log.Printf("home key of membership %s: kept, the row changed or a workspace names it again", membershipID)
+	}
+}
+
+// releaseHomeDEKAfterDestroy is releaseHomeDEK on a context of its own: the lease's may be
+// the very thing that ended.
+func (m *manager) releaseHomeDEKAfterDestroy(membershipID string, rt runtime.Runtime, lease *workspaceLifecycleLeaseGuard) {
+	ctx, cancel := context.WithTimeout(context.Background(), homeOpFinishTimeout)
+	defer cancel()
+	m.releaseHomeDEK(ctx, membershipID, rt, lease)
 }

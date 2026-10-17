@@ -12,7 +12,7 @@ export const fleetgraph = {
   "fgraph.zoom_out": "縮小（表示範囲を広げる）",
   "fgraph.pan_left": "過去へ",
   "fgraph.pan_right": "未来へ",
-  "fgraph.reset_window": "直近24時間に戻す",
+  "fgraph.reset_window": "直近 24 時間に戻す",
   "fgraph.empty": "レーンがありません",
   "fgraph.load_failed": "フリート俯瞰図の読み込みに失敗しました",
 
@@ -32,7 +32,7 @@ export const fleetgraph = {
   "fgraph.erased_label": "削除済み · {id}",
 
   // 稼働帯の状態語（LedgerState。types/fleetgraph.ts の SessionState とは別語彙）。
-  "fgraph.state.working": "進行中",
+  "fgraph.state.working": "進行中…",
   "fgraph.state.compacting": "圧縮中（進行中）",
   "fgraph.state.idle": "入力待ち",
   "fgraph.state.question": "質問あり",

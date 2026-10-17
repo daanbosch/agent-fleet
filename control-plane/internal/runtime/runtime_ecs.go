@@ -79,10 +79,15 @@ type ssmAPI interface {
 // NO CP-side state: every resource is addressed by a deterministic name/tag and
 // created-or-got on Start, so there is no schema change vs the docker adapter.
 type ecsRuntime struct {
-	cfg ecsConfig
-	ecs ecsAPI
-	efs efsAPI
-	ssm ssmAPI
+	// homeDestroyed is set by Destroy once the home task has removed the EFS home
+	// (home_gone.go).
+	homeDestroyed bool
+	// homeUnproven is set when Destroy met an access point it cannot account for.
+	homeUnproven bool
+	cfg          ecsConfig
+	ecs          ecsAPI
+	efs          efsAPI
+	ssm          ssmAPI
 	// ecr resolves the workspace image tag to its content identity, for the
 	// backend-drift ("restart required") badge only (runtime_ecs_stale.go). nil = the
 	// feature is simply off, never an error.
@@ -93,8 +98,8 @@ type ecsRuntime struct {
 	// creates. Read by nothing but the bill (docs/log/67, ADR 0048 decision 3); empty is a
 	// valid value and simply means the resource carries no tenant tag.
 	tenantSlug string
-	token      string // CP↔Agent bearer (Workspace.AgentToken)
-	secretKey  string // per-workspace at-rest DEK (hex); "" in dev
+	token      string     // CP↔Agent bearer (Workspace.AgentToken)
+	keys       SecretKeys // credential-store keys (hex); zero in dev
 	extraEnv   []string
 	// cpu / memory are the Fargate task size for THIS workspace: the cfg defaults, or
 	// a size snapped up to hold the per-workspace RAM/CPU caps (fargateSize) when one
@@ -162,7 +167,7 @@ type ecsFactory struct {
 	tasks ecsTaskAPI
 }
 
-func (f *ecsFactory) New(ws Workspace, secretKey string, extraEnv []string) Runtime {
+func (f *ecsFactory) New(ws Workspace, keys SecretKeys, extraEnv []string) Runtime {
 	// Default to the deployment task size; when a per-workspace RAM or CPU cap is set,
 	// snap onto the smallest VALID Fargate (cpu, memory) pair that holds both — Fargate
 	// only accepts specific combinations, so a memory bump may raise CPU and a CPU bump
@@ -196,7 +201,7 @@ func (f *ecsFactory) New(ws Workspace, secretKey string, extraEnv []string) Runt
 		membershipID: ws.MembershipID,
 		tenantSlug:   ws.TenantSlug,
 		token:        ws.AgentToken,
-		secretKey:    secretKey,
+		keys:         keys,
 		extraEnv:     extraEnv,
 		cpu:          cpu,
 		memory:       memory,
@@ -305,6 +310,11 @@ func newECSFactory(mcfg Config) (RuntimeFactory, error) {
 
 func (e *ecsRuntime) Token() string { return e.token }
 func (e *ecsRuntime) Name() string  { return e.name }
+
+// BrowserUnavailable: Fargate offers no SYS_ADMIN and no user namespaces, so Chromium
+// has no sandbox to start in (browser_support.go). Only this adapter says so: ecs-ec2
+// holds an *ecsRuntime in a named field, not embedded, so the method does not reach it.
+func (e *ecsRuntime) BrowserUnavailable() string { return "ecs" }
 
 // Endpoint returns the Agent's internal Service Connect URL. The client alias the
 // workspace service advertises is its ContainerName, so the CP reaches it at
@@ -468,7 +478,9 @@ func (e *ecsRuntime) Destroy(ctx context.Context) ([]string, error) {
 		if err := e.runHomeTask(ctx, homeWipeDestroy); err != nil {
 			return nil, fmt.Errorf("remove the EFS home: %w", err)
 		}
-		return e.notRemovedByHomeTask(leftovers), nil
+		left := e.notRemovedByHomeTask(leftovers)
+		e.homeDestroyed = len(left) == 0 && !e.homeUnproven
+		return left, nil
 	}
 	return leftovers, nil
 }
@@ -476,6 +488,16 @@ func (e *ecsRuntime) Destroy(ctx context.Context) ([]string, error) {
 // notRemovedByHomeTask drops from leftovers the directories the destroy task has just
 // removed (homeTaskDirs). An access point rooted anywhere else stays reported: nothing
 // removed it, and a leftover silently dropped is one nobody looks for again.
+// isHomeTaskPath reports whether path is one of the member's directories the destroy task removes.
+func (e *ecsRuntime) isHomeTaskPath(path string) bool {
+	for _, dir := range homeTaskDirs {
+		if path == "/"+dir+"/"+e.membershipID {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *ecsRuntime) notRemovedByHomeTask(leftovers []string) []string {
 	var out []string
 	for _, l := range leftovers {
@@ -524,6 +546,7 @@ func (e *ecsRuntime) accessPoints(ctx context.Context) ([]efstypes.AccessPointDe
 // the part of the teardown that is identical on both launch types. Split out so the EC2
 // adapter can run it in its own order (slot and volume first, then this).
 func (e *ecsRuntime) destroySharedResources(ctx context.Context) ([]string, error) {
+	e.homeUnproven = false
 	aps, err := e.accessPoints(ctx)
 	if err != nil {
 		return nil, err
@@ -533,8 +556,22 @@ func (e *ecsRuntime) destroySharedResources(ctx context.Context) ([]string, erro
 		if tagValue(ap.Tags, "af-membership") != e.membershipID {
 			continue
 		}
-		if rd := ap.RootDirectory; rd != nil && aws.ToString(rd.Path) != "" {
-			leftovers = append(leftovers, "efs:"+e.cfg.efsFileSystem+aws.ToString(rd.Path))
+		rd := ap.RootDirectory
+		if rd != nil && aws.ToString(rd.Path) != "" {
+			path := aws.ToString(rd.Path)
+			leftovers = append(leftovers, "efs:"+e.cfg.efsFileSystem+path)
+			if !e.isHomeTaskPath(path) {
+				// The home task never removes what this access point roots, and deleting the
+				// access point would forget it: a retry would find nothing odd and prove the
+				// home gone. It stays, reported on every Destroy, until an operator has dealt
+				// with the directory.
+				continue
+			}
+		} else {
+			// Rooted at the file system's root: unknowable, kept for the same reason.
+			leftovers = append(leftovers, "efs-access-point:"+e.cfg.efsFileSystem+"/"+aws.ToString(ap.AccessPointId))
+			e.homeUnproven = true
+			continue
 		}
 		if _, err := e.efs.DeleteAccessPoint(ctx, &efs.DeleteAccessPointInput{
 			AccessPointId: ap.AccessPointId,
@@ -542,7 +579,7 @@ func (e *ecsRuntime) destroySharedResources(ctx context.Context) ([]string, erro
 			return nil, fmt.Errorf("delete access point %s: %w", aws.ToString(ap.AccessPointId), err)
 		}
 	}
-	for _, suffix := range []string{"agent-token", "secret-key"} {
+	for _, suffix := range []string{"agent-token", "secret-key", "secret-key-next"} {
 		name := fmt.Sprintf("/af-ws/%s/%s", e.name, suffix)
 		if _, err := e.ssm.DeleteParameter(ctx, &ssm.DeleteParameterInput{
 			Name: aws.String(name),
@@ -727,8 +764,20 @@ func (e *ecsRuntime) putSecrets(ctx context.Context) ([]ecstypes.Secret, error) 
 	if err := put("AGENT_TOKEN", "agent-token", e.token); err != nil {
 		return nil, err
 	}
-	if err := put("AF_SECRET_KEY", "secret-key", e.secretKey); err != nil {
+	if err := put("AF_SECRET_KEY", "secret-key", e.keys.Key); err != nil {
 		return nil, err
+	}
+	if err := put("AF_SECRET_KEY_NEXT", "secret-key-next", e.keys.Next); err != nil {
+		return nil, err
+	}
+	if e.keys.Next == "" && e.keys.Key != "" {
+		// A home confirmed on its own key starts without NEXT. The parameter its migrating
+		// starts wrote would otherwise stay in SSM, unreferenced, until Destroy. It holds the
+		// same key secret-key now does, so a failed delete is logged and the start goes on.
+		name := fmt.Sprintf("/af-ws/%s/secret-key-next", e.name)
+		if _, err := e.ssm.DeleteParameter(ctx, &ssm.DeleteParameterInput{Name: aws.String(name)}); err != nil && !isAWSNotFound(err) {
+			log.Printf("ecs %s: delete the unused parameter %s: %v", e.name, name, err)
+		}
 	}
 	return out, nil
 }
@@ -748,6 +797,8 @@ func (e *ecsRuntime) registerTaskDef(ctx context.Context, homeAP, claudeAP strin
 		// Graceful-shutdown budget for the Agent's SIGTERM handler — the container
 		// stopTimeout minus a safety margin (see StopTimeout below).
 		{Name: aws.String("AGENT_STOP_GRACE_SEC"), Value: aws.String(strconv.Itoa(agentStopGraceSec()))},
+		// Fargate cannot add SYS_ADMIN, so Chromium has no sandbox (browser_support.go).
+		{Name: aws.String(BrowserUnavailableEnv), Value: aws.String(e.BrowserUnavailable())},
 	}
 	if e.cfg.sessionCmd != "" {
 		env = append(env, ecstypes.KeyValuePair{Name: aws.String("AGENT_SESSION_CMD"), Value: aws.String(e.cfg.sessionCmd)})

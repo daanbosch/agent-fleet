@@ -1,0 +1,32 @@
+# Upstream message fragments Agent Fleet matches on, checked by cli-fragment-check.sh on
+# every CLI version bump (cli-pin-bump.sh). One row per fragment, TAB-separated:
+#
+#   <kind>  <fragment>  <where the code matches on it, and why>
+#
+# - The fragment is a literal string (grep -F), written the way the upstream package
+#   spells it, ASCII only. It may hold spaces, but no TAB and no backtick (it is quoted in
+#   Markdown). Where the code compares case-insensitively, register the upstream's casing.
+# - A fragment belongs here only if a literal run of it sits in the package as one piece.
+#   One built by string concatenation or kept in an escaped form is invisible to a plain
+#   byte search; the checker reports such a row as "unverifiable" instead of passing it
+#   (see the header of cli-fragment-check.sh).
+# - A kind needs an unpack recipe in cli-fragment-check.sh; without one its rows are
+#   reported as "not checked". Add a row here when new code starts matching on upstream
+#   text (e.g. the expired-OAuth prompt of #2180).
+#
+claude	esc to interrupt	tmuxx.go spinnerActive: the classic busy hint
+claude	? for shortcuts	tmuxx.go atPromptFooter: the older input-box footer
+claude	Enter to select	tmuxx.go modalMarkers: a dialog is up
+claude	Esc to cancel	tmuxx.go modalMarkers: a dialog is up (folder trust, menus)
+claude	to approve	tmuxx.go modalMarkers: the plan-approval dialog at 80 columns
+claude	Do you want to	tmuxx.go modalMarkers: the permission prompt
+claude	Would you like to proceed	tmuxx.go modalMarkers: the plan-approval dialog
+claude	Ready to submit	tmuxx.go modalMarkers: the AskUserQuestion review
+claude	Enter to confirm	tmuxx.go atRateLimitModal: the usage-limit menu is still up
+claude	Stop and wait for limit	tmuxx.go rateLimitOptionRe: the usage-limit menu's first option
+claude	Ask your admin for more usage	tmuxx.go rateLimitOptionRe: the usage-limit menu's second option
+claude	run /login	agents/claude/errors.go authMarkers: sign-in-again wording (code lowercases the message)
+claude	Re-authenticate	agents/claude/errors.go authMarkers: the expired-OAuth wording (#2180)
+claude	refresh your login	agents/claude/errors.go authMarkers: a stuck token refresh
+claude	Invalid API key	agents/claude/errors.go authMarkers: a rejected API key
+claude	authentication_failed	agents/claude/errors.go authKinds: the machine-readable cause

@@ -51,7 +51,9 @@ plain `--profile` cannot:
   cannot read an SSO profile (older SDKs such as the AWS SDK for Java v1, common in Gradle/Maven
   plugins) works.
 - A missing SSO login is requested in the user's Console (exit 3 while it waits, below), instead of
-  an SSO token error you cannot fix.
+  an SSO token error you cannot fix. This holds for the user's own terminal in a workspace too: it
+  waits up to ten minutes for them to approve and Ctrl-C ends it with exit 3; `--login` is the
+  in-terminal device-code login.
 - It refuses a profile name that means different identities to different tools (keys or a role
   beside the SSO settings, a conflicting definition in `~/.aws`).
 - `--region` pins the region against a stale `AWS_REGION` in the shell, and `AWS_ENDPOINT_URL*`
@@ -119,6 +121,12 @@ prints each of the user's Settings > AWS profiles/SSM profiles as `name  account
 the ones that are not exported (the user's own definition wins, a name two labels share, a label
 `default`). Choose by account and role, not by the name alone. If the task does not say which
 account, ask the user — do not guess from a name like `prod`.
+
+A Settings profile can also be a role assumed from another Settings profile (Settings > AWS
+profiles/SSM, type "Assume a role from another profile"; no keys involved). `--list` shows it with the
+role's account and `role assumed from <source>`; `af-aws-exec --profile <name> -- <command>` runs it
+without `--account`, and a missing login is requested in the Console under the *source* profile's name.
+A chained profile whose source is not exported is listed as "not exported" with the reason.
 
 Some deployments are not reached through SSO at all: a profile in the user's own `~/.aws` that
 assumes a role from a `source_profile` (or runs a `credential_process`). `--list` does not show

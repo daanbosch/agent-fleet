@@ -200,6 +200,22 @@ export function buildMenuSeq(
   return seq;
 }
 
+// Which route answers a pending question: /respond (structured, by Interaction id) or the
+// keys below. A Managed session is always structured. A Terminal (CLI) session is too when
+// its question carries an id — only opencode 2 on af's shared serve stamps one on a Terminal
+// slot, because there the Agent can answer the form through the form API and the TUI follows.
+// Every other Terminal question has no id and keeps driving the modal.
+//
+// What the keys can do on opencode (the slot is NOT on the shared serve: v1, or v2 started
+// with --standalone) is deliberately the v1 menu and nothing more: the card is "menu" mode
+// (one choice per page), so only a single question with a single choice is drivable, and
+// anything else is shown read-only with a hint to answer in the terminal. The Console does
+// not know a slot's opencode major, and v2's tabbed form (a Submit tab after the last
+// question, Enter toggling a checklist, Tab leaving it) is a different key contract from v1's
+// pages — guessing it per slot would silently mis-answer one of the two.
+export const answersByRespond = (managed: boolean, qs: { id?: string }[] | null | undefined): boolean =>
+  managed || !!qs?.[0]?.id;
+
 // Managed (semantic) sessions answer the pending Interaction structurally — no modal,
 // no key encoding. One entry per question, in order; empty when that question was left
 // unanswered (a multi-select may legitimately select nothing).

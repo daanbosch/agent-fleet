@@ -105,7 +105,7 @@ func (managedDriver) resume(m session.Meta) (agents.ThreadHandle, error) {
 	// be applied on every path that could spawn a host, and a sign-in that arrives later must
 	// not find an unclamped file waiting for it.
 	if !readCredential().Present {
-		return nil, errors.New("Muse Code にサインインしていません（設定 > 接続 の Muse Code カードでサインイン）")
+		return nil, errors.New("Muse Code にログインしていません（設定 > 接続 の Muse Code カードでログイン）")
 	}
 
 	handlesMu.Lock()
@@ -255,6 +255,21 @@ func ManagedBusy(name string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.running || h.starting != "" || h.tq().Head() != nil || h.tq().Len() > 0
+}
+
+// ManagedInFlight reports that the handle holds an entry it took from the queue and has not
+// settled. The pump gives its move-gate lease back once the runtime has the input, which can be
+// before the runtime's own record (and so DriveState) shows the turn; a move asks this, under the
+// exclusive gate, so it never starts in that window (ADR 0115 decision 11.2). Entries still
+// queued do not count: the move carries them.
+func ManagedInFlight(name string) bool {
+	h := handleFor(name)
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.running || h.starting != "" || h.tq().Head() != nil
 }
 
 // AbortManaged interrupts every running managed turn (the equivalent of the per-pane Ctrl-C

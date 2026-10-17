@@ -3072,3 +3072,90 @@ measured) and against any older `muse` on PATH until the pin moves. Measured aga
 binaries with the current bundle: 1.4.2 red with that single break before the change and green
 after it (25 additions, two of them `feedback`), the 1.4.1 pin green, and 1.4.2 red again when the checked-in bundle was
 mutated to drop `running` from `SessionStatus`.
+
+### Note 2026-10-06: bundle re-exported for 1.4.3-R5018.1 (#1741)
+
+1.4.3-R5018.1 is the first release whose export is not a superset of the bundle: the five
+`SessionDelete*` types are gone (`session/delete` and `session/deleteCompleted` stay, so the
+driver never used them) and `ItemKind` gained `hookRun`, a type the client switches on. Per
+P2-24 that is a reason to re-export, so `internal/msp/schema` and `types_gen.go` now carry the
+1.4.3 export (fingerprint `sha256:4cb67108…`).
+
+`turnsWithCommentary` had no `default`, so an item kind it did not list was skipped. It now renders
+`hookRun` and any later unknown kind through `genericPart` (kind name, `label`/`fallbackText`, and
+the reason when the item did not complete), which is what the schema asks of clients.
+
+The cost the 2026-09 note describes applies again: the 1.4.3 bundle is red against a 1.4.2 binary
+(the bundle declares `hookRun` and the other 1.4.3 additions, which a 1.4.2 binary lacks, so they
+read as removed), so `muse-contract.yml` on the Dockerfile pin stays red until
+`MUSE_VERSION` moves; measured: 1.4.3 green, 1.4.2 red. The pin bump is cli-pin-bump's.
+
+### Note 2026-10-08: #1796 was a stale installed binary, not a bundle problem
+
+`TestInstalledBinaryIsCompatibleWithTheBundle` was red in a Workspace whose home still held
+1.4.2-R4684.1 while the Dockerfile pin and the bundle are 1.4.3-R5018.1 (the cost the 2026-10-06
+note predicted: `hook/list`, `plugin/list` and `hookRun` read as removed, and
+`FeedbackSubmitParams.sessionId` as newly required). Measured: the 1.4.3-R5018.1 artifact, sha256
+verified against the pin, passes the test; 1.4.2 fails it. No client code calls a removed method.
+The bundle and types are unchanged. The test now names the installed build and the pin when they
+differ, so the next stale home reads as "run `workspace-agent install-muse`".
+
+### Note 2026-10-09: bundle re-exported for 1.4.4-R5419.1 (#1919)
+
+1.4.4-R5419.1 grew `ToolReceiptOutcome` by `failed`. The compatibility check reads that as a break
+because the type is reachable from a message the client decodes, but nothing outside `types_gen.go`
+reads a `ToolReceipt`, so no code switches on it. The other differences are additions (new
+methods, error codes and types). Per P2-24 the answer is a re-export, so `internal/msp/schema`
+and `types_gen.go` now carry the 1.4.4 export (fingerprint `sha256:7c94f153…`, equal to the
+release manifest's `msp_schema_fingerprint`). The checker is unchanged.
+
+The same cost applies again: the 1.4.4 bundle is red against a 1.4.3 binary until `MUSE_VERSION`
+moves; measured: 1.4.4 green, 1.4.3 red. The pin bump is cli-pin-bump's.
+
+### Note 2026-10-14: bundle re-exported for 1.4.7-R6101.1 (#2088)
+
+1.4.7-R6101.1 adds values to three closed enums the client decodes (`ErrorKind` gains four
+plugin/marketplace kinds, `TurnErrorKind` gains `mcpLinkError`, `ItemKind` gains `webSearch`), and
+makes seven optional members explicitly nullable (`Session.sideFrom`,
+`SessionBranchChangedParams.branch`, `SessionGoalChangedParams.goal`, `providerId` on
+`SessionModelChangedParams` and `SessionModelRouteUnservedParams`,
+`SessionTokenUsageParams.modelId`, `SnapshotState.name`). The compatibility check reads all of
+these as breaks. None changes Go behaviour: the seven members were already pointers, so `null`
+decodes to `nil`. No code switches on `ErrorKind` or `TurnErrorKind`. A `webSearch` item renders
+through the transcript's generic part. Everything else is an addition, including four
+notifications (`computerUseSetup/changed`, `plugin/changed`, `plugin/marketplaceChanged`,
+`recap/completed`) that the handle drops like any it does not handle. Per P2-24 the answer is a
+re-export: `internal/msp/schema` and `types_gen.go` now carry the 1.4.7 export (fingerprint
+`sha256:6de32db0…`, equal to the release manifest's `msp_schema_fingerprint`). The checker is
+unchanged. No existing field in `types_gen.go` changed type.
+
+The two host-side issues reported upstream on 2026-10-05 (#1695) are still open in 1.4.7.
+`userInput/cancel` without a `reason` is still refused with `-32602`, measured with
+`TestLiveUserInputCancelNeedsAReason` (throwaway HOME, no turn). The schema still carries no
+commentary phase on `Item`. Both workarounds (#1699, #1696) stay.
+
+The same cost applies again: the 1.4.7 bundle is red against a 1.4.4 binary until `MUSE_VERSION`
+moves; measured: 1.4.7 green, 1.4.4 red. The pin bump is cli-pin-bump's.
+
+### Note 2026-10-15: bundle re-exported for 1.4.8-R6256.1 (#2164)
+
+1.4.8-R6256.1 adds one value to a closed enum the client decodes, `ItemKind` `monitorFeed` (a
+monitor task's events, keyed by `monitorId`). The compatibility check reads it as a break. It
+does not change Go behaviour: a `monitorFeed` item renders through the transcript's generic part,
+like `webSearch`. Everything else is an addition: new optional members (among them
+`Item.messagePhase`, `Item.monitorId`, `Session.generatedName`,
+`SessionResumeParams.permissionProfile`), the computer-use app types, the grantable capability
+`sessionRename` (a membership enum), and one notification, `turn/modelRetryScheduled`, which the
+handle drops like any it does not handle. Per P2-24 the answer is a re-export:
+`internal/msp/schema` and `types_gen.go` now carry the 1.4.8 export (fingerprint
+`sha256:4e3200c3…`, equal to the release manifest's `msp_schema_fingerprint`). The checker is
+unchanged. No existing field in `types_gen.go` changed type.
+
+Of the two host-side issues reported upstream (#1695), `userInput/cancel` without a `reason` is
+still refused with `-32602` on 1.4.8 (`TestLiveUserInputCancelNeedsAReason`, throwaway HOME, no
+turn). The other now has a schema answer: `Item.messagePhase` marks a completed `agentMessage` as
+`commentary` or `finalAnswer`. Whether the host now puts pre-tool-call commentary on the wire
+needs a real turn; until that is measured the session.jsonl reader (#1696) stays (#2168).
+
+The same cost applies again: the 1.4.8 bundle is red against a 1.4.7 binary until `MUSE_VERSION`
+moves; measured: 1.4.8 green, 1.4.7 red. The pin bump is cli-pin-bump's.

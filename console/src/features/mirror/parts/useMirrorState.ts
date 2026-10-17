@@ -17,6 +17,7 @@ import { emptyDiscardNotices, queueEntries, visibleDiscards, type DiscardNoticeS
 import type { SessionFile } from "../sessionFiles.ts";
 import type { PendingApproval, Question, TaskItem, Turn } from "../transcript/types.ts";
 import { echoStore, type SendEcho } from "./sendEcho.ts";
+import type { RetryNote } from "./retryNote.ts";
 
 /**
  * useMirrorState declares MirrorView's per-session view state: what the transcript poll fills
@@ -68,6 +69,8 @@ export function useMirrorState({
   const [termState, setTermState] = useState(""); // terminal-only state: "resume" | "compacting" | "update" | ""
   // Compaction progress (parsed from the pane) so the "compacting" block shows a bar, not just a spinner.
   const [compactProg, setCompactProg] = useState<{ pct: number; elapsed?: string } | null>(null);
+  // A provider error the agent is retrying (or gave up on): shown as a band above the transcript.
+  const [retry, setRetry] = useState<RetryNote | null>(null);
   const [status, setStatus] = useState("");
   const [bgBusy, setBgBusy] = useState(false); // idle but a run_in_background task lingers
   const [bgBusyReason, setBgBusyReason] = useState(""); // WHAT lingers: process | subagent | shell
@@ -229,7 +232,7 @@ export function useMirrorState({
   return {
     turns, setTurns, stateSession, setStateSession, pendingSends, setPendingSends, pendingSendsRef,
     applyEchoes, loaded, setLoaded, handoffs, setHandoffs, updateHandoff, termState, setTermState,
-    compactProg, setCompactProg, status, setStatus, bgBusy, setBgBusy, bgBusyReason, setBgBusyReason,
+    compactProg, setCompactProg, retry, setRetry, status, setStatus, bgBusy, setBgBusy, bgBusyReason, setBgBusyReason,
     finalizing, setFinalizing, finalizingRef, wasWorkingRef, busy, tasks, setTasks, files, setFiles,
     queuedPrompts, setQueuedPrompts, queuedItems, setQueuedItems, discards, setDiscards, discardNotices,
     setDiscardNotices, pendingPeers, setPendingPeers, queueOpsRef, queueShown, queuedCount, discardView,

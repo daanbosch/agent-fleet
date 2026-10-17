@@ -4,6 +4,8 @@ import (
 	"hash/fnv"
 	"sync"
 	"time"
+
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 )
 
 // The layer that decides, by time, whether a frame that looks like an idle prompt may be
@@ -107,4 +109,48 @@ func ForgetPane(name string) {
 	sightMu.Lock()
 	delete(sights, name)
 	sightMu.Unlock()
+}
+
+// FooterSettled is the idle-settle verdict for kinds whose own idle test lives outside tmuxx
+// (agy's footer): idle(frame) AND the pane unrepainted for idleSettleWindow. Every frame is
+// recorded, idle or not, so a busy frame in between rewinds the clock; recording only idle
+// frames let "idle A, busy B, idle A" read as settled the moment A came back.
+func FooterSettled(name, frame string, idle func(frame string) bool) bool {
+	settled := observeFrame(name, frame)
+	return settled && idle(frame)
+}
+
+// paneSightingFresh bounds how stale the last observation may be for PaneChangedAt to speak.
+// A kind that stopped reading frames leaves its sighting frozen, and a frozen "changed" would
+// read as a pane that stopped repainting.
+const paneSightingFresh = time.Minute
+
+// PaneChangedAt is when the session's pane last differed from the frame before it, as seen by
+// whichever poll last recorded a frame (observeFrame). ok=false when no recent poll has read
+// the pane: the caller must then treat the pane as having no opinion, never as "unchanged".
+// It reads the clock already kept for the idle-settle verdict, so it costs no capture-pane.
+func PaneChangedAt(name string) (time.Time, bool) {
+	sightMu.Lock()
+	defer sightMu.Unlock()
+	s, ok := sights[name]
+	if !ok || idleSettleNow().Sub(s.seen) > paneSightingFresh {
+		return time.Time{}, false
+	}
+	return s.changed, true
+}
+
+// observeCapture reads the frame ObservePane records. Only tests replace it.
+var observeCapture = CapturePane
+
+// ObservePane records the session's current frame on the clock PaneChangedAt reads, for kinds
+// whose own state code never captures the pane. An unreadable pane records nothing (an empty
+// frame would read as a pane that stopped repainting); PaneChangedAt then goes silent after
+// paneSightingFresh. Reports whether a frame was recorded.
+func ObservePane(name string) bool {
+	frame := observeCapture(session.TmuxName(name))
+	if frame == "" {
+		return false
+	}
+	observeFrame(name, frame)
+	return true
 }

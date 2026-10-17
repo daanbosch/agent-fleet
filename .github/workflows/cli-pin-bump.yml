@@ -28,12 +28,13 @@ on:
       - muse-contract
     types: [completed]
   schedule:
-    - cron: "0 23 * * *" # daily 08:00 JST, a backstop after the 05:30 watcher's dispatches
+    - cron: "0 1-23/2 * * *" # every 2 hours at the odd hours, a backstop 30 minutes after the watcher
   workflow_dispatch:
 
 permissions:
   contents: read
-  issues: read
+  # write: the message-fragment check reports a gone fragment into the CLI's update issue.
+  issues: write
 
 concurrency:
   group: cli-pin-bump
@@ -68,6 +69,21 @@ jobs:
         run: |
           echo "::notice::A release source could not be read; the bump branch and PR are left as they are until a complete run."
           cat "$RUNNER_TEMP/body.md" >> "$GITHUB_STEP_SUMMARY"
+
+      # Each bumped CLI's update issue (deploy/local/cli-update-issues.sh) is closed by this
+      # PR. Looked up with GITHUB_TOKEN: CLI_PIN_BUMP_TOKEN carries no issue permission.
+      - name: link the update issues it closes
+        if: steps.bump.outputs.incomplete != 'true' && steps.bump.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUMPED: ${{ steps.bump.outputs.bumped }}
+          BODY_FILE: ${{ runner.temp }}/body.md
+        run: |
+          set -euo pipefail
+          for kind in ${BUMPED//,/ }; do
+            num="$(deploy/local/cli-update-issues.sh number "$kind")" || { echo "::warning::could not look up the $kind issue"; continue; }
+            [ -z "$num" ] || printf '\nCloses #%s\n' "$num" >> "$BODY_FILE"
+          done
 
       - name: open or update the bump PR
         if: steps.bump.outputs.incomplete != 'true' && steps.bump.outputs.count != '0'
@@ -158,3 +174,11 @@ jobs:
           } > "$RUNNER_TEMP/close.md"
           gh pr close "$num" --repo "$GITHUB_REPOSITORY" --comment "$(cat "$RUNNER_TEMP/close.md")"
           echo "Closed PR #$num." >> "$GITHUB_STEP_SUMMARY"
+
+      # The fragment check could not run (cli-pin-bump.sh wrote why into the PR body and
+      # the log). It must not stop the steps above, so it fails the job only here, last.
+      - name: fail on a message-fragment check that could not run
+        if: always() && steps.bump.outputs.fragment_error == 'true'
+        run: |
+          echo "::error::The upstream message-fragment check could not run or could not report; see the bump step's log and the PR body (deploy/local/cli-fragment-check.sh)."
+          exit 1

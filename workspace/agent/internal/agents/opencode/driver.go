@@ -9,8 +9,9 @@ package opencode
 //   - Turns are driven by the v1 blocking POST /session/{id}/message, the only entry
 //     point that writes the message/part records the read layer treats as canonical; a
 //     goroutine wraps it to make it asynchronous. prompt_async only writes the user
-//     message and never starts a turn (measured), and v2 /api/session/{id}/prompt writes
-//     to a different store (session_message) that the read layer cannot see.
+//     message and never starts a turn (measured). On v2 the turn is /api/session/{id}/prompt
+//     and the read layer goes through the API too (v2state.go), because v2 never writes the
+//     v1 tables.
 //   - v1 has no mid-turn steer entry point (v2's delivery=steer is not injected into the
 //     running v1 turn, it starts its own — measured). Steer is held in a driver-side
 //     queue and submitted as the next turn once the running one finishes, which is
@@ -33,6 +34,7 @@ package opencode
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -41,6 +43,7 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -48,6 +51,7 @@ import (
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/lifegate"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/status"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/transcript"
@@ -55,7 +59,7 @@ import (
 
 // turnClient runs the blocking /message calls: no timeout — a turn legitimately
 // runs for minutes/hours. Interrupt (abort) or daemon death unblocks it.
-var turnClient = &http.Client{}
+var turnClient = &http.Client{Transport: authTransport{}}
 
 // ledger is the persistent ClientMessageID ledger (§9.5, persisted across processes): an
 // in-memory ledger does not deduplicate a re-send that spans an Agent restart.
@@ -69,7 +73,8 @@ type managedDriver struct{ agentImpl }
 
 // Capabilities (§3.1). Steer here means "accepts a follow-up aimed at the running turn",
 // implemented as a driver-side queue (see the file comment). TUIAttach is an opencode
-// strength: `opencode attach` joins a running serve without stopping it (measured).
+// strength: `opencode attach` joins a running serve without stopping it (measured), given the
+// serve password (Basic auth, user `opencode`); nothing in this package attaches today.
 func (managedDriver) Capabilities() agents.Capabilities {
 	return agents.Capabilities{
 		ProcessModel:  "shared-daemon",
@@ -199,6 +204,45 @@ func (managedDriver) LiveHandle(m session.Meta) (agents.ThreadHandle, bool) {
 
 var _ agents.LiveHandles = managedDriver{}
 
+var _ agents.TerminalResponder = managedDriver{}
+
+// RespondTerminal answers a form of a Terminal slot attached to af's serve through the form API;
+// the TUI follows (measured, docs/log/27). Terminal has no handle, so the daemon's own list is the
+// source: the form must be one it still holds for the running session, and respondForm reads it
+// again before answering. A settled, forgotten or unknown form is errFormSettled, so an answer made
+// in the TUI at the same moment is never doubled. Anything not on the serve keeps keys.
+func (managedDriver) RespondTerminal(m session.Meta, reply agents.InteractionReply) error {
+	t, ok := v2TargetFor(m)
+	if !ok || m.DriverKind() != session.DriverTUI {
+		return agents.ErrTerminalRespond
+	}
+	// A write is aimed at the conversation af recorded for this slot, never at the directory guess
+	// the readers fall back to (another slot in the same directory could be that conversation), and
+	// the conversation must still carry this slot's tags (the invariant putEnvironmentFor holds).
+	ses := sids.Read(session.UUID(m.Dir, m.Name))
+	if ses == "" {
+		return errFormSettled
+	}
+	info, err := getSharedSession(t.Addr, ses)
+	if err != nil {
+		if errors.Is(err, statusError(http.StatusNotFound)) {
+			return errFormSettled
+		}
+		return err
+	}
+	if info.Metadata[metaName] != m.Name || info.Metadata[metaSID] != session.UUID(m.Dir, m.Name) {
+		return fmt.Errorf("session %s does not belong to %s", ses, m.Name)
+	}
+	var waiting bool
+	for _, f := range pendingFormsV2(t, m, info.ID) {
+		waiting = waiting || f.ID == reply.ID
+	}
+	if !waiting {
+		return fmt.Errorf("interaction %s は待機中ではありません: %w", reply.ID, errFormSettled)
+	}
+	return respondForm(t.Addr, ses, reply)
+}
+
 // --- handle registry ---------------------------------------------------------
 
 var handlesMu sync.Mutex
@@ -236,6 +280,11 @@ func DropHandle(name string) {
 	delete(handles, name)
 	handlesMu.Unlock()
 	if h == nil {
+		// A Terminal slot has no handle; its turn runs on the shared serve all the same, and
+		// closing the pane does not stop it.
+		if m, ok := session.ReadMeta(name); ok {
+			interruptTerminal(m)
+		}
 		return
 	}
 	h.mu.Lock()
@@ -282,6 +331,21 @@ func ManagedBusy(name string) bool {
 	return h.running || h.tq().Len() > 0
 }
 
+// ManagedInFlight reports that the handle holds an entry it took from the queue and has not
+// settled. The pump gives its move-gate lease back once the runtime has the input, which can be
+// before the runtime's own record (and so DriveState) shows the turn; a move asks this, under the
+// exclusive gate, so it never starts in that window (ADR 0115 decision 11.2). Entries still
+// queued do not count: the move carries them.
+func ManagedInFlight(name string) bool {
+	h := handleFor(name)
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.running || h.tq().Head() != nil
+}
+
 // AbortManaged interrupts every running managed turn — the managed counterpart of
 // graceful shutdown's per-pane Ctrl-C (docs/log/27 §10.2-8). It takes the same path as
 // ThreadHandle.Interrupt, so once the abort lands the turn goroutine records cancelled
@@ -312,6 +376,14 @@ func ReconcileManaged(reason string) {
 		}
 		if _, err := d.Resume(m); err != nil {
 			log.Printf("opencode managed: reconcile %s (%s): %v", m.Name, reason, err)
+		}
+	}
+	// Terminal panes that survived an Agent restart are attached to the daemon too: adopt it (or
+	// start a replacement and put their environments back) rather than wait for a Console poll,
+	// which never comes for a session that has no managed handle.
+	if sharedTerminals() > 0 {
+		if _, _, err := Serve().Ensure(); err != nil {
+			log.Printf("opencode: terminal sessions need the shared serve (%s): %v", reason, err)
 		}
 	}
 }
@@ -350,12 +422,28 @@ type threadHandle struct {
 	q        *agents.TurnQueue
 	settings agents.ThreadSettings
 	inter    *agents.Interaction // pending question (the payload of waiting_interaction)
+	// forms: every form a v2 session waits on, oldest first; inter is forms[0] (v2form.go). v1 asks
+	// one question at a time and leaves it nil.
+	forms []*agents.Interaction
 	// compacting: serve said a compaction summary is being written for this session (an
 	// in-flight compaction message.updated). Only half of the "compacting" state — the store
 	// has to agree (sessionCompacting) — and cleared by every terminal turn state, a stop, the
 	// daemon going away and teardown, so a missed end event cannot keep it on.
 	compacting bool
-	events     chan agents.Event
+	// retry: the runtime is retrying a failing provider call (retry.go). Cleared by output, by
+	// every terminal turn state and by teardown. retryFailed is the retry that ended the last
+	// turn, kept for the mirror until the next input is committed; retryStop is its failure
+	// text, which runTurn consumes.
+	retry        *agents.RetryInfo
+	retryFailed  *agents.RetryInfo
+	retryStop    string
+	retryAbort   chan struct{} // closed when the abort noteRetry sent has been answered or given up on
+	retryAbortOK bool          // whether the daemon acknowledged it
+	// turnSent: this handle's own /message is out (set by runTurn, cleared when the pump
+	// finishes the input). running alone is also true while the pump waits behind another
+	// client's turn, which a retry status must never be attributed to.
+	turnSent bool
+	events   chan agents.Event
 }
 
 // tq returns the handle's queue, creating it on first use. Caller holds h.mu.
@@ -398,6 +486,7 @@ func (h *threadHandle) setState(st agents.TurnState) {
 	h.state = st
 	if st != agents.TurnRunning && st != agents.TurnWaitingInteraction {
 		h.compacting = false // the turn ended, or is being stopped
+		h.retry = nil
 	}
 	h.mu.Unlock()
 	h.emit(agents.Event{Kind: "turn_state", TurnState: st})
@@ -416,6 +505,7 @@ func (h *threadHandle) runtimeLost() {
 	h.mu.Lock()
 	h.alive = false
 	h.compacting = false
+	h.retry = nil
 	h.state = agents.TurnUnknown
 	h.mu.Unlock()
 	h.emit(agents.Event{Kind: "turn_state", TurnState: agents.TurnUnknown})
@@ -432,6 +522,15 @@ func (h *threadHandle) reconcile() {
 		st = agents.TurnRunning
 	}
 	var inter *agents.Interaction
+	if isV2() {
+		if forms, err := (apiTarget{Addr: addr, Client: serveClient}).pendingForms(ses); err == nil && len(forms) > 0 {
+			inter = forms[0].interaction()
+			st = agents.TurnWaitingInteraction
+			h.mu.Lock()
+			h.setForms(forms)
+			h.mu.Unlock()
+		}
+	}
 	for _, q := range serveListQuestions(addr, dir) {
 		if q.SessionID == ses {
 			inter = q.toInteraction()
@@ -525,6 +624,18 @@ func ErrQuestionPending(err error) bool { return errors.Is(err, errQuestionPendi
 // serialize), run the blocking turn, repeat.
 func (h *threadHandle) pump() {
 	for {
+		// Each entry gets a lease of its own on the session's lifecycle gate (ADR 0115 decision
+		// 11.1), taken before it leaves the queue and held until /message is written to serve.
+		// The input path that queued it released its lease at the accept, so a move finds every
+		// accepted entry either with serve or still queued, where its snapshot reads it. The hold
+		// spans waitIdle: a move waits out another client's turn (at most its 60s) rather than
+		// snapshot an entry the pump is about to send. Taken without h.mu: a move reads the
+		// queue under h.mu while it holds the gate.
+		lease, err := lifegate.Enter(context.Background(), h.name)
+		if err != nil {
+			h.parkForMove(err)
+			return
+		}
 		h.mu.Lock()
 		var t *agents.Taken
 		if h.alive {
@@ -536,6 +647,7 @@ func (h *threadHandle) pump() {
 			// sees pumping=true and starts no pump.
 			h.pumping = false
 			h.mu.Unlock()
+			lease.Release()
 			return
 		}
 		addr, ses, dir := h.addr, h.ses, h.dir
@@ -556,15 +668,61 @@ func (h *threadHandle) pump() {
 			waitIdle(addr, ses, dir, 60*time.Second)
 		}
 		if h.commit(t) {
-			h.runTurn(t)
+			h.runTurn(t, lease)
 		} else {
 			h.setState(agents.TurnCancelled) // stopped before it was sent: it never becomes a turn
+		}
+		lease.Release()
+		if !h.awaitRetryAbort() {
+			// The abort may still be executed later and would cut the next input's turn short:
+			// send nothing more until a resume re-reads the session (queued inputs stay queued).
+			log.Printf("opencode managed: retry abort not acknowledged name=%s: holding the queue", h.name)
+			h.runtimeLost()
 		}
 
 		h.mu.Lock()
 		h.tq().Settle(t)
 		h.running = false
+		h.turnSent = false
+		h.retry = nil
 		h.mu.Unlock()
+	}
+}
+
+// parkForMove stops a pump that a move refused, leaving its input queued for the move's
+// snapshot. If the move rolls back, the gate reopens and the pump starts again. The second look
+// covers a reopen that ran before the callback was registered or while pumping was still set,
+// when resumePump would have found nothing to do.
+//
+// A meta the gate could not read is not a move: nothing will reopen it, so the pump looks again
+// after a pause instead.
+func (h *threadHandle) parkForMove(err error) {
+	if errors.Is(err, lifegate.ErrMetaUnreadable) {
+		h.mu.Lock()
+		h.pumping = false
+		h.mu.Unlock()
+		time.AfterFunc(time.Second, h.resumePump)
+		return
+	}
+	lifegate.WhenReopened(h.name, h.resumePump)
+	h.mu.Lock()
+	h.pumping = false
+	h.mu.Unlock()
+	if !lifegate.Closed(h.name) {
+		h.resumePump()
+	}
+}
+
+// resumePump starts the pump for what is queued, unless one runs.
+func (h *threadHandle) resumePump() {
+	h.mu.Lock()
+	start := !h.pumping && h.alive && h.tq().Len() > 0
+	if start {
+		h.pumping = true
+	}
+	h.mu.Unlock()
+	if start {
+		go h.pump()
 	}
 }
 
@@ -580,6 +738,7 @@ func (h *threadHandle) commit(t *agents.Taken) bool {
 		return false
 	}
 	h.abortAsked = false
+	h.retry, h.retryFailed, h.retryStop = nil, nil, ""
 	return true
 }
 
@@ -588,7 +747,11 @@ func (h *threadHandle) commit(t *agents.Taken) bool {
 // db-derived LiveState, but the fallback and anySessionWorking (graceful shutdown's wait
 // condition) read this. Without returning to idle at the end of a turn, the session
 // sticks on "in progress".
-func (h *threadHandle) runTurn(t *agents.Taken) {
+//
+// lease is the entry's hold on the lifecycle gate (pump), released once the request carrying the
+// input is written to serve; a turn can run for hours and must not hold a move off.
+func (h *threadHandle) runTurn(t *agents.Taken, lease *lifegate.Lease) {
+	defer lease.Release()
 	in := t.In
 	agents.MarkTurnStartRun(h.ocSid, in)
 	// Stamp idle with the terminal turn state (and emit the docs/log/30 report on
@@ -609,22 +772,7 @@ func (h *threadHandle) runTurn(t *agents.Taken) {
 	// existing one is never picked up and /message never returns — the same root cause
 	// behind prompt_async looking inert). ClientMessageID idempotency happens only in the
 	// driver's ledger (accept()).
-	body := map[string]any{"parts": buildParts(in)}
-	if ag := agentForMode(st.Mode); ag != "" {
-		body["agent"] = ag
-	}
-	if prov, model, ok := splitModel(st.Model); ok {
-		body["model"] = map[string]string{"providerID": prov, "modelID": model}
-	}
-	if st.Effort != "" {
-		body["variant"] = st.Effort
-	}
-	buf, err := json.Marshal(body)
-	if err != nil {
-		h.setState(agents.TurnFailed)
-		return
-	}
-	req, err := http.NewRequest("POST", dirQ(addr+"/session/"+url.PathEscape(ses)+"/message", h.dir), bytes.NewReader(buf))
+	req, err := newTurnRequest(addr, ses, h.dir, in, st)
 	if err != nil {
 		h.setState(agents.TurnFailed)
 		return
@@ -639,6 +787,7 @@ func (h *threadHandle) runTurn(t *agents.Taken) {
 	stopped := h.tq().Received(t)
 	if !stopped {
 		h.state = agents.TurnRunning
+		h.turnSent = true
 	}
 	h.mu.Unlock()
 	if stopped {
@@ -646,7 +795,16 @@ func (h *threadHandle) runTurn(t *agents.Taken) {
 		return
 	}
 	h.emit(agents.Event{Kind: "turn_state", TurnState: agents.TurnRunning})
-	res, err := turnClient.Do(req)
+	// /message blocks for the whole turn, so the request's write is the moment serve has the
+	// input; a send that fails before it keeps the lease until runTurn returns.
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				lease.Release()
+			}
+		},
+	}))
+	res, err := sendTurn(addr, ses, h.dir, req, st)
 	if err != nil {
 		// A transport break means the daemon is gone or the turn was interrupted: fall
 		// to unknown honestly and leave it to §6.
@@ -669,11 +827,18 @@ func (h *threadHandle) runTurn(t *agents.Taken) {
 	h.mu.Lock()
 	interrupted := h.state == agents.TurnInterrupting
 	asked := h.abortAsked
+	retryStop := h.retryStop
 	h.inter = nil // the turn ended, so no question is pending any more
 	h.mu.Unlock()
 	switch {
 	case interrupted:
 		h.setState(agents.TurnCancelled)
+	case retryStop != "":
+		// We cut a retry loop short because its message can never succeed (retry.go); the
+		// abort leaves no error on the message, so the reason is carried here.
+		failure = retryStop
+		log.Printf("opencode managed: turn failed name=%s model=%s %s", h.name, st.Model, retryStop)
+		h.setState(agents.TurnFailed)
 	case res.StatusCode >= 400:
 		failure = fmt.Sprintf("[error] HTTP %d", res.StatusCode)
 		log.Printf("opencode managed: turn failed name=%s status=%d", h.name, res.StatusCode)
@@ -759,6 +924,10 @@ func (h *threadHandle) interrupt(opts agents.InterruptOpts, teardown bool) (agen
 	out := h.tq().Interrupt(opts, running || foreign)
 	abort := running && out.Head != agents.HeadStopPending
 	h.compacting = false // a stop ends any compaction with the turn (measured: the abort completes it)
+	if running {
+		// The member's stop settles the turn as cancelled: no retry note, live or failed, may outlive it.
+		h.retry, h.retryFailed, h.retryStop = nil, nil, ""
+	}
 	switch {
 	case running:
 		h.state = agents.TurnInterrupting
@@ -812,25 +981,38 @@ func (h *threadHandle) Respond(reply agents.InteractionReply) error {
 	h.mu.Lock()
 	inter := h.inter
 	addr := h.addr
+	if isV2() {
+		inter = h.formByID(reply.ID)
+	}
 	h.mu.Unlock()
 	if inter == nil || inter.ID != reply.ID {
 		return fmt.Errorf("interaction %s は待機中ではありません", reply.ID)
 	}
-	switch reply.Decision {
-	case agents.DecisionCancel, agents.DecisionDeny:
-		if err := serveQuestionReject(addr, reply.ID, h.dir); err != nil {
-			return err
+	if isV2() {
+		// A form, not a question: it is answered by field key and read again first (v2form.go).
+		err := respondForm(addr, h.sessionID(), reply)
+		if err == nil || errors.Is(err, errFormSettled) {
+			// Only this form goes: a later one may have arrived while the request was out.
+			h.settleForm(reply.ID)
 		}
-	case agents.DecisionAnswer, agents.DecisionAllow:
-		answers, err := answersToLabels(inter.Questions, reply.Answers)
-		if err != nil {
-			return err
+		return err
+	} else {
+		switch reply.Decision {
+		case agents.DecisionCancel, agents.DecisionDeny:
+			if err := serveQuestionReject(addr, reply.ID, h.dir); err != nil {
+				return err
+			}
+		case agents.DecisionAnswer, agents.DecisionAllow:
+			answers, err := answersToLabels(inter.Questions, reply.Answers)
+			if err != nil {
+				return err
+			}
+			if err := serveQuestionReply(addr, reply.ID, h.dir, answers); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unsupported decision: %s", reply.Decision)
 		}
-		if err := serveQuestionReply(addr, reply.ID, h.dir, answers); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("unsupported decision: %s", reply.Decision)
 	}
 	h.mu.Lock()
 	h.inter = nil
@@ -886,6 +1068,7 @@ func managedEnrich(m session.Meta, td *agents.TranscriptData) {
 	modeSet := h.settings.Mode
 	td.QueuedItems = h.tq().Items()
 	td.Discards = h.tq().Discards()
+	td.Retry = h.retryInfo()
 	h.mu.Unlock()
 	if inter != nil {
 		qs := make([]transcript.Question, len(inter.Questions))
@@ -922,7 +1105,7 @@ func dirQ(base, dir string) string {
 }
 
 func serveSessionExists(addr, ses, dir string) bool {
-	res, err := serveClient.Get(dirQ(addr+"/session/"+url.PathEscape(ses), dir))
+	res, err := serveClient.Get(sessionURL(addr, ses, dir))
 	if err != nil {
 		return false
 	}
@@ -931,19 +1114,12 @@ func serveSessionExists(addr, ses, dir string) bool {
 }
 
 func serveSessionBusy(addr, ses, dir string) bool {
-	res, err := serveClient.Get(dirQ(addr+"/session/status", dir))
+	m, err := activeSessions(addr, dir)
 	if err != nil {
 		return false
 	}
-	defer res.Body.Close()
-	var m map[string]struct {
-		Type string `json:"type"`
-	}
-	if json.NewDecoder(res.Body).Decode(&m) != nil {
-		return false
-	}
 	st, ok := m[ses] // an idle session is not listed (measured)
-	return ok && st.Type != "idle"
+	return ok && st != "idle"
 }
 
 func waitIdle(addr, ses, dir string, timeout time.Duration) {
@@ -957,20 +1133,17 @@ func waitIdle(addr, ses, dir string, timeout time.Duration) {
 }
 
 func serveCreateSession(addr, dir, title string) (string, error) {
-	body, _ := json.Marshal(map[string]string{"title": title})
-	u := addr + "/session?directory=" + url.QueryEscape(dir)
+	u, body := createSessionRequest(addr, dir, title)
 	res, err := serveClient.Post(u, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("opencode session の作成に失敗しました: %w", err)
 	}
 	defer res.Body.Close()
-	var s struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(res.Body).Decode(&s); err != nil || s.ID == "" {
+	id := sessionID(res.Body)
+	if id == "" {
 		return "", errors.New("opencode session の作成応答を解釈できません")
 	}
-	return s.ID, nil
+	return id, nil
 }
 
 // serveForkSession copies src into a NEW opencode session. at, when non-empty, is the
@@ -978,15 +1151,11 @@ func serveCreateSession(addr, dir, title string) (string, error) {
 // id sorts >= it, so the anchored turn and everything after it stay out of the fork
 // (measured 1.18.14 — docs/log/55 §55.2). Empty at = the whole conversation.
 func serveForkSession(addr, src, dir, at string) (string, error) {
-	body := "{}"
-	if at != "" {
-		b, err := json.Marshal(map[string]string{"messageID": at})
-		if err != nil {
-			return "", fmt.Errorf("opencode session の分岐点を組み立てられません: %w", err)
-		}
-		body = string(b)
+	body, err := forkBody(at)
+	if err != nil {
+		return "", fmt.Errorf("opencode session の分岐点を組み立てられません: %w", err)
 	}
-	res, err := serveClient.Post(dirQ(addr+"/session/"+url.PathEscape(src)+"/fork", dir), "application/json", strings.NewReader(body))
+	res, err := serveClient.Post(forkURL(addr, src, dir), "application/json", strings.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("opencode session の分岐に失敗しました: %w", err)
 	}
@@ -1000,17 +1169,15 @@ func serveForkSession(addr, src, dir, at string) (string, error) {
 		}
 		return "", fmt.Errorf("opencode session の分岐に失敗しました (HTTP %d)", res.StatusCode)
 	}
-	var s struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(res.Body).Decode(&s); err != nil || s.ID == "" {
+	id := sessionID(res.Body)
+	if id == "" {
 		return "", errors.New("opencode session の分岐応答を解釈できません")
 	}
-	return s.ID, nil
+	return id, nil
 }
 
 func serveAbort(addr, ses, dir string) error {
-	res, err := serveClient.Post(dirQ(addr+"/session/"+url.PathEscape(ses)+"/abort", dir), "application/json", strings.NewReader("{}"))
+	res, err := serveClient.Post(abortURL(addr, ses, dir), "application/json", strings.NewReader("{}"))
 	if err != nil {
 		return err
 	}
@@ -1052,6 +1219,9 @@ func (q *serveQuestion) toInteraction() *agents.Interaction {
 }
 
 func serveListQuestions(addr, dir string) []*serveQuestion {
+	if isV2() {
+		return nil // v2 has no /question: they became forms (v2form.go)
+	}
 	res, err := serveClient.Get(dirQ(addr+"/question", dir))
 	if err != nil {
 		return nil
@@ -1196,9 +1366,14 @@ func handleServeEvent(data []byte) {
 		Payload    json.RawMessage `json:"payload"`
 		Type       string          `json:"type"`
 		Properties json.RawMessage `json:"properties"`
+		// v2 (/api/event) carries the body in "data" instead (measured 2.0.28).
+		Data json.RawMessage `json:"data"`
 	}
 	if json.Unmarshal(data, &ev) != nil {
 		return
+	}
+	if len(ev.Properties) == 0 && len(ev.Data) > 0 {
+		ev.Properties = ev.Data
 	}
 	if ev.Type == "" && len(ev.Payload) > 0 {
 		inner := ev
@@ -1241,6 +1416,29 @@ func handleServeEvent(data []byte) {
 			h.mu.Unlock()
 			h.emit(agents.Event{Kind: "turn_state", TurnState: agents.TurnRunning})
 		}
+	case "form.created":
+		// v2: the question tool asks through a form (v2form.go); it is the question.asked of v1.
+		var p struct {
+			Form v2Form `json:"form"`
+		}
+		if json.Unmarshal(ev.Properties, &p) != nil || p.Form.ID == "" {
+			return
+		}
+		if h := handleBySes(p.Form.SessionID); h != nil {
+			h.askForm(p.Form.interaction())
+		}
+	case "form.replied", "form.cancelled":
+		var p struct {
+			ID        string `json:"id"`
+			SessionID string `json:"sessionID"`
+		}
+		if json.Unmarshal(ev.Properties, &p) != nil {
+			return
+		}
+		if h := handleBySes(p.SessionID); h != nil {
+			// Whoever settled it: the Console, an attached TUI, or an interrupt.
+			h.settleForm(p.ID)
+		}
 	case "message.updated":
 		// Compaction (measured 1.18.34): the v1 loop announces neither
 		// session.next.compaction.started nor .ended — those belong to the v2 event store and
@@ -1260,6 +1458,95 @@ func handleServeEvent(data []byte) {
 		if h := handleBySes(p.Info.SessionID); h != nil {
 			h.setCompacting(p.Info.inFlight())
 		}
+	case "session.status":
+		// v1: busy | retry | idle per session. The status goes busy between two attempts, so
+		// only output (message.part.updated below), idle and the turn's end clear a retry.
+		var p struct {
+			SessionID string `json:"sessionID"`
+			Status    struct {
+				Type    string `json:"type"`
+				Attempt int    `json:"attempt"`
+				Message string `json:"message"`
+				Next    int64  `json:"next"`
+			} `json:"status"`
+		}
+		if json.Unmarshal(ev.Properties, &p) != nil {
+			return
+		}
+		if h := handleBySes(p.SessionID); h != nil {
+			switch p.Status.Type {
+			case "retry":
+				h.noteRetry(p.Status.Attempt, p.Status.Message, p.Status.Next)
+			case "idle":
+				h.clearRetry()
+			}
+		}
+	case "session.retry.scheduled":
+		// v2: the next attempt of a failing step is due at "at".
+		var p struct {
+			SessionID string `json:"sessionID"`
+			Attempt   int    `json:"attempt"`
+			At        int64  `json:"at"`
+			Error     v2Err  `json:"error"`
+		}
+		if json.Unmarshal(ev.Properties, &p) != nil {
+			return
+		}
+		if h := handleBySes(p.SessionID); h != nil {
+			h.noteRetry(p.Attempt, p.Error.Message, p.At)
+		}
+	case "message.part.updated", "session.text.started", "session.step.ended":
+		// The retried call produced output (a failing attempt emits no part, measured).
+		var p struct {
+			SessionID string `json:"sessionID"`
+			Part      struct {
+				SessionID string `json:"sessionID"`
+			} `json:"part"`
+		}
+		if json.Unmarshal(ev.Properties, &p) != nil {
+			return
+		}
+		if p.SessionID == "" {
+			p.SessionID = p.Part.SessionID
+		}
+		if h := handleBySes(p.SessionID); h != nil {
+			h.clearRetry()
+		}
+	case "session.compaction.started":
+		// v2: the summary is being written. Cleared by .ended / .failed, and by every
+		// terminal turn state (setState), so a missed end event cannot keep it on.
+		var p struct {
+			SessionID string `json:"sessionID"`
+		}
+		if json.Unmarshal(ev.Properties, &p) == nil {
+			if h := handleBySes(p.SessionID); h != nil {
+				h.setCompacting(true)
+			}
+		}
+	case "session.compaction.ended", "session.compaction.failed":
+		var p struct {
+			SessionID string `json:"sessionID"`
+		}
+		if json.Unmarshal(ev.Properties, &p) == nil {
+			if h := handleBySes(p.SessionID); h != nil {
+				h.setCompacting(false)
+			}
+		}
+	case "session.execution.started", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted":
+		// v2: a turn started or ended (testdata/v2/). The payload names its session, so a subagent's
+		// execution events (its own id) never reach the parent's turn.
+		var p struct {
+			SessionID string `json:"sessionID"`
+		}
+		if json.Unmarshal(ev.Properties, &p) != nil || p.SessionID == "" {
+			return
+		}
+		wakeExec(p.SessionID)
+		if ev.Type != "session.execution.started" {
+			if h := handleBySes(p.SessionID); h != nil {
+				h.setCompacting(false)
+			}
+		}
 	case "session.compacted", "session.idle":
 		var p struct {
 			SessionID string `json:"sessionID"`
@@ -1273,17 +1560,24 @@ func handleServeEvent(data []byte) {
 	case "permission.asked":
 		var p struct {
 			ID        string `json:"id"`
+			RequestID string `json:"requestID"` // v2 may name it so (the spec's path parameter)
 			SessionID string `json:"sessionID"`
 		}
-		if json.Unmarshal(ev.Properties, &p) != nil || p.ID == "" {
+		if json.Unmarshal(ev.Properties, &p) != nil {
+			return
+		}
+		if p.ID == "" {
+			p.ID = p.RequestID
+		}
+		if p.ID == "" {
 			return
 		}
 		if h := handleBySes(p.SessionID); h != nil {
 			h.mu.Lock()
 			addr, dir := h.addr, h.dir
 			h.mu.Unlock()
-			body := strings.NewReader(`{"reply":"always"}`)
-			if res, err := serveClient.Post(dirQ(addr+"/permission/"+url.PathEscape(p.ID)+"/reply", dir), "application/json", body); err == nil {
+			u, payload := permissionReplyRequest(addr, p.SessionID, p.ID, dir)
+			if res, err := serveClient.Post(u, "application/json", strings.NewReader(payload)); err == nil {
 				res.Body.Close()
 				log.Printf("opencode managed: auto-allowed permission %s (session %s)", p.ID, h.name)
 			}

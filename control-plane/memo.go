@@ -51,12 +51,25 @@ type memoDTO struct {
 	Position    int              `json:"position"`
 	CreatedAt   string           `json:"createdAt"`
 	SentAt      string           `json:"sentAt"`
+	// Origin is set only on a memo taken in from the inbox, by the CP (ADR 0111 decision 3).
+	// A client may send one: validateMemo and memoPatch never read it.
+	Origin *memoOriginWire `json:"origin,omitempty"`
+}
+
+// memoOriginWire is where a taken-in memo came from: the inbox item and its sender.
+type memoOriginWire struct {
+	ItemID string `json:"itemId"`
+	Sender string `json:"sender"`
 }
 
 func memoToDTO(m store.Memo) memoDTO {
-	return memoDTO{ID: m.ID, Repo: m.Repo, Category: m.Category, Kind: m.Kind,
+	d := memoDTO{ID: m.ID, Repo: m.Repo, Category: m.Category, Kind: m.Kind,
 		Body: m.Body, RefPath: m.RefPath, Attachments: parseMemoAttachments(m.Attachments),
 		Position: m.Position, CreatedAt: m.CreatedAt, SentAt: m.SentAt}
+	if m.OriginItemID != "" {
+		d.Origin = &memoOriginWire{ItemID: m.OriginItemID, Sender: m.OriginSenderKey}
+	}
+	return d
 }
 
 // parseMemoAttachments decodes the stored JSON attachments column into a slice
@@ -351,6 +364,16 @@ func buildFlushMessage(memos []store.Memo) string {
 	return b.String()
 }
 
+// memoOriginLine heads the message of a taken-in memo, so the session sees where the text
+// came from. It is the server's line, outside the text a member can edit.
+func memoOriginLine(m store.Memo) string {
+	who := m.OriginSenderKey
+	if who == "" {
+		who = "?"
+	}
+	return "受信箱から取り込んだ内容（送信者: " + who + "、項目: " + m.OriginItemID + "）"
+}
+
 // memoImageOpenPrompt is the agent-facing instruction appended to a flush when memos
 // carry image attachments. English + "Read tool" wording matches the paste-image flow
 // (console/src/lib/pastedImages.ts FILE_PROMPT) so both paths read identically.
@@ -588,6 +611,15 @@ func memoFlushFor(ctx context.Context, st store.MemoStore, rt runtime.Runtime, m
 	if len(memos) == 0 {
 		return nil, &apiError{http.StatusNotFound, "no_memos", "no owned memos for the given ids"}
 	}
+	// A memo taken in from the inbox goes on its own, with its origin (ADR 0111 decision 3):
+	// concatenated with the member's own memos, a colleague's text would read as theirs. The
+	// rule holds for an edited text too, which is why it is decided here and not by the
+	// Console that composed it.
+	for _, m := range memos {
+		if m.OriginItemID != "" && len(memos) > 1 {
+			return nil, &apiError{http.StatusConflict, errCodeMemoOriginAlone, "a memo taken in from the inbox is sent on its own"}
+		}
+	}
 	// Group by category (stable within-category order preserved from ListMemos).
 	sort.SliceStable(memos, func(i, j int) bool { return memos[i].Category < memos[j].Category })
 
@@ -595,6 +627,9 @@ func memoFlushFor(ctx context.Context, st store.MemoStore, rt runtime.Runtime, m
 	message := strings.TrimSpace(textOverride)
 	if message == "" {
 		message = buildFlushMessage(memos)
+	}
+	if o := memos[0]; o.OriginItemID != "" {
+		message = memoOriginLine(o) + "\n\n" + message
 	}
 	if aerr := sendMemoPrompt(ctx, rt, sessionName, message); aerr != nil {
 		return nil, aerr

@@ -278,6 +278,23 @@ required; KMS errors fail closed. The trade-offs are in
 [`cfn/PARAMETERS.md`](cfn/PARAMETERS.md#custodiankmskeyarn) and the operator's view in
 `guide/operate/04-secure.md`.
 
+#### A key of its own for each home (optional, kms only)
+
+```bash
+# 30-ingress, together with CustodianKmsKeyArn above
+--parameter-overrides CustodianKmsKeyArn=arn:aws:kms:<region>:<account>:key/<key-id> WorkspaceDekRandom=on ...
+```
+
+Sets `AF_WORKSPACE_DEK=random` on the CP task (#1646); with no `CustodianKmsKeyArn`
+the template's Rule fails the stack operation when it runs and rolls it back (a change set can
+still be created; the failure appears in the stack events), and the flag alone sets no env var. Check before turning it
+on: kept homes keep the derived key until their first start with the flag; turning it off only
+stops keys for new homes (existing ones keep theirs, no reconnecting), while going back to a CP that
+does not know the home's key, or losing `home_dek`, can need credentials reconnected; unmigrated homes and old snapshots are
+not shredded (#1956). The per-workspace SSM parameter `secret-key-next` sits under `/af-ws/*`,
+which the CP role (`SsmWorkspaceParams`) and the workspace execution role already cover. Details:
+[`cfn/PARAMETERS.md`](cfn/PARAMETERS.md#workspacedekrandom) and `guide/operate/04-secure.md`.
+
 ### Alarms — the Control Plane cannot reach its database (set this one)
 
 ```bash
@@ -417,10 +434,27 @@ Both images are versioned together — `30-ingress.yaml` takes a single `ImageTa
 parameter (default `dev`) used for the CP image *and* the `AF_ECS_WORKSPACE_IMAGE`
 the adapter launches. To move a deployment to a new release:
 
-1. **Back up first** (production): under `Persistence=retain` RDS and EFS both have
-   daily backups, but the newest can be almost a day old. Take an RDS snapshot and an
-   on-demand EFS recovery point right before upgrading (§EFS backup and restore,
-   "On demand").
+1. **Back up first** (production): under `Persistence=retain` RDS has daily automated
+   backups, and the EFS has them **only if the data stack carries the 0.26.0 backup vault
+   and plan** (step 1a checks). The newest can be almost a day old. Take an RDS snapshot
+   and an on-demand EFS recovery point right before upgrading (§EFS backup and restore,
+   "On demand" — it needs the vault, so do 1a first on an older deployment).
+   1a. **Check the EFS backup exists** (`Persistence=retain` only; `update.sh` runs this
+   too and warns):
+   ```bash
+   ./efs-backup-check.sh --profile <p> --region <r> --stack af-ecs-ingress   # read-only
+   aws cloudformation describe-stacks --stack-name af-ecs-data \
+     --query "Stacks[0].Outputs[?OutputKey=='EfsBackupVaultName'].OutputValue" --output text
+   ```
+   No output / `None` for `EfsBackupVaultName` means the data stack predates 0.26.0 (or
+   was never updated since): **there is no EFS backup**, whatever `Persistence` says.
+   `update.sh` does not touch `10-data`, so turn it on by hand, with a change set and
+   not a direct deploy — §EFS backup and restore, "Turning it on for a deployment that
+   already runs" (`deploy --no-execute-changeset`, `describe-change-set`, then
+   `execute-change-set`). Execute only if it adds the four `EfsBackup*` resources and
+   nothing else; a `Modify` or `Replacement` on `FileSystem` or `Db` (both `Retain` /
+   `Snapshot` under `retain`, but a replacement is still a new, empty resource) means
+   stop and do not execute. Parameters keep their stored values when none are given.
 2. **Push the new tag**: `VERSION=<v> ./release-ecr.sh --profile <p> --region <r>`.
 3. **Re-deploy ingress with only the tag overridden** (all other parameters keep
    their previous values):
@@ -441,6 +475,13 @@ different image under an already-released version tag (the repos stay `MUTABLE`
 so the `:dev` sandbox flow can overwrite itself — release tags are write-once by
 discipline, not enforcement).
 
+**Upgrading across v0.26.0.** The EFS backup vault and plan arrived in `10-data` in
+v0.26.0, and no later release redeploys that stack. A `Persistence=retain` deployment
+stood up before it has had no EFS backup since, and nothing else says so. Run step 1a
+once after upgrading past 0.26.0; `EfsBackupVaultName` appearing in the data stack's
+outputs and a daily recovery point the next morning (`aws backup list-recovery-points-by-backup-vault`)
+close it.
+
 ### One command: `update.sh`
 
 `./update.sh` is the runbook above as a script — the ECS counterpart of compose's
@@ -455,6 +496,13 @@ VERSION=<v> ./update.sh --profile <p> --region <r> --dry-run
 
 It does the things the hand-typed sequence gets wrong:
 
+- **Warns about a missing EFS backup** (`Persistence=retain` only): `efs-backup-check.sh`
+  reads the data stack's `EfsBackupVaultName` output and the backup plan's selection
+  (read-only calls) and, when the file system is not covered, prints the change-set
+  command that fixes it, before the deploy and again at the end. It never blocks the
+  upgrade and never updates `10-data` itself. Only a plain selection naming the file system's exact ARN counts; a read it cannot make (missing
+  `backup:List*`/`Get*`, an unreadable ingress stack) or a selection with `NotResources`,
+  `Conditions` or tags is reported as unconfirmed, not as protected.
 - **Refuses a tag that is not in ECR.** CloudFormation only stores a string, so a
   forgotten (or wrong-region) push *succeeds* and the CP task then dies with
   `CannotPullContainerError`. The script checks both repositories first.
@@ -1593,6 +1641,11 @@ they survive, and keep billing. The response and the audit entry list what was l
 - **Patching slots = updating this stack** (the AMI parameter resolves at update time)
   and letting the old slots go. That is the operational cost the EC2 launch type adds.
   The same holds for the user data (§Moving retained slots onto new user data).
+  **Kernel patch cadence:** a slot runs the kernel of the AMI it was launched from and is
+  never patched in place. Refresh the AMI (update this stack) on the cadence your security
+  policy sets for the kernel, then replace the old slots as below. The task adds
+  `SYS_ADMIN` (below), so a kernel fix for a namespace or netfilter bug matters here more
+  than on a stricter profile.
 - **Credentials still live on EFS.** The auth/identity set (`homeKeep`: `.config`,
   `.ssh`, `.git-credentials`, `.gitconfig`, `.claude`, `.claude.json`, `.codex` — under
   100 MiB) is kept on an EFS access point and symlinked into home by the entrypoint, so
@@ -1601,6 +1654,23 @@ they survive, and keep billing. The response and the audit entry list what was l
   this profile: home is already local EBS, so there is nothing to relocate off EFS.
 
 ### Moving retained slots onto new user data
+
+The workspace task adds `SYS_ADMIN` so Chromium's setuid `chrome-sandbox` can create its
+namespaces. Two slot settings in the user data go with it, and **both apply only to slots
+launched after the template carries them, so a slot launched earlier must be replaced
+(a new launch template version, then the steps below) before they hold**:
+
+- `user.max_user_namespaces=0` (persisted in `/etc/sysctl.d/99-af-userns.conf` and applied
+  before the ECS agent configures; the user data stops on failure, and an `ecs.service`
+  drop-in refuses to start the ECS agent unless the value is 0, also after a reboot): no unprivileged user namespaces, so `SYS_ADMIN`
+  stays reachable only through the setuid helper. A task running on an old slot keeps
+  the default limit and can create user namespaces.
+- the home volume mounted `nosuid,nodev` by `af-mount`. An already mounted home keeps its
+  old options until it is unmounted and mounted again (a slot move does that).
+
+`kernel.unprivileged_bpf_disabled` (1) and `kernel.perf_event_paranoid` (2) were measured
+already strict on AL2023 and are not set. The task definition gains the capability on a
+workspace's next Start (a new revision); no slot change is needed for that part.
 
 `ECS_AWSVPC_BLOCK_IMDS=true` in the slot's `ecs.config` is what keeps a workspace task off the
 slot's instance profile (`SlotRole`) through IMDS; the launch template's hop limit does not,
@@ -1615,7 +1685,22 @@ Until then the Agent's own isolation still holds for every SDK that honours
    `aws cloudformation deploy --stack-name <pool stack> --template-file cfn/40-ec2-pool.yaml
    --capabilities CAPABILITY_NAMED_IAM` (parameters keep their previous values). The CP
    launches slots from the template's `$Latest`, so only new slots change.
-2. **Reserve the old slots for replacement** in the Console: Settings → Admin → the Slots tab
+2. **Nothing to do for most slots: a slot below `$Latest` is replaced by itself.** When a
+   workspace starts and its home is on a slot launched from an older launch template version
+   (or another template), the Start treats the slot as reserved: the same move as step 3,
+   with no notice in the member's WS bar (the Start just takes a little longer). A free slot
+   below `$Latest` is terminated by the sweeper like a reserved one. The Slots tab marks such
+   a slot "older than $Latest · replaced at next start". Each automatic move is in the audit
+   log as `pool.slot_replace_auto` (actor `slot-auto-replace`; the detail names the workspace,
+   the old version, `$Latest` and the new slot). Two differences from a reservation: if no new
+   slot can be launched (capacity, quota) the Start **does not fail** — the workspace stays on
+   its old slot and the CP retries at a Start at least 10 minutes later — and a slot whose
+   version cannot be read is left alone. To switch it off (for example while a new template
+   is being validated) set `AF_ECS_EC2_AUTO_REPLACE_OUTDATED_SLOTS=false` on the Control Plane;
+   reservations then still work as below.
+   **Reserve the old slots for replacement** in the Console when a workspace must
+   never be put back on its old slot (a reservation never falls back: if no new slot can be
+   launched, that Start fails): Settings → Admin → the Slots tab
    (super_admin). Each slot shows the launch template version it was launched from and
    whether that is older than `$Latest`; "Reserve all N for replacement…" lists the slots
    and the workspaces on them before it reserves exactly those below `$Latest` (each one is
@@ -1623,8 +1708,8 @@ Until then the Agent's own isolation still holds for every SDK that honours
    `pool.slot_replace_reserve`). "Replace at next start" / "Cancel replacement" on a row does
    one slot. The reservation is a tag on the instance (`af-slot-replace`); it moves nobody
    by itself and touches no running session.
-3. **Users stop and start their workspaces** when it suits them. Their WS bar says the next
-   start moves to a new slot. That Start launches a new slot of the workspace's class from
+3. **Users stop and start their workspaces** when it suits them. For a reserved slot, their
+   WS bar says the next start moves to a new slot (not for an automatic move). That Start launches a new slot of the workspace's class from
    the template's `$Latest` first, then moves the home off the reserved slot through the
    same release the sweeper uses (unmount before detach; refused while a task runs) and
    terminates the old instance; the home volume is never deleted. If the new slot cannot
@@ -1819,6 +1904,15 @@ aws backup list-backup-plans --query "BackupPlansList[].BackupPlanName"   # af-e
 in particular no `Modify` of `FileSystem`. A stack update moves the live file system to
 whatever `EfsThroughputMode` says (see the warning in `10-data.yaml`), and any
 `Replacement` there is a new, empty file system.
+
+**The Console says so too.** `update.sh` and `standup.sh` write the data stack's state into
+the ingress stack's `EfsBackup` parameter (`present` / `missing` / `off`; empty = never
+filled), the CP receives it as `AF_EFS_BACKUP`, and on `ecs` / `ecs-ec2` a value of
+`missing` puts a banner on every section of the Admin screen for super_admins. No CP
+permission is involved: the CP reads an environment variable, never CloudFormation or AWS
+Backup. The banner is only as fresh as the last `update.sh`, so after executing the change set
+above run `update.sh` once more to clear it. An unreadable data stack leaves
+the parameter as it was, and an empty one shows nothing.
 
 **On demand** (before an upgrade, or before touching someone's home by hand):
 

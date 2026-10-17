@@ -202,6 +202,11 @@ type Session struct {
 	Repo               string `json:"repo"` // working dir basename (display)
 	WorkingCopyID      string `json:"workingCopyId,omitempty"`
 	Title              string `json:"title"` // user-supplied display title (optional, any kind)
+	// Moving / MovedTo mirror Meta's (ADR 0115 decision 11.7): the row of a source whose move
+	// is under way or pending offers retry and cancel, and a moved one says where the
+	// conversation went. The Control Plane's sessionWire has to carry them too.
+	Moving  string `json:"moving,omitempty"`
+	MovedTo string `json:"movedTo,omitempty"`
 	// TitleSetBy mirrors Meta.TitleSetBy ("user" | "parent" | ""): who last set Title. It
 	// rides the wire so a reader outside this process can tell a name the user chose from one
 	// a parent wrote — the same reason Origin / OriginSession are here. Display-only for now;
@@ -228,6 +233,21 @@ type Session struct {
 	// BackgroundBusy, this only chooses its wording, so an unknown
 	// (or dropped) value falls back to the generic "running in background".
 	BackgroundBusyReason string `json:"backgroundBusyReason,omitempty"`
+	// ProgressAt (RFC3339) is the newest sign that a working / compacting row is still doing
+	// something: its state file, the kind's own state source, a pane repaint, or a live tool
+	// process (now). The Control Plane stops letting a busy row hold the Workspace awake once
+	// it is older than an hour — decided on ProgressAgeSec below, never by reading this string.
+	// "" = unknown, not busy or not observable for this kind — the CP then keeps holding.
+	ProgressAt string `json:"progressAt,omitempty"`
+	// ProgressAgeSec is the age of ProgressAt on the Workspace's own clock, which the CP
+	// compares with its threshold so that a Workspace clock behind or ahead of the CP's cannot
+	// lapse a live row. 0 / absent = fresh or unknown: both hold.
+	ProgressAgeSec int `json:"progressAgeSec,omitempty"`
+	// StateSince (RFC3339) is when a working / compacting row's current state began, so the
+	// admin forecast can show how long a session has been holding the Workspace. Approximate:
+	// the older of the first poll that observed the state (in memory, resets when the Agent
+	// restarts) and, for hook kinds, the status file's mtime. "" = not busy.
+	StateSince string `json:"stateSince,omitempty"`
 	// RateLimitResumeAt is set ONLY when State == agents.StateLimited: the time (RFC3339) of
 	// the scheduled automatic resume. Empty = stopped at the limit with no resume armed
 	// (auto-resume off, nothing to derive the reset time from, or a per-model limit —
@@ -360,6 +380,48 @@ type Session struct {
 	// option, and it decides "is there anything" AFTER the menu is already open.
 	GeneratedImages     int    `json:"generatedImages,omitempty"`
 	GeneratedImagesPath string `json:"generatedImagesPath,omitempty"`
+}
+
+// CatalogEntry is one row of GET /sessions/catalog, the sharing inventory the Control Plane
+// mirrors into shared_session_catalog. It carries only what that sync stores. The catalog
+// lists archived sessions too, so it grows with the member's whole history; sending the full
+// Session (lastSay, context, display, …) took a real 1,174-session catalog past the CP's
+// read limit. A field added here must also be stored by the CP's syncCatalogLocked, which is
+// its only reader.
+type CatalogEntry struct {
+	Name          string `json:"name"`
+	Kind          string `json:"kind"`
+	Dir           string `json:"dir"`
+	Repo          string `json:"repo"`
+	WorkingCopyID string `json:"workingCopyId,omitempty"`
+	Title         string `json:"title,omitempty"`
+	Label         string `json:"label,omitempty"`
+	CreatedAt     string `json:"createdAt"`
+	// State is the live state (working | idle | question | …), sent only while Alive: the CP
+	// drops it for a stopped session, so computing it there would be wasted work.
+	State    string `json:"state,omitempty"`
+	Alive    bool   `json:"alive"`
+	Archived bool   `json:"archived,omitempty"`
+}
+
+// CatalogResponse is the body of GET /sessions/catalog.
+//
+// Without a "since" query it is {"sessions": [...]}, exactly as before, so an older Control
+// Plane reads it unchanged. With "since" present (empty on a first call) it also carries Cursor.
+// With a cursor the Agent still recognises (same Epoch, not older than what it kept) Delta is
+// true, Sessions holds only the rows that changed after it and Deleted the names that are gone;
+// otherwise Sessions is the whole catalog and Delta is false — the reader replaces its copy.
+// A reader that gets no Delta flag (an Agent from before this existed) must treat the body as
+// the whole catalog. Cursor is "<epoch>.<revision>": the epoch is random per Agent process and
+// the revision a counter, so no wall clock is involved and a restarted Agent never matches an
+// old cursor.
+//
+// was: map[string]any{"sessions": items}
+type CatalogResponse struct {
+	Sessions []CatalogEntry `json:"sessions"`
+	Cursor   string         `json:"cursor,omitempty"`
+	Delta    bool           `json:"delta,omitempty"`
+	Deleted  []string       `json:"deleted,omitempty"`
 }
 
 // ContextUsage is a claude session's current context fill — the newest assistant
@@ -586,6 +648,13 @@ type Meta struct {
 	// rename through POST /repos/{name}/branch-name keeps {ref} and the kind. nil for every
 	// other launch.
 	WorkItem *WorkItemRef `json:"workItem,omitempty"`
+	// Moving names the session this one is being moved to (ADR 0115 decision 11), MovedTo the
+	// session it was moved to once that exists. Either closes the session's input: every path
+	// that can start a turn or a process on it refuses through internal/lifegate. They are on
+	// the meta, not in memory, so a moved source stays closed across an Agent restart. Only
+	// the move primitives in sessionx and the user's explicit reopen write them.
+	Moving  string `json:"moving,omitempty"`
+	MovedTo string `json:"movedTo,omitempty"`
 }
 
 // WorkItemRef is the part of a work item the branch-name resolver renders from.
@@ -615,6 +684,14 @@ type SSMMeta struct {
 	SSORegion string `json:"ssoRegion"` // SSO region
 	AccountID string `json:"accountId"` // SSO account id
 	RoleName  string `json:"roleName"`  // SSO permission-set role name
+	// Role chaining (issue #1109). With RoleARN set, Profile assumes that role from
+	// SourceProfile and StartURL / SSORegion / AccountID / RoleName describe the SOURCE
+	// sso profile. All of them are non-secret.
+	RoleARN         string `json:"roleArn,omitempty"`
+	SourceProfile   string `json:"sourceProfile,omitempty"`
+	ExternalID      string `json:"externalId,omitempty"`
+	RoleSessionName string `json:"roleSessionName,omitempty"`
+	DurationSeconds int    `json:"durationSeconds,omitempty"`
 }
 
 // DriverKind normalizes Meta.Driver ("" → tui). Always branch through it: comparing raw

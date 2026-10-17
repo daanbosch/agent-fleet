@@ -13,6 +13,7 @@ let logoutReply: Json = { revoked: true };
 let confirmAnswer = true;
 const toasts: { msg: string; kind?: string }[] = [];
 vi.mock("../../core/api/client.ts", () => ({
+  getTenant: () => "",
   api: vi.fn(async (path: string, opts?: RequestInit) => {
     calls.push(opts?.method ? `${opts.method} ${path}` : path);
     if (path === "api/aws-login/profiles") return { profiles };
@@ -242,6 +243,15 @@ describe("AWS profiles chip", () => {
     expect(toasts).toEqual([]);
   });
 
+  it("shows the normal toast, not the warning, when the AWS session had already ended", async () => {
+    logoutReply = { revoked: false, alreadyEnded: true };
+    await mount();
+    await openPop();
+    await act(async () => rows()[0].querySelector<HTMLButtonElement>(".ws-aws-logout")!.click());
+    await tick(0);
+    expect(toasts).toEqual([{ msg: "Logged out of Production.", kind: "success" }]);
+  });
+
   it("says so when AWS could not be told, and why the Agent refused", async () => {
     logoutReply = { revoked: false, message: "Could not connect to the endpoint URL" };
     await mount();
@@ -256,5 +266,58 @@ describe("AWS profiles chip", () => {
     await act(async () => rows()[0].querySelector<HTMLButtonElement>(".ws-aws-logout")!.click());
     await tick(0);
     expect(toasts[1].msg).toContain("is not in the workspace's ~/.aws/config");
+  });
+
+  // #1109: a role-chaining profile has no login of its own.
+  describe("role-chaining profiles", () => {
+    const chain = (name: string, source: string, state: string): Json => ({ name, state, source, label: name, accountId: "444444444444", roleName: "Deploy" });
+
+    it("counts a source and its chains as one login, however many chains follow it", async () => {
+      profiles = [prod, stg, chain("c1", "stg", "renew"), chain("c2", "stg", "renew"), dev];
+      await mount();
+      expect(chip()!.textContent).toContain("2/3");
+      expect(chip()!.title).toBe("AWS profiles: 2 of 3 signed in");
+      profiles = [dev, chain("c1", "dev", "none")];
+      await act(async () => void useAwsLoginStore.getState().refreshExpiry());
+      expect(chip()!.textContent).toContain("0/1");
+    });
+
+    it("names the source, not a chain, when that is the one login", async () => {
+      profiles = [prod, chain("deploy", "prod", "signed_in")];
+      await mount();
+      expect(chip()!.textContent).toContain("Production");
+    });
+
+    it("says a chain follows its source and signs in the source from the chain's row", async () => {
+      profiles = [dev, chain("deploy", "dev", "none")];
+      await mount();
+      await openPop();
+      const row = rows().find((r) => r.querySelector(".ws-aws-name")!.textContent === "deploy")!;
+      expect(row.textContent).toContain("Follows dev's login");
+      expect(row.textContent).toContain("Not signed in");
+      expect(row.querySelector(".ws-aws-logout")).toBeNull();
+      await act(async () => row.querySelector<HTMLButtonElement>(".ws-aws-login")!.click());
+      expect(useAwsLoginStore.getState().profileModal?.name).toBe("dev");
+    });
+
+    it("shows a distinct state, no sign-in action and no count for a chain whose source is unavailable", async () => {
+      profiles = [prod, chain("orphan", "gone", "source_unavailable")];
+      await mount();
+      expect(chip()!.title).toBe("AWS profiles: 1 of 1 signed in");
+      await openPop();
+      const row = rows().find((r) => r.querySelector(".ws-aws-name")!.textContent === "orphan")!;
+      expect(row.textContent).toContain("Source unavailable");
+      expect(row.textContent).not.toContain("Signed in");
+      expect(row.querySelector(".ws-aws-login")).toBeNull();
+    });
+
+    it("speaks Japanese", async () => {
+      setLocale("ja");
+      profiles = [dev, chain("deploy", "dev", "none"), chain("orphan", "gone", "source_unavailable")];
+      await mount();
+      await openPop();
+      expect(host.textContent).toContain("dev のログインに従います");
+      expect(host.textContent).toContain("元プロファイルなし");
+    });
   });
 });

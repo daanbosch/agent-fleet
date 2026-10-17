@@ -43,20 +43,27 @@ export const mirror = {
   "mirror.exec_settings_edit": "モデル・推論 effort・モードを変更",
   "mirror.exec_settings_after_resume": "再開後に実行設定を変更できます",
   "mirror.exec_settings": "実行設定",
-  "mirror.plan_mode_note": "Plan モード — 承認するまで実装しません",
+  "mirror.plan_mode_note": "Plan モードです。承認するまで実装しません。",
   // 再開／アップデート注意カード
   "mirror.resume_choice_note":
     "ターミナルで再開方法の選択待ちです。コンテキストをそのまま維持するには「2. Resume full session as-is」を選んでください。",
   "mirror.open_terminal": "ターミナルを開く",
   "mirror.codex_update_note":
-    "codex のアップデート確認待ちです。「1. Update now」を選ぶとプロセスが終了しセッションが切れるため、スキップを推奨します（更新はイメージ再ビルドで反映）。",
+    "codex のアップデート確認待ちです。「1. Update now」を選ぶとプロセスが終了しセッションが切れるため、スキップを推奨します（更新はイメージ再ビルドで反映されます）。",
   "mirror.skip_continue": "スキップして続行",
   "mirror.compacting": "コンテキストを圧縮中…",
+  "mirror.retrying": "プロバイダがエラーを返し、エージェントが再試行しています（{n} 回目）: {msg}",
+  "mirror.move_limit": "このセッションはエージェントの利用上限で止まっています。リセットを待つか、別のエージェントで続けられます。",
+  "mirror.move_limit_left": "このセッションはエージェントの利用上限で止まっています。{kinds} は利用枠が残っているので、待たずにそちらで続けられます。",
+  "mirror.move_limit_action": "別のエージェントへ移す",
+  "mirror.retry_failed": "プロバイダのエラーは再試行しても直らないため、ターンを停止しました: {msg}",
   // タイトル提案
   "mirror.title_suggestion": "タイトル案: <0>{title}</0>",
   "mirror.adopt": "採用",
   "mirror.dismiss_suggestion": "この提案を今後表示しません",
   // 履歴ロード
+  "mirror.jump_unreachable": "その発言は遠すぎて直接移動できません。上へスクロールして以前の会話を読み込んでください。",
+  "mirror.jump_failed": "その発言まで以前の会話を読み込めませんでした。",
   "mirror.load_earlier": "以前の会話を読み込む",
   "mirror.jump_latest": "最新へ",
   "mirror.jump_reply_top": "返信を頭から",
@@ -68,7 +75,7 @@ export const mirror = {
   "mirror.plan_pending": "プラン承認待ち",
   // プランレビュー（doc ペインで選択 → コメント → セッションのチャットから送信）
   "plan.review_tag": "レビュー",
-  "plan.review_hint": "本文を選択するとコメントを追加できます。送信はセッションのチャットのプランカードから。",
+  "plan.review_hint": "本文を選択するとコメントを追加できます。送信はセッションのチャットのプランカードから行います。",
   "plan.add_comment": "コメント",
   "plan.comment_placeholder": "この箇所への指摘（Ctrl+Enter で追加）",
   "plan.comment_placeholder_enter": "この箇所への指摘（Enter で追加・Shift+Enter で改行）",
@@ -88,6 +95,13 @@ export const mirror = {
   "plan.review_in_session": "別セッションでレビュー",
   "plan.review_in_session_title": "プランを却下し、選んだエージェントでレビューセッションを起動します",
   "plan.review_launch_failed": "レビューセッションを起動できませんでした：{err}",
+  "plan.review_again": "{name} で再レビュー",
+  "plan.review_again_title":
+    "プランを却下し、以前レビューした {name} に改訂版を送ります。停止中なら再開します。作業中のレビュアーには、そのターンが終わってから届きます",
+  "plan.review_again_retry": "もう一度送る",
+  "plan.review_again_failed": "{name} にプランを送れませんでした：{err}",
+  "plan.review_again_prompt":
+    "計画を改訂しました（改訂 {rev}）。もう一度レビューしてください。\n\n- 計画: {path}（読むだけ。編集しないでください）\n\n前回の指摘と見比べてください。計画側が妥当な理由で残した点は、再び指摘しないでください。\n形式は前回と同じ（判定 / 指摘）で、send_to_peer_session で {session} に送ってください。",
   "plan.review_title": "レビュー: {title}",
   "plan.review_prompt_head":
     "セッション {session} が利用者に提示した作業計画のレビューを依頼されました（利用者が Console から起動しています）。",
@@ -109,7 +123,7 @@ export const mirror = {
   "mirror.perm_pending": "許可待ち",
   "mirror.perm_asking": "許可を求めています（編集・コマンド等）",
   "mirror.allow": "許可",
-  "mirror.auto_allow": "以降このセッションでは自動許可（2番目の選択肢）",
+  "mirror.auto_allow": "以降このセッションでは自動許可（2 番目の選択肢）",
   "mirror.always_allow": "常に許可",
   "mirror.deny": "拒否",
   "mirror.perm_hint": "対象（ファイル・コマンド）や差分はターミナルで確認できます",
@@ -126,7 +140,7 @@ export const mirror = {
   "mirror.ws_stopped": "ワークスペース停止中",
   "mirror.resume_continue": "再開して続ける",
   "mirror.viewing_history_resume": "履歴を閲覧中（入力するには再開）",
-  "mirror.folder_missing_history": "作業フォルダが存在しないため再開できません（履歴のみ閲覧可）",
+  "mirror.folder_missing_history": "作業フォルダが存在しないため再開できません（履歴だけ閲覧可）",
   "mirror.viewing_history_ws_stopped": "履歴を閲覧中（ワークスペース停止中）",
   "mirror.select_in_terminal": "ターミナルで選択",
   "mirror.resume_choice_hint": "再開方法の選択待ち（コンテキスト維持は「2」）",
@@ -136,12 +150,12 @@ export const mirror = {
   // コンポーザ
   "mirror.suggest_hint":
     "クリックで入力欄へ・Ctrl/⌘/Alt＋クリックで即送信（入力途中なら Tab で候補を順に補完・入力欄が空なら Tab で候補へ・←/→ で候補選択／右クリック・長タップでピン留めと削除）",
-  "mirror.suggest_ai": "AIに返信候補を出してもらう（直近の会話から）",
+  "mirror.suggest_ai": "AI に返信候補を出してもらう（直近の会話から）",
   "mirror.suggest_forget": "この候補をもう出さない（同じ文を自分で送れば戻ります）",
   "mirror.suggest_pin": "常に表示（ピン留め）",
   "mirror.suggest_unpin": "ピン留めを解除",
   "mirror.suggest_forget_item": "この候補を消す",
-  "mirror.suggest_none": "返信候補を作れませんでした（会話が浅いか、利用できるAIがありません）",
+  "mirror.suggest_none": "返信候補を作れませんでした（会話が浅いか、利用できる AI がありません）",
   "mirror.suggest_failed": "返信候補の生成に失敗しました",
   "mirror.prev_input": "前の入力",
   "mirror.next_input": "次の入力",
@@ -160,6 +174,10 @@ export const mirror = {
   "mirror.files.st_outside": "作業コピー外",
   "mirror.files.st_workdir": "作業用の一時領域",
   "mirror.files.st_workdir_hint": "$AF_WORK_DIR（~/.af-work）内のファイル。セッションを削除すると消えます",
+  "mirror.files.st_memory": "エージェントのメモリ",
+  "mirror.files.st_memory_claude": "Claude のメモリ",
+  "mirror.files.st_memory_codex": "Codex のメモリ",
+  "mirror.files.st_memory_hint": "エージェントのメモリに保存されたファイル",
   "mirror.files.other_repo": "別の作業コピー（{repo}）のファイル。このセッションの作業コピーの差分ではありません",
   "mirror.files.sort_recent": "新しい順",
   "mirror.files.sort_path": "パス順",
@@ -221,7 +239,7 @@ export const mirror = {
   // Console の利用者に効く操作＝設定 > エージェント での再認証を案内する。
   "mirror.error_auth_hint":
     "{agent} のログインが切れています。再認証すると、このセッションはそのまま続きから再開できます。",
-  "mirror.error_auth_action": "再認証する",
+  "mirror.error_auth_action": "再認証",
   // 再認証が済んだ後の同じカード。転写は書き換わらないので、放っておくと利用者が対処した
   // 後もずっと「再認証する」を出し続ける＝直したのに効いていないように見える。判定材料は
   // 「今のログインがこのターンより後に書かれた」という事実だけなので、文面もそれだけを言う
@@ -273,7 +291,7 @@ export const mirror = {
   "mirror.pending": "反映待ち",
   "mirror.mark.pill": "マーカーを引く",
   "mirror.mark.strip_title": "マーカー",
-  "mirror.mark.strip_authors": "{n}人",
+  "mirror.mark.strip_authors": "{n} 人",
   "mirror.mark.paint": "{color}のマーカーを引く",
   "mirror.mark.remove": "マーカーを消す",
   "mirror.mark.color.yellow": "黄",
@@ -305,7 +323,7 @@ export const mirror = {
   "mirror.from_schedule_manual_title": "スケジュールの手動発火（今すぐ発火）で投入されたプロンプトです。",
   "mirror.from_auto_resume": "自動再開",
   "mirror.from_auto_resume_title":
-    "ターンが中断（接続断・一時的なレート制限など）したため、Agent が続きを走らせるために自動で送ったプロンプトです。あなたもアシスタントも入力していません。",
+    "ターンが中断（接続断・一時的なレート制限など）したため、Agent が続きを実行するために自動で送ったプロンプトです。あなたもアシスタントも入力していません。",
   "mirror.from_chat": "{provider} から",
   "mirror.from_chat_title": "チャット（{provider} など）から返信で送られた入力です。コンソールで入力したものではありません。",
   "mirror.from_peer": "別のセッションから",
@@ -316,15 +334,17 @@ export const mirror = {
   "mirror.from_spawn_named": "{name} が起動",
   "mirror.from_spawn_title":
     "このセッションの最初のタスクは、あなたではなく別のセッションが書いたものです（create_session で起動されました）。エージェントには「セッションからの指示である」と伝えてあり、あなたの承認の代わりにはなりません。",
+  "mirror.from_spawn_title_named":
+    "このセッションの最初のタスクは、あなたではなく別のセッションが書いたものです（{name} が create_session で起こしました）。エージェントには「セッションからの指示である」と伝えてあり、あなたの承認の代わりにはなりません。",
   "mirror.peer_intent.request": "依頼",
   "mirror.peer_intent.question": "質問",
   "mirror.peer_intent.answer": "回答",
   "mirror.peer_intent.notice": "共有",
   "mirror.peer_intent_title.request":
-    "このセッションに行動を求めるメッセージです。送信側には「返事はできないときだけ来る」と伝えてあります（返事が無い＝やった、です）。",
-  "mirror.peer_intent_title.question": "情報を求めるメッセージです。結論だけが1通返ります。",
+    "このセッションに行動を求めるメッセージです。送信側には「返事はできないときだけ来る」と伝えてあります（返事がないことは、やったことを示します）。",
+  "mirror.peer_intent_title.question": "情報を求めるメッセージです。結論だけが 1 通返ります。",
   "mirror.peer_intent_title.answer":
-    "このセッションが送った質問への返答です。ここで打ち切りで、返信は送りません。",
+    "このセッションが送った質問への返答です。ここで打ち切りです。返信は送りません。",
   "mirror.peer_intent_title.notice": "知らせるだけのメッセージです。返信はしません。",
   "mirror.effort_hint": "推論の努力度（codex reasoning_effort / opencode variant）",
   "mirror.token_hint": "入力(文脈)↑ / 出力↓ トークン",
@@ -336,7 +356,7 @@ export const mirror = {
   "mirror.translate_off_title": "原文に戻す",
   // DelegationCard
   "mirror.task.requested": "依頼済み",
-  "mirror.task.running": "進行中",
+  "mirror.task.running": "進行中…",
   "mirror.task.completed": "完了",
   "mirror.task.failed": "失敗",
   "mirror.delegation_title": "{name}サブエージェントに依頼",
@@ -385,6 +405,10 @@ export const mirror = {
   "mirror.carried_plan_approve": "承認して実行",
   "mirror.carried_plan_reject": "承認しない",
   "mirror.carried_plan_approve_confirm": "この計画を承認すると、セッションを再開してそのまま実行します。取り消せません。よろしいですか？",
+  "mirror.carried_plan_review_title": "このプランのレビューセッションを起動します。指摘はメッセージとしてこのセッションに届きます",
+  "mirror.carried_plan_review_again_title":
+    "以前レビューした {name} に改訂版のプランを送ります。停止中なら再開します。作業中のレビュアーには、そのターンが終わってから届きます。指摘はメッセージとしてこのセッションに届きます",
+  "mirror.carried_plan_discard_failed": "レビューセッションは起動しましたが、このプランカードを破棄できませんでした（{err}）。承認する前にここで破棄してください。",
   "mirror.carried_plan_feedback_ph": "補足や修正指示（任意）",
   "mirror.carried_no_keys": "持ち越した対話にキー操作は送れません。",
   "mirror.question_cancel_title": "この質問に答えず、通常の会話に戻る（Esc）",
@@ -442,4 +466,17 @@ export const mirror = {
   "send.add_to_queue": "キューに追加",
   "send.open_assistant": "アシスタントで開く",
   "send.send_to_session": "セッションに送信",
+  "mirror.queue_title": "送信待ち（{n} 件）",
+  "mirror.queue_add": "送信待ちに追加",
+  "mirror.queue_add_hint": "実行中のターンには送らず、ここに溜めます。ターンが終わると順に送られます（Alt+Enter）",
+  "mirror.queue_paused": "停止したため自動送信を止めています。",
+  "mirror.queue_resume": "再開",
+  "mirror.queue_up": "上へ",
+  "mirror.queue_down": "下へ",
+  "mirror.queue_edit": "編集",
+  "mirror.queue_remove": "削除",
+  "mirror.queue_now": "今すぐ送る",
+  "mirror.queue_now_inject": "今すぐ送る（実行中のターンに取り込まれます）",
+  "mirror.queue_now_after": "今すぐ送る（エージェントが受け付け、実行中のターンの後に処理されます）",
+  "mirror.queue_attach_only": "（添付のみ）",
 };

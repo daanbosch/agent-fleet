@@ -46,7 +46,10 @@ const MEMBER = {
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
 
-async function mount(member: typeof MEMBER & { state?: string } = MEMBER, onRemoved = () => {}) {
+async function mount(
+  member: typeof MEMBER & { state?: string; has_workspace?: boolean; slot_class?: string; slot_class_effective?: string; slot_class_default?: string } = MEMBER,
+  onRemoved = () => {},
+) {
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -135,28 +138,53 @@ describe("member limit editing", () => {
 });
 
 // Cleanup runs in three stages (docs/log/61 §61.18): remove the member, discard the workspace,
-// delete the row. Exactly one of them is on screen at a time; showing all three leaves the
+// delete the row. One stage is on screen at a time (both Destroy and Delete only when an older CP
+// omits has_workspace); showing all three leaves the
 // operator unable to tell which one is possible now without pressing it.
 describe("cleanup of a removed member", () => {
   it("offers only remove while the member is still present", async () => {
     await mount();
     expect(buttonWith("メンバーを外す")).toBeTruthy();
-    expect(buttonWith("Workspace を破棄")).toBeFalsy();
+    expect(buttonWith("ワークスペースを破棄")).toBeFalsy();
     expect(buttonWith("メンバーを完全に削除")).toBeFalsy();
   });
 
   it("offers only discard just after removal, while the workspace still exists", async () => {
-    await mount({ ...MEMBER, status: "removed", state: "stopped" });
-    expect(buttonWith("Workspace を破棄")).toBeTruthy();
+    await mount({ ...MEMBER, status: "removed", state: "stopped", has_workspace: true });
+    expect(buttonWith("ワークスペースを破棄")).toBeTruthy();
     // Home and the cloud resources are still alive; deleting the row would leave nothing
     // pointing at them.
     expect(buttonWith("メンバーを完全に削除")).toBeFalsy();
   });
 
-  it("offers permanent deletion only once discarded (state=none), and sends DELETE", async () => {
+  it("offers discard, not deletion, when the runtime says none but the row survives (#1888)", async () => {
+    await mount({ ...MEMBER, status: "removed", state: "none", has_workspace: true });
+    expect(buttonWith("ワークスペースを破棄")).toBeTruthy();
+    expect(buttonWith("メンバーを完全に削除")).toBeFalsy();
+  });
+
+  it("closes the detail after a successful discard so the next open reflects the row", async () => {
     const onRemoved = vi.fn();
-    await mount({ ...MEMBER, status: "removed", state: "none" }, onRemoved);
-    expect(buttonWith("Workspace を破棄")).toBeFalsy();
+    await mount({ ...MEMBER, status: "removed", state: "none", has_workspace: true }, onRemoved);
+    await act(async () => buttonWith("ワークスペースを破棄")!.click());
+    const confirm = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).filter((b) =>
+      (b.textContent || "").includes("破棄"),
+    ).pop()!;
+    await act(async () => confirm.click());
+    expect(apiJSON.mock.calls.some((c) => c[0] === "api/admin/workspaces" && c[1] === "DELETE")).toBe(true);
+    expect(onRemoved).toHaveBeenCalled();
+  });
+
+  it("offers both when an older CP omits has_workspace", async () => {
+    await mount({ ...MEMBER, status: "removed", state: "none" });
+    expect(buttonWith("ワークスペースを破棄")).toBeTruthy();
+    expect(buttonWith("メンバーを完全に削除")).toBeTruthy();
+  });
+
+  it("offers permanent deletion only once the row is gone (has_workspace=false), and sends DELETE", async () => {
+    const onRemoved = vi.fn();
+    await mount({ ...MEMBER, status: "removed", state: "none", has_workspace: false }, onRemoved);
+    expect(buttonWith("ワークスペースを破棄")).toBeFalsy();
 
     await act(async () => buttonWith("メンバーを完全に削除")!.click());
     const confirm = buttonWith("完全に削除する");
@@ -334,6 +362,56 @@ describe("member machine class", () => {
 
     await act(async () => buttonWith("省コスト（Arm）")!.click()); // x86_64 → arm64
     expect(warned()).toBe(true);
+  });
+
+  // A member with no stored class follows the TENANT default, not the deployment default: the
+  // baseline of the warning and the ladder shown for "tenant default" are the effective class.
+  it("takes the baseline from the effective class when none is stored", async () => {
+    useSizing(SIZING_CLASSES);
+    const follower = { ...MEMBER, slot_class: "", slot_class_effective: "arm", slot_class_default: "arm" };
+    await mount(follower);
+    await openEditor();
+    const warned = () => !!document.querySelector(".limit-edit .admin-hint.warn");
+    const units = () => Array.from(document.querySelectorAll(".limit-edit .af-unit")).map((e) => (e.textContent || "").trim());
+    expect(units()).toContain("→ m7g.large（2 vCPU / 8 GiB・専有）");
+    expect(warned()).toBe(false);
+
+    await act(async () => buttonWith("省コスト（Arm）")!.click()); // arm64 → arm64
+    expect(warned()).toBe(false);
+
+    await act(async () => buttonWith("標準（Intel）")!.click()); // arm64 → x86_64
+    expect(warned()).toBe(true);
+  });
+
+  // "" means the TENANT default whatever is stored, so its target comes from the CP.
+  it("draws and warns about the tenant default when a different class is stored", async () => {
+    useSizing(SIZING_CLASSES);
+    await mount({ ...MEMBER, slot_class: "standard", slot_class_effective: "standard", slot_class_default: "arm" });
+    await openEditor();
+    const warned = () => !!document.querySelector(".limit-edit .admin-hint.warn");
+    const units = () => Array.from(document.querySelectorAll(".limit-edit .af-unit")).map((e) => (e.textContent || "").trim());
+    expect(warned()).toBe(false);
+    await act(async () => buttonWith("テナントの既定")!.click()); // x86_64 → arm64
+    expect(units()).toContain("→ m7g.large（2 vCPU / 8 GiB・専有）");
+    expect(warned()).toBe(true);
+  });
+
+  it("does not warn when the stored class is already the tenant default's", async () => {
+    useSizing(SIZING_CLASSES);
+    await mount({ ...MEMBER, slot_class: "arm", slot_class_effective: "arm", slot_class_default: "arm" });
+    await openEditor();
+    await act(async () => buttonWith("テナントの既定")!.click()); // arm64 → arm64
+    expect(!!document.querySelector(".limit-edit .admin-hint.warn")).toBe(false);
+  });
+
+  // A stored id the deployment no longer offers is substituted by the CP; the editor must show
+  // the box the member really gets, not the one the dead id would map to.
+  it("draws an unchanged stored class from the effective one", async () => {
+    useSizing(SIZING_CLASSES);
+    await mount({ ...MEMBER, slot_class: "retired", slot_class_effective: "arm", slot_class_default: "arm" });
+    await openEditor();
+    const units = Array.from(document.querySelectorAll(".limit-edit .af-unit")).map((e) => (e.textContent || "").trim());
+    expect(units).toContain("→ m7g.large（2 vCPU / 8 GiB・専有）");
   });
 });
 

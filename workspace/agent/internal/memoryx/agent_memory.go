@@ -31,12 +31,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/claude"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/gitx"
@@ -52,22 +53,44 @@ const (
 	agentMemRepoPrefix = "af"
 	agentMemTombDir    = ".forgotten"
 
-	agentMemMaxBody        = 64 << 10
-	agentMemMaxFile        = 4 * agentMemMaxBody
-	agentMemMaxLine        = 4 << 10
-	agentMemMaxDescription = 300
-	agentMemMaxKinds       = 16
-	agentMemIndexCap       = 500
-	agentMemSearchDefault  = 20
-	agentMemSearchMax      = 50
-	agentMemSnippetLines   = 3
-	agentMemSnippetChars   = 200
+	// The store limits are what AF accepts, sized so nothing claude's or codex's own memory holds
+	// is refused (ADR 0108 decision 3). What is advised to authors is the warning tier below.
+	agentMemMaxBody = 200 << 10
+	// agentMemMaxFile bounds a stored file: body, frontmatter (description up to 4 bytes per
+	// character) and slack for hand edits.
+	agentMemMaxFile = agentMemMaxBody + 32<<10
+	// agentMemMaxDescription is counted in characters, not bytes: a Japanese description is 3
+	// bytes per character.
+	agentMemMaxDescription = 2000
+	// agentMemSaveMaxRequest bounds the JSON of a save: the body and description at the worst
+	// JSON escaping (6 bytes per control or quote-like character, 12 per astral one is covered
+	// by the description term) plus the other fields. The limits on the decoded values are what
+	// judge a save.
+	agentMemSaveMaxRequest = 6*agentMemMaxBody + 12*agentMemMaxDescription + 64<<10
+	// There is no per-line limit: the scanner runs every rule over the whole line (RE2 is
+	// linear), so a long line is vouched for like any other and the body bound is the only
+	// safety stop.
+
+	// Authoring guidance, returned as warnings and never as a refusal. The thresholds are
+	// claude's own: it lints a description above 300 characters (suggesting about 150) and
+	// shows other sessions only the first 4,096 bytes of a memory file in recall.
+	agentMemAdviseDescription = 150
+	agentMemWarnDescription   = 300
+	agentMemWarnBody          = 4096
+	agentMemMaxKinds          = 16
+	agentMemSearchDefault     = 20
+	agentMemSearchMax         = 50
+	agentMemSnippetLines      = 3
+	agentMemSnippetChars      = 200
 	// agentMemUnknown is what an author AF cannot establish is recorded as; never a guess.
 	agentMemUnknown = "unknown"
 )
 
 var (
-	agentMemNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+	// agentMemNameRe is a safe single path segment: it has no "/" and cannot start with "." or
+	// "-", so ".forgotten" (the tombstone directory) is unreachable. Go has no look-ahead, so
+	// agentMemValidName also refuses "..".
+	agentMemNameRe = regexp.MustCompile(`^[a-z0-9_][a-z0-9._-]{0,63}$`)
 	agentMemKindRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 	// agentMemTypes are the memory types claude's auto-memory uses, so the import keeps them.
 	agentMemTypes = map[string]bool{"": true, "user": true, "feedback": true, "project": true, "reference": true}
@@ -77,6 +100,12 @@ var (
 	agentMemMu sync.RWMutex
 )
 
+// agentMemValidName says whether name may be a memory name and so a file name, a repo path and
+// a commit-message field.
+func agentMemValidName(name string) bool {
+	return agentMemNameRe.MatchString(name) && !strings.Contains(name, "..")
+}
+
 func agentMemDir() string { return filepath.Join(claude.ConfigDir(), "af-agent-memory") }
 
 // agentMemProject is the project a session works in (ADR 0108 decision 2).
@@ -85,6 +114,10 @@ type agentMemProject struct {
 	Root    string `json:"root"`
 	VCS     string `json:"vcs"`
 	Display string `json:"display"`
+	// Remote is the normalised origin URL ("host/owner/repo", no credentials), "" when the
+	// repository has none or it predates the field. It is not part of the project's identity: it
+	// only lets the Console suggest moving an orphan's memories into a live project (#2110).
+	Remote string `json:"remote,omitempty"`
 }
 
 // agentMemCaller is who is asking: the author of a write and the scope of a read.
@@ -122,6 +155,17 @@ func agentMemResolveCaller(name string) (agentMemCaller, error) {
 // agentMemProjectFor maps a session's working copy to its project. A worktree shares its main
 // clone's memory; anything outside ~/repos (a shell in the home directory) has no project.
 func agentMemProjectFor(dir string) *agentMemProject {
+	return agentMemProjectWith(dir, dir, func(args ...string) (string, error) { return gitx.Run(dir, args...) })
+}
+
+// agentMemGitRunner runs git in one fixed directory.
+type agentMemGitRunner func(args ...string) (string, error)
+
+// agentMemProjectWith is agentMemProjectFor for a directory that is named by label (under
+// ~/repos) but inspected through vcsDir and run: the muse import passes a pinned handle's
+// /proc path, so what git answers is about the directory it opened, not about the path.
+func agentMemProjectWith(label, vcsDir string, run agentMemGitRunner) *agentMemProject {
+	dir := label
 	if dir == "" {
 		return nil
 	}
@@ -130,9 +174,9 @@ func agentMemProjectFor(dir string) *agentMemProject {
 	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
 		return nil
 	}
-	root, key, vcs := filepath.Clean(dir), filepath.Clean(dir), projcfg.DetectVCS(dir)
+	root, key, vcs := filepath.Clean(dir), filepath.Clean(dir), projcfg.DetectVCS(vcsDir)
 	if vcs == projcfg.VCSGit {
-		if r, k := agentMemGitIdentity(dir); k != "" {
+		if r, k := agentMemGitIdentityWith(run); k != "" {
 			root, key = r, k
 		}
 	}
@@ -140,7 +184,13 @@ func agentMemProjectFor(dir string) *agentMemProject {
 	if r, err := filepath.Rel(repos, root); err == nil && !strings.HasPrefix(r, "..") {
 		display = filepath.ToSlash(r)
 	}
-	return &agentMemProject{ID: agentMemProjectID(key), Root: root, VCS: vcs, Display: display}
+	p := &agentMemProject{ID: agentMemProjectID(key), Root: root, VCS: vcs, Display: display}
+	if vcs == projcfg.VCSGit {
+		if raw, err := run("remote", "get-url", "origin"); err == nil {
+			p.Remote = agentMemNormalizeRemote(raw)
+		}
+	}
+	return p
 }
 
 // agentMemGitIdentity returns the repository's main working tree (for display) and its key:
@@ -148,19 +198,23 @@ func agentMemProjectFor(dir string) *agentMemProject {
 // repositories do. The parent of git-common-dir is not the key: with --separate-git-dir or in a
 // submodule it is a metadata directory that several repositories can share.
 func agentMemGitIdentity(dir string) (root, key string) {
-	common, err := gitx.Run(dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	return agentMemGitIdentityWith(func(args ...string) (string, error) { return gitx.Run(dir, args...) })
+}
+
+func agentMemGitIdentityWith(run agentMemGitRunner) (root, key string) {
+	common, err := run("rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil || common == "" {
 		return "", ""
 	}
-	top, err := gitx.Run(dir, "rev-parse", "--show-toplevel")
+	top, err := run("rev-parse", "--show-toplevel")
 	if err != nil || top == "" {
 		return "", ""
 	}
 	root = filepath.Clean(top)
-	gitDir, err := gitx.Run(dir, "rev-parse", "--absolute-git-dir")
+	gitDir, err := run("rev-parse", "--absolute-git-dir")
 	if err == nil && filepath.Clean(gitDir) != filepath.Clean(common) {
 		// A linked worktree: the main one is git's first entry, when it is a real checkout.
-		if out, err := gitx.Run(dir, "worktree", "list", "--porcelain"); err == nil {
+		if out, err := run("worktree", "list", "--porcelain"); err == nil {
 			first, _, _ := strings.Cut(out, "\n")
 			if p, ok := strings.CutPrefix(first, "worktree "); ok {
 				if _, err := os.Lstat(filepath.Join(p, ".git")); err == nil {
@@ -281,19 +335,28 @@ func agentMemReadFile(abs string) ([]byte, bool, error) {
 		return nil, false, err
 	}
 	defer f.Close()
+	b, err := agentMemReadHandle(f)
+	if err == agentMemErrSymlink {
+		return nil, false, err
+	}
+	return b, true, err
+}
+
+// agentMemReadHandle reads an already opened regular file.
+func agentMemReadHandle(f *os.File) ([]byte, error) {
 	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() {
-		return nil, false, agentMemErrSymlink
+		return nil, agentMemErrSymlink
 	}
 	b, err := io.ReadAll(io.LimitReader(f, agentMemMaxFile+1))
 	if err != nil {
-		return nil, true, err
+		return nil, err
 	}
 	if len(b) > agentMemMaxFile {
 		// Never return a truncated file: it would be shown as the memory, or written back as
 		// the original by a rollback.
-		return nil, true, agentMemErrTooLarge
+		return nil, agentMemErrTooLarge
 	}
-	return b, true, nil
+	return b, nil
 }
 
 // agentMemErrTooLarge is a stored file larger than any memory a save can produce.
@@ -314,7 +377,13 @@ type agentMemEntry struct {
 	Updated       string   `json:"updated"`
 	Source        string   `json:"source,omitempty"`
 	SourceHash    string   `json:"sourceHash,omitempty"`
-	Body          string   `json:"body,omitempty"`
+	// Pinned is the member's choice (agentMemPin): the entry sits first in the described part of
+	// the index. The Console is the way to set it (no MCP tool does); a save by an agent carries the stored value forward.
+	Pinned bool `json:"pinned,omitempty"`
+	// Uses is the read and search-hit count from the usage sidecar, filled by the loaders that
+	// rank or list. It is not stored in the memory file.
+	Uses int    `json:"uses,omitempty"`
+	Body string `json:"body,omitempty"`
 }
 
 // agentMemRender writes an entry as frontmatter plus body. String values are written as
@@ -347,6 +416,9 @@ func agentMemRender(e agentMemEntry) []byte {
 	if e.SourceHash != "" {
 		b.WriteString("source_hash: " + q(e.SourceHash) + "\n")
 	}
+	if e.Pinned {
+		b.WriteString("pinned: true\n")
+	}
 	b.WriteString("---\n")
 	b.WriteString(strings.TrimRight(e.Body, "\n"))
 	b.WriteString("\n")
@@ -354,7 +426,7 @@ func agentMemRender(e agentMemEntry) []byte {
 }
 
 // agentMemParse reads a file agentMemRender wrote. It also accepts plain YAML scalars and
-// skips keys it does not know (indented lines included), so a file a person edited by hand
+// skips keys it does not know (indented lines included, except `type` under `metadata:`), so a file a person edited by hand
 // still loads. A missing or invalid revision reads as 1, never 0: 0 means "create", and a
 // hand-made file must not be overwritable by a blind create.
 func agentMemParse(b []byte) (agentMemEntry, bool) {
@@ -384,21 +456,30 @@ func agentMemParse(b []byte) (agentMemEntry, bool) {
 		}
 		return v
 	}
+	// claude writes its memory type as `metadata:` with an indented `type:`; a top-level type wins.
+	inMeta, metaType, topType := false, "", false
 	for _, line := range strings.Split(head, "\n") {
-		if line == "" || line[0] == ' ' || line[0] == '\t' || line[0] == '#' {
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		if line[0] == ' ' || line[0] == '\t' {
+			if k, v, ok := strings.Cut(strings.TrimSpace(line), ":"); ok && inMeta && strings.TrimSpace(k) == "type" {
+				metaType = unq(v)
+			}
 			continue
 		}
 		k, v, ok := strings.Cut(line, ":")
 		if !ok {
 			continue
 		}
+		inMeta = strings.TrimSpace(k) == "metadata" && strings.TrimSpace(v) == ""
 		switch strings.TrimSpace(k) {
 		case "name":
 			e.Name = unq(v)
 		case "description":
 			e.Description = unq(v)
 		case "type":
-			e.Type = unq(v)
+			e.Type, topType = unq(v), true
 		case "kinds":
 			v = strings.TrimSpace(v)
 			v = strings.TrimSuffix(strings.TrimPrefix(v, "["), "]")
@@ -421,7 +502,12 @@ func agentMemParse(b []byte) (agentMemEntry, bool) {
 			e.Source = unq(v)
 		case "source_hash":
 			e.SourceHash = unq(v)
+		case "pinned":
+			e.Pinned = unq(v) == "true"
 		}
+	}
+	if !topType {
+		e.Type = metaType
 	}
 	if e.Revision < 1 {
 		e.Revision = 1
@@ -430,17 +516,11 @@ func agentMemParse(b []byte) (agentMemEntry, bool) {
 	return e, true
 }
 
-// agentMemScanText scans text the way a write is judged: NUL and over-long lines are refused
-// outright, because the scanner cannot vouch for them (it skips binary, and a reader is not
-// helped by a 4 KiB line in a memory).
+// agentMemScanText scans text the way a write is judged: NUL is refused outright, because the
+// scanner cannot vouch for binary (it skips it). Lines of any length are scanned whole.
 func agentMemScanText(path, text string) []memorySecretFinding {
 	if strings.IndexByte(text, 0) >= 0 {
 		return []memorySecretFinding{{Path: path, Rule: "nul-byte", Hint: "…"}}
-	}
-	for i, line := range strings.Split(text, "\n") {
-		if len(line) > agentMemMaxLine {
-			return []memorySecretFinding{{Path: path, Line: i + 1, Rule: "line-too-long", Hint: "…"}}
-		}
 	}
 	return memoryScanContent(path, []byte(text))
 }
@@ -448,6 +528,23 @@ func agentMemScanText(path, text string) []memorySecretFinding {
 // agentMemScanCache remembers the verdict on a stored file by its content and the name it is
 // shown under, so the index does not rescan every file on every call.
 var agentMemScanCache sync.Map // sha256(raw) + "\x00" + name -> bool (true = clean)
+
+// agentMemScanRuns counts verdicts computed rather than found in agentMemScanCache. Tests read
+// it to tell a rescan from a hit without timing anything.
+var agentMemScanRuns atomic.Int64
+
+// agentMemWarmScan fills agentMemScanCache for what c can read, without agentMemMu. Readers call
+// it before taking the read lock so a cold scan (regex over every file: measured ~1.6 s for 500
+// files, all of it in the scan) does not hold up a writer queued behind the lock.
+// Race-free because the verdict is a pure function of the bytes read and the key is their
+// hash: a file replaced meanwhile only leaves an unused entry, and the locked read that follows
+// re-reads the file and still goes through agentMemClean, so nothing unscanned is returned.
+// Errors are ignored; the locked read reports them.
+func agentMemWarmScan(c agentMemCaller) {
+	for _, scope := range agentMemScopes(c) {
+		_, _, _ = agentMemLoadScope(scope, c)
+	}
+}
 
 // agentMemPublished is every value of an entry a reader is shown, decoded. It is what gets
 // scanned: the raw file can hide a value behind a JSON escape (\u0041) or an escaped quote.
@@ -465,9 +562,19 @@ func agentMemClean(raw []byte, e agentMemEntry) bool {
 	if v, ok := agentMemScanCache.Load(key); ok {
 		return v.(bool)
 	}
+	agentMemScanRuns.Add(1)
 	clean := len(agentMemScanText("", string(raw))) == 0 && len(agentMemScanText("", agentMemPublished(e))) == 0
 	agentMemScanCache.Store(key, clean)
 	return clean
+}
+
+// agentMemPrimeScan records the verdict on a file just written, judged exactly as a reader
+// would (parsed back from the bytes on disk), so the first read after a save finds it cached.
+func agentMemPrimeScan(data []byte, scope, name string) {
+	if e, ok := agentMemParse(data); ok {
+		e.Name, e.Scope = name, scope
+		agentMemClean(data, e)
+	}
 }
 
 // agentMemLoaded is one stored file as read: its entry, or why it is withheld.
@@ -484,6 +591,11 @@ func agentMemLoadScope(scope string, c agentMemCaller) ([]agentMemEntry, int, er
 	if err != nil {
 		return nil, 0, err
 	}
+	return agentMemLoadDir(scope, rel)
+}
+
+// agentMemLoadDir is agentMemLoadScope for a scope directory already resolved.
+func agentMemLoadDir(scope, rel string) ([]agentMemEntry, int, error) {
 	dir, err := agentMemCheckDir(rel, false)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -499,7 +611,7 @@ func agentMemLoadScope(scope string, c agentMemCaller) ([]agentMemEntry, int, er
 	withheld := 0
 	for _, d := range ents {
 		name, ok := strings.CutSuffix(d.Name(), ".md")
-		if !ok || !d.Type().IsRegular() || !agentMemNameRe.MatchString(name) {
+		if !ok || !d.Type().IsRegular() || !agentMemValidName(name) {
 			continue
 		}
 		l, ok, err := agentMemLoadFile(filepath.Join(dir, d.Name()), scope, name)
@@ -550,37 +662,50 @@ func agentMemAppliesTo(e agentMemEntry, kind string) bool {
 	return false
 }
 
-// agentMemIndex is the answer to memory_index: no bodies, newest first.
+// agentMemIndex is the answer to memory_index: no bodies, ranked and cut to a byte budget.
+// Entries are the described part (descriptions shortened), More the grouped, abbreviated names
+// of what did not fit, Omitted the count beyond even those.
 type agentMemIndex struct {
-	Project   *agentMemProject `json:"project"`
-	Entries   []agentMemEntry  `json:"entries"`
-	Truncated bool             `json:"truncated,omitempty"`
+	Project *agentMemProject `json:"project"`
+	Entries []agentMemEntry  `json:"entries"`
+	More    []string         `json:"more,omitempty"`
+	Omitted int              `json:"omitted,omitempty"`
+	// PinnedOmitted counts pinned memories that are in More or Omitted because the pins alone
+	// are larger than the budget (agentMemBudgetIndex).
+	PinnedOmitted int `json:"pinnedOmitted,omitempty"`
+	// Truncated is true when any memory is not in Entries.
+	Truncated bool `json:"truncated,omitempty"`
 	// Withheld counts files left out because they failed the secret scan or are malformed
 	// beyond reading; their names are not shown either.
 	Withheld int `json:"withheld,omitempty"`
 }
 
-func agentMemListIndex(c agentMemCaller) (agentMemIndex, error) {
+// agentMemListIndex ranks what the caller sees and applies the byte budget (0 = default).
+func agentMemListIndex(c agentMemCaller, budget int) (agentMemIndex, error) {
+	agentMemWarmScan(c)
 	agentMemMu.RLock()
 	defer agentMemMu.RUnlock()
 	out := agentMemIndex{Project: c.Project, Entries: []agentMemEntry{}}
+	var all []agentMemEntry
 	for _, scope := range agentMemScopes(c) {
 		es, withheld, err := agentMemLoadScope(scope, c)
 		if err != nil {
 			return out, err
 		}
 		out.Withheld += withheld
+		if rel, err := agentMemScopeDir(scope, c); err == nil {
+			agentMemSetUses(es, rel)
+		}
 		for _, e := range es {
 			if agentMemAppliesTo(e, c.Kind) {
 				e.Body = ""
-				out.Entries = append(out.Entries, e)
+				all = append(all, e)
 			}
 		}
 	}
-	sort.SliceStable(out.Entries, func(i, j int) bool { return out.Entries[i].Updated > out.Entries[j].Updated })
-	if len(out.Entries) > agentMemIndexCap {
-		out.Entries, out.Truncated = out.Entries[:agentMemIndexCap], true
-	}
+	agentMemRank(all)
+	out.Entries, out.More, out.Omitted, out.PinnedOmitted = agentMemBudgetIndex(all, budget)
+	out.Truncated = len(out.Entries) < len(all)
 	return out, nil
 }
 
@@ -588,65 +713,9 @@ func agentMemListIndex(c agentMemCaller) (agentMemIndex, error) {
 type agentMemHit struct {
 	agentMemEntry
 	Snippets []string `json:"snippets"`
-}
-
-// agentMemSearch matches every whitespace-separated term, case-insensitively, against name,
-// description and body. Plain substring matching is enough at the size measured for one
-// project (469 files, ADR 0108); ranking is #1558's.
-func agentMemSearch(c agentMemCaller, query string, limit int) ([]agentMemHit, error) {
-	terms := strings.Fields(strings.ToLower(query))
-	if len(terms) == 0 {
-		return nil, memoryErrf(http.StatusBadRequest, errCodeMemoryBadRequest, "query is required")
-	}
-	if limit <= 0 {
-		limit = agentMemSearchDefault
-	}
-	limit = min(limit, agentMemSearchMax)
-	agentMemMu.RLock()
-	defer agentMemMu.RUnlock()
-	hits := []agentMemHit{}
-	for _, scope := range agentMemScopes(c) {
-		es, _, err := agentMemLoadScope(scope, c)
-		if err != nil {
-			return nil, err
-		}
-		for _, e := range es {
-			if !agentMemAppliesTo(e, c.Kind) {
-				continue
-			}
-			hay := strings.ToLower(e.Name + "\n" + e.Description + "\n" + e.Body)
-			all := true
-			for _, t := range terms {
-				if !strings.Contains(hay, t) {
-					all = false
-					break
-				}
-			}
-			if !all {
-				continue
-			}
-			h := agentMemHit{agentMemEntry: e, Snippets: []string{}}
-			for _, line := range strings.Split(e.Body, "\n") {
-				low := strings.ToLower(line)
-				for _, t := range terms {
-					if strings.Contains(low, t) {
-						h.Snippets = append(h.Snippets, agentMemTruncate(strings.TrimSpace(line), agentMemSnippetChars))
-						break
-					}
-				}
-				if len(h.Snippets) >= agentMemSnippetLines {
-					break
-				}
-			}
-			h.Body = ""
-			hits = append(hits, h)
-		}
-	}
-	sort.SliceStable(hits, func(i, j int) bool { return hits[i].Updated > hits[j].Updated })
-	if len(hits) > limit {
-		hits = hits[:limit]
-	}
-	return hits, nil
+	// MatchedTerms names the query words this hit contains. It is set only on an any-term
+	// fallback answer, where hits differ in how much of the query they matched.
+	MatchedTerms []string `json:"matchedTerms,omitempty"`
 }
 
 // agentMemTruncate cuts at a rune boundary so a snippet of Japanese text stays valid UTF-8.
@@ -683,6 +752,9 @@ func agentMemRead(c agentMemCaller, scope, name string) (agentMemEntry, error) {
 			return agentMemEntry{}, memoryErrf(http.StatusUnprocessableEntity, errCodeMemorySecretDetected,
 				"this memory is withheld: its file looks like it contains a secret or cannot be checked; your user has to fix the file")
 		}
+		// Counted under the read lock: a forget or re-create (write lock) cannot slip between the
+		// read and the count and leave this use on a newer memory.
+		agentMemRecordUses(c, l.Entry)
 		return l.Entry, nil
 	}
 	return agentMemEntry{}, memoryErrf(http.StatusNotFound, errCodeMemoryNotFound, "no memory by that name")
@@ -706,7 +778,7 @@ func agentMemLoadOne(c agentMemCaller, scope, name string) (agentMemLoaded, bool
 // agentMemCheckName is the gate every name passes before it reaches a path: the slug rule, then
 // the secret scan, so a token-shaped name never gets as far as an error that quotes a path.
 func agentMemCheckName(name string) error {
-	if !agentMemNameRe.MatchString(name) {
+	if !agentMemValidName(name) {
 		return agentMemBadName()
 	}
 	if len(agentMemScanText("name", name)) > 0 {
@@ -716,7 +788,7 @@ func agentMemCheckName(name string) error {
 }
 
 func agentMemBadName() error {
-	return memoryErrf(http.StatusBadRequest, errCodeMemoryBadRequest, "name must be lower-case letters, digits and hyphens, at most 64")
+	return memoryErrf(http.StatusBadRequest, errCodeMemoryBadRequest, "name must be 1-64 characters of lower-case letters, digits, '-', '_' and '.'; it must not start with '.' or '-' or contain '..'")
 }
 
 // agentMemSaveReq is a create or update. Revision is the one the caller read: 0 creates, and
@@ -748,6 +820,23 @@ type agentMemWriteResult struct {
 	Commit   string `json:"commit,omitempty"`
 	Created  bool   `json:"created,omitempty"`
 	Deleted  bool   `json:"deleted,omitempty"`
+	// Warnings is authoring guidance; the save has succeeded either way.
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// agentMemSaveWarnings is the guidance a save returns: the limits claude itself lints or
+// truncates at. It never refuses; the store limits are agentMemMax*.
+func agentMemSaveWarnings(req agentMemSaveReq) []string {
+	var w []string
+	if n := utf8.RuneCountInString(req.Description); n > agentMemWarnDescription {
+		w = append(w, fmt.Sprintf("description is %d characters; keep it to about %d (one fact per memory, a one-line summary): claude lints a description above %d characters and recall matches on it as a summary",
+			n, agentMemAdviseDescription, agentMemWarnDescription))
+	}
+	if n := len(req.Body); n > agentMemWarnBody {
+		w = append(w, fmt.Sprintf("body is %d bytes; claude's recall shows only the first %d bytes (200 lines) of a memory, so put the essentials first or split it into one fact per memory",
+			n, agentMemWarnBody))
+	}
+	return w
 }
 
 // agentMemSecretErr carries the scan's findings to the REST layer. The agent gets the rule and
@@ -765,14 +854,14 @@ func agentMemValidate(req *agentMemSaveReq) error {
 	req.Type = strings.TrimSpace(req.Type)
 	req.Body = strings.TrimSpace(req.Body)
 	switch {
-	case !agentMemNameRe.MatchString(req.Name):
+	case !agentMemValidName(req.Name):
 		return agentMemBadName()
 	case req.Description == "":
 		return bad("description is required")
 	case strings.ContainsAny(req.Description, "\r\n"):
 		return bad("description must be one line")
-	case len(req.Description) > agentMemMaxDescription:
-		return bad(fmt.Sprintf("description is longer than %d bytes", agentMemMaxDescription))
+	case utf8.RuneCountInString(req.Description) > agentMemMaxDescription:
+		return bad(fmt.Sprintf("description is longer than %d characters", agentMemMaxDescription))
 	case !agentMemTypes[req.Type]:
 		return bad("type must be one of user, feedback, project, reference")
 	case req.Body == "":
@@ -917,6 +1006,7 @@ func agentMemSave(c agentMemCaller, req agentMemSaveReq, now time.Time) (agentMe
 	}
 	if exists {
 		e.Created, e.Source, e.SourceHash = cur.Entry.Created, cur.Entry.Source, cur.Entry.SourceHash
+		e.Pinned = cur.Entry.Pinned
 	}
 	data := agentMemRender(e)
 	repoRel := rel + "/" + req.Name + ".md"
@@ -925,17 +1015,14 @@ func agentMemSave(c agentMemCaller, req agentMemSaveReq, now time.Time) (agentMe
 	}
 
 	changes := []agentMemChange{{Rel: repoRel, Data: data}}
-	if c.Project != nil && req.Scope == agentMemScopeProject {
-		info := agentMemProjectInfoRel(*c.Project)
-		if _, ok, _ := agentMemReadFile(filepath.Join(agentMemDir(), filepath.FromSlash(info))); !ok {
-			b, _ := json.MarshalIndent(c.Project, "", "  ")
-			// The root path comes from a folder name anyone can choose; it is committed too.
-			// Raw values as well as the JSON: JSON escapes the quotes the generic rule needs.
-			if f := agentMemScanText("project", c.Project.Root+"\n"+c.Project.Display+"\n"+string(b)); len(f) > 0 {
-				return agentMemWriteResult{}, &agentMemSecretErr{Findings: f}
-			}
-			changes = append(changes, agentMemChange{Rel: info, Data: append(b, '\n')})
+	// The member names a project that already holds memory and has no working copy to describe
+	// it, so the project's record is left as the sessions wrote it.
+	if c.Project != nil && req.Scope == agentMemScopeProject && c.Kind != agentMemMember.Kind {
+		extra, err := agentMemProjectInfoChange(*c.Project)
+		if err != nil {
+			return agentMemWriteResult{}, err
 		}
+		changes = append(changes, extra...)
 	}
 	op := "update"
 	if !exists {
@@ -947,8 +1034,11 @@ func agentMemSave(c agentMemCaller, req agentMemSaveReq, now time.Time) (agentMe
 	}
 	if !exists {
 		agentMemRemoveTomb(rel, req.Name)
+		agentMemClearUsage(rel, req.Name)
 	}
-	return agentMemWriteResult{Name: e.Name, Scope: e.Scope, Revision: e.Revision, Commit: rev, Created: !exists}, nil
+	agentMemPrimeScan(data, req.Scope, req.Name)
+	return agentMemWriteResult{Name: e.Name, Scope: e.Scope, Revision: e.Revision, Commit: rev, Created: !exists,
+		Warnings: agentMemSaveWarnings(req)}, nil
 }
 
 // agentMemForget removes a memory from what is published. Its text stays in history; purging
@@ -1004,10 +1094,88 @@ func agentMemForget(c agentMemCaller, req agentMemForgetReq, now time.Time) (age
 		// The memory is back; a tombstone beside it is harmless (it is read only on create).
 		return agentMemWriteResult{}, err
 	}
+	agentMemClearUsage(rel, req.Name)
 	return agentMemWriteResult{Name: req.Name, Scope: req.Scope, Revision: cur.Entry.Revision, Commit: rev, Deleted: true}, nil
 }
 
+// agentMemProjectInfoChange is the project.json write a project's first memory brings along, or
+// nothing when it is there already.
+func agentMemProjectInfoChange(p agentMemProject) ([]agentMemChange, error) {
+	info := agentMemProjectInfoRel(p)
+	old, exists, _ := agentMemReadFile(filepath.Join(agentMemDir(), filepath.FromSlash(info)))
+	if exists {
+		return agentMemProjectInfoAddRemote(info, old, p)
+	}
+	b, _ := json.MarshalIndent(p, "", "  ")
+	// The root path comes from a folder name anyone can choose; it is committed too.
+	// Raw values as well as the JSON: JSON escapes the quotes the generic rule needs.
+	if f := agentMemScanText("project", p.Root+"\n"+p.Display+"\n"+string(b)); len(f) > 0 {
+		if p.Remote == "" {
+			return nil, &agentMemSecretErr{Findings: f}
+		}
+		// The remote is a convenience: whatever in it the scan flags must not stop the first
+		// memory of the project from being saved.
+		p.Remote = ""
+		return agentMemProjectInfoChange(p)
+	}
+	return []agentMemChange{{Rel: info, Data: append(b, '\n')}}, nil
+}
+
+// agentMemProjectInfoAddRemote adds the remote to a record written before the field existed
+// (#2110) by splicing one member into the stored bytes: the fields, their order and anything a
+// newer version wrote stay exactly as they were. A record that already has a "remote" member, is
+// not the object of this project, or would fail the scan is left alone. Not worth failing a save for.
+func agentMemProjectInfoAddRemote(info string, old []byte, p agentMemProject) ([]agentMemChange, error) {
+	if p.Remote == "" || !agentMemRemoteOK(p.Remote) {
+		return nil, nil
+	}
+	var members map[string]json.RawMessage
+	if json.Unmarshal(old, &members) != nil {
+		return nil, nil
+	}
+	var id string
+	if _, has := members["remote"]; has || json.Unmarshal(members["id"], &id) != nil || id != p.ID {
+		return nil, nil
+	}
+	body := bytes.TrimRight(old, " \t\r\n")
+	if len(body) < 2 || body[len(body)-1] != '}' || len(members) == 0 {
+		return nil, nil
+	}
+	rem, _ := json.Marshal(p.Remote)
+	next := append(bytes.TrimRight(body[:len(body)-1], " \t\r\n"), []byte(",\n  \"remote\": "+string(rem)+"\n}\n")...)
+	// The raw bytes hide what a JSON escape spells (\u0067hp_…), so the decoded keys and strings
+	// of the whole record, unknown members and nesting included, are scanned too.
+	decoded, ok := agentMemJSONStrings(next)
+	if !ok || len(agentMemScanText("project", string(next)+"\n"+decoded)) > 0 {
+		return nil, nil
+	}
+	return []agentMemChange{{Rel: info, Data: next}}, nil
+}
+
+// agentMemJSONStrings joins every object key and string value of a JSON document, decoded, as the
+// token stream gives them: a key repeated in one object is not collapsed, so the earlier value is
+// scanned too. ok=false when the document does not parse.
+func agentMemJSONStrings(data []byte) (string, bool) {
+	var b strings.Builder
+	dec := json.NewDecoder(bytes.NewReader(data))
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return b.String(), true
+		}
+		if err != nil {
+			return "", false
+		}
+		if s, ok := tok.(string); ok {
+			b.WriteString(s + "\n")
+		}
+	}
+}
+
 func agentMemProjectInfoRel(p agentMemProject) string { return "projects/" + p.ID + "/project.json" }
+
+// agentMemOpProjectInfo is the op of the project.json backfill commit.
+const agentMemOpProjectInfo = "project-info"
 
 // agentMemChange is one file of a write, relative to the store (= relative to af/ in the repo).
 type agentMemChange struct {
@@ -1105,9 +1273,13 @@ func agentMemApplyLocked(changes []agentMemChange, op, memRel string, c agentMem
 			return "", fmt.Errorf("stage agent memory: %w", err)
 		}
 	}
+	trigger := memoryTriggerAgentMemory
+	if op == agentMemOpProjectInfo {
+		trigger = memoryTriggerAgentMemoryMeta
+	}
 	msg := fmt.Sprintf("agent-memory: %s %s (%s)\n\nAF-Trigger: %s\nAF-Op: %s\nAF-Memory: %s\nAF-Author-Kind: %s\nAF-Author-Session: %s\n",
 		op, memRel, now.Format(time.RFC3339),
-		memoryTriggerAgentMemory, op, agentMemRepoPrefix+"/"+memRel, c.Kind, c.Session)
+		trigger, op, agentMemRepoPrefix+"/"+memRel, c.Kind, c.Session)
 	for _, t := range extra {
 		msg += t + "\n"
 	}

@@ -1,5 +1,6 @@
 import { Icon } from "../../../ui/Icon.tsx";
 import { t as tr } from "../../../lib/i18n/index.ts";
+import { SplitSend } from "../sendQueue/SplitSend.tsx";
 
 /**
  * Right column: a small mode chip stacked over the send button. The chip is a
@@ -14,6 +15,7 @@ export function SendColumn({
   sendDisabled,
   onToggleMode,
   onSend,
+  onQueue,
 }: {
   showMode: boolean;
   isPlan: boolean;
@@ -23,6 +25,8 @@ export function SendColumn({
   sendDisabled: boolean;
   onToggleMode: () => void;
   onSend: () => void;
+  /** Present while a turn runs: hold the draft in the pre-send queue instead of sending. */
+  onQueue?: () => void;
 }) {
   return (
     <div className="mirror-send-col">
@@ -37,9 +41,13 @@ export function SendColumn({
           {modeLabel || "…"}
         </button>
       )}
-      <button type="button" className="btn primary mirror-send" disabled={sendDisabled} onClick={onSend} title={tr("chat.send")}>
-        <Icon name="send" />
-      </button>
+      {onQueue ? (
+        <SplitSend disabled={sendDisabled} onSend={onSend} onQueue={onQueue} />
+      ) : (
+        <button type="button" className="btn primary mirror-send" disabled={sendDisabled} onClick={onSend} title={tr("chat.send")}>
+          <Icon name="send" />
+        </button>
+      )}
     </div>
   );
 }

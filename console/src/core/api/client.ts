@@ -348,6 +348,20 @@ export function previewURL(port: string | number, path = "/"): string {
   return u.toString();
 }
 
+// The owner-only entry that opens an UNLISTED port on its preview subdomain
+// (control-plane/preview_grant.go). A top-level navigation on the Console origin, so like
+// previewURL the tenant rides as a query param. It acts on the caller's own workspace and is
+// never a link to share.
+export function previewOwnOpenURL(port: string | number, path = "/"): string {
+  const u = new URL(rel("preview-open-own"));
+  u.searchParams.set("port", String(port));
+  if (path.startsWith("/") && !path.startsWith("//") && !path.startsWith("/\\") && path !== "/") {
+    u.searchParams.set("next", path);
+  }
+  if (selectedTenant) u.searchParams.set("tenant", selectedTenant);
+  return u.toString();
+}
+
 // Build a download URL for a home-relative file. Opened as a top-level
 // navigation (anchor), so — like preview/terminal — the tenant rides as a query
 // param (a download click can't carry the X-AF-Tenant header fetch() injects).
@@ -369,6 +383,38 @@ export function downloadURL(path: string, thumb?: number, version?: number): str
   if (selectedTenant) u.searchParams.set("tenant", selectedTenant);
   return u.toString();
 }
+
+/**
+ * The URL of a folder's zip (GET api/fs/download-zip, ADR 0111): a top-level navigation like
+ * downloadURL, so the tenant rides in the query. Each request builds its own archive on the
+ * Agent, which is why the caller asks `fsZipCheck` first — a refusal (too large, busy, a name
+ * that cannot be zipped) is then a message in the Console instead of a failed download.
+ */
+export function downloadZipURL(path: string): string {
+  const u = new URL(rel("api/fs/download-zip"));
+  u.searchParams.set("path", path);
+  if (selectedTenant) u.searchParams.set("tenant", selectedTenant);
+  return u.toString();
+}
+
+/** What a folder's zip would hold, answered by the same walk that builds it (`check=1`). */
+export type FsZipCheck = {
+  /** The file name the browser will save it under. */
+  name: string;
+  files: number;
+  dirs: number;
+  /** Listing-time total; the archive is limited by the bytes actually read. */
+  bytes: number;
+  /** Folder names left out below the start: `.git`, `node_modules`, denylisted ones. */
+  excluded: string[];
+  /** Symbolic links and special files, which are never packed. */
+  skipped: number;
+};
+
+// fetch-based on purpose: unlike the download anchor it surfaces 401 (session expiry), 413,
+// 503 and a stopped workspace as {error} for the caller to show.
+export const fsZipCheck = (path: string): Promise<(FsZipCheck & { error?: undefined }) | { error: ApiError }> =>
+  api(`api/fs/download-zip?path=${encodeURIComponent(path)}&check=1`);
 
 /**
  * The URL for a surface that SHOWS a picture at up to `edge` on its longest side — a lightbox,
@@ -727,12 +773,12 @@ export async function sessionCarriedAnswer(
     answers?: CarriedAnswerInput[];
     feedback?: string;
   },
-): Promise<{ ok: boolean; message?: string }> {
+): Promise<{ ok: boolean; message?: string; code?: string }> {
   const r = await apiJSON(`api/sessions/${encodeURIComponent(session)}/carried-answer`, "POST", body).catch(
     () => ({ error: { message: t("err.network") } }),
   );
   const err = r?.error as ApiError | undefined;
-  if (err) return { ok: false, message: errText(err) || t("err.send_failed") };
+  if (err) return { ok: false, message: errText(err) || t("err.send_failed"), ...(err.code ? { code: err.code } : {}) };
   return { ok: true };
 }
 
@@ -968,13 +1014,16 @@ export async function chatStream(
   // source: set when the Console sends on the member's behalf ("handoff"); stored on the user
   // message so the composer's ↑ history skips it. Omitted for composer input.
   source?: string,
+  // retry: re-run of a turn whose user message the server already stored (it keeps the message
+  // instead of appending the same one again).
+  retry?: boolean,
 ): Promise<void> {
   let res: Response;
   try {
     res = await fetch(rel(`api/chat/conversations/${encodeURIComponent(id)}/stream`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(source ? { content, source } : { content }),
+      body: JSON.stringify({ content, ...(source ? { source } : {}), ...(retry ? { retry: true } : {}) }),
       signal,
     });
   } catch {
@@ -1271,4 +1320,38 @@ export function wsURL(session: string): URL {
     `?session=${encodeURIComponent(session)}` +
     (selectedTenant ? `&tenant=${encodeURIComponent(selectedTenant)}` : "");
   return u;
+}
+
+/** sessionPeerSend delivers a peer message to a RUNNING session as `from` does with
+ *  send_to_peer_session. The Agent builds the envelope, applies the peer rate limit and queues
+ *  the message while the target waits on its user, so `queued` is a success: it arrives once
+ *  that turn ends. Resuming a stopped target is the caller's job (see features/mirror/reviewAgain.ts). */
+export async function sessionPeerSend(
+  to: string,
+  from: string,
+  intent: "request" | "question" | "answer" | "notice",
+  message: string,
+): Promise<{ ok: boolean; queued?: boolean; message?: string; code?: string }> {
+  const r = await apiJSON(`api/sessions/${encodeURIComponent(to)}/input`, "POST", {
+    prompt: message,
+    peer_from: from,
+    peer_intent: intent,
+  }).catch(() => ({ error: { message: t("err.network") } }));
+  const err = r?.error as ApiError | undefined;
+  if (err) return { ok: false, message: errText(err) || t("err.send_failed"), code: String(err.code || "") };
+  return { ok: true, queued: !!r?.queued };
+}
+
+/** sessionAlive reads whether the session is running NOW (null = the read failed). The session
+ *  list lags by seconds and a held Session snapshot lags by as long as a card sits on screen. */
+export async function sessionAlive(session: string): Promise<boolean | null> {
+  const r = await apiJSON(`api/sessions/${encodeURIComponent(session)}/status`, "GET").catch(() => null);
+  return !r || r.error ? null : !!r.alive;
+}
+
+/** sessionReady reports whether a session's agent can take input right now (alive and its
+ *  composer is up). A failed read is "not ready", so polling callers simply try again. */
+export async function sessionReady(session: string): Promise<boolean> {
+  const r = await apiJSON(`api/sessions/${encodeURIComponent(session)}/status`, "GET").catch(() => null);
+  return !!r && !r.error && !!r.alive && !!r.ready;
 }

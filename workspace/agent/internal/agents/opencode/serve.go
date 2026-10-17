@@ -6,10 +6,18 @@ package opencode
 // thread (an opencode session) is made to do belongs to driver.go's ThreadHandle.
 //
 // Measured (1.17.18, docs/log/27 §12.2):
-//   - Auth: with OPENCODE_SERVER_PASSWORD unset there is none (the startup log carries an
-//     unsecured warning). It listens only on loopback inside the container's network
-//     namespace, so it runs unauthenticated on the same judgement as the codex app-server
-//     (§9.1). A TUI attach passes through under the same condition.
+//   - Auth: every request carries Basic auth (user `opencode`). A new daemon starts with a
+//     random per-generation OPENCODE_SERVER_PASSWORD that both majors read (measured on
+//     1.19.0 and 2.0.28: 401 without it, SSE included); serveapi.go's transport adds it to
+//     every client, and the file it is kept in lets a restarted Agent adopt the daemon. On v1
+//     the TUI route never attaches to this daemon (buildProgram opens its own store). On v2
+//     Terminal sessions do (shared.go): their TUIs read the password from the pane
+//     environment, so a v2 daemon keeps ONE password across generations, because a TUI whose
+//     server restarted reconnects only with the password it started with. The password is not
+//     a boundary against the agent itself: the serve process environment and the file are
+//     readable by the same uid.
+//   - Major version: the pin is v1, but a probe also recognises v2 and the driver then
+//     routes to /api/* (serveapi.go holds the table and the measured differences).
 //   - Provider keys are env-injected (auth.go's env()), so a key change requires a
 //     restart: generation + drain (§7) IS the path that applies it.
 //   - serve writes to SQLite (message/part) through the v1 flow, so the read layer
@@ -24,7 +32,6 @@ package opencode
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -38,10 +45,17 @@ import (
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/status"
 )
 
+// serveStartTimeout bounds the wait for a spawned daemon to answer its probe.
+var serveStartTimeout = 20 * time.Second
+
 const serveAddrEnv = "AF_OPENCODE_SERVE_ADDR"
+
+// sharedServeEnv is set in the environment of a daemon af started for shared Terminal sessions.
+const sharedServeEnv = "AF_OPENCODE_SHARED_SERVE"
 
 // defaultServeAddr sits next to the codex app-server (:7798). It is loopback inside the
 // container's network namespace, so the collision risk is limited to processes in this
@@ -51,7 +65,7 @@ const defaultServeAddr = "http://127.0.0.1:7799"
 // serveClient is the short-timeout HTTP client for the control calls
 // (create/abort/question/status). Only the blocking /message (running a turn, no time
 // limit) uses a client of its own, in driver.go.
-var serveClient = &http.Client{Timeout: 10 * time.Second}
+var serveClient = &http.Client{Timeout: 10 * time.Second, Transport: authTransport{}}
 
 // Supervisor owns the shared `opencode serve` daemon: idempotent start, health,
 // generation counter, drain and restart (the RuntimeSupervisor of docs/log/27 §3).
@@ -73,17 +87,20 @@ type Supervisor struct {
 	askedStop *exec.Cmd
 	// watching: one zero-demand watcher (agents.WatchIdle, idlestop.go) is running.
 	watching bool
+	// key is launchKey() as of the daemon's start (or adoption): which opencode it is.
+	key string
 }
 
 var supervisor = &Supervisor{}
 
 // dependents is the total number of things that need the shared daemon.
 //
-// The TUI route of opencode does not use serve (buildProgram connects directly to its own
-// SQLite store), so unlike codex only managed handles are counted. The OAuth device flow
-// is the one exception: it is the only path that starts the daemon while still
-// unconnected, so unless it counts as demand for its duration, the daemon gets folded up
-// from under a login in progress.
+// On v1 the TUI route does not use serve (buildProgram connects directly to its own SQLite
+// store), so only managed handles are counted. On v2 every live Terminal pane is a dependent
+// as well (sharedTerminals): its TUI is attached to this daemon, and the idle stop must not
+// pull it out from under it. The OAuth device flow is the one more exception: it is the only
+// path that starts the daemon while still unconnected, so unless it counts as demand for its
+// duration, the daemon gets folded up from under a login in progress.
 //
 // Counting REGISTERED rather than live handles is for the same reason as on the codex
 // side: when the daemon dies runtimeLost clears alive, so counting live would make the
@@ -95,7 +112,7 @@ func dependents() int {
 	if oauthBusy() {
 		n++
 	}
-	return n
+	return n + sharedTerminals()
 }
 
 // idleGraceEnv / defaultIdleGrace: fold the daemon up after this much continuous zero
@@ -245,19 +262,9 @@ func (s *Supervisor) Generation() int {
 // after a successful Ensure).
 func (s *Supervisor) Addr() string { return serveAddr() }
 
-// healthy is a cheap liveness probe (GET /global/health).
-func healthy(addr string) bool {
-	req, err := http.NewRequest("GET", addr+"/global/health", nil)
-	if err != nil {
-		return false
-	}
-	res, err := serveClient.Do(req)
-	if err != nil {
-		return false
-	}
-	defer res.Body.Close()
-	return res.StatusCode < 500
-}
+// healthy is a cheap liveness probe of either major (serveapi.go): a JSON answer that names
+// the server, not a status code, because the other major's paths answer 200 with HTML.
+func healthy(addr string) bool { return probeServe(addr) }
 
 // ErrNotConnected: opencode is not connected (no key, no Console login, no explicit
 // free-tier choice), so the shared daemon is not started. serve would happily listen
@@ -277,6 +284,12 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 	if s.Disabled() {
 		return "", 0, errors.New("opencode serve is disabled (AF_OPENCODE_SERVE_DISABLE=1)")
 	}
+	// One reading of the switch for this start: the replacement check, the binary, the
+	// database and the recorded key all come from it.
+	spec := CurrentLaunch()
+	if err := s.retireStaleFor(spec.Key); err != nil {
+		return "", 0, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	addr := serveAddr()
@@ -291,6 +304,7 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 		s.cmd = nil
 		s.up = true
 		s.stopping = false
+		s.key = adoptedKey()
 		s.armIdleWatchLocked()
 		go s.monitorEvents(addr, s.gen)
 		log.Printf("opencode serve: adopted running daemon at %s (gen %d)", addr, s.gen)
@@ -306,24 +320,67 @@ func (s *Supervisor) ensure(allowUnauthed bool) (string, int, error) {
 	if err != nil {
 		return "", 0, err
 	}
-	cmd := exec.Command("opencode", "serve", "--hostname", host, "--port", port)
+	// Something already answers 401 on the port: a daemon whose password we lost. Spawning
+	// would only collide, and rotating the password would make the loss permanent.
+	if serveRejectsAuth(addr) {
+		return "", 0, fmt.Errorf("opencode serve が %s で認証を要求しています（パスワードが一致しません）。起動済みのデーモンを止めてください", addr)
+	}
+	// The candidate is only adopted for the probe below; the previous password comes back
+	// unless the new daemon proves it holds this one, so a failed start (or an Ensure that
+	// raced a slow-but-alive daemon) cannot lock the Agent out of it.
+	prevPassword := servePassword()
+	// Decided once, from this start's reading: the password policy and the environment flag must
+	// agree, and a second read could see the switch after it flipped.
+	sharedWanted := sharedTUIFor(spec) || sharedTerminals() > 0
+	password, err := nextServePassword(prevPassword, sharedWanted)
+	if err != nil {
+		return "", 0, fmt.Errorf("opencode serve のパスワードを用意できません: %w", err)
+	}
+	useServePassword(password)
+	started := false
+	defer func() {
+		if !started {
+			useServePassword(prevPassword)
+		}
+	}()
+	// A database still holding 1.x data is migrated before the daemon opens it (migrate.go).
+	if err := EnsureMigrated(spec); err != nil {
+		return "", 0, err
+	}
+	cmd := exec.Command(spec.Bin, "serve", "--hostname", host, "--port", port)
 	// Provider keys are env-injected (auth.go) — the same set a TUI launch gets, so
-	// managed turns authenticate identically. Re-keying requires a Restart (§7).
-	cmd.Env = append(os.Environ(), env()...)
+	// managed turns authenticate identically. Re-keying requires a Restart (§7). The
+	// auth variables come last: a duplicate key keeps its final value.
+	cmd.Env = append(append(withoutEnv(os.Environ(), "AF_SESSION_SID", "AF_SESSION_NAME"), spec.Env()...),
+		"OPENCODE_SERVER_USERNAME="+serveUser, "OPENCODE_SERVER_PASSWORD="+password)
+	if sharedWanted {
+		// Tells the plugins this is af's shared server: no AF_SESSION_SID here, sessions are told
+		// apart by metadata, and shell commands wait for their environment (agent-fleet-shared.js).
+		cmd.Env = append(cmd.Env, sharedServeEnv+"=1")
+	}
 	cmd.Dir = paths.HomeDir()
 	tail, err := agents.StartWithStderrTail(cmd)
 	if err != nil {
 		return "", 0, fmt.Errorf("opencode serve の起動に失敗しました: %w", err)
 	}
 	defer tail.Settle() // after any failure snapshot; see StderrTail.Release
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(serveStartTimeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(200 * time.Millisecond)
 		if healthy(addr) {
+			started = true
+			if err := persistServePassword(password); err != nil {
+				log.Printf("opencode serve: password not saved, a restarted Agent cannot adopt this daemon: %v", err)
+			}
+			// Environments go back BEFORE the daemon counts as up: the Console polls Resume and
+			// the reconnecting TUIs submit as soon as they can.
+			restoreTerminalEnvs(addr)
 			s.gen++
 			s.cmd = cmd
 			s.up = true
 			s.stopping = false
+			s.key = spec.Key
+			noteServeStart(cmd.Process.Pid, s.key)
 			gen := s.gen
 			s.armIdleWatchLocked()
 			go s.waitDaemon(cmd, tail, gen)
@@ -389,6 +446,17 @@ func (s *Supervisor) stopIfIdle() bool {
 	// stopping is deliberately NOT cleared, so a late SSE disconnect (monitorEvents) is
 	// not misread as an unintended loss. The next successful Ensure resets it to false.
 	return true
+}
+
+// nextServePassword is the password a daemon about to start gets. A daemon that Terminal TUIs
+// attach to keeps its password across generations: a TUI whose server went away retries forever
+// and reconnects only with the password it started with (measured on 2.0.28). Every other daemon
+// gets a fresh one.
+func nextServePassword(prev string, shared bool) (string, error) {
+	if shared && prev != "" {
+		return prev, nil
+	}
+	return genServePassword()
 }
 
 // splitServeAddr derives --hostname/--port from the configured http URL.
@@ -553,11 +621,12 @@ func drainTimeout() time.Duration {
 	return 60 * time.Second
 }
 
-// drain waits for the busy managed sessions to go idle, then aborts the stragglers.
+// drain waits for the busy sessions to go idle, then aborts the stragglers: managed handles and,
+// on v2, the live Terminal slots, whose turns run on this same daemon.
 func (s *Supervisor) drain(addr string) {
 	deadline := time.Now().Add(drainTimeout())
 	for time.Now().Before(deadline) {
-		if len(busyManaged(addr)) == 0 {
+		if len(busyManaged(addr)) == 0 && len(busyTerminals(addr)) == 0 {
 			return
 		}
 		time.Sleep(500 * time.Millisecond)
@@ -571,8 +640,34 @@ func (s *Supervisor) drain(addr string) {
 		h.mu.Unlock()
 		abortSession(addr, h.sessionID(), h.dir)
 	}
+	for _, ses := range busyTerminals(addr) {
+		log.Printf("opencode serve: drain timeout — aborting terminal session %s", ses)
+		abortSession(addr, ses, "")
+	}
 	// Give the aborts a moment to unwind the blocked turn goroutines.
 	time.Sleep(2 * time.Second)
+}
+
+// busyTerminals lists the opencode session ids of the live Terminal slots that are running a
+// turn. The v2 active list is global, so one read covers every slot.
+func busyTerminals(addr string) []string {
+	slots := terminalSlots()
+	if len(slots) == 0 {
+		return nil
+	}
+	m, err := activeSessions(addr, "")
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, slot := range slots {
+		if ses := sids.Read(session.UUID(slot.Dir, slot.Name)); ses != "" {
+			if st, ok := m[ses]; ok && st != "idle" {
+				out = append(out, ses)
+			}
+		}
+	}
+	return out
 }
 
 // busyManaged lists the opencode sessions that are (a) busy per the runtime and
@@ -586,21 +681,13 @@ func busyManaged(addr string) []*threadHandle {
 	}
 	var out []*threadHandle
 	for dir, hs := range byDir {
-		res, err := serveClient.Get(dirQ(addr+"/session/status", dir))
-		if err != nil {
-			continue
-		}
-		var m map[string]struct {
-			Type string `json:"type"`
-		}
-		err = json.NewDecoder(res.Body).Decode(&m)
-		res.Body.Close()
+		m, err := activeSessions(addr, dir)
 		if err != nil {
 			continue
 		}
 		for _, h := range hs {
-			// Measured: /session/status omits idle, so being listed = busy/retry.
-			if st, ok := m[h.sessionID()]; ok && st.Type != "idle" {
+			// Measured: the status list omits idle, so being listed = busy/retry.
+			if st, ok := m[h.sessionID()]; ok && st != "idle" {
 				out = append(out, h)
 			}
 		}
@@ -608,16 +695,7 @@ func busyManaged(addr string) []*threadHandle {
 	return out
 }
 
-func abortSession(addr, ses, dir string) {
-	req, err := http.NewRequest("POST", dirQ(addr+"/session/"+ses+"/abort", dir), strings.NewReader("{}"))
-	if err != nil {
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if res, err := serveClient.Do(req); err == nil {
-		res.Body.Close()
-	}
-}
+func abortSession(addr, ses, dir string) { _ = serveAbort(addr, ses, dir) }
 
 // stopProcess terminates the owned daemon (SIGTERM → SIGKILL). For an adopted
 // daemon (cmd == nil) there is no handle to signal — best-effort skip.
@@ -640,7 +718,7 @@ func stopProcess(cmd *exec.Cmd, addr string) {
 
 // --- SSE event monitor ------------------------------------------------------
 
-// monitorEvents subscribes to the serve's cross-project SSE stream (GET /global/event)
+// monitorEvents subscribes to the serve's cross-project SSE stream (GET /global/event, /api/event on v2)
 // and dispatches to the thread handles. Measured: a bare /event is scoped to the project
 // of serve's own cwd, so a question.asked from a session in another directory never
 // arrives; /global/event wraps each event in {"payload": {...}} and delivers all projects.
@@ -679,18 +757,24 @@ func (s *Supervisor) monitorEvents(addr string, gen int) {
 	}
 }
 
+// sseClient has no timeout, and carries the same auth as every other call.
+var sseClient = &http.Client{Transport: authTransport{}}
+
 // streamEvents reads one SSE connection until it breaks. Returns the read error.
 func (s *Supervisor) streamEvents(addr string, gen int) error {
-	req, err := http.NewRequest("GET", addr+"/global/event", nil)
+	req, err := http.NewRequest("GET", eventURL(addr), nil)
 	if err != nil {
 		return err
 	}
 	// No timeout: SSE is a long-lived stream (heartbeats keep it warm).
-	res, err := (&http.Client{}).Do(req)
+	res, err := sseClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("event stream: HTTP %d", res.StatusCode) // a 401 must not read as a clean EOF
+	}
 	sc := bufio.NewScanner(res.Body)
 	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for sc.Scan() {
@@ -710,4 +794,19 @@ func (s *Supervisor) streamEvents(addr string, gen int) error {
 // WithControlCtx builds a request context for short control calls.
 func controlCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 10*time.Second)
+}
+
+// withoutEnv returns environ without the named variables.
+func withoutEnv(environ []string, names ...string) []string {
+	out := make([]string, 0, len(environ))
+next:
+	for _, kv := range environ {
+		for _, n := range names {
+			if strings.HasPrefix(kv, n+"=") {
+				continue next
+			}
+		}
+		out = append(out, kv)
+	}
+	return out
 }

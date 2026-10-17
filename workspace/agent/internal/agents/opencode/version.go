@@ -1,0 +1,135 @@
+package opencode
+
+import (
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+)
+
+// The opencode major decides which launch line, which instruction delivery and which
+// service defaults apply. It is read from the installed package, never by running the
+// binary: the launch path is hot, and `opencode --version` costs a process start.
+
+// buildPinsPath is the image's pin list (workspace/Dockerfile writes it from its ARGs). It is
+// only the fallback for a binary whose package.json cannot be found; a var so tests can swap it.
+var buildPinsPath = "/usr/local/share/agent-fleet/versions.json"
+
+// opencodeBinary resolves the opencode on PATH; a var so tests can point it at a fake tree.
+//
+// It never consults the opt-in switch: the switch is read once per start (CurrentLaunch), and a
+// resolver that read it again could answer for the other setting than the reading it serves.
+var opencodeBinary = func() string {
+	p, err := exec.LookPath("opencode")
+	if err != nil {
+		return ""
+	}
+	return p
+}
+
+// InstalledMajor is the exported form of installedMajor, for the callers outside this
+// package that must pick between the two majors' config mechanisms.
+func InstalledMajor() int { return installedMajor() }
+
+// installedMajor is the major of the opencode that will be launched: 2 for @opencode/cli,
+// 1 for opencode-ai, and 1 whenever neither the package nor the pin says otherwise (the
+// pinned, default version).
+//
+// Both packages put the executable at <pkg>/bin/opencode[.exe] and the manifest beside bin/,
+// so the version comes from the resolved binary's package.json. A binary whose manifest
+// cannot be found (a copied or wrapped executable) falls back to the image pin.
+func installedMajor() int {
+	if UseV2() {
+		return majorOfBinary(V2Binary())
+	}
+	return pathMajor()
+}
+
+// majorOfBinary is the major of the package that bin belongs to; 2 when its manifest cannot be
+// read (the opt-in binary is @opencode/cli by construction).
+func majorOfBinary(bin string) int {
+	if real, err := filepath.EvalSymlinks(bin); err == nil {
+		if m := majorOf(readPackageVersion(filepath.Join(filepath.Dir(real), "..", "package.json"))); m != 0 {
+			return m
+		}
+	}
+	return 2
+}
+
+// pathMajor is the major of the opencode found on PATH, then the image pin, then 1. It does not
+// look at the opt-in switch.
+func pathMajor() int {
+	if bin := opencodeBinary(); bin != "" {
+		if real, err := filepath.EvalSymlinks(bin); err == nil {
+			if m := majorOf(readPackageVersion(filepath.Join(filepath.Dir(real), "..", "package.json"))); m != 0 {
+				return m
+			}
+		}
+	}
+	if b, err := os.ReadFile(buildPinsPath); err == nil {
+		var pins struct {
+			Opencode string `json:"opencode"`
+		}
+		if json.Unmarshal(b, &pins) == nil {
+			if m := majorOf(pins.Opencode); m != 0 {
+				return m
+			}
+		}
+	}
+	return 1
+}
+
+// installedVersion is the full version of the opencode that would be launched ("" when unknown).
+func installedVersion() string {
+	if UseV2() {
+		return readPackageVersion(filepath.Join(filepath.Dir(V2Binary()), "..", "package.json"))
+	}
+	return pathVersion()
+}
+
+// pathVersion is the version of the opencode found on PATH, without the opt-in switch.
+func pathVersion() string {
+	if bin := opencodeBinary(); bin != "" {
+		if real, err := filepath.EvalSymlinks(bin); err == nil {
+			return readPackageVersion(filepath.Join(filepath.Dir(real), "..", "package.json"))
+		}
+	}
+	return ""
+}
+
+func readPackageVersion(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var pkg struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}
+	if json.Unmarshal(b, &pkg) != nil || (pkg.Name != "opencode-ai" && pkg.Name != "@opencode/cli") {
+		return ""
+	}
+	return pkg.Version
+}
+
+// majorOf parses the leading integer of a semver string; 0 when there is none.
+func majorOf(v string) int {
+	head, _, _ := strings.Cut(strings.TrimSpace(v), ".")
+	n, err := strconv.Atoi(head)
+	if err != nil || n < 1 {
+		return 0
+	}
+	return n
+}
+
+// SetBinaryForTest makes the major detection look at the opencode binary path (and ignore the
+// image pin list) until the returned function is called. Tests of other packages use it to
+// choose the major without installing anything.
+func SetBinaryForTest(path string) (restore func()) {
+	oldBin, oldPins := opencodeBinary, buildPinsPath
+	opencodeBinary = func() string { return path }
+	buildPinsPath = ""
+	return func() { opencodeBinary, buildPinsPath = oldBin, oldPins }
+}

@@ -42,14 +42,15 @@ const agentSessionsPayload = `{"sessions":[{
 	"driver":"managed","repo":"x","title":"t","titleSetBy":"user","display":"[AF] t","color":"#332211",
 	"label":"[AF] t","started":"07/15 12:00","createdAt":"2026-07-15T12:00:00+09:00",
 	"remoteUrl":"","state":"","alive":false,"resumable":true,"locked":true,
-	"backgroundBusy":true,"backgroundBusyReason":"subagent","authOkAt":"2026-08-14T09:00:00+09:00",
+	"backgroundBusy":true,"backgroundBusyReason":"subagent","progressAt":"2026-07-15T11:30:00+09:00","progressAgeSec":1800,"stateSince":"2026-07-15T10:00:00+09:00","authOkAt":"2026-08-14T09:00:00+09:00",
 	"context":{"read":1000,"create":200,"fresh":30,"model":"claude-fable-5"},
 	"branch":"main","currentBranch":"dev","branchDrift":true,"worktree":true,
 	"exitReason":"oom","exitCode":137,"exitSignal":9,"handoffPending":true,
 	"originSession":"sparent","origin":"session","lastSay":"実装を終えて試験を回しています","tokenSpends":[1200,800,4300],
 	"pr":{"number":1062,"state":"open","draft":true,"url":"https://github.com/o/r/pull/1062","checks":"failure"},"ports":[5173,8080],
 	"generatedImages":3,"generatedImagesPath":".cache/agent-fleet/generated/2f1c0a7e-0000-5000-8000-000000000001",
-	"studio":"0b9d1f2e-7c4a-4e1b-9a3d-5f6e7a8b9c0d","initialPromptState":"pending"
+	"studio":"0b9d1f2e-7c4a-4e1b-9a3d-5f6e7a8b9c0d","initialPromptState":"pending",
+	"moving":"s2","movedTo":"s3"
 }]}`
 
 // TestAgentSessionsRelayKeepsFields pins that the CP's decode→re-emit round trip drops none
@@ -114,6 +115,13 @@ func TestAgentSessionsRelayKeepsFields(t *testing.T) {
 		// that cannot say what is running.
 		"backgroundBusy":       true,
 		"backgroundBusyReason": "subagent",
+		// The Agent's last sign of progress for a busy row. Dropped here, the reaper never
+		// sees it and a frozen "working" row holds the Workspace awake forever (#1818).
+		"progressAt":     "2026-07-15T11:30:00+09:00",
+		"progressAgeSec": float64(1800),
+		// When the busy state began: dropped here, the admin forecast cannot show how long a
+		// session has been holding the Workspace (#1819).
+		"stateSince": "2026-07-15T10:00:00+09:00",
 		// When the login in force was written (docs/log/47 §4-11). Dropped here, the mirror
 		// cannot tell an auth failure the user has already fixed from a live one, and goes on
 		// asking them to re-authenticate for the rest of the conversation's life.
@@ -141,6 +149,10 @@ func TestAgentSessionsRelayKeepsFields(t *testing.T) {
 		// overwrite each other's draft, and the pane cannot tell whether to offer a resend.
 		"studio":             "0b9d1f2e-7c4a-4e1b-9a3d-5f6e7a8b9c0d",
 		"initialPromptState": "pending",
+		// A move's two states (ADR 0115 decision 11.7). Dropped here, a moved source's row
+		// cannot say where its conversation went, and a pending move offers no retry or cancel.
+		"moving":  "s2",
+		"movedTo": "s3",
 		// The session's generated images: how many, and the folder the gallery opens
 		// (ADR 0080 decision 8). Dropped here, the "Generated images (N)" entry never appears
 		// on any session — not a degraded display but a missing feature, and silent, since the

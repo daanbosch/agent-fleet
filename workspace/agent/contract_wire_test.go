@@ -127,9 +127,55 @@ func agentContractFamilies() []contractFamily {
 			tsPath:  "../../console/src/features/settings/memory/memoryTypes.ts",
 			tsName:  "MemoryChange",
 			tsKeys: keySet("commit", "at", "op", "scope", "project", "name", "authorKind",
-				"authorSession", "revertOf", "latest", "live", "revertible"),
+				"authorSession", "revertOf", "latest", "live", "revertible", "purgedBefore"),
 			tsOnly: map[string]string{},
 			goOnly: map[string]string{},
+		},
+
+		// Moving the memories of a project whose working copy is gone (#1984).
+		{
+			name:    "agentMemProjectRow",
+			goPath:  "internal/memoryx/agent_memory_project_move.go",
+			goName:  "agentMemProjectRow",
+			binding: agentMemProjectRowBinding,
+			tsPath:  "../../console/src/features/settings/memory/memoryTypes.ts",
+			tsName:  "ProjectRow",
+			tsKeys:  keySet("project", "count", "withheld", "orphaned", "live", "mergeInto"),
+			tsOnly:  map[string]string{},
+			goOnly:  map[string]string{},
+		},
+		{
+			name:    "agentMemMoveItem",
+			goPath:  "internal/memoryx/agent_memory_project_move.go",
+			goName:  "agentMemMoveItem",
+			binding: agentMemMoveItemBinding,
+			tsPath:  "../../console/src/features/settings/memory/memoryTypes.ts",
+			tsName:  "MoveItem",
+			tsKeys:  keySet("name", "newName", "status", "description", "type", "revision"),
+			tsOnly:  map[string]string{},
+			goOnly:  map[string]string{},
+		},
+		{
+			name:    "agentMemMovePreview",
+			goPath:  "internal/memoryx/agent_memory_project_move.go",
+			goName:  "agentMemMovePreview",
+			binding: agentMemMovePreviewBinding,
+			tsPath:  "../../console/src/features/settings/memory/memoryTypes.ts",
+			tsName:  "MovePreview",
+			tsKeys:  keySet("from", "to", "items", "counts", "withheld", "collision", "needsPolicy"),
+			tsOnly:  map[string]string{},
+			goOnly:  map[string]string{},
+		},
+		{
+			name:    "agentMemMoveResultItem",
+			goPath:  "internal/memoryx/agent_memory_project_move.go",
+			goName:  "agentMemMoveResultItem",
+			binding: agentMemMoveResultItemBinding,
+			tsPath:  "../../console/src/features/settings/memory/memoryTypes.ts",
+			tsName:  "MoveResultItem",
+			tsKeys:  keySet("name", "newName", "result", "reason", "commit"),
+			tsOnly:  map[string]string{},
+			goOnly:  map[string]string{},
 		},
 
 		// The preview of a memory import.
@@ -161,7 +207,7 @@ func agentContractFamilies() []contractFamily {
 			binding: browserPageBinding,
 			tsPath:  "../../console/src/features/browser/controller.ts",
 			tsName:  "BrowserPageResult",
-			tsKeys:  keySet("id", "port", "url", "state"),
+			tsKeys:  keySet("id", "port", "url", "state", "reason"),
 			tsOnly:  map[string]string{},
 			goOnly: map[string]string{
 				"title": "[gap] the page title is returned but the Console's BrowserPageResult does not declare it.",
@@ -233,6 +279,25 @@ var agentMemChangeViewBinding = map[string]string{
 	"Commit": "commit", "At": "at", "Op": "op", "Scope": "scope", "Project": "project",
 	"Name": "name", "AuthorKind": "authorKind", "AuthorSession": "authorSession",
 	"RevertOf": "revertOf", "Latest": "latest", "Live": "live", "Revertible": "revertible",
+	"PurgedBefore": "purgedBefore",
+}
+
+var agentMemProjectRowBinding = map[string]string{
+	"Project": "project", "Count": "count", "Withheld": "withheld", "Orphaned": "orphaned", "Live": "live", "MergeInto": "mergeInto",
+}
+
+var agentMemMoveItemBinding = map[string]string{
+	"Name": "name", "NewName": "newName", "Status": "status", "Description": "description",
+	"Type": "type", "Revision": "revision",
+}
+
+var agentMemMovePreviewBinding = map[string]string{
+	"From": "from", "To": "to", "Items": "items", "Counts": "counts", "Withheld": "withheld",
+	"Collision": "collision", "NeedsPolicy": "needsPolicy",
+}
+
+var agentMemMoveResultItemBinding = map[string]string{
+	"Name": "name", "NewName": "newName", "Result": "result", "Reason": "reason", "Commit": "commit",
 }
 
 var memoryImportPreviewBinding = map[string]string{
@@ -243,7 +308,7 @@ var memoryImportPreviewBinding = map[string]string{
 }
 
 var browserPageBinding = map[string]string{
-	"ID": "id", "Port": "port", "URL": "url", "Title": "title", "State": "state",
+	"ID": "id", "Port": "port", "URL": "url", "Title": "title", "State": "state", "Reason": "reason",
 }
 
 var chatMessageBinding = map[string]string{
@@ -277,7 +342,7 @@ func TestContractFamilies(t *testing.T) {
 	fams := agentContractFamilies()
 	// Guard the population being scanned (the #320 shape): a family that silently
 	// disappears is caught here.
-	if len(fams) != 10 {
+	if len(fams) != 14 {
 		t.Fatalf("only %d families - one has dropped out of the table (if you added one, fix the count too)", len(fams))
 	}
 	for _, f := range fams {

@@ -225,6 +225,21 @@ if [ -n "$ENGINES_STACK" ]; then
   fi
 fi
 echo "      5. $STACK (30-ingress, ImageTag=$VERSION)"
+
+# --- 0) EFS backup preflight (read-only, advisory) ---------------------------------------
+# 10-data is not part of this update, so a data stack older than 0.26.0 stays without the EFS
+# backup vault and plan. Said before anything runs and again at the end, where it is not lost
+# in the deploy output. Never blocks: the upgrade itself does not touch the data stack.
+# shellcheck source=deploy/aws/ecs/efs-backup-check.sh
+. "$HERE/efs-backup-check.sh"
+# A failed read of the ingress stack is "unknown", never the default name (that could be another
+# deployment's data stack).
+DATA_STACK="$(af_efs_backup_data_stack "$STACK")" || DATA_STACK=""
+af_efs_backup_check "$DATA_STACK" "$PROFILE" "$REGION"
+# The same verdict goes to the Console: the ingress stack carries it to the Control Plane as
+# EfsBackup, so an operator who never reads this output still sees the warning. Empty = unknown,
+# in which case the parameter is not passed at all.
+EFS_BACKUP_MARKER="$(af_efs_backup_marker "$AF_EFS_BACKUP_VERDICT" || true)"
 # The pin only applies to the copy above. Said here, before anything runs, so a pin that would
 # otherwise do nothing is not mistaken for one that was checked.
 if [ -n "$COMFY_DIGEST" ] && { [ "$COMFY_REPAIR" != 1 ] || [ "$COMFY_PULLED" != 1 ]; }; then
@@ -609,11 +624,12 @@ fi
 
 # --- 2) CFN deploy: override ImageTag only (everything else keeps its previous value) -------
 # `cloudformation deploy` keeps parameters it was not given at UsePreviousValue, so never add
-# another parameter here — adding one overwrites that "previous value".
+# another parameter here — adding one overwrites that "previous value". EfsBackup is the one
+# exception: it is a fact read from the data stack just above, so overwriting is its job.
 echo "==> cloudformation deploy $STACK (ImageTag=$VERSION)"
 deploy_out=""
 if [ "$DRY" = 1 ]; then
-  echo "DRY: aws cloudformation deploy --stack-name $STACK --template-file $TEMPLATE --capabilities CAPABILITY_NAMED_IAM --parameter-overrides ImageTag=$VERSION"
+  echo "DRY: aws cloudformation deploy --stack-name $STACK --template-file $TEMPLATE --capabilities CAPABILITY_NAMED_IAM --parameter-overrides ImageTag=$VERSION${EFS_BACKUP_MARKER:+ EfsBackup=$EFS_BACKUP_MARKER}"
 else
   set +e
   # Always go through af_cfn_deploy (env.sh): it switches to S3 once a template passes 51,200
@@ -622,7 +638,7 @@ else
   # without it CreateChangeSet fails with InsufficientCapabilitiesException (#1576).
   deploy_out="$(af_cfn_deploy "$STACK" "$TEMPLATE" \
     --capabilities CAPABILITY_NAMED_IAM \
-    --parameter-overrides "ImageTag=$VERSION" \
+    --parameter-overrides "ImageTag=$VERSION" ${EFS_BACKUP_MARKER:+"EfsBackup=$EFS_BACKUP_MARKER"} \
     --no-fail-on-empty-changeset 2>&1)"
   rc=$?
   set -e
@@ -711,6 +727,13 @@ if [ -n "${running// /}" ]; then
 else
   echo "No workspaces are running (the next Start picks up the new image)."
 fi
+
+case "${AF_EFS_BACKUP_VERDICT:-}" in
+  ok|skip|"") ;;
+  *) echo
+     echo "REMINDER: ${DATA_STACK:-the data stack} still has no confirmed daily EFS backup (see the warning at the top;"
+     echo "          README \"EFS backup and restore\", \"Turning it on\")." >&2 ;;
+esac
 
 if [ -n "${golden_stale// /}" ]; then
   cat <<EOF

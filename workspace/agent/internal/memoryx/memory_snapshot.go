@@ -31,6 +31,10 @@ const (
 	memoryTriggerImport     = "import"
 	// memoryTriggerAgentMemory is one write to the AF-owned store (agent_memory.go).
 	memoryTriggerAgentMemory = "agent-memory"
+	// memoryTriggerAgentMemoryMeta is a store write that is no memory change (the backfill of a
+	// project.json). It is a trigger of its own so the changes list, which selects commits by
+	// memoryTriggerAgentMemory, neither counts it against its limit nor reports it as withheld.
+	memoryTriggerAgentMemoryMeta = "project-record"
 )
 
 // memorySnapshotResult is the outcome of one snapshot run. Committed=false means nothing was
@@ -121,6 +125,8 @@ func memoryCommitMessage(trigger string, now time.Time, changed []string, projec
 		verb = "restore"
 	case memoryTriggerImport:
 		verb = "import"
+	case memoryTriggerPreExport:
+		verb = "pre-export"
 	}
 	var subject string
 	switch {

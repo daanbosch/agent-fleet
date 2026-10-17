@@ -1,13 +1,15 @@
 import type { BrowserTarget } from "./target.ts";
 import { browserTarget } from "./target.ts";
 import type { BrowserOutbound, BrowserPageState, BrowserSnapshot } from "./protocol.ts";
-import { clampZoom } from "./protocol.ts";
+import { clampZoom, knownUnreachableReason } from "./protocol.ts";
 
 export interface BrowserPageResult {
   id: string;
   port: number;
   url: string;
   state: string;
+  // Why a target-unreachable page failed, when the Agent could tell (see BrowserSnapshot.reason).
+  reason?: string;
 }
 
 export interface BrowserSocket {
@@ -277,7 +279,7 @@ export class BrowserController {
   private async start(): Promise<void> {
     if (this.disposed || !this.visible || this.pageId || this.creating) return this.creating ?? undefined;
     const generation = ++this.generation;
-    this.update({ state: "loading", errorCode: "", errorMessage: "" });
+    this.update({ state: "loading", reason: "", errorCode: "", errorMessage: "" });
     const task = (async () => {
       try {
         const page = await this.deps.createPage(this.targetValue, {
@@ -290,7 +292,8 @@ export class BrowserController {
           return;
         }
         this.pageId = page.id;
-        this.update({ url: page.url, state: page.state === "target-unreachable" ? "target-unreachable" : "loading" });
+        const unreachable = page.state === "target-unreachable";
+        this.update({ url: page.url, state: unreachable ? "target-unreachable" : "loading", reason: unreachable ? knownUnreachableReason(page.reason) : "" });
         this.connect(page.id, generation);
       } catch (error) {
         if (generation !== this.generation || this.disposed) return;
@@ -389,7 +392,10 @@ export class BrowserController {
       case "state": {
         const state = message.state;
         if (state === "loading" || state === "ready" || state === "disconnected" || state === "crashed" || state === "target-unreachable") {
-          this.update({ state: state as BrowserPageState });
+          this.update({
+            state: state as BrowserPageState,
+            reason: state === "target-unreachable" ? knownUnreachableReason(message.reason) : "",
+          });
         }
         return;
       }

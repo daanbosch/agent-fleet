@@ -12,6 +12,10 @@ export const chat: Record<keyof typeof jaChat, string> = {
   "chat.load_failed": "Failed to load the conversation",
   "chat.new_title": "New chat",
   "chat.create_failed": "Failed to create the conversation",
+  "chat.auth_expired": "Your Claude login has expired. Re-authenticate, then send again.",
+  "chat.auth_expired_action": "Re-authenticate",
+  "chat.auth_expired_retry": "Retry",
+  "chat.auth_expired_details": "Details (original error)",
   "chat.image_paste_failed": "Failed to paste the image",
   "chat.image_paste_failed_net": "Failed to paste the image (network error)",
   "chat.label": "Chat",
@@ -93,7 +97,7 @@ export const chat: Record<keyof typeof jaChat, string> = {
   "chat.notice.agent_switched":
     "This conversation switched to “{agent}”. From here on {agent} answers. The history so far is handed over with your next message, so that first turn costs extra tokens. The model was re-resolved from the {agent} row in Settings > Assistant.",
   "chat.notice.plan_updated":
-    "Work plan updated. It is carried into every new session verbatim — never summarized.\n\n---\n\n{plan}",
+    "Work plan updated. It is carried into every new session verbatim, never summarized.\n\n---\n\n{plan}",
   "chat.plan.title": "Work plan",
   "chat.plan.toggle_tip": "Open the work plan (carried into new sessions verbatim, never summarized by compaction)",
   "chat.plan.edit": "Edit",

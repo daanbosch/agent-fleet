@@ -29,6 +29,9 @@ export interface WorkItemRefContext {
   /** "owner/name" → the hosts it is cloned from in this workspace (see cloneHosts), so an
    * uncached `owner/name#N` about a Bitbucket repository is not guessed onto GitHub. */
   known: Map<string, Set<"github" | "bitbucket">>;
+  /** Project keys of the member's Jira connection (jiraProjects.ts). A key of one of them links
+   * even when no cached row shares its project. Absent = none known. */
+  jiraProjects?: ReadonlySet<string>;
 }
 
 // A bare or qualified issue number. The look-behind is what keeps `C#`, `&#123;`, `page#12`
@@ -37,7 +40,13 @@ export interface WorkItemRefContext {
 // The number is taken whole, however long and even with a leading zero, so a run of digits is
 // never left over for the commit shape to claim (`#11223344`, `#00000000` are colours, not shas);
 // classifyWorkItemRef decides what it is.
-export const ISSUE_REF_SRC = String.raw`(?<![\w&#/.\-])(?:[A-Za-z0-9][\w.\-]*\/[\w.\-]+)?#\d+(?![\w#])`;
+//
+// The `-` in the look-behind keeps `foo-#12` off it, but a range `#573-#598` is two citations: the
+// second end is also accepted when a complete reference (itself passing the plain look-behind, so
+// `abc#1-#2` and a chain's third end stay text) sits right before the `-`.
+const ISSUE_REF_BODY = String.raw`(?:[A-Za-z0-9][\w.\-]*\/[\w.\-]+)?#\d+`;
+const ISSUE_REF_START = String.raw`(?<![\w&#/.\-])`;
+export const ISSUE_REF_SRC = String.raw`(?:${ISSUE_REF_START}|(?<=${ISSUE_REF_START}${ISSUE_REF_BODY}-))${ISSUE_REF_BODY}(?![\w#])`;
 // A Jira key. The shape alone also matches UTF-8, SHA-256, ISO-8601, GPT-4 and P2-1, so this is
 // only a candidate: classifyWorkItemRef links it only for a project the cache holds.
 export const JIRA_REF_SRC = String.raw`(?<![\w/\-])[A-Z][A-Z0-9_]{1,9}-[1-9]\d{0,6}(?![\w\-])`;
@@ -45,6 +54,9 @@ export const JIRA_REF_SRC = String.raw`(?<![\w/\-])[A-Z][A-Z0-9_]{1,9}-[1-9]\d{0
 /** "Does this text mention anything ticket-shaped at all" — decides whether loading the cache is
  * worth a request. */
 export const WORK_ITEM_HINT_RE = new RegExp(`${ISSUE_REF_SRC}|${JIRA_REF_SRC}`);
+
+/** A Jira-shaped candidate anywhere in a text — decides whether the project list is worth a request. */
+export const JIRA_HINT_RE = new RegExp(JIRA_REF_SRC);
 
 const ISSUE_TOKEN = /^(?:([\w.-]+\/[\w.-]+))?#(\d+)$/;
 const JIRA_TOKEN = /^([A-Z][A-Z0-9_]+)-\d+$/;
@@ -89,10 +101,10 @@ export function originOf(repo: { provider?: string; remote?: string; remotePath?
 /** What classifyWorkItemRef's answers depend on beyond the token, as one comparable string: the
  * context origin and the cached keys. A rendered message re-runs its linkifier when this changes —
  * the repository list or the inbox arriving after the text did. */
-export function workItemRefInputs(origin: RefOrigin | null, items: WorkItem[]): string {
+export function workItemRefInputs(origin: RefOrigin | null, items: WorkItem[], jiraProjects: readonly string[] = []): string {
   // A set: the same ticket matched by two saved queries is one key, not a change.
   const keys = [...new Set(items.map((i) => `${i.provider}:${i.key}`))];
-  return [origin ? `${origin.provider}:${origin.path}` : "", keys.sort().join(",")].join("|");
+  return [origin ? `${origin.provider}:${origin.path}` : "", keys.sort().join(","), [...jiraProjects].sort().join(",")].join("|");
 }
 
 const cachedRow = (items: WorkItem[], provider: string, key: string) =>
@@ -145,7 +157,8 @@ export function classifyWorkItemRef(token: string, ctx: WorkItemRefContext, inCo
   const jira = token.match(JIRA_TOKEN);
   if (!jira) return null;
   if (cachedRow(ctx.items, "jira", token)) return { provider: "jira", key: token };
-  if (!inCode && ctx.items.some((i) => i.provider === "jira" && i.key.startsWith(`${jira[1]}-`))) {
+  // Prose only, like a GitHub number: in inline code a key is more often literal text.
+  if (!inCode && (ctx.jiraProjects?.has(jira[1]) || ctx.items.some((i) => i.provider === "jira" && i.key.startsWith(`${jira[1]}-`)))) {
     return { provider: "jira", key: token, guessed: true };
   }
   return null;

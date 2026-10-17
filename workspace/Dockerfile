@@ -146,8 +146,8 @@ RUN if [ "${BAKE_OPTIONAL_TOOLS}" = "1" ]; then set -eux; \
 # publishes the same security build for both architectures. Fonts and fontconfig are
 # explicit so Japanese pages render without depending on a transient recommendation.
 # deploy/local/apt-pin-check.sh checks the pin against both architectures' indexes and
-# prints the version to bump to; cli-drift.yml runs it daily and goes red when the pin
-# is gone for either architecture.
+# prints the version to bump to; cli-drift.yml runs it every 2 hours and goes red when the
+# pin is gone for either architecture, and apt-pin-bump.yml opens the PR that moves it.
 # ⚠ trixie-security は「現行ビルドだけ」を持ち、古い版はミラーから消える。ピンを
 # 放置すると、この層のキャッシュが破れた次のビルドで `Version ... was not found` と
 # 落ちる（＝別の ARG を触った瞬間に無関係に見える形で発火する）。上流のセキュリティ
@@ -157,7 +157,7 @@ RUN if [ "${BAKE_OPTIONAL_TOOLS}" = "1" ]; then set -eux; \
 # スイートと main スイートは別の版を指すので、片方を security・片方を main で読むと
 # **存在しない版差が出る**。実際それで「trixie にすると chromium が下がる」という誤った
 # 代償が 1 度記録され、ベース更新の判断を狂わせた。ここに書くのは常に security の版。
-ARG CHROMIUM_VERSION=154.0.8037.92-1~deb13u1
+ARG CHROMIUM_VERSION=155.0.8059.79-1~deb13u1
 # BAKE_OPTIONAL_TOOLS=0（native lean rootfs）は chromium 本体・CJK フォントを焼かず
 # オンデマンド DL（P2 の install-chromium、CHROMIUM_DL_VERSION ピン）に回すが、
 # その DL 版が動くための実行時ライブラリと fontconfig/DejaVu はここで明示導入する
@@ -255,15 +255,59 @@ RUN set -eux; \
     rm -rf /tmp/gh.tgz "/tmp/gh_${GH_VERSION}_linux_${gharch}"; \
     /usr/local/libexec/gh --version
 
+# Bitbucket CLI (bkt, avivsinai/bitbucket-cli): the Bitbucket counterpart of gh, same shape.
+# The real binary goes to /usr/local/libexec/bkt and /usr/local/bin/bkt is the transparent-auth
+# wrapper (bkt-auth-wrapper.sh, COPY'd with the other wrappers below). The tarball must match the
+# release's own checksums.txt, or the build fails. Bump BKT_VERSION to upgrade (docs/build/08 §8.3).
+ARG BKT_VERSION=0.33.1
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in amd64) bktarch=x86_64 ;; arm64) bktarch=arm64 ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac; \
+    base="https://github.com/avivsinai/bitbucket-cli/releases/download/v${BKT_VERSION}"; \
+    asset="bkt_${BKT_VERSION}_linux_${bktarch}.tar.gz"; \
+    mkdir /tmp/bkt; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "${base}/${asset}" -o "/tmp/bkt/${asset}"; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "${base}/checksums.txt" -o /tmp/bkt/checksums.txt; \
+    (cd /tmp/bkt && awk -v a="${asset}" '$2 == a { print; n++ } END { exit n != 1 }' checksums.txt >sum && sha256sum -c sum); \
+    tar -C /tmp/bkt -xzf "/tmp/bkt/${asset}" bkt; \
+    install -D -m 0755 /tmp/bkt/bkt /usr/local/libexec/bkt; \
+    rm -rf /tmp/bkt; \
+    /usr/local/libexec/bkt --version
+
+# Jira CLI (jira, ankitpokhrel/jira-cli): same shape as bkt. The real binary goes to
+# /usr/local/libexec/jira and /usr/local/bin/jira is the transparent-auth wrapper
+# (jira-auth-wrapper.sh). The tarball must match the release's own checksums.txt. Bump
+# JIRA_CLI_VERSION to upgrade (docs/build/08 §8.4.2).
+ARG JIRA_CLI_VERSION=1.7.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in amd64) jiraarch=x86_64 ;; arm64) jiraarch=arm64 ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac; \
+    base="https://github.com/ankitpokhrel/jira-cli/releases/download/v${JIRA_CLI_VERSION}"; \
+    dir="jira_${JIRA_CLI_VERSION}_linux_${jiraarch}"; \
+    asset="${dir}.tar.gz"; \
+    mkdir /tmp/jira; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "${base}/${asset}" -o "/tmp/jira/${asset}"; \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "${base}/checksums.txt" -o /tmp/jira/checksums.txt; \
+    (cd /tmp/jira && awk -v a="${asset}" '$2 == a { print; n++ } END { exit n != 1 }' checksums.txt >sum && sha256sum -c sum); \
+    tar -C /tmp/jira -xzf "/tmp/jira/${asset}" "${dir}/bin/jira"; \
+    install -D -m 0755 "/tmp/jira/${dir}/bin/jira" /usr/local/libexec/jira; \
+    rm -rf /tmp/jira; \
+    /usr/local/libexec/jira version
+
 # rtk (token-saving claude Bash hook): fetched pinned at build time, but only when
 # both BAKE_RTK=1 and BAKE_AGENT_CLIS=1. In the default lean build (BAKE_AGENT_CLIS=0)
 # the entrypoint's boot-install puts the rtk pin from versions.json into ~/.local/bin
 # instead (docs/log/35 §35.4.1). BAKE_RTK=0 is the escape hatch for airgapped builds
 # (no build-time GitHub fetch); the entrypoint seeds the hook only when `rtk` is on PATH.
 # rtk-ai/rtk is public, so the asset + checksums download without auth.
+# The asset is the Apache-2.0 edition (`rtk-oss-*`): from 1.0.0 the default `rtk-*` asset
+# links a BUSL-1.1 engine, which breaks the NOTICE entry and the redistribution premise of
+# docs/log/35 §35.4.1. The oss edition drops only that engine (pipelines, PostToolUse
+# compression); the PreToolUse hook, `rtk rewrite` and `rtk gain` we use are identical.
+# entrypoint.sh downloads the same assets (boot-install and self-update) — keep them in step.
 #
 # ⚠️ amd64 gets a STATIC musl binary. arm64 has no musl asset: upstream publishes only
-# `rtk-aarch64-unknown-linux-gnu`, which requires **GLIBC_2.39** (exactly two symbols,
+# `rtk-oss-aarch64-unknown-linux-gnu` (gnu, like the default edition's), which requires **GLIBC_2.39** (exactly two symbols,
 # `pidfd_getpid` / `pidfd_spawnp` — verified with readelf on v0.47.0). On the old
 # Debian 12 base (**glibc 2.36**) the download and the sha256 both passed and the binary
 # then could not start (measured on Graviton4, 2026-08-22, docs/log/70 §70.9.2). The base
@@ -281,12 +325,12 @@ RUN set -eux; \
 # Bump RTK_VERSION to upgrade (ARG change busts the cache; same idiom as GH_VERSION).
 # The AF_AGENT_SELF_UPDATE opt-in also updates rtk in place at start (entrypoint).
 ARG BAKE_RTK=1
-ARG RTK_VERSION=0.51.0
+ARG RTK_VERSION=1.0.1
 RUN if [ "${BAKE_RTK}" = "1" ] && [ "${BAKE_AGENT_CLIS}" = "1" ]; then set -eux; \
       arch="$(dpkg --print-architecture)"; \
       case "$arch" in \
-        amd64) asset="rtk-x86_64-unknown-linux-musl.tar.gz" ;; \
-        arm64) asset="rtk-aarch64-unknown-linux-gnu.tar.gz" ;; \
+        amd64) asset="rtk-oss-x86_64-unknown-linux-musl.tar.gz" ;; \
+        arm64) asset="rtk-oss-aarch64-unknown-linux-gnu.tar.gz" ;; \
         *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
       esac; \
       base="https://github.com/rtk-ai/rtk/releases/download/v${RTK_VERSION}"; \
@@ -317,13 +361,19 @@ RUN if [ "${BAKE_RTK}" = "1" ] && [ "${BAKE_AGENT_CLIS}" = "1" ]; then set -eux;
 # 換えて再ビルド → 各 Workspace を Stop→Start。latest の確認は `npm view <pkg> version`。
 # 未ピン時代は同一 RUN 行が Docker レイヤキャッシュに当たり、再ビルドしても古い版の
 # ままになる罠があった（ピン止めなら ARG 変更が確実にキャッシュを破る）。
-ARG CLAUDE_CODE_VERSION=2.1.288
-ARG OPENCODE_VERSION=1.18.34
-ARG CODEX_VERSION=0.160.0
-ARG COPILOT_VERSION=1.0.91
+ARG CLAUDE_CODE_VERSION=2.1.302
+ARG OPENCODE_VERSION=2.0.32
+ARG CODEX_VERSION=0.163.0
+ARG COPILOT_VERSION=1.0.98
+# opencode's npm package follows the pin's major: `opencode-ai` for 1.x, `@opencode/cli` for
+# 2.x (which also installs an `opencode2` bin). The pin has been 2.x since the v2 cut-over
+# (#2101); rolling back is OPENCODE_VERSION=1.19.0, nothing else (docs/log/119). entrypoint.sh,
+# deploy/local/cli-drift-check.sh, .github/workflows/release-gate.yml and
+# .github/actions/setup-agent-cli apply the same rule.
 RUN if [ "${BAKE_AGENT_CLIS}" = "1" ]; then \
+      case "${OPENCODE_VERSION%%.*}" in 0|1) oc_pkg=opencode-ai ;; *) oc_pkg=@opencode/cli ;; esac; \
       npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-        "opencode-ai@${OPENCODE_VERSION}" \
+        "${oc_pkg}@${OPENCODE_VERSION}" \
         "@openai/codex@${CODEX_VERSION}" \
         "@github/copilot@${COPILOT_VERSION}" \
       && claude --version && opencode --version && codex --version && copilot --version; \
@@ -346,10 +396,10 @@ ENV COPILOT_AUTO_UPDATE=false
 # 当てるのと同じ OPENSSL_ia32cap マスクで検証する（0008 の 2026-09-07 決定）ので、
 # --version 検証を飛ばすのは x86 以外のビルドホストだけ（arm64 のクロスビルドは
 # バイナリを走らせられるとは限らない）。
-ARG AGY_VERSION=1.2.16
-ARG AGY_RELEASE_BUILD=5594158052802560
-ARG AGY_SHA256_X64=d4247430e04cebdbe1ca93d9ccb483cd2f3daeb4cdb0ace5a71cd130e0bdab84
-ARG AGY_SHA256_ARM64=a6d269d2764e5636ab2bcda73b78c587fe9d00ead767aa3974574229585ee0d3
+ARG AGY_VERSION=1.4.0
+ARG AGY_RELEASE_BUILD=5281842794987520
+ARG AGY_SHA256_X64=fd96967583c1eed94733c039638fa59b71ddbd823c75ebc8dd0e677463565aad
+ARG AGY_SHA256_ARM64=cf953adcc69f87d00d71f97c3f35dc723a8669a350accf9a199df781f0523f56
 RUN if [ "${BAKE_AGENT_CLIS}" = "1" ]; then set -eux; \
       arch="$(dpkg --print-architecture)"; \
       case "$arch" in \
@@ -393,9 +443,9 @@ ENV AGY_CLI_DISABLE_AUTO_UPDATE=true
 # setTimeout(...).unref() で走るが `disableAutoUpdate || channel==="static"` でスキップ）。
 # 焼き込みでは AF が起動フラグ `--disable-auto-update`（全経路）＋ entrypoint の
 # cli-config.json `channel:"static"` 再固定の二重で封じる（詳細 docs/log/40 Track B）。
-ARG CURSOR_VERSION=2026.10.01-e373342
-ARG CURSOR_SHA256_X64=a79726c6e644520e993970be4c45775a6889802b67abe461a677a53219ae28e8
-ARG CURSOR_SHA256_ARM64=785c5f6bf2a60eb1121e27ed8c14f5ee07ed1b5b6692324f2d9a997238245eb5
+ARG CURSOR_VERSION=2026.10.14-941492e
+ARG CURSOR_SHA256_X64=6f6bf39dd2df29dcd38643cdfab0155ce71699953889f732deec123f6562bb2d
+ARG CURSOR_SHA256_ARM64=cbba40d90d7f699874e133a5c15bf3854cee006565bd3bb00a6c79b49d62b0d0
 RUN if [ "${BAKE_AGENT_CLIS}" = "1" ]; then set -eux; \
       arch="$(dpkg --print-architecture)"; \
       case "$arch" in \
@@ -435,9 +485,9 @@ RUN if [ "${BAKE_AGENT_CLIS}" = "1" ]; then set -eux; \
 # `app.disableAutoupdates` で止める設定型なので、封殺は runtime（entrypoint 起動毎再固定
 # ＋ 縦割りの ensureSettings）に寄せる（copilot の COPILOT_AUTO_UPDATE とは違い build ENV
 # では止められない）。
-ARG KIRO_VERSION=2.27.1
-ARG KIRO_SHA256_X64=e68927fe0bffb752746a573010cb68792b0f3e97be3a6ce73792c9cc02f08007
-ARG KIRO_SHA256_ARM64=937ff1ae3df373717b66cc09aec79c3b7f0b8e53968d746e3a4545722e1e4587
+ARG KIRO_VERSION=2.31.1
+ARG KIRO_SHA256_X64=47972b933825d5cf1f0b218c36863862df11f12dab2c864f041051f4cada58be
+ARG KIRO_SHA256_ARM64=d8b1e47bee2e5950b437aa85b347989d15b5fb41883b70f8c17ee2e361d77406
 # Muse Code（kind="muse"、ADR 0095 決定 8）。プロプライエタリなので **配布イメージには
 # 入らない**（BAKE_AGENT_CLIS=0 既定・理由は本ファイル冒頭と NOTICE）。既定の経路は
 # per-user のオンデマンド導入（workspace-agent install-muse）で、ここのピンは
@@ -455,9 +505,9 @@ ARG KIRO_SHA256_ARM64=937ff1ae3df373717b66cc09aec79c3b7f0b8e53968d746e3a4545722e
 # MUSE_VERSION と両 arch の sha を揃えて書き換え）。実測 362,440,920 B / 323,360,856 B（1.4.1-R4503.1）。
 # ⚠️ 版文字列は `Muse Code 1.3.0 (1.3.0-R3401.1)`＝**括弧内のビルド id** がピンと突合する値。
 # agy の `tr -dc '0-9.'` 流儀だと `-R3401.1` が落ちて毎回不一致になる（install_muse.go）。
-ARG MUSE_VERSION=1.4.2-R4684.1
-ARG MUSE_SHA256_X64=dfb3096c91f4767c4d98006460800b7ba906a0b1a408280a926a8dc19a1af64f
-ARG MUSE_SHA256_ARM64=fa6974c23307a0d5db91367549e41505a5e7b55dcd66c672eb2dd89c1a125ad6
+ARG MUSE_VERSION=1.4.10-R6427.1
+ARG MUSE_SHA256_X64=decefc0fb33c48ee43419c3e72ac2dbc781743868611074c7292807f5960dfcf
+ARG MUSE_SHA256_ARM64=2e5afa5e8560c1565185249af2d27b3e97aaf351d3d32275b8e410be702dce35
 # Postgres供給ピン（ADR 0086 P0 供給レーン）: Zonky embedded-postgres 17.11.0 jar のハッシュ。
 # sha256 は `curl -sfL <jar-url> | sha256sum` で確認した値。
 # 他メジャー（16/17/18）は install-postgres が Maven Central の .sha256 サイドカーで動的に取得する。
@@ -562,8 +612,8 @@ RUN set -eux; mkdir -p /usr/local/share/agent-fleet; \
       arm64) agy_sha="${AGY_SHA256_ARM64}"; cursor_sha="${CURSOR_SHA256_ARM64}"; kiro_sha="${KIRO_SHA256_ARM64}"; muse_sha="${MUSE_SHA256_ARM64}"; pg_sha="${POSTGRES_SHA256_ARM64}"; mysql_sha="${MYSQL_SHA256_ARM64}"; gcloud_sha="${GCLOUD_SHA256_ARM64}" ;; \
       *) agy_sha=""; cursor_sha=""; kiro_sha=""; muse_sha=""; pg_sha=""; mysql_sha=""; gcloud_sha="" ;; \
     esac; \
-    printf '{"claude":"%s","opencode":"%s","codex":"%s","agy":"%s","agy_build":"%s","agy_sha256":"%s","copilot":"%s","cursor":"%s","cursor_sha256":"%s","kiro":"%s","kiro_sha256":"%s","muse":"%s","muse_sha256":"%s","postgres":"%s","postgres_sha256":"%s","mysql":"%s","mysql_sha256":"%s","rtk":"%s","go":"%s","gh":"%s","chromium":"%s","chromium_cft":"%s","chromium_dl":"%s","noto_cjk":"%s","mcp_grafana":"%s","cloudwatch_mcp":"%s","aws_mcp_proxy":"%s","awscli":"%s","session_manager_plugin":"%s","gcloud":"%s","gcloud_sha256":"%s"}\n' \
-      "$CLAUDE_CODE_VERSION" "$OPENCODE_VERSION" "$CODEX_VERSION" "$AGY_VERSION" "$AGY_RELEASE_BUILD" "$agy_sha" "$COPILOT_VERSION" "$CURSOR_VERSION" "$cursor_sha" "$KIRO_VERSION" "$kiro_sha" "$MUSE_VERSION" "$muse_sha" "$POSTGRES_VERSION" "$pg_sha" "$MYSQL_VERSION" "$mysql_sha" "$RTK_VERSION" "$GO_VERSION" "$GH_VERSION" "$CHROMIUM_VERSION" \
+    printf '{"claude":"%s","opencode":"%s","codex":"%s","agy":"%s","agy_build":"%s","agy_sha256":"%s","copilot":"%s","cursor":"%s","cursor_sha256":"%s","kiro":"%s","kiro_sha256":"%s","muse":"%s","muse_sha256":"%s","postgres":"%s","postgres_sha256":"%s","mysql":"%s","mysql_sha256":"%s","rtk":"%s","go":"%s","gh":"%s","bkt":"%s","jira":"%s","chromium":"%s","chromium_cft":"%s","chromium_dl":"%s","noto_cjk":"%s","mcp_grafana":"%s","cloudwatch_mcp":"%s","aws_mcp_proxy":"%s","awscli":"%s","session_manager_plugin":"%s","gcloud":"%s","gcloud_sha256":"%s"}\n' \
+      "$CLAUDE_CODE_VERSION" "$OPENCODE_VERSION" "$CODEX_VERSION" "$AGY_VERSION" "$AGY_RELEASE_BUILD" "$agy_sha" "$COPILOT_VERSION" "$CURSOR_VERSION" "$cursor_sha" "$KIRO_VERSION" "$kiro_sha" "$MUSE_VERSION" "$muse_sha" "$POSTGRES_VERSION" "$pg_sha" "$MYSQL_VERSION" "$mysql_sha" "$RTK_VERSION" "$GO_VERSION" "$GH_VERSION" "$BKT_VERSION" "$JIRA_CLI_VERSION" "$CHROMIUM_VERSION" \
       "$CHROMIUM_CFT_VERSION" "$CHROMIUM_DL_VERSION" "$NOTO_CJK_VERSION" "$MCP_GRAFANA_VERSION" "$CLOUDWATCH_MCP_VERSION" "$AWS_MCP_PROXY_VERSION" "$AWSCLI_VERSION" "$SESSION_MANAGER_PLUGIN_VERSION" \
       "$GCLOUD_VERSION" "$gcloud_sha" \
       > /usr/local/share/agent-fleet/versions.json
@@ -583,7 +633,8 @@ ENV DISABLE_AUTOUPDATER=1
 # ~/.local shadow) — both unwanted in the version-pinned model. Disable it via env;
 # explicit `opencode upgrade` still works. (codex, by contrast, only *notifies* on
 # startup by default and self-writes only on explicit `codex update` / opt-in
-# autoUpdate, so it needs no analogous flag.)
+# autoUpdate, so it needs no analogous flag.) opencode 2 has the `update` config key for the
+# same thing (`"disable"`); entrypoint.sh seeds it when the installed major is 2.
 ENV OPENCODE_DISABLE_AUTOUPDATE=true
 
 # Muse Code の自己更新封殺（ADR 0095 決定 8）。**配布イメージは muse を配らない**
@@ -644,6 +695,13 @@ ENV GIT_TERMINAL_PROMPT=0 \
 # is also why it is no longer here. Keep these vars anyway: they still do what the
 # paragraph above says about optional/background traffic. ADR 0041 決定1 is unchanged
 # (the native path stays off); only the mechanism moved.
+#
+# NONESSENTIAL_TRAFFIC also turns off feature-flag evaluation, and Remote Control will not
+# start while it is set (silent: the claude session runs, no Remote Control session is created).
+# So while the Console's Remote control toggle is on, the Agent removes this one variable
+# (`env -u`) from the claude processes it starts afterwards (agents/claude/program.go
+# `launchCommand`); the other three stay set, and with the toggle off the environment is
+# exactly this one. docs/log/58 §58.18 has the measurement.
 ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
     DISABLE_TELEMETRY=1 \
     DISABLE_ERROR_REPORTING=1
@@ -685,6 +743,10 @@ COPY --from=agentbuild /out/workspace-agent /usr/local/bin/workspace-agent
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 # gh 透過認証ラッパー（実体は /usr/local/libexec/gh）。§8.3 参照。
 COPY gh-auth-wrapper.sh /usr/local/bin/gh
+# bkt (Bitbucket CLI) transparent-auth wrapper, same idea (real binary in /usr/local/libexec/bkt).
+COPY bkt-auth-wrapper.sh /usr/local/bin/bkt
+# jira (Jira CLI) transparent-auth wrapper, same idea (real binary in /usr/local/libexec/jira).
+COPY jira-auth-wrapper.sh /usr/local/bin/jira
 # svn transparent-auth wrapper. Same shape as the gh one, except the real binary stays
 # where apt put it (/usr/bin/svn) and the shim only takes precedence through PATH order —
 # /usr/local/bin comes first. It resolves the credential from the encrypted store, so an
@@ -696,6 +758,9 @@ COPY af-scratch.sh /usr/local/bin/af-scratch
 # ADR 0086 P0 シム: workspace-agent af-db へ転送する /usr/local/bin/af-db。
 # af-scratch と同じ形——実装は workspace-agent 側（L2 レーン）が持つ。
 COPY af-db.sh /usr/local/bin/af-db
+# AF agent memory from the command line (ADR 0108): same shape as af-db, the implementation is
+# `workspace-agent af-memory`.
+COPY af-memory.sh /usr/local/bin/af-memory
 # アーキ変更後に利用者自身の ~/.local 導入物を同じ版で戻す（entrypoint から呼ばれる）。
 # entrypoint に埋めず別ファイルにしてあるのは、単体で走らせて検証できるようにするため。
 COPY af-arch-repair.sh /usr/local/bin/af-arch-repair
@@ -705,7 +770,7 @@ COPY af-aws-exec.sh /usr/local/bin/af-aws-exec
 # Runs one command with one Google Cloud profile's access token from the Agent's own gcloud
 # store, never the VM's or node's identity (ADR 0107 decision 2): `workspace-agent gcloud-exec`.
 COPY af-gcloud-exec.sh /usr/local/bin/af-gcloud-exec
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/gh /usr/local/bin/svn /usr/local/bin/af-scratch /usr/local/bin/af-db /usr/local/bin/af-arch-repair /usr/local/bin/af-aws-exec /usr/local/bin/af-gcloud-exec
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/gh /usr/local/bin/bkt /usr/local/bin/jira /usr/local/bin/svn /usr/local/bin/af-scratch /usr/local/bin/af-db /usr/local/bin/af-memory /usr/local/bin/af-arch-repair /usr/local/bin/af-aws-exec /usr/local/bin/af-gcloud-exec
 # opencode plugins source (seeded into ~/.config/opencode/plugin at runtime):
 # agent-fleet-status.js (session working/idle bridge — seeded by the entrypoint) +
 # agent-fleet-caller.js (stamps the calling opencode session on af's MCP tools so a

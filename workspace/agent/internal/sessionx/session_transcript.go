@@ -157,12 +157,12 @@ func HandleSessionMessages(w http.ResponseWriter, r *http.Request) {
 	tagInjectedTurns(name, turns) // Source=operator/discord/… on injected user turns (docs/log/30 ②, docs/log/37 P2a)
 	mt := jsonlMtime(jpath)       // hoisted: also feeds the title-suggestion idle check below
 	if uiprefs.AutoTitleSuggest() && meta.Title == "" && meta.SuggestedTitle == "" &&
-		!meta.SuggestedTitleDismissed && titleGenReady(name) {
+		!meta.SuggestedTitleDismissed && titleGenReady(name, len(lines)) {
 		// Full-transcript parse — expensive, so only reached once the cheap field/backoff
 		// checks above pass. Once Title/SuggestedTitle/Dismissed settle, this line never
 		// runs again for this session (see docs/decisions/0009 on why the windowed
 		// `turns` above can't be reused here: it's an incremental slice after the first poll).
-		maybeSuggestTitle(name, claude.CollectTurns(lines, 0, len(lines)), time.Since(mt))
+		maybeSuggestTitle(name, claude.CollectTurns(lines, 0, len(lines)), time.Since(mt), len(lines))
 	}
 	// Whole-transcript answers for AskUserQuestion/ExitPlanMode/Agent, keyed by tool_use
 	// id. claude writes an interaction tool_use at ASK time; its answer can land in a later
@@ -318,10 +318,10 @@ func handleGenericMessages(w http.ResponseWriter, r *http.Request, meta session.
 	all, path := td.Turns, td.Path
 	total := len(all)
 	if uiprefs.AutoTitleSuggest() && meta.Title == "" && meta.SuggestedTitle == "" &&
-		!meta.SuggestedTitleDismissed && titleGenReady(meta.Name) {
+		!meta.SuggestedTitleDismissed && titleGenReady(meta.Name, total) {
 		// `all` is already the full parse here (unlike claude's windowed path above), so
 		// this is free — no extra transcript read.
-		maybeSuggestTitle(meta.Name, all, time.Since(jsonlMtime(path)))
+		maybeSuggestTitle(meta.Name, all, time.Since(jsonlMtime(path)), total)
 	}
 
 	since := 0
@@ -465,6 +465,11 @@ func handleGenericMessages(w http.ResponseWriter, r *http.Request, meta session.
 	// sessionCompacting): reuse the chat's claude compacting block (spinner-only — opencode reports no progress percentage).
 	if alive && td.Compacting {
 		resp["terminalState"] = "compacting"
+	}
+	// A provider error under retry, or the one that ended the last turn (agents/opencode
+	// retry.go): without it the session reads as plain working with an empty answer.
+	if alive && td.Retry != nil {
+		resp["retry"] = td.Retry
 	}
 	// Work an earlier turn left running, for the header's "background running" — the same
 	// answer the kind's WireLive gives the session list, and under claude's gate: only when

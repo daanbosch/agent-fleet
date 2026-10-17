@@ -105,7 +105,9 @@ export type PaneContent =
    * the view (memo `sessions-overview-pane`). `collapsed` holds the lane ids (session names)
    * whose descendants are folded away, for the same reason and with the same lifetime.
    */
-  | { kind: "fleetgraph"; showArchived: boolean; collapsed?: string[] };
+  | { kind: "fleetgraph"; showArchived: boolean; collapsed?: string[] }
+  // Home (#2028): what waits for the member and where they left off. No state of its own.
+  | { kind: "home" };
 
 export type PaneKind = PaneContent["kind"];
 

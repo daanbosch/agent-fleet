@@ -26,7 +26,10 @@ let host: HTMLDivElement | null = null;
 const errors: string[] = [];
 let done = 0;
 
-function mount(carried: Parameters<typeof CarriedBlock>[0]["carried"]) {
+function mount(
+  carried: Parameters<typeof CarriedBlock>[0]["carried"],
+  onReviewPlan?: (plan: string) => Promise<void>,
+) {
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -38,6 +41,7 @@ function mount(carried: Parameters<typeof CarriedBlock>[0]["carried"]) {
         agentName="claude"
         onDone={() => done++}
         onError={(m) => errors.push(m)}
+        onReviewPlan={onReviewPlan}
       />,
     ),
   );
@@ -118,6 +122,23 @@ describe("CarriedBlock", () => {
     await act(async () => {});
     const [, body] = sessionCarriedAnswer.mock.calls[0] as unknown as [string, Record<string, unknown>];
     expect(body).toMatchObject({ decision: "reject", feedback: "手順 2 を分けて" });
+  });
+
+  it("a carried plan offers review in another session and sends nothing to the session itself", async () => {
+    const review = vi.fn(async () => {});
+    mount({ kind: "plan", plan: "# 計画" }, review);
+    click(byText(/別セッションでレビュー|Review in another session/));
+    await act(async () => {});
+    expect(review).toHaveBeenCalledWith("# 計画");
+    // Discarding is the container's job, after the reviewer session exists: opening (or
+    // cancelling) the dialog must neither discard nor lock approval.
+    expect(sessionCarriedAnswer).not.toHaveBeenCalled();
+    expect((byText(/承認して実行|Approve and run/) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("without a review handler (other kinds, shared view) no review button is shown", () => {
+    mount({ kind: "plan", plan: "# 計画" });
+    expect(byText(/別セッションでレビュー|Review in another session/)).toBeNull();
   });
 
   it("a permission offers only resume-and-continue, since the answer cannot be delivered", async () => {

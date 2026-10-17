@@ -137,7 +137,7 @@ updated: "2026-09"
 | `workspace-notes.md` | 全コンテナが受け取る運用ポリシーの、常時読み込まれる短い部分（禁止事項と罠）|
 | `notes/` | そのトピックファイル（イメージでは `/usr/local/share/agent-fleet/notes/`）。ポリシーの索引が指す手順 |
 | `af-db.sh`・`af-aws-exec.sh`・`af-scratch.sh`・`af-arch-repair.sh` | `PATH` 上の `af-*` コマンド。最初の 2 つは `workspace-agent` を exec するだけ |
-| `gh-auth-wrapper.sh`・`svn-auth-wrapper.sh` | 本物より前に `gh` と `svn` として置かれ、どちらも Console で保存した資格情報を使えるようにする |
+| `gh-auth-wrapper.sh`・`bkt-auth-wrapper.sh`・`jira-auth-wrapper.sh`・`svn-auth-wrapper.sh` | 本物より前に `gh`・`bkt`・`jira`・`svn` として置かれ、いずれも Console で保存した資格情報を使えるようにする（`bkt-auth-wrapper-test.sh` と `jira-auth-wrapper-test.sh` がそれぞれのラッパーを固定する） |
 | `jvm.Dockerfile` | 共有 JDK ディレクトリを作る（`deploy/local/provision-jvm.sh`）|
 | `opencode-plugin/`・`tmux.conf` | opencode のプラグインと tmux の設定 |
 | `.dockerignore` | ⚠️ `**/*.md` を除外したうえで、ビルドに要るものを戻している。**イメージや agent バイナリが embed する markdown を足す前に読むこと** |

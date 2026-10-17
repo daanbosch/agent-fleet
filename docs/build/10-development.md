@@ -116,7 +116,7 @@ dispatched the contract, and nothing is being tested while it is down.
 
 `cli-pin-bump.yml` keeps **one** pull request against `main`, on the fixed branch
 `automation/cli-pin-bump`, that raises every agent-CLI pin whose new version has already
-passed its contract. It runs when a contract workflow completes, daily at 08:00 JST as a
+passed its contract. It runs when a contract workflow completes, every 2 hours (odd hours) as a
 backstop, and on dispatch. The decision and the edit are `deploy/local/cli-pin-bump.sh`;
 `deploy/local/cli-pin-bump-stub-test.sh` pins them.
 
@@ -143,27 +143,51 @@ backstop, and on dispatch. The decision and the edit are `deploy/local/cli-pin-b
   different: the run then leaves the branch and the PR as they are until a complete
   run, so a network blip never drops a kind or closes the PR. The npm kinds have no
   checksum.
+- **Upstream message fragments.** For every drifting kind that has rows in
+  `deploy/local/cli-message-fragments.txt` (today: claude's TUI footer fragments and
+  auth-failure wording), `cli-fragment-check.sh` unpacks the pinned and the latest npm
+  package and `grep -F`s each fragment. A fragment found in the pinned package and absent
+  from the latest is named in the PR body and in a row of the kind's update issue
+  (`Red contracts`); it never holds the bump back, because it says "look here", not "broken".
+  A fragment that is also absent from the pinned package (assembled by string
+  concatenation, escaped or encoded in the bundle) is listed as *unverifiable* instead of
+  passing. A checker that could not run (download, unpack, nothing found even in the pinned
+  package) sets `fragment_error=true`, is written into the PR body, and fails the workflow's
+  last step after the PR is opened. Add a row when new code starts matching on upstream text;
+  `cli-fragment-check-stub-test.sh` proves a missing fragment is reported and a present one
+  passes. Binary-only CLIs (agy, cursor, kiro, muse) need an unpack recipe first.
 - **The edit** touches only the bumped kinds' `ARG` lines, is checked line by line
   before it replaces the file, and a second run changes nothing.
 - **The PR** carries the evidence table — each kind's `pin → latest`, a link to the
   contract run that recorded `tested` (`cli-release-state.sh` writes the run URL into the
   marker comment), and where the checksums came from. The branch is force-updated only
   when the Dockerfile edit changes. Nothing merges it: review it, wait for CI and follow
-  §10.2.1 from step 4. Once it is merged, `cli-drift.yml` closes the drift issue on its
-  next run if no other pin is behind. Closing it without merging declines that exact edit
-  (recognised by an id in the body, even after the branch is deleted) until a version
-  changes.
+  §10.2.1 from step 4. The body carries `Closes #N` for the update issue of each bumped
+  CLI that has one (below), so merging it closes them. Closing it without merging declines
+  that exact edit (recognised by an id in the body, even after the branch is deleted) until
+  a version changes.
 
-**What stays manual:**
+**The update issues: one per CLI, open only while a person has something to do.**
+`cli-drift.yml` keeps them with `deploy/local/cli-update-issues.sh` (label `cli-drift`,
+title `<kind> CLI: <next step>`). The title and the first line of the body are the next
+step, as a command where there is one, and every path ends in a PR that closes the issue.
+The usual case opens nothing: a CLI moves, the watcher runs its contract, and the bump PR
+above is the whole interaction. An issue opens only for:
 
-- **cursor and kiro** credentials rotate, so the watcher never dispatches their
-  contracts. Refresh the secret, then `gh workflow run cursor-contract.yml -f
-  cli_version=latest` (or `kiro-contract.yml`); the bump follows when it passes.
-- **claude, copilot and agy** are dispatched only while their contract secrets are set;
-  without one, run the fleet probe from the companion issue and dispatch the contract
-  once the secret is back.
-- **rtk** has a release source but no contract, so there is no `tested` to gate on. It
-  is listed as drifting and bumped by hand (§10.2.1).
+| Title | Why a person is needed | Closed by |
+|---|---|---|
+| `kiro CLI: run the contract on <v>` (cursor too) | the credential rotates, so the watcher never runs the contract; refresh the secret if it fails at sign-in | the bump PR that follows a pass |
+| `<kind> CLI: verify <v> (no CI credential)` | claude, copilot or agy with no contract secret: register it and run the contract, or probe the release by hand in Terminal (CLI) | the bump PR, or a hand bump |
+| `<kind> CLI: contract failed on <v>` | the contract is red on latest (its row and run are in the issue's `Red contracts` section; `deploy/local/cli-contract-report.sh`) | the bump PR once the fixed contract passes |
+| `<kind> CLI: contract fails on develop` | the contract failed its last 2 runs on `develop` whatever the version: the harness or its secret is broken | itself, once the contract passes and the pin is current |
+| `<kind> CLI: upstream message fragments gone in <v>` | the new release no longer contains text Agent Fleet matches on (named in the `Red contracts` section); check the code that matches it, fix it and the registry | the bump PR, or a newer release |
+| `rtk CLI: bump the pin to <v>` | rtk has a release source but no contract, so no `tested` to gate on; bump it by hand (§10.2.1) | the hand-bump PR |
+
+An open issue follows its CLI: once latest passes, the same issue is retitled
+`<kind> CLI: merge the pin bump to <v>` and names the bump PR. It closes itself, with a
+comment, when the pin equals latest and no contract is red, or when a newer release
+replaced a red one on a CLI the watcher runs unattended. `deploy/local/cli-drift-stub-test.sh`
+pins these decisions.
 
 **The token (one-time setup, by a repository admin).** A push or PR made with
 `GITHUB_TOKEN` starts no other workflow, so the bump PR's CI would never run. The job
@@ -177,7 +201,9 @@ repository only, works too, but its tokens last an hour, so it needs a token-min
 
 Save it under **Settings → Secrets and variables → Actions → New repository secret** as
 `CLI_PIN_BUMP_TOKEN`. A PAT expires; when it does, the job goes red with the same
-message, and the drift issue keeps reporting the pins as behind.
+message. A CLI that passed its contract opens no update issue (the bump PR is meant to be
+the whole interaction), so while the token is broken that red `cli-pin-bump` run is the
+only signal; an update issue that was already open keeps waiting for the PR.
 
 ## 10.3 What the start scripts do (`deploy/local/`)
 
@@ -287,6 +313,16 @@ npm --prefix console run build
   | `secret-scan` | credential leaks over the whole history (below) |
   | `release-scan` | the forbidden-token gate over the tracked tree — the same scanner the pre-commit hook runs over staged content |
   | `model-id-lint` | no model-id-shaped string literal in either Go module outside `workspace/agent/internal/modelfallback`; `// model-id-lint:allow <reason>` marks one that chooses no model |
+  | `migration-versions` | sets the `migration-version` commit status on every open PR into `develop`: failure when a migration the PR adds takes a version `develop` already holds (compared as the runner reads it, so `95_x` and `0095_y` collide), shares its version with another new file of the same PR, or has no readable version. This job is the script's self-test; the status is posted by `migration-version.yml`, which has no cancel-in-progress, on the PR's own events (including a retarget to `develop`) and again for every open PR on each push to `develop`. `scripts/migration-versions.sh` |
+
+  To make it a required check on `develop`, require the context **`migration-version`**
+  (the commit status, not the `migration-versions` job or the `migration-version.yml` workflow's `publish` job), source GitHub Actions. It judges
+  each PR against `develop` only, never against another open PR: two open PRs that take
+  the same number both stay green until the first merges, and the push that merge makes
+  turns the second red. A fork PR's token is read-only, so its PR is checked without a
+  status and stays unmergeable until the next push to `develop`, or until a maintainer runs
+  `gh workflow run migration-version.yml --ref develop`. The same manual run re-posts every open PR's
+  status after an outage or a broken job.
 
   On a pull request, the `changes` job skips `control-plane`, `workspace-agent`,
   `deploy-scripts` and `console` when every changed path is inert — `docs/` and `guide/`
@@ -313,6 +349,27 @@ module, standard library only). **L3** is `console-e2e/` (Playwright). **L4**
   creates a **shell session**, types into it, reads the effect back through the
   filesystem API, and stops — against a real container. Being a shell session, it needs
   **no LLM credentials**.
+- **L2, multi-member** (`e2e/members_test.go`) runs the CP with `AUTH=proxy`, so a test
+  acts as any member by setting `X-Forwarded-Email`; a super_admin identity creates a
+  tenant of the test's own and invites the members, and every request carries
+  `X-AF-Tenant`. Each member gets a real workspace container, and a git remote both of
+  them can reach is served by the test process (`git http-backend`, no credentials) on
+  the docker bridge gateway. `TestMemberHandoff` drives ADR 0057's handover on it: the
+  push gate, share, offer, the recipient's inbox and notification while both workspaces
+  are stopped, the launch from the offer (its HEAD is the offer's `head_sha`), accept,
+  decline and unshare → expired. `e2e/limit_board_test.go` checks what other members see
+  on the limit board: `TestLimitBoardVisibility` (no docker) feeds it through the
+  Console's usage-observation post, and `TestLimitBoardReaperPull` through the reaper's
+  read of a running workspace whose claude capture is written inside the container, with
+  the sweep shortened to 2 s in that test's CP only. The member inbox's acceptance
+  (docs/log/130) runs on the same harness: `e2e/inbox_test.go` uses the inbox routes only
+  and needs no docker (except `TestInboxMemberRemoval`, whose workspace destroy goes
+  through the runtime); `e2e/inbox_workspace_test.go` needs a member's workspace. They
+  read the CP's SQLite database read-only through `python3`, restart the CP where only
+  start-up does something (the purge), and start the CP's workspace-only listener on the
+  bridge gateway (`cpReachableEnv`) so the workspace's memo tools reach the CP. The
+  file's doc comment says how to add another scenario; `TestGitRemote` and
+  `TestMemberFleetSetup` cover the harness without docker.
 - **L3** opens the Console in a real browser, opens a session, types into xterm, and
   observes the effect through the filesystem API — because xterm draws to a canvas and
   the characters cannot be read from the DOM. It needs a built `console/dist`, and uses
@@ -337,7 +394,8 @@ cd console-e2e && npm ci && npx playwright test
 - Missing prerequisites (docker, a built image, and for L3 `console/dist`) cause a
   skip; CI sets `E2E_REQUIRE=1`, which turns that into a failure.
 - Safe to run on a development host with a live fleet: each layer uses a separate
-  development user (`e2e`, `e2e-ui`, `e2e-live`), ports are allocated dynamically, and
+  development user (`e2e`, `e2e-ui`, `e2e-live`; the multi-member tests a random tenant
+  slug that scopes every container and network), ports are allocated dynamically, and
   teardown is built in. **One at a time** on a memory-constrained host.
 
 ### Detecting upstream CLI breakage
@@ -357,12 +415,12 @@ Two complementary systems close it — neither works alone:
 | Watches | the version **number** (pin vs published latest) | the **behaviour**, against the real CLI |
 | Answers | "is it time to look?" | "did it actually break?" |
 | Cost | free | free to subscription quota, by tier |
-| Frequency | daily | PRs to main (relevant paths), a weekly cron, and dispatch (claude, copilot, agy, cursor and kiro are dispatch-only) |
+| Frequency | every 2 hours | PRs to main (relevant paths), a weekly cron, and dispatch (claude, copilot, agy, cursor and kiro are dispatch-only) |
 | Goes red | only if the check itself fails | when a contract breaks (a step that depends on an outside service can be report-only, e.g. opencode's live Tier B turn) |
 
 Drift is **the normal state** — some CLIs move every few days — so the drift workflow
-does not go red. It keeps a single tracking issue up to date and closes it when the
-drift clears. The rows it checks are `TARGETS` in `deploy/local/cli-drift-check.sh`:
+does not go red, and most of it needs no person. It opens an issue for a CLI only when
+a person has something to do (§10.2.2) and closes it when that is done. The rows it checks are `TARGETS` in `deploy/local/cli-drift-check.sh`:
 every agent CLI whose version is pinned, plus `rtk`. lcpp is not among them: it runs
 in-process against a self-hosted engine and has no upstream CLI.
 
@@ -373,19 +431,35 @@ amd64 **and** arm64 in trixie, trixie-updates or trixie-security. trixie-securit
 only the current build, so a pin disappears as soon as Debian ships the next update — for
 one architecture first, sometimes — and the next uncached image build fails. That is a
 broken build, not steady-state drift, so this job goes red; its output names the newest
-version served on both architectures, which is what the ARG is bumped to by hand.
-`deploy/local/apt-pin-check-test.sh` pins its verdicts.
+version served on both architectures. `deploy/local/apt-pin-check-test.sh` pins its verdicts.
 
-A second workflow, `cli-release-watch.yml`, compares the published versions daily and
+The bump itself is `apt-pin-bump.yml` (every 6 hours, and on dispatch). It moves an ARG pin
+to that newest version when it is newer than the pin (never a downgrade, nothing when an
+index could not be read; `deploy/local/apt-pin-bump.sh`, pinned by
+`deploy/local/apt-pin-bump-test.sh`). It keeps one PR on `automation/apt-pin-bump` with the
+same mechanics and token as the CLI bump PR (§10.2.2), and after each push it dispatches a
+two-architecture `dev-image.yml` build of the workspace on that branch. PR CI does not build
+the image, so that build is the evidence: the Dockerfile asserts the installed version,
+`chromium --version` and the sandbox mode. Merge once it is green. `publish-dist.yml`'s
+preflight runs the same check, because a release builds without layer cache and is the first
+build to meet a pin that has gone.
+
+A second workflow, `cli-release-watch.yml`, compares the published versions every 2 hours (drift at :00, the watcher at :30, the
+pin-bump backstop at the next odd hour) and
 dispatches a contract **only for the CLIs whose version actually changed** (the kinds
 are `KINDS` in `deploy/local/cli-release-edges.sh`). Its state lives in one issue:
-`tested` and `seen` markers are appended as comments, because repository variables
+`tested` markers are appended as comments, because repository variables
 cannot be written with the default token (`deploy/local/cli-release-state.sh`). It
-records `tested` only when the contract succeeds, so a failure is retried the next day.
+records `tested` only when the contract succeeds. A contract that finishes red for
+`latest` writes a `red` marker for that version (and a row in the `Red contracts` section
+of that CLI's update issue, which also flags a contract workflow that failed its last 2
+runs on `develop`; `deploy/local/cli-contract-report.sh`), and the watcher does not
+dispatch that version again, so a failing release does not spend the contract's quota
+12 times a day. A new release, a passing run (`tested == latest` wins) or a manual dispatch
+releases it; a cancelled or timed-out run leaves no marker and is retried.
 A CLI whose credential cannot be supplied unattended is not dispatched. This covers a
-missing secret, and cursor and kiro, whose credentials rotate. For those it records
-`seen`, and the contract is dispatched by hand once the secret is refreshed — "detected"
-is never recorded as "tested". muse needs no credential for its contract, so it is
+missing secret, and cursor and kiro, whose credentials rotate. For those the CLI's update
+issue asks a person to run the contract — "detected" is never recorded as "tested". muse needs no credential for its contract, so it is
 dispatched unattended.
 
 **One unreadable release source does not stop the watcher.** Each row is fetched
@@ -403,7 +477,7 @@ the others). Path filters and dispatch inputs are per workflow, so putting them 
 file means (1) unrelated changes trigger runs and (2) inputs get mixed up — which really
 happened: codex's Tier 2 and claude's L4 shared a single `live` input, and one dispatch
 spent both quotas. Separate files make that coupling structurally impossible. The
-cross-cutting exceptions are the two daily watchers, and `mcp-config-contract.yml`
+cross-cutting exceptions are the two scheduled watchers, and `mcp-config-contract.yml`
 (no credentials), which verifies one registry-side contract across several CLIs at
 once: the shape of the global MCP config file af writes for each CLI. CI covers
 claude, codex, opencode, copilot and cursor; kiro (needs a login) and agy (will not
@@ -492,3 +566,616 @@ repeats what an agent needs at commit time and points back there.
 What to update when you change what is the
 [update-trigger table](README.md#update-trigger). The norms every shelf follows are
 [CONVENTIONS](../CONVENTIONS.md).
+
+### Rewriting the Japanese Console catalogue (`catalog-diff-check.py`)
+
+A wording pass over `console/src/lib/i18n/locales/ja/<domain>.ts` may change prose and
+nothing else. `scripts/catalog-diff-check.py <ref>` compares the files at `<ref>` with the
+working tree and fails on a change outside string-literal contents (keys, order, comments,
+`+` structure), on a changed key set, on any edit under `locales/` outside `ja/`, and, per
+changed value, on any difference in the multisets of `{placeholders}`, Trans slots,
+digits, ASCII words, 「…」 contents, `code` spans, line breaks, edge whitespace and the
+terms of `guide/ref/glossary.ja.md`. Reword a UI label (at most 15 characters, no 「。」)
+only on purpose: it fails without `--allow-labels`, and with it every `old -> new` pair is
+printed for review. A changed value whose old text is still quoted in `guide/**/*.ja.md`,
+console tests, Go sources or `workspace/agent/knowledge/af-usage.md` is reported as PINNED
+with `file:line` and fails; update that citation in the same PR (`--list-pinned` prints
+just those locations). A short common-word label can also be quoted for another purpose;
+after reading the hit, accept exactly that one with `--exempt-pin KEY@PATH[:LINE]` (printed
+as EXEMPT and counted, other hits still fail). A guide quote that reproduces only the start of a sentence, or any
+quote that does not contain a whole old clause, is not searched; after a rewrite, search
+the guide by hand for the opening words of each changed value. It does not judge meaning, and, like
+`scripts/guide-diff-check.py`, it is for local use and is not part of CI. Its tests are
+`python3 -m unittest discover -s scripts -p test_catalog_diff_check.py`.
+
+#### `--lang en`: the English catalogue
+
+`--lang en` points the same script at `locales/en/<domain>.ts` to guard a wording pass over
+the English strings. ja is the canonical source and en is derived from it, so a rewrite must
+keep meaning parity with ja; the script holds the structure and the facts, a reviewer judges
+the meaning. The default (no flag) is the ja mode above, unchanged. In en mode any change
+outside `en/` (`ja/` included) fails, and the key, order and file rules are the same. Per
+changed value, instead of the ASCII-word rule it compares the multisets of `{placeholders}`,
+Trans slots, digits, `code` spans, line breaks and edge whitespace, plus ALL_CAPS words,
+identifiers (paths, env vars such as `AF_MASTER_KEY`, snake_case and dotted names, `--flags`,
+CLI and product names such as `codex`, case included), the contents of `"…"` quotes and the
+→ and ⚠ marks. The glossary is the Screen column of `guide/ref/glossary.md`, matched
+case-insensitively on word boundaries (a plural `s` is the same word). A label is at most 30
+characters with no sentence-ending punctuation (`--allow-labels` as before). PINNED splits the old
+text at sentence ends, `{x}` slots and line breaks (clauses of 20+ characters) and searches
+`guide/**/*.md` except `*.ja.md` and `README*.md`, console tests and Go sources (not `workspace/agent/knowledge/af-usage.md`, a Japanese
+document); a label is also looked for as `**label**`, `"label"`, `'label'` and `` `label` ``;
+`--list-pinned` and `--exempt-pin` work as in ja mode. A change in the count of a restriction
+word (only, never, must, not, cannot, default, required, unless, except; `can't` and `n't`
+count as their long forms) in a changed value prints `WARN restriction` and is totalled on a
+`warnings:` line; it never fails the run, but the rewrite deserves a human look.
+`--triples` prints `key`, the current ja value, the old en and the new en for every changed
+value as TSV (tabs and line breaks escaped) and exits 0, for the reviewer comparing meaning
+against ja. Not part of CI.
+
+**Approving an intended term change** (`--allow-term`, `--allow-terms-file`). A rewrite that
+applies a terminology decision changes the glossary counts (and, in ja, the Latin-word counts:
+`OFF` → `オフ`), which the checks above report. Approve exactly that change, per key:
+
+```
+--allow-term KEY:OLD>NEW[*N]              repeatable; N defaults to 1
+--allow-terms-file PATH                   lines KEY<TAB>OLD<TAB>NEW[<TAB>N]; blank lines and # comments skipped
+```
+
+The allowance holds only if, in that key's changed value, the count of OLD fell by exactly N
+and the count of NEW rose by exactly N, in every category that counts the term (the glossary,
+and the Latin-word rule in ja or the ALL_CAPS rule in en; a term no category counts is
+counted directly). Everything else in the value is still held to the unchanged checks, the
+same term changing in another key still fails, and `--allow-labels`, PINNED and the other
+categories are not relaxed. Each applied allowance is printed (`ALLOWED term: … OLD -> NEW xN
+(OLD a -> b, NEW c -> d)`). An allowance that did not apply (wrong direction, wrong count, the
+key unchanged or absent) is `FAIL allow` with the counts it saw, and the drift it was meant
+to explain fails too. The `failures:` line gets an `allow=` entry only when an allowance is
+given, so a run without the flags prints exactly what it printed before. Counting rules are
+the existing ones (substring in ja, so `既定` inside `既定値` counts; word boundary in en).
+
+A term that two categories count (an en ALL_CAPS glossary term such as `DEFAULT`: glossary,
+case-insensitive, and caps, exact) is summed per (category, unit), so `default DEFAULT` →
+`standard standard` needs both `Default>standard` and `DEFAULT>standard`. Messages name the
+category (`[glossary]`, `[caps]`, `[latin]`, `[direct]` for a term no category counts).
+
+Allowances of one key that repeat the same OLD and NEW add up (two `OFF>オフ` equal `*2`). A
+term that is OLD in one allowance and NEW in another of the same key (reversed or chained) is
+refused with exit 2, because the two would cancel; state the net change as one allowance. In
+the TSV file the fields are taken as they are, so terms may contain `>`, `*` or `:`; on the
+command line `KEY` ends at the first `:`, `OLD` at the first `>`, and a trailing `*digits`
+on NEW is the count (use the file for a term that ends that way).
+
+Worked example (ja; `既定 OFF。` → `既定ではオフです。`, `デフォルト` → `既定`):
+
+```
+python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+  --allow-term 'agents.note_x:OFF>オフ' --allow-term 'surface_color.default:デフォルト>既定'
+```
+
+Without the flags this reports `FAIL latin` (`OFF` removed), `FAIL glossary` (`オフ` 0 → 1)
+and `FAIL glossary` (`既定` 0 → 1); with them, two `ALLOWED term:` lines and exit 0. Applying
+the same decision to a second key needs a second allowance. en works the same way
+(`--lang en --allow-term KEY:OFF>off`; glossary terms are matched case-insensitively).
+
+**Label sync** (`--list-citations`, `--rewrite-guide`, `--allow-split`). A label
+rewrite must keep every citation in sync in the same PR. The always-on SPLIT check
+looks across **all domains of the selected language**, even when explicit file
+arguments restrict the review: every key with the same old label must change to the
+same new text. Otherwise `FAIL split` lists the divergent keys and exits 1.
+`--allow-split KEY,KEY` (repeatable) approves a reviewed independent use only when
+all participants in the reported split are named, including the changed key;
+malformed lists exit 2 and stale keys fail. An approved split is still never
+rewritten automatically, because a citation cannot identify which key it means.
+Runs without a split or new flags retain their previous output.
+
+```
+python3 scripts/catalog-diff-check.py origin/develop --list-citations
+python3 scripts/catalog-diff-check.py origin/develop --allow-labels --rewrite-guide
+```
+
+`--list-citations` is read-only and exits 0, including for a split. Its sections are
+`guide`, `console tests`, `af-usage.md`, `af-usage.coverage.tsv`, and `Go sources`.
+Every row is `path:line<TAB>form<TAB>old<TAB>new<TAB>key`; backslashes, tabs and line
+breaks in values are escaped. Shared keys each receive their own rows. These modes,
+`--list-pinned`, and `--triples` are mutually exclusive.
+
+Matching is exact and case-sensitive: the complete contents of `「…」`, `**…**`,
+quoted strings (`"…"`, `'…'`, backticks, curly double quotes), or a menu segment
+separated by ` > ` or `→` must equal the old label. Menu cells end at the next
+separator, line end, or punctuation such as parentheses, commas and table bars;
+whitespace and formatting delimiters are retained. A bare match in guide prose
+must have no Unicode letter, number or underscore immediately before or after it.
+A label inside a longer quoted/bold span is excluded, so `保存` does not match
+`「保存中」`, `**保存中**`, or `保存中`. Console tests and Go require exact quoted,
+bracket or bold matches; the knowledge ledger additionally matches complete TSV
+cells. ATX and setext headings are marked `heading`, regardless of their span form.
+Fenced guide code is marked `code`. This conservative matching cannot identify
+Japanese words embedded in prose or menu cells with explanatory suffixes: search
+those manually as well.
+
+`--rewrite-guide` writes only `guide/**/*.ja.md`; `--lang en` instead writes
+`guide/**/*.md` excluding `*.ja.md` (including English README pages). It replaces
+only exact bracket-quote, bold and menu spans on non-heading lines outside fenced
+code. The first column of `guide/ref/settings.ja.md` (English: `settings.md`) is
+also rewritable as `table-cell`. Changed `set.tab_*` or `tenant.tab_*` keys produce
+`WARN SETTINGS TAB`: update those cells so `scripts/docs-check.py` continues to
+pass; its rules are unchanged. Japanese personal tabs also need the matching
+`guide/member/12-settings.ja.md` section heading updated manually; table replacement
+alone does not satisfy that check. Every edit prints `path:line old -> new`.
+
+The tool checks every target's git status before writing any file. A staged,
+unstaged or untracked dirty target is refused with exit 2; review its edits and use
+`--force` to allow it. A second run makes no edits. Chained/swapped label mappings
+are refused for automatic rewriting to prevent a later run from cascading into a
+second replacement; handle those guide edits manually. Symlink targets outside
+`guide/` are refused. Existing structure, term and label checks still apply.
+
+After rewriting, the remaining citations are printed in the same TSV sections.
+Headings (and their anchors and inbound links, including site `/ja/features/`
+links), bare prose, other quoted forms, fenced code, tests, both knowledge files,
+and Go sources need manual updates. Any remaining citation exits 1; reviewed
+independent matches can use the existing `--exempt-pin KEY@PATH[:LINE]`, with
+EXEMPT output and stale-exemption warnings. Exempted spans are also protected from
+automatic rewriting. Re-run after the manual edits.
+
+Worked example: when changing `保存` to `保存する`, first change **every** catalogue
+key whose old text is `保存`, then run `--list-citations`. After review,
+`--allow-labels --rewrite-guide` changes `「保存」` and `**保存**` to the new label,
+but leaves `保存中` untouched and reports a heading such as `## 保存` and a test
+assertion such as `toBe("保存")`. Update the heading, its links, and that assertion
+in the same PR, then rerun the guard and `scripts/docs-check.py`. No catalogue
+rewrite is needed to adopt this tooling, and it remains local-only, outside CI.
+
+Automatic rewrites also protect Markdown source contexts: inline code (including
+multiple backticks and multiline spans), fenced and indented code, initial YAML
+front matter, HTML tags/attributes and comments, URLs, inline link destinations
+and titles, and reference-link definitions. Exact citations in these contexts
+are still listed as `code` or `metadata`, require manual review or `--exempt-pin`,
+and are never automatically rewritten. Fences retain their opener's character
+and length; only a same-character closing fence of at least that length, with no
+trailing content, closes them. Blockquote and list containers are recognized.
+Nested exact citations such as `「**label**」` and `**「label」**` are listed and
+rewritten at their inner label range once; overlapping edits are refused.
+
+Label-sync modes require both versions of each compared catalogue file. Added,
+untracked, deleted or moved domain files produce an explicit error and exit 2,
+instead of a misleading empty citation list. These modes also report the number
+of compared files and changed labels on stderr; a zero result distinguishes no
+catalogue diff against the ref from a diff with no changed labels.
+
+Heading protection also applies inside blockquote and list containers, including
+setext headings: their citation text and anchors remain manual. The settings
+`table-cell` exception is limited to a changed `set.tab_*` / `tenant.tab_*` key's
+first-column cell beneath a valid `タブ` (Japanese) or `Tab` (English) table header
+and separator. Concept/layer tables and non-tab keys retain ordinary manual prose
+handling. SPLIT remains always on: a partial shared-label rewrite intentionally
+changes the failure output and exit status even without new flags. Byte-identical
+legacy output is preserved for runs without a SPLIT violation or new flags.
+
+For setext headings, every line of the preceding Markdown paragraph is manual,
+including wrapped headings inside quote/list containers. Container normalization
+also applies to reference-link definitions: their destinations, continued
+next-line destinations and wrapped titles are protected as metadata. Blank lines
+end these blocks, so ordinary citations in surrounding paragraphs remain eligible
+for the normal rewrite rules.
+
+### Japanese notation batches (`ja-notation-normalize.py`, phase B1)
+
+`scripts/ja-notation-normalize.py` is a deterministic, local-only planner and editor
+for notation in `console/src/lib/i18n/locales/ja/<domain>.ts`. It is not wired into
+CI and does not evaluate TypeScript or call a service. This tool's introduction
+changes no catalogue values. Terminology choices (sign-in/login, deployment,
+terminal, limits, collapse) belong to B2; spelling decisions involving button
+behaviour remain manual. The rules follow [Japanese notation conventions](../CONVENTIONS.md#11-japanese-notation-in-ui-text-and-the-guide)
+and the [glossary](../../guide/ref/glossary.md).
+
+- **R1:** insert a half-width space at Latin/Japanese and digit/Japanese boundaries,
+  e.g. `Gitホスティング` → `Git ホスティング`, `30日後` → `30 日後`.
+  Placeholder boundaries are eligible only for the inspected numeric names
+  `n`, `count`, `days`, `profiles`, `hosts`, `bytes`, `applied`; `{n}人` becomes
+  `{n} 人`. Other names such as `{msg}` and `{name}` are skipped and reported.
+  Existing spaces, string ends and Japanese punctuation/brackets
+  (`、。「」（）・：`) are never changed. Single-token labels of at most three
+  characters are skipped. Latin units, ranges, times, versions and multipliers
+  (`30GB`, `30 GB`, `1〜10`, `12:30`, `v1.2`, `3x`, `×1.25`) are protected,
+  including boundaries touching those tokens.
+- **R2:** `既に` → `すでに`. `無い` → `ない` and `無く` → `なく` require an
+  inspected key and its exact original value in `scripts/ja_notation_contexts.json`.
+  Each occurrence is printed as `CONTEXT R2 key@offset token | full value`,
+  including protected and rejected contexts. The adjective/auxiliary whitelist
+  cannot approve a different key or changed sentence. Compound nouns (`無料`,
+  `無効`, `無制限`, `無視`, `無理`, `無事`, `無限`, `無駄`, `無数`), noun `無し`
+  and verb forms `無くす`/`無くなる` are never converted. Adding a new whitelist
+  entry requires grammatical inspection; batch executors must not add approvals.
+- **R3:** a plain `Workspace` word in running Japanese text becomes
+  `ワークスペース`. Identifiers and adjacent Latin words (possible product names,
+  including the catalogue's `Google Workspace` and `Workspace Agent`) are
+  protected; the standalone `Workspace` label is skipped. As part of R3, remove
+  half-width spaces between the converted word and Japanese letters, particles or
+  punctuation (`Workspace を破棄` → `ワークスペースを破棄`). Keep spaces next to
+  Latin words, digits, placeholders and code. Edge whitespace, tabs and line
+  breaks stay intact. The dry-run shows this final Japanese text; R1 itself never
+  removes spaces.
+  Each affected key emits `KEY<TAB>Workspace<TAB>ワークスペース<TAB>N`, accepted
+  by `catalog-diff-check.py --allow-terms-file`. Other unexplained glossary or
+  Latin-token drift causes the entire value's proposal to be skipped.
+
+All rules preserve code spans, placeholders' contents, complete Trans slots
+(`<n>…</n>`/`<n/>`), quoted text (including Japanese bracket quotes), identifiers,
+paths, URLs and environment variables. Unbalanced markup is skipped.
+Agent-facing `plan.review_prompt_*` and `wi.prompt_*`, notification speech
+(including `speech_bare` and other speech variants), `err.*`, `chat.report.*`
+and `clean.reason*` are excluded. UI descriptions such as `launch.first_prompt_note`
+remain eligible. Valid Unicode surrogate escape pairs are decoded for reports and
+matching while their original escape bytes stay intact; unpaired surrogate escapes
+are refused before any catalogue or artifact writes. Escaped characters and
+boundaries between concatenated literals are skipped when an edit cannot map to unchanged source
+syntax. The scanner mirrors the catalogue guard's tokenizer and edits only
+literal contents; keys, comments, quote style, escapes, line breaks, entry order
+and `en/` stay intact. Unsupported expressions, duplicate keys and symlink
+catalogues are refused. Selected dirty catalogue files (staged, unstaged or
+untracked) are refused before any edit unless `--force` is explicitly supplied
+after review. This flag does not override any notation exclusion.
+
+The report lists every proposed `key | old | new`, skips with reasons, and per-rule
+replacement and skip counts per domain. `CANDIDATE (manual only)` lists label
+pairs that differ by spaces, `…` or `を`, across domain boundaries; it never
+chooses a spelling or changes ellipses. Shared labels are checked across the whole
+catalogue: a proposal that would cause SPLIT is skipped with the other keys listed.
+Select those domains together only when the batch's scope allows it.
+
+```sh
+python3 scripts/ja-notation-normalize.py --all
+python3 scripts/ja-notation-normalize.py --domain settings --dry-run \
+  --report "$AF_WORK_DIR/settings-plan.txt" \
+  --allow-terms-out "$AF_WORK_DIR/settings-plan.tsv"
+python3 scripts/ja-notation-normalize.py --domain settings --apply \
+  --allow-terms-out "$AF_WORK_DIR/settings-applied.tsv" \
+  --report "$AF_WORK_DIR/settings-applied.txt"
+# Comma-separated domains and a nonempty subset of R1,R2,R3 are supported:
+python3 scripts/ja-notation-normalize.py --domain settings,repos --rules R1,R2
+```
+
+Dry-run is the default; `--all` is dry-run only. Report and allowance outputs are
+optional during planning. Applying Workspace changes requires
+`--allow-terms-out`; without it the tool refuses before writing. Use fresh output
+paths: existing artifacts, identical report/allowance paths, catalogue/script
+paths and git metadata paths are refused, including a worktree's actual private
+and shared Git directories when `.git` is a gitdir file. Artifact creation happens
+before catalogue writes, so an artifact write failure leaves the catalogue intact.
+Keep the applied allowance file until the PR is reviewed. A second apply with reviewed dirty files and `--force` makes
+no additional catalogue edits; it must not overwrite the first allowance file
+with an empty plan. In a Managed session where `AF_WORK_DIR` is unset, use
+`~/.af-work/<working-copy-directory>/` instead and clean up afterwards.
+
+**Per-domain executor runbook:**
+
+1. Start with a clean catalogue on the assigned branch. Run `--all` for sizing,
+   then the selected domain's dry-run with fresh report/allowance paths. Read
+   **every proposal, CONTEXT and SKIPPED**. Leave skipped cases unchanged; send
+   grammatical/product-name decisions to the reviewer. Do not broaden the rules
+   or whitelist and do not perform B2 terminology work.
+2. Apply the same domains and rules, emitting a fresh applied allowance file.
+   Inspect the diff for value-only changes and verify that a second dry-run has
+   zero proposals. An untracked or edited catalogue requires review before
+   `--force`; it is not a shortcut around the clean starting point.
+3. Run the printed guard command. Keep the allowance argument in every checking
+   or rewriting invocation:
+
+   ```sh
+   python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+     --allow-terms-file "$AF_WORK_DIR/settings-applied.tsv"
+   python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+     --allow-terms-file "$AF_WORK_DIR/settings-applied.tsv" --list-citations
+   python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+     --allow-terms-file "$AF_WORK_DIR/settings-applied.tsv" --rewrite-guide
+   ```
+
+   The required final guard exit is **0**. Before citation sync, exit 1 for
+   PINNED is expected when labels still have citations; it is not permission to
+   ignore failures. Resolve all other categories before continuing. The guide
+   rewrite can return 1 for remaining manual citations. Update headings and
+   inbound anchors, bare prose, tests, knowledge and Go citations in the same
+   notation PR. Read each `--list-citations` hit; `--exempt-pin` is only for a
+   reviewed independent use, and SPLIT requires all participants or a separately
+   reviewed `--allow-split` decision. Also manually search sentence prefixes,
+   because the guard cannot find every shortened quote.
+4. Rerun the guard to exit 0, `python3 scripts/docs-check.py`, and the relevant
+   Console tests **from `console/`** with capped workers. Check the new and
+   existing script suites if rules change:
+   `python3 -m unittest discover -s scripts -p test_ja_notation_normalize.py` and
+   `python3 -m unittest discover -s scripts -p test_catalog_diff_check.py`.
+5. The PR body records domains/rules, proposed/changed/skipped counts, inspected
+   precision (wrong proposals / all proposals), allowance rows, citation updates
+   and manual decisions, exact verification commands and exit codes. Keep labels
+   and sentence batches separate when required by the revision plan. Run the
+   pre-commit hook, commit, push and open the PR against `develop`.
+
+The scratch settings acceptance run with R3 spacing cleanup inspected all
+30 changed values:
+0 wrong proposals (100% precision), 36 R1 insertions, 8 R2 replacements and 1 R3
+replacement, with 9 skipped occurrences. An earlier 32-value plan had two unsafe
+`{msg}` boundary proposals; restricting placeholder spacing to inspected numeric
+names removed them. The R3 replacement also removes spaces that existed only
+because Workspace was Latin; retaining those spaces had left incorrectly spaced
+Japanese values. The complete catalogue dry-run took about one second over
+23 domains. The scratch guard initially returned 1 with 20 PINNED hits and no
+structural/invariant failures; after guide rewriting and manual citation sync,
+the final guard returned 0. No acceptance edits are committed to the catalogue.
+The suite also removes each protected-span recognizer and selected other exclusions
+and proves that their negative controls fail; the real guard fixture fails without
+the emitted Workspace allowance and passes with it.
+
+The R3 cleanup keeps the full-catalogue plan at 16 changed values (17 Workspace
+occurrences). Checking both sides of `ワークスペース`, `すでに`, `ない` and `なく`
+for spaces beside Japanese letters went from 16 hits to zero. A further scratch
+run of `admin,settings,workitems` changed 64 values with 13 accepted allowance
+rows. The initial guard reported only 32 PINNED hits; citation, anchor and coverage
+ledger updates brought the final guard and docs check to exit 0. A second dry-run
+proposed no changes. The scratch repository was removed after verification.
+
+### Reviewed Japanese term plans (phase B2)
+
+B2 separates sense judgement from application. A model/human judge reads
+`scripts/ja-term-candidates.py`, writes a reviewed plan, and uses
+`scripts/ja-term-apply.py --check-only` before applying it. Both tools are
+local-only, use B1's literal tokenizer without evaluating TypeScript, and are
+outside CI. Introducing them changes no catalogue or guide terminology.
+
+| Family | Judge's decision and permitted forms |
+|---|---|
+| F-login | Agent Fleet's own IdP uses サインイン; external CLIs/services, including GitHub as a service, use ログイン. Both substitution directions are available; review the tenant group label and guide citations. |
+| F-deploy | Nouns use 配備; the verb デプロイする stays. Includes デプロイ既定 → 配備の既定 and デプロイ全体 → 配備全体. |
+| F-device | Browser/device scope uses このブラウザ. この端末 → このブラウザ and 端末 → ブラウザ cover existing particles such as ほかの端末; 端末 → このブラウザ is also explicit. Keep terminal-emulator 端末. |
+| F-slot | 枠 → 利用枠 or 子の上限; 利用枠 → 子の上限 is available for a mistaken child cap. Judge period/free quotas separately; スロット is EC2 only. |
+| F-fold | Keep UI collapse 畳む; session ending uses 停止/終了. Explicit forms cover 畳む, 畳まれ, 畳んだ, 畳んで and 畳め. Data roll-up is a separate sense: leave it outside this batch. |
+| F-onoff | ON/OFF → オン/オフ in prose; オン/オフ ↔ 有効/無効 follows the control's actual name. Latin matches must be complete words, including beside Japanese. |
+| F-buttons | Sixteen explicit noun/する pairs in `BUTTONS` of `scripts/ja_term_common.py`. Use nouns on ordinary buttons; する only on a confirmation dialog's execute button. |
+| F-default | デフォルト → 既定. |
+| F-variants | Explicit whole-label pairs in `VARIANTS` of the shared module (保存中/保存中…, 送信/送信…, セッション削除/セッションを削除, APIトークン/API トークン, 7日/7 日, the five keys.palette placeholders without … and others). … is for in-progress displays and dialog-opening buttons only; otherwise judge the majority form. |
+
+The registry permits transformations, not senses. It never supplies a reason
+for a decision. New pairs require review and positive/negative tests; a plan
+cannot introduce arbitrary words, spaces, reordered text or ellipses in prose.
+Opposite directions of the same pair within one value are refused: a term swap
+can hide both changes from glossary counts. Independent pairs such as
+ON → オン and OFF → オフ are still permitted.
+Protection rules may still refuse a registered pair, for example removal of
+edge whitespace. Such a refusal is a manual case, not grounds to use `--force`.
+
+```sh
+python3 scripts/ja-term-candidates.py --stats
+python3 scripts/ja-term-candidates.py --family F-login,F-deploy --domain settings --format tsv
+python3 scripts/ja-term-candidates.py --family F-device,F-fold --format md --limit 20
+python3 scripts/ja-term-apply.py --plan "$AF_WORK_DIR/term-plan.tsv" --check-only
+python3 scripts/ja-term-apply.py --plan "$AF_WORK_DIR/term-plan.tsv" --dry-run
+python3 scripts/ja-term-apply.py --plan "$AF_WORK_DIR/term-plan.tsv" --apply \
+  --allow-terms-out "$AF_WORK_DIR/term-allowances.tsv" --report "$AF_WORK_DIR/term-report.txt"
+```
+
+Candidates are one row per matched occurrence, ordered by domain file, key
+source order, registry family order and decoded offset. They include the key,
+domain, label/sentence kind (15 characters, no 。), complete value, match,
+`[start,end)` Unicode code-point offsets, containing sentence, previous/next
+keys and values in the file, English value, guide hit count and first two lines,
+test/Go/knowledge hit locations, exact key references in UI source, all keys sharing the value, exclusions and sense
+criteria. Previous/next keys can cross a card boundary; no card membership is
+inferred. Empty English cells mean the key was absent; empty hit lists mean
+only that this scanner found nothing. Exact label citations use the existing
+guard citation machinery; sentences use its hard-wrap-aware PINNED clauses.
+Hits are attributed matches that the judge must read, including coincidental
+common clauses. `--stats` counts occurrences, values, labels and excluded
+occurrences per family/domain, with measured runtime on stderr. `--limit`
+limits report rows, not statistics. Excluded values remain visible to the judge.
+UI references are exact quoted-key matches with file/line attribution, not
+inferred control roles; assembled/dynamic keys need manual investigation.
+
+F-fold also discovers 畳み, 畳ま, 畳ん and 畳も to expose additional inflections,
+but these four stems have no apply pairs. Leave them unchanged or obtain a
+separately reviewed pair with tests; a discovery row is not an apply permission.
+F-device discovers 端末 and このブラウザ only. Existing bare ブラウザ is outside
+this automated discovery scope, and ブラウザ → このブラウザ is not an apply pair.
+Search `rg -n 'ブラウザ' console/src/lib/i18n/locales/ja` when reviewing existing
+browser wording. Although 端末 → ブラウザ can preserve particles such as
+ほかの, it does not authorize converting every browser reference to このブラウザ.
+
+**Judge's checklist:** read the entire value, containing sentence, neighbouring
+keys, English ambiguity reference, cited guide lines and
+`guide/ref/glossary.ja.md`. Read the component for button
+behaviour, control names or unclear scope. Check the characters around every
+match: pairs also match inside compounds such as 外枠, 携帯端末, 折り畳む and
+ログインID. A mechanical match does not establish the sense: keep terminal
+emulator 端末 and verbal デプロイする, and review compounds individually.
+Record why this key has that sense and which evidence establishes it. Keep labels and sentences in separate
+batches, include every shared-label key with the same new value, and leave
+ambiguous cases unchanged. Agent-facing `*prompt*`, speech variants, `err.*`,
+`chat.report.*` and `clean.reason*` cannot be changed. Glossary rows require a
+separate explicit decision; the apply tool edits only catalogue literals.
+
+F-login sense review has three explicit, repeatable exceptions; the default
+protections above remain unchanged. `--allow-split KEY,KEY` on the apply tool
+requires every key sharing the old label, including retained external-service
+labels, and rejects incomplete or stale approvals. Pass the same groups to the
+guard and review each citation manually: an approved split is never rewritten
+automatically. `--allow-user-error KEY` permits one reviewed user-visible
+`err.*` value in an F-login, F-deploy or F-onoff plan row (`USER_ERROR_FAMILIES`
+in the shared module; decision 25's デプロイ → 配備 and decision 23's 無効 → オフ
+in error text); an approval for a key that is not in the plan, is not `err.*`,
+or whose row is in another family is refused, so approvals cannot go stale or
+widen. Prompt/speech keys, `chat.report.*`, `clean.reason*`, error identifiers
+and all other families remain protected. Check Go for a twin of the sentence
+before applying; the stable error code never changes.
+`--allow-quoted-terms KEY` permits registered F-login
+substitutions inside that key's `「…」` label references. Pass it to the guard
+with the emitted term allowances: the guard normalizes only verified
+サインイン/ログイン pairs inside those quotes, while preserving their remaining
+contents. Both tools reject stale quote approvals; code, placeholders, Trans
+slots, other quote forms and other families stay protected. Record these
+exceptions and their per-key sense evidence in the PR.
+
+The UTF-8 plan has no BOM or header and contains exactly five TAB-separated fields:
+
+```text
+key<TAB>old_value<TAB>new_value<TAB>family<TAB>reason
+surface_color.default<TAB>デフォルト<TAB>既定<TAB>F-default<TAB>Initial setting; checked glossary and English
+```
+
+`<TAB>` above means a literal tab. Blank lines and `#` comments are skipped.
+Use `\\`, `\t`, `\n`, `\r` to encode backslashes, tabs and line breaks in
+fields; candidates use the same reversible encoding. Unknown escapes are
+refused. Save the exact current decoded value; do not normalize it when copying.
+
+Before any write, apply verifies every row: one existing Japanese key with the
+exact old value (or the exact already-applied new value), only declared family
+substitutions, unchanged placeholders/slots/digits/code/quotes/newlines/edge
+whitespace, eligible key class, complete shared-label groups and no duplicate
+keys. Unsupported syntax, symlinks and edits crossing escaped characters or
+concatenated literals are refused. It verifies reconstructed values and the
+unchanged source skeleton. Dirty target files require reviewed `--force`;
+that flag overrides no validation. A second apply is a no-op even while its
+previous edits are dirty. Mixed old/new rows can resume a partially applied
+plan; retain the original plan and allowance file.
+
+Applying pending edits requires a fresh allowance output, even if empty.
+It emits `KEY<TAB>OLD<TAB>NEW<TAB>N` in the guard's count semantics, and validates
+the complete glossary/Latin drift before publishing it. Reports and allowances
+are created exclusively before catalogue edits; existing artifacts, tracked
+source, catalogue/script paths, plan aliases, symlinks and Git metadata are
+refused. Use distinct fresh paths. `--check-only` writes neither artifacts nor
+catalogues; dry-run can emit review artifacts. Where `AF_WORK_DIR` is unset,
+use `~/.af-work/<working-copy-directory>/` and clean up afterwards.
+
+For a direct term that is not itself a glossary/Latin unit, the guard excludes
+occurrences inside a counted unit named in that key's allowances. Thus
+`枠 → 利用枠` removes one standalone 枠 and adds one glossary 利用枠; an already
+present 利用枠 does not masquerade as a second old 枠. Glossary/Latin counts
+and the requested N remain exact. English counting is unchanged.
+
+**Apply and sync pipeline:** keep the emitted allowance in every guard invocation.
+
+```sh
+python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+  --allow-terms-file "$AF_WORK_DIR/term-allowances.tsv"
+python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+  --allow-terms-file "$AF_WORK_DIR/term-allowances.tsv" --list-citations
+python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+  --allow-terms-file "$AF_WORK_DIR/term-allowances.tsv" --rewrite-guide
+(cd console && npm test -- --maxWorkers=2)
+# From the repository root, after resolving manual citations:
+python3 scripts/docs-check.py
+```
+
+An initial guard exit 1 for PINNED is expected when citations are stale; all
+other categories must be resolved. `--list-citations` is for labels: use
+`--list-pinned` and manual prefix searches for sentences. Read every citation,
+manually update headings/anchors, tests, console-e2e, both knowledge files and
+Go twins, and rerun the guard to exit 0. `--rewrite-guide` protects headings,
+code and metadata. `--exempt-pin KEY@PATH[:LINE]` is only for a reviewed
+independent use; a zero-hit scan is never proof of no dependencies.
+
+**B1 lessons:** the FULL Console test suite above is mandatory for every wording
+batch. Assembled strings, goldens, console-e2e expectations and Go twins can be
+invisible to PINNED; targeted wording tests alone missed CI failures. Regenerate
+goldens only with the project's update flag in the owning test, after reading
+the diff; never replace them blindly. Run the relevant console-e2e/Go checks
+when those references change. Never claim pass/fail without the real summary
+line and the command's exit status (no status-hiding `| tail` pipelines).
+For tool changes, run `python3 -m unittest discover -s scripts -p 'test_*.py'`,
+Python compilation, docs-check and the staged pre-commit hook. The B2 suite
+includes verification-removal mutants and a real guard negative/positive pair.
+
+**Lessons from the B1/B2 batches** (each is a check to run, not background):
+
+1. **Stray spaces after a Latin→Japanese substitution.** B1 puts a space between
+   Latin/digits and Japanese; when ON/OFF or Workspace is replaced by katakana or
+   kanji, the spaces that existed only for the Latin neighbour stay behind
+   (「音声読み上げを オン にしました」). After EVERY substitution batch, check the
+   changed lines for a space between the substituted word and an adjacent Japanese
+   character and remove it in the same PR. Keep a space only next to Latin, digits,
+   a `{placeholder}`, `code` or the string edge. Evidence: PR #1805 left 36 such
+   lines; the guard (it does not count interior spaces), `ja-term-apply` (it
+   rejects whitespace edits) and two reviewers all missed them; #1809 fixed them.
+   Run the check as a Python regex, not `git grep -E` with Japanese ranges: its
+   locale error ("Invalid collation character") is hidden by `2>/dev/null` and
+   reads as "0 hits". `python3 scripts/ja-notation-normalize.py --all --lint-spaces`
+   automates it: it lists half-width spaces between two Japanese characters that
+   `origin/develop` (or the ref given as its argument) did not have, and exits 1 on
+   any. Spaces already in the catalogue (menu paths such as 接続 > Git, ・ separators)
+   are deliberate, so the lint reports only new ones.
+2. **A pass/fail claim without the real summary line is not evidence.** B1 batches
+   reported `npm test` exit 0 and still failed CI: strings built by code, goldens
+   and console-e2e are invisible to the guard's PINNED scan. Run the FULL console
+   suite, read the `Test Files` / `Tests` / failed counts, and regenerate goldens
+   only with the project's update flag.
+3. **Parallel batches conflict on shared values.** Families overlap (measured: 10
+   keys in F-login ∩ F-onoff, 9 in F-deploy ∩ F-login, 14 in F-deploy ∩ F-onoff,
+   27 in F-default ∩ F-onoff), so whichever batch merges second conflicts.
+   Procedure: merge develop (merge only; never rebase or force-push). For a
+   conflicted catalogue file take develop's version and re-apply the plan after
+   rebuilding the OLD values with `ja-term-candidates.py`. For a conflicted guide,
+   knowledge or test file take develop's version of the whole FILE and re-apply only
+   the term substitution (`--list-citations` / `--rewrite-guide` plus minimal manual
+   edits). Never hand-merge hunks. Merge one PR at a time and let the next one
+   rebuild; then re-run the guard, docs-check and the full suite.
+4. **Reviewers miss what the guard cannot see.** Hand the reviewer the concrete
+   checks: the blind-spot list above, the stray-space check, and a histogram of
+   replaced fragments (`git diff -U0 --word-diff=porcelain`) that must show only
+   the declared substitution pairs.
+5. **Tool limits.** `ja-term-apply` rejects whitespace edits, `err.*` values
+   (use `--allow-user-error` per key, with a reason) and some F-variants cases.
+   File a follow-up issue rather than working around the tool.
+
+#### B2 tooling acceptance evidence
+
+At the introduction's catalogue snapshot, all-family statistics over 23 domains
+took 2.8 seconds. Counts include already-standard forms and excluded values;
+they are discovery counts, not proposed edits.
+
+| Family | Occurrences | Values | Labels | Excluded occurrences |
+|---|---:|---:|---:|---:|
+| F-login | 294 | 238 | 52 | 22 |
+| F-deploy | 122 | 111 | 12 | 24 |
+| F-device | 34 | 29 | 5 | 3 |
+| F-slot | 28 | 26 | 7 | 0 |
+| F-fold | 10 | 9 | 3 | 1 |
+| F-onoff | 242 | 187 | 38 | 10 |
+| F-buttons | 81 | 81 | 81 | 0 |
+| F-default | 143 | 140 | 51 | 3 |
+| F-variants | 83 | 83 | 83 | 0 |
+
+The device/fold smoke report was read in full (44 occurrence rows). The judge
+assessment below accounts for every key; repeated occurrences take the same
+decision. It is sample evidence, not a production plan or authorization to
+rewrite the tracked catalogue.
+
+| Family / keys | Assessment and evidence |
+|---|---|
+| F-device: `noti.table_note` (2), `launch.tmpl.err.not_loaded`, `awslogin.close_hint`, `display.per_tenant_note`, `display.pane_layout_note`, `set.prefs_unsynced`, `gcplogin.close_hint` | Change 端末 to ブラウザ (この端末 to このブラウザ): English describes device-local settings or access from other devices; the neighbours describe preferences/login requests. Seven values, eight occurrences. |
+| F-device: `assistant.note_appearance`, `noti.os_unsupported`, `ovw.waiting_hint` | Keep: already このブラウザ; local appearance, browser notification support and local observations. |
+| F-device: `err.plan_pending`, `err.permission_pending`, `err.interaction_pending` | Excluded; these also mean the terminal fallback for interaction cards. |
+| F-device: `admin.idle_hold_watching_row` | Keep in this batch: an activity/idle-stop hold, including keystrokes and Console interaction, not a browser-local setting. The added UI reference lets a judge inspect its hold-kind rendering. |
+| F-device: `admin.term_log_hint`, `onb.rtt_title`, `noti.kind_terminal_notification`, `srow.keep_awake_hint`, `agents.skip_permissions_off_note` | Keep: recorded terminal output, terminal echo path, terminal-origin notifications, closed-terminal work and terminal permission replies respectively. |
+| F-device: `keys.kt.termPrioTitle`, `keys.kt.termPrioLabel` (2), `keys.kt.termPrioNote` (2), `keys.kt.shellPassLabel`, `keys.kt.shellPassNote` (3) | Keep all nine occurrences: terminal focus and key forwarding. Neighbours/English explicitly name shell, tmux and terminal input. |
+| F-device: `ssm.term_color`, `ssm.term_preview_title`, `ssm.term_label`, `git.identity_help`, `view.lfs_tip` | Keep: terminal colour/preview, terminal commits and terminal execution of git lfs pull. |
+| F-fold: `fgraph.collapse`, `ovw.collapse`, `wsbar.usage.fold_hint`, `wsbar.usage.place_fold`, `wsbar.usage.place_fold_title`, `agents.expand_thinking_note` | Keep all six UI-collapse occurrences. English says collapse/popover; next keys expose expand, placement and display controls. |
+| F-fold: `agents.skip_permissions_off_note` (2) | Sample judge decision: 畳まれ → 停止され in both occurrences. The interaction timeout ends the running session; it preserves the pending conversation. The permission-card UI reference confirms prose, not an agent prompt. |
+| F-fold: `plan.review_prompt_reply` | Excluded agent prompt, even though its sense is session ending. |
+| F-fold: `usage.truncated_hint` | Keep outside this batch: English says roll-up/pruning of retained data, not UI collapse or session ending. The usage-chart UI reference confirms the separate sense. |
+
+Full values, neighbours, English and attributed citations were enough for the
+device/fold decisions; UI key references were added for ambiguous roles and for
+later button judges. They are starting points for source inspection, not proof
+of a button's behaviour. Common sentence hits still need review, and shortened
+citations remain a manual search.
+
+A SAMPLE device plan was applied only to a scratch archive: 7 values in 4 files,
+8 substitutions and 4 emitted allowances. Reapplying reported 7 already applied,
+0 pending. The real guard checked 2,412 values and accepted 4 of 4 allowances:
+initially only `pinned=1` failed, at the notification settings prose. The
+label-citation mode correctly reported 4 compared files, 0 changed labels.
+Manual inspection updated two guide phrases in the scratch copy; the second
+shortened phrase was invisible to PINNED. The final guard and guide rewrite
+returned 0 with every failure category zero. No scratch wording or golden
+updates are part of this tooling PR; the complete Console test run belongs to
+the later real wording batch.

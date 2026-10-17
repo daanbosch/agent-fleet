@@ -15,11 +15,13 @@ import { useLayoutStore } from "../../layout/store.ts";
 import { useReposStore } from "./store.ts";
 import type { Repo } from "./store.ts";
 import { useFilesStore } from "../files/store.ts";
+import type { Session } from "../../types/session.ts";
 import { useSessionsStore } from "../sessions/store.ts";
 import { useSessionUI } from "../sessions/ui.ts";
 import { openSessionTerminal, openSessionTerminalSplit, openSessionChat, openSessionChatSplit } from "../sessions/open.ts";
 import { RepoRow } from "./RepoRow.tsx";
 import { parentFFFailedText, parentFFSuccessText } from "./parentSync.ts";
+import { postFastForward } from "./staleIndexLock.ts";
 import { useStartWork } from "./useStartWork.ts";
 import { SvnAuthModal } from "./SvnAuthModal.tsx";
 import { GitflowInitModal } from "./GitflowInitModal.tsx";
@@ -41,13 +43,15 @@ interface RepoRowConnectedProps {
   sess?: { alive: number; total: number };
   /** Unread-notification dot for the sessions this row currently hides (see RepoRow.unread). */
   unread?: boolean;
+  /** Session summary shown on the folded row (see RepoRow.peek). */
+  peek?: { s: Session; others: string[] };
   /** Bulk-archive stopped sessions (right-click menu). The owning node (RepoNode) passes a
    * count and a handler scoped to the sessions directly under this folder. */
   onArchiveStopped?: () => void;
   stoppedCount?: number;
 }
 
-export function RepoRowConnected({ r, ctx, node, onToggle, sess, unread, onArchiveStopped, stoppedCount }: RepoRowConnectedProps) {
+export function RepoRowConnected({ r, ctx, node, onToggle, sess, unread, peek, onArchiveStopped, stoppedCount }: RepoRowConnectedProps) {
   const settings = useSettings(); // default model for a claude launch
   const tr = useT();
   const toast = useToast();
@@ -101,6 +105,7 @@ export function RepoRowConnected({ r, ctx, node, onToggle, sess, unread, onArchi
       selected={r.name === ctx.activeRepo}
       sess={sess}
       unread={unread}
+      peek={peek}
       onArchiveStopped={onArchiveStopped}
       stoppedCount={stoppedCount}
       // Bulk stop: the whole subtree's live sessions, planned per row in the modal.
@@ -119,7 +124,7 @@ export function RepoRowConnected({ r, ctx, node, onToggle, sess, unread, onArchi
       onOpenFolder={() => useFilesStore.getState().revealInFiles("repos/" + r.name, { focus: true })}
       onOpenChanges={() => openTarget({ content: { kind: "changes", scmRepo: r.name } })}
       onFF={async () => {
-        const res = await apiJSON(`api/repos/${encodeURIComponent(r.name)}/ff`, "POST", {});
+        const res = await postFastForward(`api/repos/${encodeURIComponent(r.name)}/ff`);
         if (res && res.error) {
           toast(tr("rp.ff_failed", { err: errText(res.error) }));
           return;
@@ -128,7 +133,7 @@ export function RepoRowConnected({ r, ctx, node, onToggle, sess, unread, onArchi
         toast(tr("rp.ff_success", { name: r.name }), { kind: "success" });
       }}
       onParentFF={r.worktree && r.integration?.relation === "contained" ? async () => {
-        const res = await apiJSON(`api/repos/${encodeURIComponent(r.name)}/parent-ff`, "POST", {});
+        const res = await postFastForward(`api/repos/${encodeURIComponent(r.name)}/parent-ff`);
         if (res && res.error) {
           toast(parentFFFailedText(r, errText(res.error)));
           return;

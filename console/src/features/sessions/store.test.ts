@@ -18,7 +18,11 @@ vi.stubGlobal("window", { fetch: fetchMock });
 vi.stubGlobal("fetch", fetchMock);
 
 const toastMock = vi.fn();
-vi.mock("../../ui/toast.ts", () => ({ toast: (...a: unknown[]) => toastMock(...a) }));
+const dismissMock = vi.fn();
+vi.mock("../../ui/toast.ts", () => ({
+  toast: (...a: unknown[]) => toastMock(...a),
+  dismissToast: (...a: unknown[]) => dismissMock(...a),
+}));
 
 let useSessionsStore: typeof import("./store.ts")["useSessionsStore"];
 let tMaybe: typeof import("../../lib/i18n/index.ts")["tMaybe"];
@@ -121,6 +125,73 @@ describe("sessions store", () => {
 
     await expect(useSessionsStore.getState().start("ssko6g5")).resolves.toBe(false);
     expect(String(toastMock.mock.calls[0][0])).toContain("tmux: no server");
+  });
+
+  // claude deletes transcripts older than cleanupPeriodDays; a session whose log is gone must not
+  // quietly start a blank conversation. The agent refuses with 409 transcript_lost, and the
+  // toast's button is the explicit way to start fresh (?fresh=1).
+  // The toast outlives a tenant switch and names the session by slug only, so it is bound to the
+  // (user, tenant) it was raised for: a late 409 shows nothing in another workspace, and the
+  // button of a toast left behind does nothing there. Back in the original one it works again.
+  it("binds the lost-log toast to the tenant that raised it", async () => {
+    const lost = () =>
+      new Response(JSON.stringify({ error: { code: "transcript_lost", message: "x" } }), {
+        status: 409,
+        headers: { "Content-Type": "application/json" },
+      });
+    const { setTenant } = await import("../../core/api/client.ts");
+
+    // A late answer: the request left for alpha, the user is in beta when it lands.
+    setTenant("alpha");
+    let release!: () => void;
+    fetchMock.mockImplementationOnce(() => new Promise((r) => (release = () => r(lost()))));
+    fetchMock.mockResolvedValue(jsonResponse({ sessions: [] }));
+    const pending = useSessionsStore.getState().start("ssko6g5");
+    setTenant("beta");
+    release();
+    await pending;
+    expect(toastMock).not.toHaveBeenCalled();
+
+    // A toast raised in alpha, its button pressed in beta: no request at all.
+    setTenant("alpha");
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(lost()).mockResolvedValue(jsonResponse({ sessions: [] }));
+    await useSessionsStore.getState().start("ssko6g5");
+    const body = toastMock.mock.calls[0][0] as { props: { children: { props: { onClick: () => void } }[] } };
+    setTenant("beta");
+    const before = fetchMock.mock.calls.length;
+    body.props.children[1].props.onClick();
+    await Promise.resolve();
+    expect(fetchMock.mock.calls.length).toBe(before);
+
+    // Back in alpha the same button works.
+    setTenant("alpha");
+    body.props.children[1].props.onClick();
+    await vi.waitFor(() => expect(String((fetchMock.mock.calls[before] as unknown[])[0])).toContain("/start?fresh=1"));
+    setTenant("");
+  });
+
+  it("offers a fresh start when the conversation log was deleted", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { code: "transcript_lost", message: "log deleted" } }), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ sessions: [row("ssko6g5", false)] }));
+
+    await expect(useSessionsStore.getState().start("ssko6g5")).resolves.toBe(false);
+    expect(toastMock).toHaveBeenCalledTimes(1);
+    expect(toastMock.mock.calls[0][1]).toMatchObject({ kind: "error", duration: 0 });
+
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ ok: true }))
+      .mockResolvedValueOnce(jsonResponse({ sessions: [row("ssko6g5", true)] }));
+    const toastBody = toastMock.mock.calls[0][0] as { props: { children: { props: { onClick: () => void } }[] } };
+    toastBody.props.children[1].props.onClick();
+    await vi.waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(4));
+    expect(String((fetchMock.mock.calls[2] as unknown[])[0])).toContain("/start?fresh=1");
   });
 
   // The accepted POST is authoritative (docs/log/85): the row has to say "stopping after

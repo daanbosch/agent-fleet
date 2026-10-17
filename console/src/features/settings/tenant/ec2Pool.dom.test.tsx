@@ -74,6 +74,24 @@ afterEach(() => {
 });
 
 describe("the EC2 slot pool surface", () => {
+  // jsdom has no layout, so this pins only the structure that gives the scroll container: a
+  // bare table's min-content width pushes the settings pane sideways at phone width (#1959).
+  it("keeps each table inside its own horizontal scroll container", async () => {
+    await mount();
+    const tables = host!.querySelectorAll("table.pool-table");
+    expect(tables.length).toBe(2);
+    // The box is a keyboard stop (a scroll container is not focusable in every browser) and is
+    // named after the heading above it.
+    const titles = ["スロット", "home"];
+    tables.forEach((t, i) => {
+      const box = t.parentElement!;
+      expect(box.classList.contains("pool-table-scroll")).toBe(true);
+      expect(box.getAttribute("role")).toBe("region");
+      expect(box.getAttribute("tabindex")).toBe("0");
+      expect(box.getAttribute("aria-label")).toBe(titles[i]);
+    });
+  });
+
   it("counts held, running and hibernating slots and says eviction happens once the cap is reached", async () => {
     await mount();
     expect(text()).toContain("i-hot");
@@ -297,7 +315,15 @@ describe("the EC2 slot pool surface", () => {
     expect(buttonsIn(rowOf("i-bad")).map((b) => b.textContent)).toEqual(["終了"]);
     // A healthy slot must not carry it: it is not a general "delete this machine" control.
     // (Its only action is the replacement reservation.)
-    expect(buttonsIn(rowOf("i-hot")).map((b) => b.textContent)).toEqual(["次回起動で入れ替え"]);
+    expect(buttonsIn(rowOf("i-hot")).map((b) => b.textContent)).toEqual(["入れ替えを予約"]);
+  });
+
+  it("renders the terminate button as a bordered danger button", async () => {
+    api.mockResolvedValue(QUARANTINED);
+    await mount();
+    const [kill] = buttonsIn(rowOf("i-bad"));
+    expect(kill.classList.contains("ui-btn-danger")).toBe(true);
+    expect(kill.classList.contains("ui-btn-sm")).toBe(true);
   });
 
   it("asks before terminating, and names the instance and why it was quarantined", async () => {
@@ -370,8 +396,37 @@ describe("replacement reservations", () => {
     expect(rowOf("i-hot")?.textContent).toContain("v9");
     expect(rowOf("i-hot")?.textContent).toContain("$Latest より古い");
     expect(rowOf("i-zzz")?.textContent).not.toContain("$Latest より古い");
-    expect(rowOf("i-done")?.textContent).toContain("次回起動で入れ替え");
-    expect(rowOf("i-done")?.querySelector("button")?.textContent).toBe("入れ替えを取り消す");
+    expect(rowOf("i-done")?.textContent).toContain("次回起動で入れ替え予定");
+    expect(rowOf("i-done")?.querySelector("button")?.textContent).toBe("予約の取消");
+  });
+
+  it("says an outdated slot is replaced at its next start when automatic replacement is on (#1934)", async () => {
+    api.mockResolvedValue({ ...TEMPLATES, auto_replace_outdated: true });
+    await mount();
+    expect(rowOf("i-hot")?.textContent).toContain("次回起動で自動入れ替え");
+    expect(host?.querySelector(".pool-outdated")?.textContent).toContain("予約しなくても");
+    // Already reserved: the reservation badge speaks, not the automatic one.
+    expect(rowOf("i-done")?.textContent).not.toContain("自動入れ替え");
+  });
+
+  it("renders the slot actions as bordered buttons, and the button text differs from the state badge", async () => {
+    api.mockResolvedValue(TEMPLATES);
+    await mount();
+    const buttonsIn = (row: Element | null) => Array.from(row?.querySelectorAll("button") || []);
+    const bulkBtn = Array.from(host!.querySelectorAll("button")).find((b) => b.textContent?.includes("1 台すべて"));
+    const hot = buttonsIn(rowOf("i-hot"));
+    const done = buttonsIn(rowOf("i-done"));
+    expect(bulkBtn).toBeTruthy();
+    expect(hot).toHaveLength(1);
+    expect(done).toHaveLength(1);
+    for (const b of [bulkBtn!, ...hot, ...done]) {
+      expect(b.classList.contains("ui-btn")).toBe(true);
+      expect(b.classList.contains("ui-btn-default")).toBe(true);
+      expect(b.classList.contains("ui-btn-sm")).toBe(true);
+    }
+    const badge = rowOf("i-done")?.querySelector(".pool-badge.reserved")?.textContent;
+    expect(badge).toBeTruthy();
+    expect(buttonsIn(rowOf("i-hot")).map((b) => b.textContent)).not.toContain(badge);
   });
 
   it("lists the affected slots and people before the bulk reservation, and sends exactly those", async () => {

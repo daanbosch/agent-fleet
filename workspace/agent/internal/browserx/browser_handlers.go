@@ -164,8 +164,6 @@ func HandleBrowserWebSocket(w http.ResponseWriter, r *http.Request) {
 	}()
 	conn.SetReadLimit(browserWSMaxMessage)
 
-	ready := p.readyMessage()
-	v.enqueueText(ready)
 	writerDone := make(chan struct{})
 	go func() {
 		v.writeLoop()
@@ -194,13 +192,21 @@ func HandleBrowserWebSocket(w http.ResponseWriter, r *http.Request) {
 	<-writerDone
 }
 
-func (p *browserPage) readyMessage() []byte {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func (p *browserPage) readyMessageLocked() []byte {
 	return mustBrowserJSON(map[string]any{
 		"type": "ready", "version": 1, "url": p.url, "title": p.title,
 		"width": p.viewport.Width, "height": p.viewport.Height,
 	})
+}
+
+// reasonMessageLocked is the state message carrying the probed reason, or nil when the
+// page has none to give. The caller holds p.mu.
+func (p *browserPage) reasonMessageLocked() []byte {
+	r := p.reasonLocked()
+	if r == "" || p.state != "target-unreachable" {
+		return nil
+	}
+	return mustBrowserJSON(map[string]any{"type": "state", "state": "target-unreachable", "reason": r})
 }
 
 func (v *browserViewer) enqueueText(data []byte) {

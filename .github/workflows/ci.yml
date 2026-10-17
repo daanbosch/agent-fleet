@@ -94,6 +94,19 @@ jobs:
       - name: scan full history
         run: /tmp/gitleaks --version && /tmp/gitleaks git --log-opts="--all --full-history -m" --redact --verbose
 
+  # Self-test of scripts/migration-versions.sh (#2046), on every event so a broken script
+  # fails on its own PR. The `migration-version` status itself is posted by
+  # migration-version.yml, not here: this workflow's cancel-in-progress could kill a
+  # publisher between its post and its re-check of develop and leave a stale success.
+  migration-versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the self-test reads a pinned commit of develop
+      - name: self-test
+        run: ./scripts/migration-versions-test.sh
+
   # Core verification of the forbidden-token gate for shipped artifacts (docs/log/35
   # §35.7.5). The artifacts themselves are scanned by release-gate and publish-dist (both
   # need a build); what this job confirms every time is that the mechanism works and that
@@ -257,6 +270,21 @@ jobs:
         run: |
           bash -n workspace/entrypoint.sh
           ./deploy/local/keep-relocate-test.sh
+      # The bkt wrapper is the one place a Bitbucket token meets an exec: what the real binary is
+      # given, that nothing reaches argv or output, and that every helper failure leaves bkt
+      # running without injected auth are pinned against stub git / workspace-agent / bkt.
+      - name: bkt auth wrapper (real script, stub git / workspace-agent / bkt)
+        working-directory: .
+        run: |
+          bash -n workspace/bkt-auth-wrapper.sh
+          ./workspace/bkt-auth-wrapper-test.sh
+      # Same for the jira wrapper, which also decides whose config file it is looking at: a config
+      # for another Jira must never receive this connection's token.
+      - name: jira auth wrapper (real script, stub workspace-agent / jira)
+        working-directory: .
+        run: |
+          bash -n workspace/jira-auth-wrapper.sh
+          ./workspace/jira-auth-wrapper-test.sh
 
   # The deployment scripts (deploy/aws/ecs) only run in full against real AWS, but if that
   # is taken as a reason to check nothing, a break is discovered on the day the stack
@@ -277,9 +305,15 @@ jobs:
       # fake `aws`, so it runs per PR as well.
       - name: teardown / bring-up order (the same check as release-gate)
         run: ./deploy/local/ecs-lifecycle-stub-test.sh
+      - name: EFS backup preflight (real script, stub aws)
+        run: ./deploy/local/efs-backup-check-stub-test.sh
       # The engine fetch sidecar lives inside a CloudFormation Mappings entry, where nothing
       # type-checks it and the only feedback is a GPU box that comes up idle ten minutes
       # later. This pulls it out of the template and runs it (ADR 0072 P0).
+      # deploy/gcp/gke/pause.sh has no cluster to run against here; the order it takes things
+      # down in (the untainted workspace pool restarts a node otherwise) is pinned on stubs.
+      - name: GKE pause / resume order (real script, stub gcloud / kubectl)
+        run: ./deploy/local/gke-pause-stub-test.sh
       - name: engine fetch sidecar (real script, stub aws)
         run: ./deploy/local/engine-sidecar-test.sh
       # CloudFormation replaces every non-ASCII codepoint in a template with `?`, server-side
@@ -308,6 +342,11 @@ jobs:
       # only, and a widened grant decrypts with keys the CP has no business with.
       - name: CP role KMS custodian grant (template vs Go)
         run: python3 ./deploy/local/cfn-cp-kms-scope-test.py
+      # AF_WORKSPACE_DEK=random is refused by the CP without the kms custodian; the template
+      # must fail the same combination when the stack operation runs (execute-time guard), and
+      # the env var must stay unset without a key, so the CP never crash-loops on it.
+      - name: CP AF_WORKSPACE_DEK parameter / Rule (offline template evaluation)
+        run: python3 ./deploy/local/cfn-workspace-dek-test.py
       # IAM caps a role's inline policies at 10,240 characters in total and each managed one
       # at 6,144, and four stacks attach to the CP task role, so no one template shows the
       # total. Passing it is a ServiceLimitExceeded and a rolled-back stack on a real
@@ -324,10 +363,24 @@ jobs:
       # accepted is decided here, so it is tested here.
       - name: CLI pin bump decisions (real script, stub drift/gh/curl)
         run: ./deploy/local/cli-pin-bump-stub-test.sh
+      # The upstream message fragments the bump checks for: a missing one must be reported
+      # and a present one must pass, or an empty result could mean a check that never ran.
+      - name: CLI message fragment check (real script, fake npm packages)
+        run: ./deploy/local/cli-fragment-check-stub-test.sh
+      # opencode 1 and 2 are different npm packages; five places pick one from the version's
+      # major, and they only disagree on the day the pin crosses.
+      - name: opencode package follows the major (every place that names it)
+        run: ./deploy/local/opencode-pkg-test.sh
+      - name: self-update puts the other opencode package back when the install fails
+        run: ./deploy/local/opencode-swap-test.sh
       # The daily apt-pins job in cli-drift.yml reads live Debian indexes; its verdicts
       # (missing for one architecture, unreadable index) are pinned here on fixtures.
       - name: Debian package pin check (real script, fixture indexes)
         run: ./deploy/local/apt-pin-check-test.sh
+      # The pin-bump PR is opened unattended; what it proposes (never a downgrade, nothing on
+      # an unreadable index) is decided here, so it is tested here.
+      - name: Debian package pin bump (real scripts, fixture indexes)
+        run: ./deploy/local/apt-pin-bump-test.sh
       # The LAN ComfyUI helper runs on an operator's GPU host, where no CI reaches; its
       # docker calls, refusals and re-run behaviour are pinned against a stateful fake docker.
       - name: LAN ComfyUI helper (real script, stub docker / nvidia-smi)

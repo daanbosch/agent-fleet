@@ -139,3 +139,75 @@ func streamingFrames(t *testing.T) []streamFrame {
 	}
 	return out
 }
+
+// idle A -> busy B -> idle A must not read as settled when A comes back: B was a repaint.
+func TestFooterSettledBusyFrameRewindsClock(t *testing.T) {
+	now := withFakeClock(t)
+	idle := func(f string) bool { return f == "A" }
+	FooterSettled("agyfoot", "A", idle)
+	*now = now.Add(2 * idleSettleWindow)
+	if !FooterSettled("agyfoot", "A", idle) {
+		t.Fatal("unchanged idle frame should be settled")
+	}
+	FooterSettled("agyfoot", "B", idle)
+	*now = now.Add(time.Second)
+	if FooterSettled("agyfoot", "A", idle) {
+		t.Fatal("idle A right after busy B read as settled")
+	}
+	*now = now.Add(idleSettleWindow)
+	if !FooterSettled("agyfoot", "A", idle) {
+		t.Fatal("A should settle after a full window")
+	}
+}
+
+func TestPaneChangedAt(t *testing.T) {
+	now := withFakeClock(t)
+	if _, ok := PaneChangedAt("p1"); ok {
+		t.Fatal("a pane nobody has read answered")
+	}
+	first := *now
+	observeFrame("p1", "frame A")
+	*now = now.Add(30 * time.Second)
+	observeFrame("p1", "frame A") // unchanged: the clock must not move
+	got, ok := PaneChangedAt("p1")
+	if !ok || !got.Equal(first) {
+		t.Fatalf("PaneChangedAt = %v, %v; want %v (the repaint, not the poll)", got, ok, first)
+	}
+	*now = now.Add(paneSightingFresh + time.Second)
+	if _, ok := PaneChangedAt("p1"); ok {
+		t.Fatal("a sighting no poll refreshed still spoke: a frozen clock would read as a frozen pane")
+	}
+}
+
+func TestObservePane(t *testing.T) {
+	now := withFakeClock(t)
+	orig := observeCapture
+	t.Cleanup(func() { observeCapture = orig })
+	frame := "a"
+	observeCapture = func(string) string { return frame }
+
+	if !ObservePane("n") {
+		t.Fatal("first read must record")
+	}
+	first := *now
+	if at, ok := PaneChangedAt("n"); !ok || !at.Equal(first) {
+		t.Fatalf("first: %v %v, want %v", at, ok, first)
+	}
+	*now = now.Add(10 * time.Second)
+	ObservePane("n") // unchanged frame keeps the clock
+	if at, _ := PaneChangedAt("n"); !at.Equal(first) {
+		t.Errorf("unchanged frame moved the clock to %v", at)
+	}
+	frame = "b"
+	*now = now.Add(10 * time.Second)
+	ObservePane("n")
+	if at, _ := PaneChangedAt("n"); !at.Equal(*now) {
+		t.Errorf("repaint did not move the clock: %v", at)
+	}
+	// A failed read records nothing and reports false.
+	frame = ""
+	*now = now.Add(5 * time.Second)
+	if ObservePane("n") {
+		t.Error("failed capture reported success")
+	}
+}

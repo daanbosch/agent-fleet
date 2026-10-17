@@ -21,7 +21,9 @@ import { TenantLoginRules, TenantLoginRulesView } from "./tenantLoginRules.tsx";
 import { TenantSignInMethods } from "./tenantSignInMethods.tsx";
 import { PoolBudgetHint, type PoolBudget } from "./ec2Pool.tsx";
 import { TenantNetworkView } from "./tenantNetwork.tsx";
+import { TenantLimitBoardView } from "../../limits/TenantLimitBoardView.tsx";
 import { TenantBranchRulesView } from "./tenantBranchRules.tsx";
+import { TenantMemberDefaultsPanel } from "./tenantMemberDefaults.tsx";
 import { TenantGitOAuthView } from "./tenantGitOAuth.tsx";
 import { TenantMachineView } from "./tenantMachine.tsx";
 import { TenantEngineAccessView } from "./tenantEngineAccess.tsx";
@@ -58,6 +60,8 @@ export function tenantScopeGroups(opts: { cost: boolean; engines?: boolean }): S
     // Branch naming rules (ADR 0103 decision 10): like the MCP distribution above, a list the
     // tenant admin keeps in the CP that every member's Agent pulls.
     ["branch-rules", "tenant.tab_branch_rules"],
+    // Defaults for members' Console (ADR 0114 decision 8): the agent the first-run card names.
+    ["member-defaults", "tenant.tab_member_defaults"],
     // The reduced engine panel (ADR 0072 open question 11). Created only where the operator
     // granted this tenant `allow_engine_ingest` — like the cost item above, the item does not
     // exist rather than existing and being hidden, because the CP answers 403 without the
@@ -74,7 +78,12 @@ export function tenantScopeGroups(opts: { cost: boolean; engines?: boolean }): S
       label: "tenant.group_tenant",
       // Limits are about the tenant itself, so they belong to neither login nor manage. The
       // deployment admin decides them, but a tenant admin can read them in the same place.
-      items: [["limits", "tenant.tab_limits"]],
+      // The limit board switch (ADR 0111 addendum item 4) is the tenant admin's, like the
+      // machine class: it decides whether the tenant's members can publish at all.
+      items: [
+        ["limits", "tenant.tab_limits"],
+        ["limit-board", "limits.tenant_tab"],
+      ],
     },
     {
       key: "login",
@@ -495,6 +504,7 @@ export function TenantScopeBody({
     );
   }
   if (section === "network") return <TenantNetworkView key={slug} slug={slug} />;
+  if (section === "limit-board") return <TenantLimitBoardView key={slug} slug={slug} />;
   if (section === "engine-access") return <TenantEngineAccessView key={slug} slug={slug} />;
   // The reduced engine panel, which since the panel was split in two is the MODELS screen and
   // only that — the other half buys and stops a GPU, which a tenant admin may never do. Still
@@ -548,6 +558,7 @@ export function TenantScopeBody({
   if (section === "audit") return <AuditView key={slug} tenants={one} isSuper={false} />;
   if (section === "mcp") return <McpAdminView key={slug} tenants={one} />;
   if (section === "branch-rules") return <TenantBranchRulesView key={slug} slug={slug} />;
+  if (section === "member-defaults") return <TenantMemberDefaultsPanel key={slug} slug={slug} />;
   // tenant is passed because this view carries two toggles, "accept" and "show as a button"
   // (docs/log/61 §61.17.5). Only a super_admin can flip them, and the rules PUT stays fixed at
   // withSuperAdmin (decision 19). onChanged reloads the four columns.

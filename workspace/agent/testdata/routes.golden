@@ -1,19 +1,45 @@
 # Every (method, path) buildMux() registers. Generated - do not edit by hand.
 # Update: cd workspace/agent && go test -run TestRouteTableGolden -update-routes-golden .
 # ANY = registered without a method.
-# count: 346
+# count: 390
+POST /agents/memory/af-import
+GET /agents/memory/af-import/preview
+GET /agents/memory/auto-sync
+POST /agents/memory/auto-sync
+GET /agents/memory/auto-sync/preview
+GET /agents/memory/claude-export
+POST /agents/memory/claude-export
+GET /agents/memory/claude-export/preview
+GET /agents/memory/claude-import
+POST /agents/memory/claude-import
+GET /agents/memory/claude-import/preview
 GET /agents/memory/diff
 GET /agents/memory/entries
 POST /agents/memory/entries
 GET /agents/memory/entries/changes
 GET /agents/memory/entries/diff
 POST /agents/memory/entries/forget
+GET /agents/memory/entries/list
+GET /agents/memory/entries/member-forgotten
+GET /agents/memory/entries/member-latest
+GET /agents/memory/entries/member-read
+POST /agents/memory/entries/member-save
+GET /agents/memory/entries/member-search
+POST /agents/memory/entries/pin
+POST /agents/memory/entries/project-move
+GET /agents/memory/entries/project-move-preview
+GET /agents/memory/entries/projects
+POST /agents/memory/entries/purge
+GET /agents/memory/entries/purge-preview
 GET /agents/memory/entries/read
 POST /agents/memory/entries/revert
 GET /agents/memory/entries/search
 GET /agents/memory/export
 POST /agents/memory/import
 POST /agents/memory/import/apply
+GET /agents/memory/muse-import
+POST /agents/memory/muse-import
+GET /agents/memory/muse-import/preview
 POST /agents/memory/restore
 GET /agents/memory/roots
 PUT /agents/memory/settings
@@ -173,6 +199,7 @@ GET /fleet-graph
 GET /fs/changes
 DELETE /fs/delete
 GET /fs/download
+GET /fs/download-zip
 GET /fs/file
 PUT /fs/file
 GET /fs/images
@@ -190,6 +217,7 @@ GET /gcp-login
 GET /gcp-login/profiles
 GET /gcp-login/profiles/{name}/attempts/{attempt}
 POST /gcp-login/profiles/{name}/attempts/{attempt}/code
+POST /gcp-login/profiles/{name}/logout
 POST /gcp-login/profiles/{name}/start
 POST /gcp-login/{id}/cancel
 POST /gcp-login/{id}/start
@@ -233,6 +261,7 @@ POST /memos/paste-image
 GET /muse/usage
 GET /notifications
 POST /notifications/ack
+GET /preview-listener/{port}
 ANY /proxy/{port}/{rest...}
 GET /repo-jobs
 DELETE /repo-jobs/{id}
@@ -274,7 +303,11 @@ GET /repos/{name}/status
 GET /repos/{name}/submodules
 GET /repos/{name}/svn-auth
 POST /repos/{name}/svn-auth
+GET /repos/{name}/svn-changes
 POST /repos/{name}/svn-cleanup
+GET /repos/{name}/svn-diff
+GET /repos/{name}/svn-log
+GET /repos/{name}/svn-show
 POST /repos/{name}/svn-update
 POST /repos/{name}/unstage
 GET /session-search
@@ -282,6 +315,8 @@ GET /session-search/turns
 GET /sessions
 POST /sessions
 GET /sessions-idempotency/{key}
+POST /sessions-idempotency/{key}/abandon
+POST /sessions-idempotency/{key}/reserve
 GET /sessions/archived
 GET /sessions/catalog
 GET /sessions/cleanup
@@ -292,12 +327,14 @@ POST /sessions/{name}/archive
 POST /sessions/{name}/carried-answer
 GET /sessions/{name}/committed
 POST /sessions/{name}/driver
+GET /sessions/{name}/export
 POST /sessions/{name}/fork
 POST /sessions/{name}/halt
 GET /sessions/{name}/handoff-context
 DELETE /sessions/{name}/handoff-proposal
 GET /sessions/{name}/handoff-proposal
 POST /sessions/{name}/handoff-proposal
+POST /sessions/{name}/handoff-push
 POST /sessions/{name}/input
 POST /sessions/{name}/keep-awake
 POST /sessions/{name}/lock
@@ -305,6 +342,12 @@ DELETE /sessions/{name}/marks
 GET /sessions/{name}/marks
 POST /sessions/{name}/marks
 GET /sessions/{name}/messages
+POST /sessions/{name}/move
+POST /sessions/{name}/move/cancel
+POST /sessions/{name}/move/deliver
+GET /sessions/{name}/move/preview
+POST /sessions/{name}/move/reopen
+POST /sessions/{name}/move/retry
 GET /sessions/{name}/output
 POST /sessions/{name}/paste-image
 GET /sessions/{name}/pasted/{file}
@@ -343,6 +386,7 @@ GET /user-notes/preview
 POST /work-items/comment
 POST /work-items/detail
 POST /work-items/fetch
+POST /work-items/jira-projects
 GET /workspace/machine
 GET /workspace/stats
 GET /ws/browser

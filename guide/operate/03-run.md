@@ -8,8 +8,8 @@ updated: "2026-09"
 
 English | [日本語](03-run.ja.md)
 
-This chapter covers steady-state operations after installation — backup, restore, upgrades,
-air-gapped networks, and stopping Workspaces — together with the decision points involved.
+This chapter covers steady-state operations after installation (backup, restore, upgrades,
+air-gapped networks, and stopping Workspaces), together with the decision points involved.
 **The actual commands (`backup.sh` / `restore.sh` / upgrade / air-gapped procedures) are
 canonically documented in [deploy/compose/README.md](../../deploy/compose/README.md).**
 Rather than duplicating the commands here, this chapter supplements them with "what happens
@@ -26,7 +26,7 @@ of the runbook.
 
 What **goes into** the archive (= with this alone you can restore onto another host):
 
-- `control-plane.db` — the graph of tenants / members / ports / tokens.
+- `control-plane.db`: the graph of tenants / members / ports / tokens.
 - Each user's home (working trees, dotfiles, the envelope-encrypted `secrets.enc`).
 - Each user's `claude-config` (**plaintext Claude login state**).
 - Caddy's certificates (to avoid Let's Encrypt rate limits at restore time).
@@ -35,23 +35,22 @@ What is **not included**:
 
 - `shared/jvm` (the re-fetchable, huge Temurin JDKs) is deliberately excluded.
 - **`AF_MASTER_KEY` is not included.** It lives in `.env` and is by design never put into
-  the archive. **Keep it outside the data area** — the archive now also carries the client
+  the archive. **Keep it outside the data area.** The archive also carries the client
   secrets of tenant-defined sign-in methods (sealed with that key), so a copy of the key stored
   next to the data would undo the separation the envelope encryption exists for.
 
-> These two points are the heart of operations. The backup archive is **sensitive data that
+> These two points matter most in operations. The backup archive is **sensitive data that
 > contains plaintext Claude state**, so be strict about the permissions and encryption of
 > wherever you store it. At the same time, possessing the archive alone is not enough: without
 > `AF_MASTER_KEY`, the envelope-encrypted credentials cannot be decrypted. Conversely, if you
-> lose `AF_MASTER_KEY`, every past archive becomes permanently undecryptable (crypto-shred —
-> see [03](04-secure.md)). **Keep the key and the data separate, but back up both** — that is
-> the right answer.
+> lose `AF_MASTER_KEY`, every past archive becomes permanently undecryptable (crypto-shred;
+> see [04](04-secure.md)). **Keep the key and the data separate, but back up both.**
 
 ### Impact on users
 
 By default `backup.sh` **briefly stops the CP and Caddy** to take a consistent SQLite snapshot,
 then restarts them immediately. During this, **user Workspaces (`af-ws-*`) do not stop, since
-they are outside compose management** — sessions stay connected and work continues. During the
+they are outside compose management**; sessions stay connected and work continues. During the
 few seconds of downtime, Console logins and API relaying merely become temporarily unresponsive.
 If the caller has already guaranteed quiescence, `--no-stop` lets you take the backup without
 stopping anything.
@@ -70,7 +69,7 @@ runbook's "Backup & restore".
 
 The flow is: "prepare `.env` (restore **the same `AF_MASTER_KEY` as the backup source** from
 your vault) → `restore.sh <archive>` → `docker compose up -d` → **Start** each Workspace from
-the Console". Three key points.
+the Console". There are three key points.
 
 1. **`AF_MASTER_KEY` must be identical to the original.** If it differs or is missing, the
    wrapped DEKs cannot be unwrapped and the credentials cannot be decrypted. Verify the
@@ -93,7 +92,7 @@ The commands are in the runbook's "Upgrade" section.
 
 - **Images come from GHCR** (`ghcr.io/k-k1/agent-fleet/*`, resolved through `REGISTRY` +
   `VERSION`); pulling them needs no registry login. Remember that the **workspace image is
-  not a compose service**, so `docker compose pull` does not fetch it — `docker pull` it
+  not a compose service**, so `docker compose pull` does not fetch it; `docker pull` it
   separately, or let the first Start pull it on demand.
 - **Schema migrations are embedded in the CP and applied automatically at startup**
   (**forward-compatible**). No manual migration runs are needed.
@@ -104,25 +103,45 @@ The commands are in the runbook's "Upgrade" section.
 - **On AWS (`ecs` / `ecs-ec2`) the command is `deploy/aws/ecs/update.sh`, not compose**
   (`VERSION=<v> ./update.sh --profile <p> --region <r>`): it pushes to ECR, re-deploys the
   ingress stack with only `ImageTag` overridden, and waits for the CP service to roll.
-  When a release needs one stack updated before another — the reverse of the script's usual
-  order — `update.sh` checks for that first, stops before touching anything, and prints the
+  When a release needs one stack updated before another (the reverse of the script's usual
+  order), `update.sh` checks for that first, stops before touching anything, and prints the
   exact `aws cloudformation deploy` command to run on its own; then run `update.sh` again.
-  **Running workspaces are not upgraded automatically** — each picks the new image up on its
+  **Running workspaces are not upgraded automatically**: each picks the new image up on its
   next Start. The users concerned see a "Restart needed" badge in the Console, so when to take the
   restart is their call, not yours.
+  **Data stack and the EFS backup:** `update.sh` does not update the data stack. A
+  `Persistence=retain` deployment stood up before v0.26.0 has no daily EFS backup until
+  that stack is updated by hand; `update.sh` warns when it finds this (read-only check) and
+  prints the change-set command. See `deploy/aws/ecs/README.md`, "Upgrade (runbook)" step 1a.
+  The same finding is shown to super_admins as a banner on every section of the Console's
+  Admin screen ("no daily EFS backup"), so it is not lost if nobody reads the `update.sh`
+  output. `update.sh` records it in the ingress stack (parameter `EfsBackup`), and the banner
+  clears at the first `update.sh` run that confirms the data stack has its backup. Never filled
+  means no banner. If `update.sh` cannot read or evaluate the data stack it keeps the previous
+  verdict, so an existing banner stays until a run confirms the fix.
 
 ### ecs-ec2: replacing slots after a launch template change
 
 A slot reads its user data only when it is launched, and a stopped workspace goes back to the
 same slot on its next Start, so a change to the slot launch template (a release's security
 setting, for example) does not reach the slots you already have. Replace them from the
-Console instead of terminating instances by hand:
+Console instead of terminating instances by hand.
+
+**Slots below `$Latest` are replaced automatically.** When a workspace starts and its home is on
+such a slot, that start moves it to a new slot exactly as a reservation does, but without the WS
+bar notice, and a free slot below `$Latest` is terminated by the sweeper. If no new slot can be
+launched (capacity, quota) the start still succeeds on the old slot and tries again at a later
+start. Each automatic move is in the audit log (`pool.slot_replace_auto`). The Slots tab shows
+**older than $Latest · replaced at next start** on these slots. Set
+`AF_ECS_EC2_AUTO_REPLACE_OUTDATED_SLOTS=false` on the Control Plane to turn this off. Reserve slots
+yourself when a workspace must never be put back on its old slot (then a start that cannot launch
+a new slot fails instead):
 
 1. **Settings → Admin → Slots** (super_admin). The **Template** column shows the launch template
    version each slot was launched from, marked **older than $Latest** when it is.
 2. **Reserve all N for replacement…** lists the slots below `$Latest` and the workspace on each,
    and reserves exactly those once you confirm. **Replace at next start** on a row reserves one
-   slot; **Cancel replacement** takes it back. Every reservation is in the audit log
+   slot (a reserved row then shows the label "replaced at next start"); **Cancel replacement** takes it back. Every reservation is in the audit log
    (`pool.slot_replace_reserve` / `pool.slot_replace_cancel`, with the workspace it moves).
 3. Nothing happens to a running workspace. Its member sees **Moves to a new slot** in the WS bar,
    and their next stop → start launches a new slot from `$Latest`, moves the home onto it and
@@ -159,7 +178,7 @@ There are four decision points.
 
 - **Diagram icons (`.drawio`)**: the vendored drawio viewer draws diagrams offline, but the
   vendor icon artwork (`shape=mxgraph.aws4.*`, GCP, Azure, Kubernetes, rack gear …) is **not**
-  bundled — all of it together is 40.8 MB. Normally the Control Plane fetches a set on first
+  bundled; all of it together is 40.8 MB. Normally the Control Plane fetches a set on first
   use and caches it; with no external network that fetch fails and diagrams degrade quietly to
   outlines, colours and labels. To avoid that, seed the cache from a directory you carry in:
 
@@ -176,7 +195,7 @@ There are four decision points.
   so you can equally well `tar` a seeded cache directory and unpack it on another host. Run
   `--list` first to see exactly what the default bundle covers, and what it leaves out.
 
-Be clear-eyed about what "air-gapped" buys you: local images let the fleet **start**, but the
+What "air-gapped" buys you is limited: local images let the fleet **start**, but the
 agents themselves cannot do any work without reaching their model endpoints. The offline
 install path is for hosts on a restricted internal network, not for a genuinely disconnected
 one.
@@ -192,12 +211,12 @@ instruction files at each start).
 The policy is split in two so that it stays short: the always-loaded file carries only the
 prohibitions and the traps an agent cannot see coming, and ends with an index of **topic files**
 (`workspace/notes/<topic>.md`, shipped as `/usr/local/share/agent-fleet/notes/`) that hold the
-procedures — the agent reads the one for its situation when it gets there. Put a new rule in the
+procedures; the agent reads the one for its situation when it gets there. Put a new rule in the
 always-loaded file only when the agent has to know it *before* it knows it needs it; everything
 else goes in a topic file, and the index line is what makes it findable. Where the CLI has a
 user-level skills directory (claude, codex, opencode) the agent also registers each topic file as
-a skill named `af-<topic>` at every start, so the CLI's own skill index — description at start,
-body on demand — is a second way to the same text; the other kinds have only the index.
+a skill named `af-<topic>` at every start, so the CLI's own skill index (description at start,
+body on demand) is a second way to the same text; the other kinds have only the index.
 
 - This is where fleet-wide rules go: **what must not be done** (deleting repositories, writing
   credentials in the clear), **the constraints of this environment** (no root, no Docker, shared
@@ -208,8 +227,48 @@ body on demand — is a second way to the same text; the other kinds have only t
   Agent instructions, and fleet policy wins where the two conflict
   ([member/06](../member/06-agents.md#agent-instructions-write-down-how-you-work-once)).
 - **The always-loaded file's length is a per-session context cost.** Every agent reads it every
-  time, so before adding to it, check that it is genuinely needed by everyone, every time — a
+  time, so before adding to it, check that it is genuinely needed by everyone, every time; a
   topic file costs nothing until it is read. This layer cannot be delivered to cursor.
+
+## opencode 2: Terminal sessions and the shared server
+
+With opencode 2, Terminal (CLI) sessions attach to the one opencode server the Workspace Agent
+runs ([member/06](../member/06-agents.md#how-opencode-2-differs)). To force a private server per
+Terminal session instead (about 150-250 MB more memory per session, measured idle), start the
+Workspace Agent with this in its environment:
+
+```
+AF_OPENCODE_TUI_STANDALONE=1
+```
+
+- It takes effect for Terminal sessions launched after the Agent starts with it; running
+  sessions keep the mode they started in.
+- `AF_OPENCODE_SERVE_DISABLE=1` (managed opencode off) also gives private servers, because
+  there is no shared server to attach to.
+- On an image re-pinned to opencode 1 (below) neither variable has an effect on Terminal sessions.
+
+### Going back to opencode 1
+
+The image pins opencode 2 (`OPENCODE_VERSION` in `workspace/Dockerfile`). If it misbehaves in
+your deployment, the way back is an image whose pin is `1.19.0`: rebuild with
+`--build-arg OPENCODE_VERSION=1.19.0` (the install, the self-update and the drift check pick
+`opencode-ai` for a 1.x pin by themselves), then Stop and Start the workspaces.
+
+- **What carries over.** The first opencode 2 start converted `~/.local/share/opencode/opencode.db`
+  in place and imported the opencode 1 sessions, keeping their ids. opencode 1 still runs on the
+  converted file and sees every conversation from before the upgrade.
+- **What is lost.** Conversations created under opencode 2, and turns added under opencode 2 to
+  older ones, are not visible to opencode 1 (it does not read the tables opencode 2 writes), and
+  conversations started under opencode 1 after the way back are not visible to opencode 2 on a
+  later upgrade. The data is not deleted.
+- **To be able to undo an upgrade exactly,** copy `~/.local/share/opencode/opencode.db*` of the
+  workspace before the first opencode 2 start and put the copies back after the way back.
+- **Leftovers of the earlier opt-in.** A workspace that had run `workspace-agent opencode-major 2`
+  (a private opencode 2 install under `~/.local/share/agent-fleet/opencode2` with its own database
+  in `opencode2-data`) ignores both once the pin is 2.x: the pinned opencode 2 uses the main
+  database, and the sessions that only exist in the private database are **not merged** into it.
+  They stay on disk until you delete the two directories. After a way back to a 1.x pin the opt-in
+  works as it did before.
 
 ## Once it is on the public internet
 
@@ -224,11 +283,11 @@ hours** (measured: 172 probes for `/actuator/heapdump`, `/.env` and friends in t
 - **The access log carries the status code**, e.g. `GET /actuator/heapdump 401 0s`, so
   the log alone answers "did we refuse it, or serve it?". Filter on `401` to count probes.
 - **Per-IP analysis and blocking belong outside the CP**: ALB access logs for the former,
-  AWS WAF for the latter. The CP deliberately has no path-level blocklist of its own —
+  AWS WAF for the latter. The CP deliberately has no path-level blocklist of its own;
   that would add a second place where access is decided. On AWS, `30-ingress` ships an
   **off-by-default WAF** with exactly two knobs: `WafRateLimitPer5Min` and
   `WafIpReputation`. ⚠️ **Signature rule sets (Core rule set, SQLi, XSS) are deliberately
-  not offered** — this product carries source code and shell commands in ordinary request
+  not offered**: this product carries source code and shell commands in ordinary request
   bodies, so `'; DROP TABLE` and `../../etc/passwd` are legitimate traffic and those rules
   would 403 real work at random, looking like a product bug.
 - **If only your own people need it, narrow the door instead**: `00-network`'s
@@ -236,17 +295,17 @@ hours** (measured: 172 probes for `/actuator/heapdump`, `/.env` and friends in t
 
 ## Telling two deployments apart (colour and label)
 
-The moment a second deployment exists — staging beside production, or a laptop beside both —
+The moment a second deployment exists (staging beside production, or a laptop beside both),
 every tab in the strip and every icon on a phone's home screen is the same teal cat, and the
 login page gives no hint which one you are signing in to. Two settings on the Control Plane
 fix that; both are cosmetic, and nothing about access or data depends on them.
 
 **Where to set it.** The quickest route is the Console: **Admin → Deployment → Appearance**
-(super_admin only) — pick a colour, type a label, save. It takes effect on the next request,
+(super_admin only): pick a colour, type a label, save. It takes effect on the next request,
 with no restart, and the tab you are looking at updates on the spot. The two settings below
 are the same thing on the deployment side: they are the value a fresh deployment starts
 from, and what the modal falls back to when you press "Follow the environment". **A choice
-saved in the modal wins over them** — change the environment afterwards and nothing moves
+saved in the modal wins over them**: change the environment afterwards and nothing moves
 until you reset.
 
 | Setting | What it does |
@@ -261,7 +320,7 @@ AF_BRAND_LABEL=staging
 
 Compose reads them from `.env`; on AWS ECS they are the `BrandColor` / `BrandLabel` stack
 parameters; the native runtime and `run-dev.sh` take them from the environment. A restart is
-enough — there is no separate image to build, because the Control Plane recolours the shipped
+enough; there is no separate image to build, because the Control Plane recolours the shipped
 art as it serves it.
 
 - The label is a **prefix** on purpose: a crowded tab strip and a phone launcher both truncate
@@ -270,15 +329,15 @@ art as it serves it.
   time. On Android those are baked into the installed app, which is why the status bar
   inside it can stay on the old colour while the same deployment is correctly coloured in a
   browser tab. Chrome rebuilds the installed app in the background eventually, but that
-  takes days; **reinstall it** — long-press the icon, uninstall, then install again from the
-  browser — to see the change now.
+  takes days; **reinstall it** (long-press the icon, uninstall, then install again from the
+  browser) to see the change now.
 - An unknown colour name is not fatal: the Control Plane logs it and stays on teal.
 
 ## Idle stop and force-stop
 
 - **A start that never finishes is stopped**: a Workspace that has been starting for
-  **30 minutes** with no task running — on ECS, typically a task the cluster refuses to
-  place — is stopped, so it no longer holds capacity and the user can press **Start** again
+  **30 minutes** with no task running (on ECS, typically a task the cluster refuses to
+  place) is stopped, so it no longer holds capacity and the user can press **Start** again
   once the cause is fixed. The 30 minutes count from its last Start, or from when the
   Control Plane first saw it starting if that is later (after a Control Plane restart, for
   instance), and it is checked once per usage sample (5 minutes), so the stop comes up to
@@ -293,19 +352,27 @@ art as it serves it.
 - **Automatic idle stop (scale-to-zero)**: an idle claude session is halted after **1 hour**
   and a Workspace with nothing running is stopped after **2 hours**. That is the default;
   `AF_SESSION_IDLE_TIMEOUT` / `AF_INTERACTION_IDLE_TIMEOUT` (a session parked on a question or an approval) / `AF_WS_IDLE_TIMEOUT` / `AF_PRESENCE_IDLE_TIMEOUT` (how long a terminal with no typing still counts as someone being there; 30m) change it (per-tenant overrides are in the
-  Admin UI — a tenant setting `0` opts that tenant out, and `0` in the env turns it off for the
+  Admin UI: a tenant setting `0` opts that tenant out, and `0` in the env turns it off for the
   whole deployment). A stopped Workspace comes back when the user presses **Start**, and
   `AF_AUTOSTART` (on by default) additionally starts it for the deliberate "I am using this
-  now" actions — creating, forking or resuming a session, answering a carried question, the
+  now" actions: creating, forking or resuming a session, answering a carried question, the
   SSM node lookup. **Opening a terminal does not start it, and neither does reading or
   reloading the Console**: those answer "the workspace is stopped — start it first", so a tab
   left open never keeps a Workspace warm. This is effective for
   saving resources. For the meaning of the env vars, see
   `deploy/compose/.env.example`; for how it works, see
-  `docs/build/09-deploy.md` §9.4.
+  `docs/build/09-deploy.md` §9.4. A Terminal claude, agy, codex, cursor, copilot, kiro or opencode session showing "working" keeps the
+  Workspace awake only while it shows signs of life: if it has produced no output, state change or
+  running tool process for **1 hour**, it stops counting. That is a limit on time without any
+  change, not on total working time. For claude and agy a running tool process counts as life; for
+  codex, cursor, copilot, kiro and opencode only a pane repaint does (a spinner or elapsed-time
+  counter counts), so a silent tool under a pane that stays static for an hour can lapse, while a
+  stuck session whose spinner keeps animating keeps holding. Use the "do not auto-stop" pin for
+  long silent work on those kinds. Managed sessions and the other kinds (muse, lcpp, shell, ssm) are not yet bounded this way, and background
+  work and the "do not auto-stop" pin are never subject to it.
 - **force-stop (brute force)**: `docker compose down` **does not stop user Workspaces** (they
   are outside compose management). To stop a specific Workspace for sure, a super_admin
   force-stops it from the Admin panel in the Console. When the whole host must be brought fully
   down for maintenance, after stopping the CP/Caddy you also need to `docker stop` the remaining
   `af-ws-*` containers separately (this also comes up in the troubleshooting chapter,
-  [04](06-diagnose.md)).
+  [06](06-diagnose.md)).

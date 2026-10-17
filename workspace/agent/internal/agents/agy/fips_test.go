@@ -36,11 +36,23 @@ func TestEnvDoesNotMutateCaller(t *testing.T) {
 func TestBuildLaunchCarriesMaskInEnv(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", t.TempDir())
-	plan, err := New().BuildLaunch(session.Meta{Name: "s", Dir: dir, Kind: session.KindAgy}, agents.LaunchOpts{})
+	m := session.Meta{Name: "s", Dir: dir, Kind: session.KindAgy}
+	hookRecords.Write(session.UUID(dir, "s"), hookRecord{ConvID: "old", State: "working"})
+	plan, err := New().BuildLaunch(m, agents.LaunchOpts{})
 	if err != nil {
 		// Unsupported host (no agy binary, or a mask that does not help): nothing to assert.
 		t.Skipf("BuildLaunch refused on this host: %v", err)
 	}
+	// The launch generation rides the same env; a record of an earlier launch is gone.
+	sid := session.UUID(dir, "s")
+	if _, ok := hookRecords.Read(sid); ok {
+		t.Error("BuildLaunch kept the previous launch's hook record")
+	}
+	last := plan.Env[len(plan.Env)-1]
+	if last != launchEnvVar+"="+launchGens.Read(sid) || launchGens.Read(sid) == "" {
+		t.Fatalf("last env %q does not carry the stored launch generation", last)
+	}
+	plan.Env = plan.Env[:len(plan.Env)-1]
 	want := MaskEnv()
 	if len(plan.Env) != len(want) {
 		t.Fatalf("plan.Env = %q, want %q", plan.Env, want)

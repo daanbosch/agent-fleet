@@ -7,7 +7,10 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/afmemory"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/agy"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/claude"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/opencode"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/browserx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/mcpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/sessionx"
@@ -52,6 +55,14 @@ var subcommands = []subcommand{
 		operands: "<verb>",
 		summary:  "per-working-copy Postgres for tests: up|url|env|reset|down|status",
 		run:      runAFDB,
+	},
+	{
+		// Behind the af-memory PATH shim (ADR 0108): the command-line side of AF memory, talking
+		// to this workspace's own Agent.
+		name:     "af-memory",
+		operands: "<verb>",
+		summary:  "AF agent memory: changes|import-sources|import --project <slug> [--dry-run]",
+		run:      afmemory.Run,
 	},
 	{
 		// Behind the af-aws-exec PATH shim (issue #998): one command under one SSO
@@ -131,6 +142,20 @@ var subcommands = []subcommand{
 		run:     runInstallMuse,
 	},
 	{
+		// Opt-in to opencode 2 beside the pinned 1.x: a private npm prefix, ~200 MB, never
+		// on PATH. opencode-major switches af's launches to it.
+		name:     "install-opencode2",
+		operands: "[version]",
+		summary:  "download opencode 2 into the home volume (does not switch to it)",
+		run:      runInstallOpencode2,
+	},
+	{
+		name:     "opencode-major",
+		operands: "[1|2]",
+		summary:  "show, or switch, which opencode major af launches (2 needs install-opencode2)",
+		run:      runOpencodeMajor,
+	},
+	{
 		name:     "install-postgres",
 		operands: "[major]",
 		summary:  "download the Zonky embedded-postgres binaries for this arch",
@@ -162,6 +187,22 @@ var subcommands = []subcommand{
 		run:     runCredHelper,
 	},
 	{
+		// The pasted-API-token REST credential for the PATH wrapper at /usr/local/bin/bkt;
+		// the one case `git credential fill` cannot express. See bkt_cred.go.
+		name:    "bkt-cred",
+		summary: "Bitbucket API-token email and token for the bkt wrapper",
+		hidden:  true,
+		run:     runBktCred,
+	},
+	{
+		// The Jira connection for the PATH wrapper at /usr/local/bin/jira, renewed when an
+		// OAuth token is about to expire. See jira_cred.go.
+		name:    "jira-cred",
+		summary: "Jira site, login and token for the jira wrapper",
+		hidden:  true,
+		run:     runJiraCred,
+	},
+	{
 		// Transparent SVN auth: the PATH shim at /usr/local/bin/svn re-enters this binary,
 		// which fills in the credential and execs the real svn — so the process svn's caller
 		// sees is still svn. See svn_wrapper.go.
@@ -185,10 +226,47 @@ var subcommands = []subcommand{
 		run:     sessionx.RunSessionStatusHook,
 	},
 	{
+		name:    agy.HookSubcommand,
+		summary: "agy hook: record the conversation id and working/idle state",
+		hidden:  true,
+		run:     agy.RunHook,
+	},
+	{
 		name:    claude.PushHookSubcommand,
 		summary: "claude hook: forward a PushNotification to the notification center",
 		hidden:  true,
 		run:     sessionx.RunPushNotificationHook,
+	},
+	{
+		// The pane program of an opencode 2 Terminal session on af's shared serve: PUTs the
+		// pane's environment as the session's shell environment, then becomes the TUI.
+		name:    "opencode-attach",
+		summary: "put this pane's environment on an opencode session, then start the TUI",
+		hidden:  true,
+		run:     opencode.RunAttach,
+	},
+	{
+		// Called by the opencode TUI plugin for a session its pane shows: one winner per session.
+		name:    "opencode-claim",
+		summary: "claim an opencode session for a Terminal slot (environment, then tag)",
+		hidden:  true,
+		run:     opencode.RunClaim,
+	},
+	{
+		// Called by the opencode shared-serve plugin before a shell command whose session has no
+		// confirmed environment on this server generation.
+		name:    "opencode-put-env",
+		summary: "put an opencode Terminal slot's pane environment on one of its sessions",
+		hidden:  true,
+		run:     opencode.RunPutEnv,
+	},
+	{
+		// Called by the opencode shared-serve plugin: the engine token scoped to one session,
+		// which the server's own (workspace-scoped) environment cannot carry.
+		name:    "opencode-engine-token",
+		summary: "print the engine token scoped to an opencode Terminal session",
+		hidden:  true,
+		run:     runOpencodeEngineToken,
 	},
 	{
 		// Appended after the agent CLI by startSessionTmux, so a crash / OOM is recorded.

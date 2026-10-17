@@ -20,6 +20,8 @@ export const viewer: Record<keyof typeof jaViewer, string> = {
   "browser.keyboard_toggle": "Show or hide the keyboard",
   "browser.loading": "Loading page…",
   "browser.target_unreachable": "The target port is unreachable. Start the service, then reconnect.",
+  "browser.target_not_http": "The target port is listening but does not speak HTTP. The browser pane shows HTTP only.",
+  "browser.target_tls": "The target port is serving HTTPS. Turn off the dev server's HTTPS, then reconnect.",
   "browser.crashed": "The browser inside the container crashed.",
   "browser.installing": "Preparing the browser (first use only, ~200MB download)…",
   "browser.disconnected": "The browser pane disconnected.",
@@ -29,8 +31,8 @@ export const viewer: Record<keyof typeof jaViewer, string> = {
   "browser.protocol_mismatch": "The browser-pane protocol version does not match.",
   "browser.unavailable.title": "Browser features are not available on this workspace",
   "browser.unavailable.body":
-    "This workspace runs on the {runtime} runtime, where Chromium's sandbox cannot start (it needs user namespaces or a setuid helper, and the restricted pod forbids both). Rather than run Chromium unsandboxed, the browser pane and the agents' browser tools are turned off. Open web apps in the lightweight preview (a new tab) instead.",
-  "browser.unavailable.short": "Not available on the {runtime} runtime: Chromium's sandbox cannot start in its restricted pod",
+    "This workspace runs on the {runtime} runtime, where Chromium's sandbox cannot start (it needs user namespaces or a setuid helper, and this runtime's restricted workspace container forbids both). Rather than run Chromium unsandboxed, the browser pane and the agents' browser tools are turned off. Open web apps in the lightweight preview (a new tab) instead.",
+  "browser.unavailable.short": "Not available on the {runtime} runtime: Chromium's sandbox cannot start in its restricted workspace container",
   "browser.unavailable.open_light": "Open :{port} in the lightweight preview",
   "browser.console_empty": "No Console messages.",
   "browser.copy_console": "Copy Console messages",
@@ -101,13 +103,13 @@ export const viewer: Record<keyof typeof jaViewer, string> = {
   "view.doc.cannot_convert": "(Could not convert this document)",
   "view.doc.unsupported": "(This format is not supported)",
   "view.doc.encrypted": "(This document is password-protected)",
-  "view.doc.needs_ocr": "(The pages are images only — reading their text needs OCR, which is not available here)",
+  "view.doc.needs_ocr": "(The pages are images only. Reading their text needs OCR, which is not available here)",
   "view.doc.too_large": "(Too large to convert here)",
   "view.doc.download_hint": "Open the original through the download link in the info bar.",
   "view.pdf.pages_meta": " · {n} pages",
   "view.pdf.loading": "Loading the PDF…",
   "view.pdf.cannot_load": "(Cannot display this PDF)",
-  "view.pdf.password": "(This PDF is password-protected — download it to open it)",
+  "view.pdf.password": "(This PDF is password-protected. Download it to open it)",
   "view.pdf.broken": "(The PDF is damaged or in an unsupported format)",
   "view.pdf.page_of": "{n} / {total}",
   "view.pdf.prev_page": "Previous page",
@@ -170,7 +172,7 @@ export const viewer: Record<keyof typeof jaViewer, string> = {
   "view.table_repaired":
     "This table is written with the fullwidth ｜ instead of |, so it is shown repaired here. Other Markdown viewers will still render it as plain text.",
   "view.frontmatter_invalid":
-    "This front matter is not valid YAML, so it is read line by line as `key: value` here. Other Markdown viewers will render it as body text — quote any value that starts with a reserved character such as ` or @.",
+    "This front matter is not valid YAML, so it is read line by line as `key: value` here. Other Markdown viewers will render it as body text. Quote any value that starts with a reserved character such as ` or @.",
 
   // === Text/code editor (docs/log/44 Phase 2) ===
   "editor.aria_label": "{path} editor",
@@ -255,4 +257,9 @@ export const viewer: Record<keyof typeof jaViewer, string> = {
   "editor.suggestion.selection_too_large": "The selection is too large to suggest on.",
   "editor.suggestion.instruction_invalid": "The instruction is empty or too long.",
   "editor.suggestion.invalid": "This suggestion cannot be applied.",
+  "view.path": "path",
+  "view.copy_path": "Copy the path",
+  "view.path_menu.open": "Open in pane",
+  "view.path_menu.open_new": "Open in new pane",
+  "view.path_menu.reveal": "Show in Files",
 };

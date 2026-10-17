@@ -142,7 +142,13 @@ function browserStatus(snapshot: BrowserSnapshot, tr: ReturnType<typeof useT>): 
     return key ? tr(key) : snapshot.errorMessage || tr("browser.disconnected");
   }
   if (snapshot.state === "loading") return tr("browser.loading");
-  if (snapshot.state === "target-unreachable") return tr("browser.target_unreachable");
+  if (snapshot.state === "target-unreachable") {
+    // The reason is carried next to the state (see BrowserUnreachableReason); nothing
+    // listening, an unknown reason or an older Agent keep the generic text.
+    if (snapshot.reason === "preview_not_http") return tr("browser.target_not_http");
+    if (snapshot.reason === "preview_tls") return tr("browser.target_tls");
+    return tr("browser.target_unreachable");
+  }
   if (snapshot.state === "crashed") return tr("browser.crashed");
   if (snapshot.state === "disconnected") return tr("browser.disconnected");
   return "";

@@ -7,6 +7,7 @@ import {
   checksText,
   canComment,
   canReadLive,
+  detailStateLabel,
   checksTone,
   dedupeWorkItems,
   matchWorkItem,
@@ -164,12 +165,12 @@ describe("relTime", () => {
 
   it("changes unit at each step", () => {
     expect(at("2026-08-27T11:59:40Z")).toBe("たった今");
-    expect(at("2026-08-27T11:25:00Z")).toBe("35分前");
-    expect(at("2026-08-27T09:00:00Z")).toBe("3時間前");
-    expect(at("2026-08-24T12:00:00Z")).toBe("3日前");
-    expect(at("2026-08-06T12:00:00Z")).toBe("3週間前");
-    expect(at("2026-05-29T12:00:00Z")).toBe("3か月前");
-    expect(at("2024-08-27T12:00:00Z")).toBe("2年前");
+    expect(at("2026-08-27T11:25:00Z")).toBe("35 分前");
+    expect(at("2026-08-27T09:00:00Z")).toBe("3 時間前");
+    expect(at("2026-08-24T12:00:00Z")).toBe("3 日前");
+    expect(at("2026-08-06T12:00:00Z")).toBe("3 週間前");
+    expect(at("2026-05-29T12:00:00Z")).toBe("3 か月前");
+    expect(at("2024-08-27T12:00:00Z")).toBe("2 年前");
   });
 
   it("says nothing for an empty or broken value, rather than drawing an empty clock", () => {
@@ -191,8 +192,8 @@ describe("railWhen", () => {
   });
 
   it("appears only on rows that have been sitting", () => {
-    expect(at("2026-08-24T12:00:00Z")).toBe("3日前");
-    expect(at("2026-05-29T12:00:00Z")).toBe("3か月前");
+    expect(at("2026-08-24T12:00:00Z")).toBe("3 日前");
+    expect(at("2026-05-29T12:00:00Z")).toBe("3 か月前");
   });
 
   it("says nothing for an empty or broken value", () => {
@@ -590,6 +591,12 @@ describe("live read helpers", () => {
     expect(canReadLive({ kind: "pr", provider: "bitbucket" })).toBe(true);
     expect(canReadLive({ kind: "issue", provider: "github" })).toBe(false);
     expect(canReadLive({ kind: "pr", provider: "jira" })).toBe(false);
+    // A stand-in is read live on every provider (#1697 GitHub, #1661 Jira and Bitbucket)...
+    expect(canReadLive({ kind: "issue", provider: "github" }, true)).toBe(true);
+    expect(canReadLive({ kind: "issue", provider: "jira" }, true)).toBe(true);
+    expect(canReadLive({ kind: "pr", provider: "bitbucket" }, true)).toBe(true);
+    // ...but not one the Agent has no read for.
+    expect(canReadLive({ kind: "issue", provider: "linear" }, true)).toBe(false);
   });
 
   it("counts reviews by standing, with anything undecided pending", () => {
@@ -608,5 +615,27 @@ describe("live read helpers", () => {
     expect(checksTone({ state: "success", total: 3, failed: 0, pending: 0 })).toBe("ok");
     expect(checksTone({ state: "failure", total: 3, failed: 1, pending: 0 })).toBe("bad");
     expect(checksTone({ state: "pending", total: 3, failed: 0, pending: 1 })).toBe("warn");
+  });
+});
+
+describe("detailStateLabel (#1697)", () => {
+  const base = { kind: "pr", state: "done", merged: false, draft: false, stateReason: "", provider: "github" };
+  it("keeps merged, closed, draft and open apart for a pull request", () => {
+    const labels = [
+      detailStateLabel({ ...base, merged: true }),
+      detailStateLabel(base),
+      detailStateLabel({ ...base, state: "in_progress", draft: true }),
+      detailStateLabel({ ...base, state: "open" }),
+    ];
+    expect(new Set(labels).size).toBe(4);
+  });
+  it("keeps completed and not planned apart for an issue", () => {
+    const a = detailStateLabel({ ...base, kind: "issue", stateReason: "completed" });
+    const b = detailStateLabel({ ...base, kind: "issue", stateReason: "not_planned" });
+    expect(a).not.toBe(b);
+  });
+  it("does not call a finished Jira issue completed: Jira has no close reason", () => {
+    const jira = detailStateLabel({ ...base, kind: "issue", provider: "jira" });
+    expect(jira).not.toBe(detailStateLabel({ ...base, kind: "issue", provider: "github", stateReason: "completed" }));
   });
 });

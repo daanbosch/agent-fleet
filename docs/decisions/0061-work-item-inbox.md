@@ -7,6 +7,9 @@ English | [日本語](0061-work-item-inbox.ja.md)
   **2026-08-27: Bitbucket pull requests added, with decisions 17–19** ([docs/80](../log/80-work-item-inbox.md) §80.19). The design and the background are in [docs/80](../log/80-work-item-inbox.md).
   Status update (2026-09-25): the query composer, the sort UI and grouping that decision 14 left unbuilt are not planned (decision 14; docs/log/80 §80.18.5). The detail pane was superseded by decision 20's detail modal.
   **2026-09-28: decision 25 added** — say when a query's page left matches out, and search the tracker on a press only (#1095). It departs narrowly from decision 14's line.
+  **2026-10-05: decision 26 added** — a reference that is not in the inbox is read live too, GitHub only (#1697). It departs narrowly from decision 20.1's "no single-item read for an issue".
+  **2026-10-08: decision 27 added** — the same read for a Jira key and a Bitbucket number that are not in the inbox (#1661). Follow-ups: #1661.
+  **2026-10-08: decision 28 added** — the Jira connection's project keys let a key link without a cached row of its project (#1899). Not checked against a real Jira site.
 - See also: [0031-mcp-registry.md](0031-mcp-registry.md) (MCP means "each CLI speaks it directly and af only distributes the definitions"; OAuth MCP is a non-goal) / [0036-working-sets.md](0036-working-sets.md) (the unit of "a piece of work") /
   [0055-idle-stop-and-carried-interactions.md](0055-idle-stop-and-carried-interactions.md) (do not keep it warm) / [0052-tenant-git-oauth.md](0052-tenant-git-oauth.md) (the CP passes secrets through and does not hold them) / [0059-repo-import-jobs.md](0059-repo-import-jobs.md) (the relationship between self-running work and the busy check)
 
@@ -377,6 +380,64 @@ Rejected: **paging with "show more" from the provider.** The 5-minute refresh re
 the first page, so kept pages would either vanish or have to be re-fetched every time; a stopped
 workspace cannot fetch them at all; and rows sorted by update shift between requests.
 
+**26 (#1697). A reference that is not in the inbox is read live as well — GitHub only.** The inbox
+holds open items only, so the merged PRs and closed issues that status tables in the mirror cite are
+never in it, and their stand-in panel showed no title and no state. `POST /work-items/detail` now
+accepts a `kind` that is empty for such a reference: the Agent asks `GET /repos/{o}/{r}/issues/{n}`
+(it answers for both kinds); with `pull_request` it chains into decision 24's pull request read,
+otherwise it returns an issue row (title, state, `state_reason`, assignees, labels, updated). The
+panel tells Merged from Closed, and Closed (completed) from Closed (not planned). This departs from
+decision 20.1's line (no single-item read for an issue) on purpose and narrowly, and keeps decision
+24's promises: **a human opening the panel is the only trigger**, **no body is fetched** (the issue
+object's `body` is never decoded), **nothing is stored** in the CP, and **a stopped workspace is not
+started** (409 → the old "af has no details" note). A 404 (a guessed `#N`), a missing token, a rate
+limit and an Agent from before this change all land on that same note. Jira and Bitbucket keep
+today's behaviour: a Jira key is already in the inbox when it matters, and a bare `#N` is only
+ambiguous on GitHub.
+
+Rejected: **storing the answer in the cache so the next click is free.** It would put a panel's look
+into the rail's history (the same reason as decision 24), and a closed item would then sit among the
+open ones the query asked for.
+
+**27 (#1661). The same read for a Jira key and a Bitbucket number that are not in the inbox.**
+Decision 26 reached GitHub only, on the reasoning that a Jira key is in the inbox when it matters.
+That does not hold for a finished ticket: status tables in the mirror cite done Jira issues, and the
+inbox's default query (`statusCategory != Done`) never holds them. No new route is needed: `POST
+/work-items/detail` accepts `provider: "jira"`, and the Agent asks `GET /rest/api/3/issue/{key}?fields=
+summary,status,assignee,labels,issuetype,updated` (the `fields=` list is the no-body promise, as in the
+list adapter), reusing the list adapter's issue mapping. A Bitbucket reference needed no Agent change
+(its pull request read already ignores `kind`); the Console now asks for it. Same promises as decisions
+24 and 26: a human opening the panel is the only trigger, nothing is stored, a stopped workspace is not
+started (409), and any failure — 404, no connection, refused credentials, rate limit, an Agent from
+before this change (it answers 400 `bad_provider`) — lands on the "af has no details" note. The key is
+validated against `^[A-Z][A-Z0-9_]*-[1-9][0-9]{0,9}$` before it is put into a request path, so it cannot
+steer the request elsewhere on the site. The panel says "Done" for a finished Jira issue, never
+"Closed (completed)": Jira has no close reason.
+
+Not done, tracked in #1661: Jira project keys the user can read but has no saved query for still do not
+link (the link decision is made from the cache before any read); and `#N` in Markdown files (DocView).
+
+**28 (#1899). A Jira key links when its project is on the member's connection, not only when the inbox holds a row of it.**
+Decision 27 left this open: the link decision was made from the cache alone, so a project the member reads
+but has no saved query for never linked. The Agent now answers `POST /work-items/jira-projects` with the keys
+of `GET /rest/api/3/project/search` (the projects the member may browse) and nothing else: no name, lead or URL.
+The CP relays it as `GET /api/work-items/jira-projects`; the Console asks once a rendered text holds a
+Jira-shaped token, and a key of a listed project links in prose (guessed, like a GitHub number; inline code
+still needs a cached row). A click then opens the live single-issue read of decision 27.
+- **Bounded:** at most 500 keys over at most 30 reads, in key order (each page continues from the values
+  actually received, since Jira may shorten a page); `truncated` says the list was not finished, and those keys
+  simply stay text. Keys outside the shape the linker matches are dropped, and the CP refuses an answer over 500
+  keys or with a malformed one.
+- **Cache lifetime:** the CP keeps the list in memory per membership (so a member is only ever handed their own
+  projects) for 1 hour; a stopped workspace is never started for it and keeps serving the entry up to 24 hours;
+  an Agent failure keeps the stale entry too. Older than that, never read, not connected, or an Agent from before
+  this change: an empty list, which is today's behaviour. The Console re-asks after 10 minutes (the CP answers from
+  its cache) and not more than once a minute after a failure. The CP also folds concurrent reads of one membership into one Agent read and leaves the Agent alone for a minute after a failure. The Console drops its list the moment the tenant or account changes.
+- **Why not the database:** the list is cheap to re-read and a stale key costs a click that ends on the "af has
+  no details" note, never a wrong ticket; a table would add a retention scope for no gain. A CP restart costs one read.
+- Not checked against a real Jira site (the tests use httptest fakes); a project key that is also a common word
+  (`SHA`, `UTF`) will link its `SHA-256` once the member's site has such a project.
+
 ## Options rejected
 
 - **Cache what the live pull request read returns on the CP** (the alternative to decision 24). It
@@ -436,3 +497,13 @@ workspace cannot fetch them at all; and rows sorted by update shift between requ
   Jira (already covered by decision 13). When someone asks.
 - **Cover GHE (GitHub Enterprise Server) in v1.** Both the `gh` wrapper and the direct calls are fixed
   to github.com, and giving the connection a host is separate work. When someone asks.
+
+## Note (2026-10-08, #1715): the default now names the type
+
+Decision 19's "a default must never use `OR`" no longer holds for GitHub's default. `OR` has parsed
+since the Agent in 0.19.0 (September 2026), and GitHub now answers some accounts' searches that
+name neither `is:issue` nor `is:pull-request` with 422, which cost two search requests per refresh
+(the Agent retries once). The default is now `is:open (is:issue OR is:pull-request) involves:@me`.
+Saved queries are not rewritten. The Console cannot see the Agent's version, so a workspace still on
+an older image shows "could not parse the query" until it restarts. The original decision stands as
+written above.

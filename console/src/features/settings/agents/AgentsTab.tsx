@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useToast } from "../../../ui/ToastProvider.tsx";
 import { api, apiJSON, errDetail, isTransientErr } from "../../../core/api/client.ts";
 import { Button } from "../../../ui/Button.tsx";
@@ -19,6 +19,7 @@ import {
 import { agentOf } from "../../../agents/registry.ts";
 import { SPEND_CAP_DEFAULTS } from "../../sessions/spendBudget.ts";
 import { useConnections } from "../parts/useConnections.ts";
+import { useSettingsTarget } from "../parts/useSettingsTarget.ts";
 import { useWorkspaceStore, wsStartBusy } from "../../../core/store/workspace.ts";
 import { tCount, useT } from "../../../lib/i18n/index.ts";
 import { imagegenStatus } from "../../imagegen/api.ts";
@@ -221,11 +222,10 @@ export function AgentsTab() {
         <OnOff value={s.sessionSearch} onChange={(v) => setSetting("sessionSearch", v)} />
       </Row>
       <p className="muted ds-note">{tr("agents.note_session_search")}</p>
-      {/* AF memory (ADR 0108): one more af MCP tool set every kind gets, so it sits here too. */}
-      <Row label={tr("agents.agent_memory")}>
-        <OnOff value={s.agentMemory} onChange={(v) => setSetting("agentMemory", v)} />
-      </Row>
-      <p className="muted ds-note">{tr("agents.note_agent_memory")}</p>
+      {/* AF memory (ADR 0108) is another af tool set every kind gets, but its switch lives on the
+          Agent memory page beside the change list and the import that needs it on; this line only
+          says where, so a member looking among the tool switches still finds it. */}
+      <p className="muted ds-note">{tr("agents.note_agent_memory_moved")}</p>
       {/* Image generation (ADR 0069) sits next to it for the same reason: one tool distributed
           to every kind through af's own MCP server, not any one agent's setting. */}
       <Row label={tr("agents.image_generation")}>
@@ -262,8 +262,13 @@ export function AgentsTab() {
   // (degraded): their launch defaults are reachable, connection waits for start.
   const loading = running && !conns;
 
+  // A deep-link from elsewhere (the transcript's Re-authenticate button) names the agent card to
+  // land on; the cards only exist once the connection snapshot has loaded.
+  const rootRef = useRef<HTMLDivElement>(null);
+  useSettingsTarget(rootRef, !loading);
+
   return (
-    <div className="conns">
+    <div className="conns" ref={rootRef}>
       {sessionSettings}
       {!running && (
         <div className="agents-ws-hint">

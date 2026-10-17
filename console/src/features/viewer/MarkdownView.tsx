@@ -8,12 +8,14 @@ import { useSettings } from "../../lib/settings.ts";
 import { useToast } from "../../ui/ToastProvider.tsx";
 import { openSessionChat, openSessionChatSplit } from "../sessions/open.ts";
 import { useSessionLinkMenu } from "../sessions/SessionLinkMenu.tsx";
+import { usePathLinkMenu } from "./PathLinkMenu.tsx";
 import { useChatStore, ensureConvs } from "../chat/store.ts";
 import { openChat, openChatSplit } from "../chat/open.ts";
 import { useFilesStore } from "../files/store.ts";
 import { ensureWorkItems, useWorkItemStore } from "../workitems/store.ts";
+import { ensureJiraProjects, useJiraProjects } from "../workitems/jiraProjects.ts";
 import { useReposStore } from "../repos/store.ts";
-import { cloneHosts, cloneHostsInputs, originOf, WORK_ITEM_HINT_RE, workItemRefInputs } from "../workitems/refs.ts";
+import { cloneHosts, cloneHostsInputs, originOf, JIRA_HINT_RE, WORK_ITEM_HINT_RE, workItemRefInputs } from "../workitems/refs.ts";
 import { markRepairedTables, renderFrontMatter } from "./parts/mdFrontMatter.ts";
 import { renderEmoji } from "./parts/mdEmoji.ts";
 import { CONV_HINT_RE, linkifyPathRefs, linkifyRefs } from "./parts/mdRefLinks.ts";
@@ -27,7 +29,7 @@ import { wireImages, wireLinks } from "./parts/mdLinks.ts";
 // links open that file in the viewer via onOpenFile.
 let mermaidSeq = 0;
 
-interface MarkdownViewProps {
+export interface MarkdownViewProps {
   source?: string;
   basePath?: string;
   baseDir?: string; // cwd for an agent reply; relative file citations resolve from here
@@ -109,6 +111,12 @@ export function MarkdownView({
   const openSessionMenuRef = useRef(openSessionMenu);
   openSessionMenuRef.current = openSessionMenu;
   const hasSessionMenu = openSessionMenu !== null;
+  // File / folder links likewise (PathLinkMenuHost); wired only with an onOpenFile as well.
+  const openPathMenu = usePathLinkMenu();
+  const openPathMenuRef = useRef(openPathMenu);
+  openPathMenuRef.current = openPathMenu;
+  // The shared view passes no onOpenFile: no menu and no suppressed native menu there.
+  const hasPathMenu = openPathMenu !== null && !!onOpenFile;
 
   // What a ticket link's classification depends on besides the text (#1659). The repository list
   // and the inbox can both land after the message rendered (a deep link, a push adding a Jira
@@ -120,7 +128,9 @@ export function MarkdownView({
   // The clones' hosts decide whether an uncached `owner/name#N` is guessed onto GitHub.
   const wiClones = useReposStore((s) => (workItemRefs ? cloneHostsInputs(cloneHosts(s.repos)) : ""));
   const wiCache = useWorkItemStore((s) => (workItemRefs ? workItemRefInputs(null, s.payload?.items || []) : ""));
-  const wiInputs = `${wiOrigin}#${wiClones}#${wiCache}`;
+  // The Jira project keys arrive on their own request (jiraProjects.ts); one landing re-runs the linkifier.
+  const wiJira = useJiraProjects((s) => (workItemRefs ? s.keys.join(",") : ""));
+  const wiInputs = `${wiOrigin}#${wiClones}#${wiCache}#${wiJira}`;
   const relink = useRef<{ run: () => void; inputs: string } | null>(null);
 
   useEffect(() => {
@@ -168,6 +178,7 @@ export function MarkdownView({
       (p, line, column, openInNew) => onOpenFileRef.current?.(p, line, column, openInNew),
       (p) => onOpenDirRef.current?.(p),
       (message) => toast(message),
+      hasPathMenu ? (target, x, y) => openPathMenuRef.current?.(target, x, y) : undefined,
     );
     wireImages(el, basePath);
 
@@ -215,6 +226,9 @@ export function MarkdownView({
         if (alive) runLinkify();
       });
     }
+    // A Jira key of a project with no saved query: the project list comes on its own request, and
+    // landing changes wiInputs, which re-runs the linkifier.
+    if (workItemRefs && JIRA_HINT_RE.test(source ?? "")) void ensureJiraProjects();
 
     // Link the file paths written as inline code (`docs/log/65-drawio-viewer.md`) to the file
     // they name — but only on a surface that can actually open one. onOpenFile absent means
@@ -238,6 +252,7 @@ export function MarkdownView({
             ? onOpenDirRef.current(p)
             : useFilesStore.getState().revealInFiles(p, { focus: true }),
         (message) => toast(message),
+        hasPathMenu ? (target, x, y) => openPathMenuRef.current?.(target, x, y) : undefined,
       );
     }
 
@@ -292,7 +307,7 @@ export function MarkdownView({
       stickyCleanup();
     };
     // wiInputs is read for the relink bookkeeping only: a change to it is the effect below.
-  }, [source, basePath, baseDir, repo, breaks, streaming, theme, codeWrapDefault, toast, hasSessionMenu, workItemRefs]);
+  }, [source, basePath, baseDir, repo, breaks, streaming, theme, codeWrapDefault, toast, hasSessionMenu, hasPathMenu, workItemRefs]);
 
   // Idempotent: existing anchors are skipped, and the links already there re-classify on click.
   useEffect(() => {

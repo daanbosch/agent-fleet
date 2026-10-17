@@ -28,10 +28,13 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin/memberorigintest"
 )
 
 // memoryTestRoutes is the same (method, path) -> handler mapping as the memory section of
-// routes.go (18 routes).
+// routes.go (21 routes).
 var memoryTestRoutes = map[string]http.HandlerFunc{
 	"GET /agents/memory/roots":           HandleMemoryRoots,
 	"GET /agents/memory/snapshots":       HandleMemorySnapshots,
@@ -41,7 +44,7 @@ var memoryTestRoutes = map[string]http.HandlerFunc{
 	"POST /agents/memory/restore":        HandleMemoryRestore,
 	"PUT /agents/memory/settings":        HandleMemorySettings,
 	"GET /agents/memory/export":          HandleMemoryExport,
-	"POST /agents/memory/import":         HandleMemoryImport,
+	"POST /agents/memory/import":         HandleMemoryImport, // wrapped by buildMux, as routes.go does
 	"POST /agents/memory/import/apply":   HandleMemoryImportApply,
 	"GET /agents/memory/entries":         HandleAgentMemoryIndex,
 	"GET /agents/memory/entries/search":  HandleAgentMemorySearch,
@@ -51,23 +54,102 @@ var memoryTestRoutes = map[string]http.HandlerFunc{
 	"GET /agents/memory/entries/changes": HandleAgentMemoryChanges,
 	"GET /agents/memory/entries/diff":    HandleAgentMemoryChangeDiff,
 	"POST /agents/memory/entries/revert": HandleAgentMemoryRevert,
+	"GET /agents/memory/entries/list":    HandleAgentMemoryList,
+	"POST /agents/memory/entries/pin":    HandleAgentMemoryPin,
+
+	"GET /agents/memory/entries/member-read":      HandleAgentMemoryMemberRead,
+	"POST /agents/memory/entries/member-save":     HandleAgentMemoryMemberSave,
+	"GET /agents/memory/entries/member-search":    HandleAgentMemoryMemberSearch,
+	"GET /agents/memory/entries/member-latest":    HandleAgentMemoryMemberLatest,
+	"GET /agents/memory/entries/member-forgotten": HandleAgentMemoryMemberForgotten,
+	"GET /agents/memory/entries/purge-preview":    HandleAgentMemoryPurgePreview,
+	"POST /agents/memory/entries/purge":           HandleAgentMemoryPurge,
+
+	"GET /agents/memory/entries/projects":             HandleAgentMemoryMemberProjects,
+	"GET /agents/memory/entries/project-move-preview": HandleAgentMemoryMemberMovePreview,
+	"POST /agents/memory/entries/project-move":        HandleAgentMemoryMemberMove,
+
+	"GET /agents/memory/claude-import":         HandleAgentMemoryClaudeSources,
+	"GET /agents/memory/claude-import/preview": HandleAgentMemoryClaudePreview,
+	"POST /agents/memory/claude-import":        HandleAgentMemoryClaudeApply,
+	"GET /agents/memory/muse-import":           HandleAgentMemoryMuseSources,
+	"GET /agents/memory/muse-import/preview":   HandleAgentMemoryMusePreview,
+	"POST /agents/memory/muse-import":          HandleAgentMemoryMuseApply,
+
+	"GET /agents/memory/claude-export":         HandleAgentMemoryClaudeExportSources,
+	"GET /agents/memory/claude-export/preview": HandleAgentMemoryClaudeExportPreview,
+	"POST /agents/memory/claude-export":        HandleAgentMemoryClaudeExportApply,
+	"GET /agents/memory/af-import/preview":     HandleAgentMemoryBundlePreview,
+	"POST /agents/memory/af-import":            HandleAgentMemoryBundleApply,
+	"GET /agents/memory/auto-sync":             HandleAutoSyncStatus,
+	"GET /agents/memory/auto-sync/preview":     HandleAutoSyncPreview,
+	"POST /agents/memory/auto-sync":            HandleAutoSyncAction,
+}
+
+// memberOnlyTestRoutes are wrapped in memberorigin.Require, as routes.go wraps them.
+var memberOnlyTestRoutes = map[string]bool{
+	"POST /agents/memory/entries/pin":          true,
+	"POST /agents/memory/entries/revert":       true,
+	"POST /agents/memory/entries/member-save":  true,
+	"POST /agents/memory/af-import":            true,
+	"POST /agents/memory/auto-sync":            true,
+	"POST /agents/memory/entries/purge":        true,
+	"POST /agents/memory/snapshots":            true,
+	"POST /agents/memory/import/apply":         true,
+	"POST /agents/memory/entries/project-move": true,
 }
 
 func buildMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	for pattern, h := range memoryTestRoutes {
+		if pattern == "POST /agents/memory/import" {
+			mux.Handle(pattern, MemberImportHandler())
+			continue
+		}
+		if memberOnlyTestRoutes[pattern] {
+			limit := int64(MemberWriteMaxRequest)
+			if pattern == "POST /agents/memory/import/apply" {
+				limit = HistoryApplyMaxRequest
+			}
+			mux.Handle(pattern, memberorigin.Require(limit, h))
+			continue
+		}
 		mux.HandleFunc(pattern, h)
 	}
 	return mux
 }
 
-// smokeDo is the same helper package main's routes_test.go has (docs/log/23 P0-2).
+// smokeDo is the same helper package main's routes_test.go has (docs/log/23 P0-2). It sends no
+// mark; markedDo is the same call with the one the CP would put on a member write.
 func smokeDo(t *testing.T, h http.Handler, method, path, token, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	r := httptest.NewRequest(method, path, strings.NewReader(body))
 	if token != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
 	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+
+// markedDo is smokeDo for a member write with a fresh signer installed.
+func markedDo(t *testing.T, h http.Handler, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	r := httptest.NewRequest(method, path, strings.NewReader(body))
+	r.Header.Set("Authorization", "Bearer smoke-token")
+	r.Header.Set("Content-Type", "application/json")
+	memberorigintest.Install(t).Sign(r, []byte(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+
+// signedDo is smokeDo for a member write: the request carries the mark the CP would put on it.
+func signedDo(t *testing.T, s *memberorigintest.Signer, h http.Handler, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	r := httptest.NewRequest(method, path, strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	s.Sign(r, []byte(body))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	return w

@@ -5,6 +5,7 @@ import (
 	"net/http/httputil"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/browserx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
@@ -28,6 +29,16 @@ func handlePreview(w http.ResponseWriter, r *http.Request) {
 	// (they differ when the agent listens elsewhere) — forwarding here would loop.
 	if browserx.ReservedBrowserAgentPort(port) {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_port", "this port is the workspace agent")
+		return
+	}
+
+	// The CP sets this for a port the owner opened without registering it: the listener
+	// the grant was made for. It is never forwarded to the app, and whatever a client
+	// sent along is dropped by the CP before it gets here.
+	granted := splitInodes(r.Header.Get(previewListenerHeader))
+	r.Header.Del(previewListenerHeader)
+	if len(granted) > 0 && !previewListeners.Matches(time.Now(), port, granted) {
+		writePreviewError(w, previewListenerChanged, port)
 		return
 	}
 
@@ -64,9 +75,15 @@ func handlePreview(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		},
+		// A server that accepts and then never answers is not timed out here, on purpose:
+		// ResponseHeaderTimeout would also cut a long-poll, which holds its headers until
+		// there is something to say. The caller going away cancels the request instead.
+		ModifyResponse: func(resp *http.Response) error {
+			resp.Header.Del(previewErrorHeader) // final header only; see previewErrorHeader
+			return sniffPlainHTTPToTLS(resp)
+		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			httpx.WriteErr(w, http.StatusBadGateway, "preview_unreachable",
-				"nothing is listening on 127.0.0.1:"+portStr+" inside the workspace")
+			writePreviewError(w, classifyPreviewError(err), port)
 		},
 	}
 	rp.ServeHTTP(w, r)

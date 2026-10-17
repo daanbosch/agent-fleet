@@ -1,0 +1,135 @@
+# Open or update the one Debian package pin-bump PR.
+#
+# cli-drift.yml's apt-pins job says a pin is gone; this turns that into the PR. trixie-security
+# keeps only the current build, so a vanished pin means a security update and the image should
+# carry it — and an unbumped pin is found by the next uncached build, which is a release. The
+# decision and the edit are deploy/local/apt-pin-bump.sh (tested by apt-pin-bump-test.sh); this
+# file only calls it, pushes, and starts the image build that is the PR's evidence.
+#
+# The PR mechanics mirror cli-pin-bump.yml (fixed branch, re-push only on a changed edit, a
+# human's close declines that exact edit, a PR nothing supports any more is closed) and use the
+# same CLI_PIN_BUMP_TOKEN, for the same reason: a push made with GITHUB_TOKEN starts no CI.
+name: apt-pin-bump
+
+on:
+  schedule:
+    - cron: "15 */6 * * *" # every 6 hours; Debian publishes a security build every week or two
+  workflow_dispatch:
+
+permissions:
+  actions: write # dispatch dev-image.yml on the bump branch
+  contents: read
+  pull-requests: write # comment the image build on the PR
+
+concurrency:
+  group: apt-pin-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BRANCH: automation/apt-pin-bump
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: develop
+          persist-credentials: false
+
+      - name: rewrite the pins
+        id: bump
+        env:
+          BODY_FILE: ${{ runner.temp }}/body.md
+        run: deploy/local/apt-pin-bump.sh
+
+      - name: skip an incomplete run
+        if: steps.bump.outputs.incomplete == 'true'
+        run: echo "::notice::A Debian index could not be read; the bump branch and PR are left as they are until a complete run."
+
+      - name: open or update the bump PR
+        id: pr
+        if: steps.bump.outputs.incomplete != 'true' && steps.bump.outputs.count != '0'
+        env:
+          TOKEN: ${{ secrets.CLI_PIN_BUMP_TOKEN }}
+          TITLE: ${{ steps.bump.outputs.title }}
+          EDIT_ID: ${{ steps.bump.outputs.edit_id }}
+          BODY_FILE: ${{ runner.temp }}/body.md
+        run: |
+          set -euo pipefail
+          if [ -z "$TOKEN" ]; then
+            echo "::error::CLI_PIN_BUMP_TOKEN is not set (docs/build/10-development.md §10.2.2). The pin bump is in the job summary."
+            cat "$BODY_FILE" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          export GH_TOKEN="$TOKEN"
+          remote="https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          declined="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state closed \
+            --json number,mergedAt,body \
+            --jq "[.[] | select(.mergedAt == null and (.body | contains(\"<!-- apt-pin-bump edit=$EDIT_ID -->\"))) | .number] | first // empty")"
+          if [ -n "$declined" ]; then
+            echo "::notice::PR #$declined proposed this same edit and was closed without merging; not proposed again."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          printf '%s\n\nAutomated by apt-pin-bump.yml: the pinned build is no longer the newest served on\nevery architecture. The PR body has the check output.\n' "$TITLE" > "$RUNNER_TEMP/msg.txt"
+          git commit -q -F "$RUNNER_TEMP/msg.txt" -- workspace/Dockerfile
+
+          if git fetch -q "$remote" "refs/heads/$BRANCH" 2>/dev/null &&
+             git diff --quiet FETCH_HEAD HEAD -- workspace/Dockerfile; then
+            echo "The bump branch already carries this edit; not re-pushed."
+          else
+            git push -q --force "$remote" "HEAD:refs/heads/$BRANCH"
+            echo "pushed=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+          num="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open \
+            --json number --jq 'first | .number // empty')"
+          if [ -n "$num" ]; then
+            gh pr edit "$num" --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$BODY_FILE"
+          else
+            gh pr create --repo "$GITHUB_REPOSITORY" --base develop --head "$BRANCH" \
+              --title "$TITLE" --body-file "$BODY_FILE"
+            num="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open \
+              --json number --jq 'first | .number // empty')"
+          fi
+          echo "num=$num" >> "$GITHUB_OUTPUT"
+          cat "$BODY_FILE" >> "$GITHUB_STEP_SUMMARY"
+
+      # PR CI does not build the workspace image, and the Dockerfile's own assertions
+      # (installed version, `chromium --version`, sandbox mode) are what prove the bump. Only
+      # after a push: a run that changed nothing already has its build.
+      - name: build the workspace image on the bump branch
+        if: steps.pr.outputs.pushed != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ steps.pr.outputs.pushed }}
+          NUM: ${{ steps.pr.outputs.num }}
+        run: |
+          set -euo pipefail
+          tag="apt-pin-dev-$SHA"
+          gh workflow run dev-image.yml --ref "$BRANCH" -f tag="$tag" -f image=workspace \
+            -f platforms=linux/amd64,linux/arm64
+          runs="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/workflows/dev-image.yml?query=branch%3A${BRANCH//\//%2F}"
+          [ -z "$NUM" ] || gh pr comment "$NUM" --body "Workspace image build for \`$SHA\` (amd64 + arm64) started as \`dev-image $tag (workspace)\`: $runs. Merge once it is green."
+
+      - name: close a bump PR that nothing supports any more
+        if: steps.bump.outputs.incomplete != 'true' && steps.bump.outputs.count == '0'
+        env:
+          TOKEN: ${{ secrets.CLI_PIN_BUMP_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "$TOKEN" ] || exit 0
+          export GH_TOKEN="$TOKEN"
+          num="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open \
+            --json number --jq 'first | .number // empty')"
+          [ -n "$num" ] || exit 0
+          gh pr view "$num" --repo "$GITHUB_REPOSITORY" --json body --jq .body |
+            sed 's/<!-- apt-pin-bump edit=[^ ]* -->/<!-- apt-pin-bump superseded -->/' > "$RUNNER_TEMP/old.md"
+          gh pr edit "$num" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/old.md"
+          gh pr close "$num" --repo "$GITHUB_REPOSITORY" \
+            --comment "Closed by \`apt-pin-bump.yml\`: every Debian pin already equals the newest build served on every architecture."

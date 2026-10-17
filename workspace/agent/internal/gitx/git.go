@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -440,8 +442,28 @@ func worktreeIntegration(parentDir, worktreeDir, targetBranch string) (RepoInteg
 }
 
 func HandleListRepos(w http.ResponseWriter, r *http.Request) {
+	repos, err := listRepos()
+	if err != nil {
+		// 5xx, never an empty 200: the Console treats a 200 as "this is the whole list" and
+		// would blank the rail on a read error that says nothing about what is on disk.
+		httpx.WriteErr(w, http.StatusInternalServerError, "repos_read_failed", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"repos": repos})
+}
+
+// listRepos builds the GET /repos list. The per-copy git answers come from listCache
+// (repos_cache.go), which says which field is invalidated by what.
+// A missing ~/repos is an empty list; any other read error is returned.
+func listRepos() ([]Repo, error) {
 	repos := []Repo{}
-	entries, _ := os.ReadDir(ReposRoot()) // missing root => empty list
+	global := globalConfigPaths()
+	live := map[string]bool{}
+	entries, err := os.ReadDir(ReposRoot())
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	var gitIdx []int // positions in repos that still need their git facts
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -464,51 +486,19 @@ func HandleListRepos(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
-		st, _ := GitStatus(dir)
-		var provider, host, remotePath string
-		if origin, ok := GitOriginURL(dir); ok {
-			provider, host = gitProviderHost(origin)
-			remotePath = gitRemotePath(origin)
-		}
-		var parent, createdAt string
-		wt := IsLinkedWorktree(dir)
-		if wt {
-			parent = filepath.Base(WorktreeParent(dir))
-			createdAt = worktreeCreatedAt(dir)
-		}
-		repos = append(repos, Repo{
-			Name: e.Name(), WorkingCopyID: WorkingCopyID(dir), Path: dir, Branch: st.Branch,
-			Dirty: st.Dirty, Ahead: st.Ahead, Behind: st.Behind, Unborn: st.Unborn,
-			Provider: provider, Remote: host, RemotePath: remotePath,
-			Worktree: wt, Parent: parent, CreatedAt: createdAt,
-		})
+		live[dir] = true
+		gitIdx = append(gitIdx, len(repos))
+		repos = append(repos, Repo{Name: e.Name(), Path: dir})
 	}
-	// Compare linked worktrees only after the full list is available, so the
-	// target label comes from the already-read parent status. The actual commit
-	// comparison uses the parent path reported by Git rather than trusting names.
-	byName := make(map[string]Repo, len(repos))
-	for _, repo := range repos {
-		byName[repo.Name] = repo
-	}
-	for i := range repos {
-		if !repos[i].Worktree {
-			continue
-		}
-		parentDir := WorktreeParent(repos[i].Path)
-		targetBranch := ""
-		if parent, ok := byName[repos[i].Parent]; ok {
-			targetBranch = parent.Branch
-		}
-		integration := GitWorktreeIntegration(parentDir, repos[i].Path, targetBranch)
-		repos[i].Integration = &integration
-	}
+	listCache.prune(live)
+	fillGitFacts(listCache, repos, gitIdx, global)
 	// Delete lock (docs/log/45): one ledger read for the whole list, not one per row.
 	if locked := lockedRepoDirs(); len(locked) > 0 {
 		for i := range repos {
 			repos[i].Locked = locked[absPath(repos[i].Path)]
 		}
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"repos": repos})
+	return repos, nil
 }
 
 type cloneReq struct {
@@ -901,6 +891,36 @@ func EnsureBranchRef(dir, base string) {
 	_ = CmdContext(ctx, dir, "fetch", "--prune").Run()
 }
 
+// NewWorktreeStartPoint resolves the base a new-branch worktree forks from into a start
+// point `git worktree add -b` accepts, fetching once (EnsureBranchRef) only when base
+// resolves to nothing — the handover recipient's case, whose clone has never fetched the
+// sender's branch. A base that already resolves costs no network round trip.
+//
+// A base that exists only as origin/<base> is returned as the full remote-tracking ref.
+// Passing the bare name does not work: worktree add then either fails with "invalid
+// reference" or, when origin/<base> is known, DWIMs to a checkout of a new local <base>
+// and drops -b (measured, git 2.47). An empty base (the parent's HEAD) is returned as is.
+func NewWorktreeStartPoint(dir, base string) (string, error) {
+	base = strings.TrimSpace(base)
+	if base == "" || strings.HasPrefix(base, "-") {
+		return base, nil // EnsureWorktree refuses the '-' case with its own message
+	}
+	resolves := func(ref string) bool { return OK(dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}") }
+	// A local branch, tag, commit or full ref keeps the start point the bare name has
+	// always had; only a name that resolves to nothing falls back to origin.
+	if branchExists(dir, base) || resolves(base) {
+		return base, nil
+	}
+	tracking := "refs/remotes/origin/" + base
+	if !resolves(tracking) {
+		EnsureBranchRef(dir, base)
+	}
+	if resolves(tracking) {
+		return tracking, nil
+	}
+	return "", fmt.Errorf("base %q exists neither in this working copy nor on origin", base)
+}
+
 // FastForwardWorktree brings a just-created existing-branch worktree up to its
 // upstream tip (git pull --ff-only). "Start work on branch X" means X as it is NOW,
 // not as of this copy's last fetch — without this the session silently begins on a
@@ -1203,7 +1223,10 @@ func EnsureWorktree(parentDir, base, newBranch, folderSeg string) (string, error
 	// git worktree add [-b <newBranch>] <dir> [<base>]
 	args := []string{"worktree", "add"}
 	if newBranch != "" {
-		args = append(args, "-b", newBranch, dir)
+		// --no-track: a start point that is a remote-tracking ref (NewWorktreeStartPoint)
+		// would otherwise become the new branch's upstream, and `git push` would then aim
+		// at the base instead of creating the new branch.
+		args = append(args, "--no-track", "-b", newBranch, dir)
 		if base != "" {
 			args = append(args, base)
 		}
@@ -1551,7 +1574,15 @@ func HandleRepoFF(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	var req ffReq
+	_ = json.NewDecoder(r.Body).Decode(&req) // empty body is fine
+	if req.RemoveStaleLock {
+		removeStaleIndexLock(dir)
+	}
 	if out, err := Combined(dir, "pull", "--ff-only"); err != nil {
+		if writeIfStaleIndexLock(w, dir, out) {
+			return
+		}
 		httpx.WriteErr(w, http.StatusBadGateway, "ff_failed", out)
 		return
 	}
@@ -1598,7 +1629,15 @@ func HandleRepoParentFF(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusNotFound, "parent_not_found", "cannot resolve the parent working copy")
 		return
 	}
+	var req ffReq
+	_ = json.NewDecoder(r.Body).Decode(&req) // empty body is fine
+	if req.RemoveStaleLock {
+		removeStaleIndexLock(dir)
+	}
 	if err := fastForwardWorktreeFromParent(parent, dir); err != nil {
+		if writeIfStaleIndexLock(w, dir, err.Error()) {
+			return
+		}
 		httpx.WriteErr(w, http.StatusConflict, "parent_ff_not_possible", err.Error())
 		return
 	}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin"
 )
 
 // agentMemSecretWire is the refusal of a write whose text matched the secret scan.
@@ -70,10 +71,18 @@ func agentMemErrKind(err error) string {
 // sessions may do, and the member can still review and undo what was written while it was on.
 var AgentMemoryEnabled func() bool
 
-func agentMemCallerFrom(w http.ResponseWriter, name string) (agentMemCaller, bool) {
+// agentMemRequireEnabled answers 403 and returns false while the switch is off.
+func agentMemRequireEnabled(w http.ResponseWriter) bool {
 	if AgentMemoryEnabled == nil || !AgentMemoryEnabled() {
 		httpx.WriteErr(w, http.StatusForbidden, errCodeMemoryDisabled,
-			"Agent Fleet memory is turned off for sessions in Settings > Agents")
+			"Agent Fleet memory is turned off for sessions in Settings > Agent memory")
+		return false
+	}
+	return true
+}
+
+func agentMemCallerFrom(w http.ResponseWriter, name string) (agentMemCaller, bool) {
+	if !agentMemRequireEnabled(w) {
 		return agentMemCaller{}, false
 	}
 	c, err := agentMemResolveCaller(name)
@@ -84,13 +93,16 @@ func agentMemCallerFrom(w http.ResponseWriter, name string) (agentMemCaller, boo
 	return c, true
 }
 
-// HandleAgentMemoryIndex lists the memories the calling session sees, without bodies.
+// HandleAgentMemoryIndex lists the memories the calling session sees, without bodies, ranked and
+// cut to the optional `budget` (bytes; see agentMemClampBudget).
 func HandleAgentMemoryIndex(w http.ResponseWriter, r *http.Request) {
-	c, ok := agentMemCallerFrom(w, r.URL.Query().Get("session"))
+	q := r.URL.Query()
+	c, ok := agentMemCallerFrom(w, q.Get("session"))
 	if !ok {
 		return
 	}
-	out, err := agentMemListIndex(c)
+	budget, _ := strconv.Atoi(q.Get("budget"))
+	out, err := agentMemListIndex(c, budget)
 	if err != nil {
 		agentMemWriteErr(w, err)
 		return
@@ -102,6 +114,9 @@ func HandleAgentMemoryIndex(w http.ResponseWriter, r *http.Request) {
 type agentMemSearchWire struct {
 	Project *agentMemProject `json:"project"`
 	Hits    []agentMemHit    `json:"hits"`
+	// Fallback is "any" when no memory held every query word and the hits are the ones that
+	// held some of them (each lists its matchedTerms). Absent for an every-word answer.
+	Fallback string `json:"fallback,omitempty"`
 }
 
 // HandleAgentMemorySearch finds memories by text.
@@ -112,12 +127,12 @@ func HandleAgentMemorySearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	hits, err := agentMemSearch(c, q.Get("q"), limit)
+	hits, fallback, err := agentMemSearchRanked(c, q.Get("q"), limit)
 	if err != nil {
 		agentMemWriteErr(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, agentMemSearchWire{Project: c.Project, Hits: hits})
+	httpx.WriteJSON(w, http.StatusOK, agentMemSearchWire{Project: c.Project, Hits: hits, Fallback: fallback})
 }
 
 // HandleAgentMemoryRead returns one memory with its body.
@@ -137,7 +152,7 @@ func HandleAgentMemoryRead(w http.ResponseWriter, r *http.Request) {
 
 // HandleAgentMemorySave creates or updates a memory and publishes it at once.
 func HandleAgentMemorySave(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, agentMemMaxBody+16<<10)
+	r.Body = http.MaxBytesReader(w, r.Body, agentMemSaveMaxRequest)
 	var req agentMemSaveReq
 	if !httpx.DecodeJSON(w, r, &req) {
 		return
@@ -193,13 +208,184 @@ func HandleAgentMemoryChangeDiff(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
-// HandleAgentMemoryRevert undoes one change, or forgets the memory as that change left it.
+// HandleAgentMemoryRevert undoes one change, or forgets the memory as that change left it. The
+// author is the member, so it answers only a request the CP marked as theirs (ADR 0113).
 func HandleAgentMemoryRevert(w http.ResponseWriter, r *http.Request) {
+	if !memberorigin.RefuseUnverified(w, r) {
+		return
+	}
 	var req agentMemRevertReq
 	if !httpx.DecodeJSON(w, r, &req) {
 		return
 	}
 	res, err := agentMemRevert(req, time.Now())
+	if err != nil {
+		agentMemWriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, res)
+}
+
+// HandleAgentMemoryClaudeSources lists the claude projects that have memory to import. Like the
+// preview it works while the switch is off: reading claude's own files changes nothing.
+func HandleAgentMemoryClaudeSources(w http.ResponseWriter, r *http.Request) {
+	httpx.WriteJSON(w, http.StatusOK, agentMemImportList())
+}
+
+// HandleAgentMemoryClaudePreview says what an import of one claude project would do.
+func HandleAgentMemoryClaudePreview(w http.ResponseWriter, r *http.Request) {
+	pv, err := agentMemImportPreviewFor(r.URL.Query().Get("slug"))
+	if err != nil {
+		agentMemWriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, pv)
+}
+
+// HandleAgentMemoryClaudeApply imports the listed items. Unlike the two reads above it needs
+// the switch on: it writes to the store the sessions read.
+func HandleAgentMemoryClaudeApply(w http.ResponseWriter, r *http.Request) {
+	if !agentMemRequireEnabled(w) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	var req agentMemImportReq
+	if !httpx.DecodeJSON(w, r, &req) {
+		return
+	}
+	res, err := agentMemImportApply(req, time.Now())
+	if err != nil {
+		agentMemWriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, res)
+}
+
+// HandleAgentMemoryMuseSources lists the working copies that have muse project memory. Like the
+// preview it works while the switch is off.
+func HandleAgentMemoryMuseSources(w http.ResponseWriter, r *http.Request) {
+	httpx.WriteJSON(w, http.StatusOK, agentMemMuseList())
+}
+
+// HandleAgentMemoryMusePreview says what an import of one working copy's muse memory would do.
+func HandleAgentMemoryMusePreview(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	pv, err := agentMemMusePreviewFor(q.Get("scope"), q.Get("dir"), q.Get("into"))
+	if err != nil {
+		agentMemWriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, pv)
+}
+
+// HandleAgentMemoryMuseApply imports the listed items; like the claude import it needs the switch on.
+func HandleAgentMemoryMuseApply(w http.ResponseWriter, r *http.Request) {
+	if !agentMemRequireEnabled(w) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	var req agentMemMuseReq
+	if !httpx.DecodeJSON(w, r, &req) {
+		return
+	}
+	res, err := agentMemMuseApply(req, time.Now())
+	if err != nil {
+		agentMemWriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, res)
+}
+
+// HandleAgentMemoryClaudeExportSources lists the AF projects that have memory to write back. The
+// write-back does not need the switch: it writes claude's store, not AF's, and its main use is
+// after the member turned AF memory off.
+func HandleAgentMemoryClaudeExportSources(w http.ResponseWriter, r *http.Request) {
+	out, err := agentMemExportList()
+	if err != nil {
+		agentMemWriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+// HandleAgentMemoryClaudeExportPreview says what a write-back of one project would do.
+func HandleAgentMemoryClaudeExportPreview(w http.ResponseWriter, r *http.Request) {
+	pv, err := agentMemExportPreviewFor(r.URL.Query().Get("project"))
+	if err != nil {
+		agentMemWriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, pv)
+}
+
+// HandleAgentMemoryClaudeExportApply writes the previewed project into claude's memory.
+func HandleAgentMemoryClaudeExportApply(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 256<<10)
+	var req agentMemExportReq
+	if !httpx.DecodeJSON(w, r, &req) {
+		return
+	}
+	res, err := agentMemExportApply(req, time.Now())
+	if err != nil {
+		agentMemWriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, res)
+}
+
+// HandleAgentMemoryList lists every memory of every scope for the Console, with the pin and the
+// use count. It is not a use of anything, so it does not touch the counts.
+func HandleAgentMemoryList(w http.ResponseWriter, r *http.Request) {
+	out, err := agentMemListAll()
+	if err != nil {
+		agentMemWriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+// HandleAgentMemoryPin sets or clears the member's pin on one memory; like revert, only for a
+// marked member request.
+func HandleAgentMemoryPin(w http.ResponseWriter, r *http.Request) {
+	if !memberorigin.RefuseUnverified(w, r) {
+		return
+	}
+	var req agentMemPinReq
+	if !httpx.DecodeJSON(w, r, &req) {
+		return
+	}
+	res, err := agentMemPin(req, time.Now())
+	if err != nil {
+		agentMemWriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, res)
+}
+
+// HandleAgentMemoryPurgePreview says what purging one memory's past revisions would rewrite. It
+// changes nothing and carries no memory text, so it is not behind the member-origin mark.
+func HandleAgentMemoryPurgePreview(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	out, err := agentMemPurgePreview(q.Get("scope"), q.Get("project"), q.Get("name"))
+	if err != nil {
+		agentMemWriteErr(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+// HandleAgentMemoryPurge rewrites the history to drop one memory's past revisions. The history
+// is the member's to rewrite, so it answers only a request the CP marked as theirs (ADR 0113); no
+// MCP tool reaches it.
+func HandleAgentMemoryPurge(w http.ResponseWriter, r *http.Request) {
+	if !memberorigin.RefuseUnverified(w, r) {
+		return
+	}
+	var req agentMemPurgeReq
+	if !httpx.DecodeJSON(w, r, &req) {
+		return
+	}
+	res, err := agentMemPurge(req)
 	if err != nil {
 		agentMemWriteErr(w, err)
 		return

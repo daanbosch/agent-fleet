@@ -73,6 +73,9 @@ var sessionWireBinding = map[string]string{
 	"Archived":             "archived",
 	"BackgroundBusy":       "backgroundBusy",
 	"BackgroundBusyReason": "backgroundBusyReason",
+	"ProgressAt":           "progressAt",
+	"ProgressAgeSec":       "progressAgeSec",
+	"StateSince":           "stateSince",
 	"RateLimitResumeAt":    "rateLimitResumeAt",
 	"AuthOkAt":             "authOkAt",
 	"Context":              "context",
@@ -91,6 +94,7 @@ var sessionWireBinding = map[string]string{
 	"HandoffPending":       "handoffPending",
 	"OriginSession":        "originSession",
 	"Origin":               "origin",
+	"InboxOrigin":          "inboxOrigin",
 	"LastSay":              "lastSay",
 	"TokenSpends":          "tokenSpends",
 	"PR":                   "pr",
@@ -99,6 +103,8 @@ var sessionWireBinding = map[string]string{
 	"GeneratedImagesPath":  "generatedImagesPath",
 	"Studio":               "studio",
 	"InitialPromptState":   "initialPromptState",
+	"Moving":               "moving",
+	"MovedTo":              "movedTo",
 }
 
 // --- 2. exemption tables for the correspondence check (the family list itself is
@@ -145,11 +151,11 @@ func sessionContractFamily() contractFamily {
 		tsName:  "Session",
 		tsKeys: keySet("name", "kind", "driver", "title", "titleSetBy", "color", "label", "repo", "workingCopyId",
 			"path", "dir", "subdir", "remoteUrl", "state", "alive", "resumable", "backgroundBusy",
-			"backgroundBusyReason", "rateLimitResumeAt", "authOkAt", "createdAt", "model", "context", "branch",
+			"backgroundBusyReason", "progressAt", "progressAgeSec", "stateSince", "rateLimitResumeAt", "authOkAt", "createdAt", "model", "context", "branch",
 			"currentBranch", "branchDrift", "worktree", "exitReason", "exitCode", "exitSignal",
 			"carried", "handoffPending", "locked", "keepAwakeUntil", "stopAfterTurnAt",
 			"spendCapUsd", "spendCapHitAt", "originSession", "origin", "lastSay", "tokenSpends", "pr", "ports", "generatedImages", "generatedImagesPath",
-			"studio", "initialPromptState"),
+			"studio", "initialPromptState", "moving", "movedTo", "inboxOrigin"),
 		tsOnly: consoleOnlyExempt,
 		goOnly: goOnlyExempt,
 	}

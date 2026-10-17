@@ -34,6 +34,7 @@ type mcpMemoryEntry struct {
 	Updated       string   `json:"updated"`
 	Body          string   `json:"body"`
 	Snippets      []string `json:"snippets"`
+	MatchedTerms  []string `json:"matchedTerms"`
 }
 
 type mcpMemoryProject struct {
@@ -51,7 +52,7 @@ func mcpMemoryCall(id json.RawMessage, name string, raw json.RawMessage) []byte 
 		return mcpToolErr(id, name+" はセッション側の Agent Fleet サーバー専用です")
 	}
 	if !mcpAgentMemoryEnabled {
-		return mcpToolErr(id, "Agent Fleet memory is not enabled for this session (Settings > Agents)")
+		return mcpToolErr(id, "Agent Fleet memory is not enabled for this session (Settings > Agent memory)")
 	}
 	var a struct {
 		Query       string   `json:"query"`
@@ -63,6 +64,7 @@ func mcpMemoryCall(id json.RawMessage, name string, raw json.RawMessage) []byte 
 		Type        string   `json:"type"`
 		Kinds       []string `json:"kinds"`
 		Revision    int      `json:"revision"`
+		Budget      int      `json:"budget"`
 	}
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &a); err != nil {
@@ -79,6 +81,9 @@ func mcpMemoryCall(id json.RawMessage, name string, raw json.RawMessage) []byte 
 
 	switch name {
 	case mcpToolMemoryIndex:
+		if a.Budget != 0 {
+			q.Set("budget", fmt.Sprint(a.Budget)) // the Agent clamps it
+		}
 		out, err := agentDo(http.MethodGet, "/agents/memory/entries?"+q.Encode(), nil)
 		if err != nil {
 			return mcpToolErr(id, mcpMemoryErr(err))
@@ -113,7 +118,7 @@ func mcpMemoryCall(id json.RawMessage, name string, raw json.RawMessage) []byte 
 		if err != nil {
 			return mcpToolErr(id, mcpMemoryErr(err))
 		}
-		return mcpTextResult(id, out)
+		return mcpTextResult(id, mcpMemoryFormatSave(out))
 	case mcpToolMemoryForget:
 		body, _ := json.Marshal(map[string]any{"session": owner, "scope": a.Scope, "name": a.Name, "revision": a.Revision})
 		out, err := agentDo(http.MethodPost, "/agents/memory/entries/forget", body)
@@ -123,6 +128,19 @@ func mcpMemoryCall(id json.RawMessage, name string, raw json.RawMessage) []byte 
 		return mcpTextResult(id, out)
 	}
 	return mcpToolErr(id, "unknown memory tool: "+name)
+}
+
+// mcpMemoryFormatSave is the Agent's save answer, with its authoring warnings said again in
+// plain text: the memory is saved either way, and the agent that wrote it is the one who can
+// shorten it.
+func mcpMemoryFormatSave(raw string) string {
+	var r struct {
+		Warnings []string `json:"warnings"`
+	}
+	if json.Unmarshal([]byte(raw), &r) != nil || len(r.Warnings) == 0 {
+		return raw
+	}
+	return raw + "\n\nSaved, with guidance:\n- " + strings.Join(r.Warnings, "\n- ")
 }
 
 // mcpMemoryErr turns the Agent's refusal into what the agent should do next. The Agent's
@@ -147,7 +165,7 @@ func mcpMemoryErr(err error) string {
 	_ = json.Unmarshal([]byte(he.Body), &body)
 	switch {
 	case body.Error.Code == "memory_disabled":
-		return "Agent Fleet memory is turned off in Settings > Agents; do not retry, and keep notes in your own memory instead."
+		return "Agent Fleet memory is turned off in Settings > Agent memory; do not retry, and keep notes in your own memory instead."
 	case body.Error.Code == "memory_secret_detected":
 		parts := make([]string, 0, len(body.Findings))
 		for _, f := range body.Findings {
@@ -163,14 +181,24 @@ func mcpMemoryErr(err error) string {
 	return he.Error()
 }
 
-// mcpMemoryFormatIndex prints one line per memory: an index is read every time work starts, so
-// it is kept far smaller than the JSON it comes from.
+// FormatMemoryIndex renders an index answer the way the memory_index tool prints it, for the one
+// caller that has no MCP round trip: lcpp's per-session system prompt.
+func FormatMemoryIndex(raw string) string { return mcpMemoryFormatIndex(raw) }
+
+// mcpMemoryFormatIndex prints one line per described memory, then the names of the rest: an
+// index is read every time work starts, so the Agent bounds it (memoryx.agentMemBudgetIndex)
+// and the line text must stay identical to memoryx.agentMemIndexLine, which the budget measures.
 func mcpMemoryFormatIndex(raw string) string {
 	var v struct {
 		Project   *mcpMemoryProject `json:"project"`
 		Entries   []mcpMemoryEntry  `json:"entries"`
+		More      []string          `json:"more"`
+		Omitted   int               `json:"omitted"`
 		Truncated bool              `json:"truncated"`
 		Withheld  int               `json:"withheld"`
+
+		// Pinned memories that did not fit the budget; see memoryx.agentMemBudgetIndex.
+		PinnedOmitted int `json:"pinnedOmitted"`
 	}
 	if json.Unmarshal([]byte(raw), &v) != nil {
 		return raw
@@ -185,7 +213,7 @@ func mcpMemoryFormatIndex(raw string) string {
 		// Count only: a withheld file's name may be the very thing that failed the scan.
 		fmt.Fprintf(&b, "%d memory file(s) are withheld because they look like they contain a secret or cannot be checked; tell your user, who has to fix them.\n", v.Withheld)
 	}
-	if len(v.Entries) == 0 {
+	if len(v.Entries) == 0 && len(v.More) == 0 && v.Omitted == 0 {
 		if v.Withheld == 0 {
 			b.WriteString("No memories yet. Save what a later session should know with memory_save.\n")
 		}
@@ -194,8 +222,17 @@ func mcpMemoryFormatIndex(raw string) string {
 	for _, e := range v.Entries {
 		fmt.Fprintf(&b, "- [%s] %s — %s%s\n", e.Scope, e.Name, e.Description, mcpMemoryTags(e))
 	}
-	if v.Truncated {
-		b.WriteString("(truncated: use memory_search to find older memories)\n")
+	// The Agent already ranked and cut; render exactly that and add nothing back.
+	if len(v.More) > 0 {
+		b.WriteString("Not listed above (names only; a name ending in \"…\" is a prefix — memory_search matches names, or memory_read with the full name):\n")
+		b.WriteString(strings.Join(v.More, " "))
+		b.WriteByte('\n')
+	}
+	if v.Omitted > 0 {
+		fmt.Fprintf(&b, "and %d more (use memory_search)\n", v.Omitted)
+	}
+	if v.PinnedOmitted > 0 {
+		fmt.Fprintf(&b, "%d of these are pinned by your user (over the index budget)\n", v.PinnedOmitted)
 	}
 	b.WriteString("Read one with memory_read before relying on it.\n")
 	return b.String()
@@ -220,7 +257,8 @@ func mcpMemoryTags(e mcpMemoryEntry) string {
 
 func mcpMemoryFormatSearch(raw string) string {
 	var v struct {
-		Hits []mcpMemoryEntry `json:"hits"`
+		Hits     []mcpMemoryEntry `json:"hits"`
+		Fallback string           `json:"fallback"`
 	}
 	if json.Unmarshal([]byte(raw), &v) != nil {
 		return raw
@@ -229,8 +267,15 @@ func mcpMemoryFormatSearch(raw string) string {
 		return "No memory matches."
 	}
 	var b strings.Builder
+	if v.Fallback != "" {
+		b.WriteString("No memory contains every word of the query; these contain some of them (matched words in brackets), best first:\n")
+	}
 	for _, e := range v.Hits {
-		fmt.Fprintf(&b, "- [%s] %s — %s%s\n", e.Scope, e.Name, e.Description, mcpMemoryTags(e))
+		fmt.Fprintf(&b, "- [%s] %s — %s%s", e.Scope, e.Name, e.Description, mcpMemoryTags(e))
+		if len(e.MatchedTerms) > 0 {
+			fmt.Fprintf(&b, " [matched: %s]", strings.Join(e.MatchedTerms, ", "))
+		}
+		b.WriteString("\n")
 		for _, s := range e.Snippets {
 			fmt.Fprintf(&b, "    %s\n", s)
 		}

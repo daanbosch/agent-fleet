@@ -178,14 +178,12 @@
   }
 }
 
-/* Onboarding card (first-run checklist over the empty starter pane) — old
-   styles.css region 4074–4171 verbatim (docs/log/22 P6d). */
+/* Onboarding card: the first-run checklist, shown as Home's setup card and in the
+   getting-started guide modal (OnboardingCard.tsx). */
 
-/* Legacy control styles (old element globals), scoped — the verbatim-ported card
-   keeps raw <button className="ghost"> markup (:where() = old 0-0-1 specificity).
-   .onboard-scope re-scopes them for the getting-started guide modal body (GuideModal),
-   which reuses the same markup outside the .onboard overlay. */
-:where(.onboard, .onboard-scope) button {
+/* Legacy control styles (old element globals), scoped — the card keeps raw
+   <button className="ghost"> markup (:where() = old 0-0-1 specificity). */
+:where(.onboard-scope) button {
   background: var(--btn);
   color: var(--fg);
   border: 1px solid var(--btn-border);
@@ -194,33 +192,24 @@
   cursor: pointer;
   font: inherit;
 }
-:where(.onboard, .onboard-scope) button:hover:not(:disabled) {
+:where(.onboard-scope) button:hover:not(:disabled) {
   background: var(--btn-h);
 }
-:where(.onboard, .onboard-scope) button:disabled {
+:where(.onboard-scope) button:disabled {
   opacity: 0.4;
   cursor: default;
 }
-:where(.onboard, .onboard-scope) button.ghost {
+:where(.onboard-scope) button.ghost {
   background: transparent;
   border-color: transparent;
   color: var(--muted);
   padding: 2px 6px;
 }
-:where(.onboard, .onboard-scope) button.ghost:hover:not(:disabled) {
+:where(.onboard-scope) button.ghost:hover:not(:disabled) {
   background: var(--btn);
   color: var(--fg);
 }
 
-.onboard {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  overflow: auto;
-}
 .onboard-card {
   width: min(94%, 500px);
   padding: 22px 22px 14px;

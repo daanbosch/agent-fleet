@@ -93,12 +93,23 @@ var mcpSourceSession string
 // line with mcpSourceSession's rule that a native id must never decide ownership.
 const mcpCallerSIDArg = "_af_caller_sid"
 
+// mcpCallerSIDMetaKey is where opencode 2 itself puts the calling session id, in the tools/call
+// `params._meta` (measured: 2.0.28 sends it on every call, 1.19.0 never does).
+// opencode 2 cannot use the stamp: its client drops arguments a closed inputSchema does not
+// declare after the plugin hook has run, and af's schemas are closed. The model cannot write
+// `_meta`, so unlike the stamped argument it needs no plugin to be believed.
+const mcpCallerSIDMetaKey = "ai.opencode/sessionID"
+
 // mcpCallerSID is mcpCallerSIDArg's value for the tools/call being handled, "" outside one.
 // One variable is enough because RunStdio dispatches serially — but only the dispatch goroutine
 // may read it: the tools/list watcher runs beside a call (a generate_image call holds the loop
 // for minutes), so everything that builds the list resolves its owner through
 // mcpListOwningSession, which never looks here.
 var mcpCallerSID string
+
+// mcpCallerFromMeta says mcpCallerSID came from params._meta rather than the stamped argument.
+// Same lifetime and same single-reader rule as mcpCallerSID.
+var mcpCallerFromMeta bool
 
 // mcpPeerMessagingEnabled adds ONLY the two session-to-session messaging tools to the
 // session-side server (docs/log/58 / ADR 0041 decision 3). Enabled by `--self-report
@@ -526,6 +537,9 @@ var mcpAdvertised struct {
 	mu    sync.Mutex
 	names map[string]bool // nil until the first tools/list has been served
 	fp    string          // fingerprint of that same answer, for the watcher below
+	// props is the property set each advertised tool's schema declared in that answer; a call's
+	// argument keys are held to it (mcpCheckCallArgs).
+	props map[string]map[string]bool
 }
 
 // rememberAdvertised records what a tools/list answer actually contained.
@@ -538,7 +552,7 @@ func rememberAdvertised(tools []map[string]any) {
 	}
 	fp := mcpToolListFingerprint(tools)
 	mcpAdvertised.mu.Lock()
-	mcpAdvertised.names, mcpAdvertised.fp = names, fp
+	mcpAdvertised.names, mcpAdvertised.fp, mcpAdvertised.props = names, fp, advertisedProps(tools)
 	mcpAdvertised.mu.Unlock()
 }
 
@@ -1033,13 +1047,16 @@ func mcpStdioMemoryTools() []map[string]any {
 	return []map[string]any{
 		{
 			"name": "memory_index",
-			"description": "Agent Fleet memory shared by every agent kind: list the memories for this session's project and the user-wide ones (name, scope, description; no bodies). " +
-				"Call it when you start work on a task. " + mcpMemoryEvidence,
-			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}},
+			"description": "Agent Fleet memory shared by every agent kind: list the memories for this session's project and the user-wide ones (name, scope, short description; no bodies). " +
+				"The index is partial by design: feedback and newest first, within a size budget, then only the names of the rest. " +
+				"Call it when you start work on a task, then memory_search with the task's keywords before re-deriving something. " + mcpMemoryEvidence,
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
+				"budget": map[string]any{"type": "integer", "minimum": 4096, "maximum": 65536, "description": "Size of the described part in bytes (default 24576)"},
+			}},
 		},
 		{
 			"name":        "memory_search",
-			"description": "Agent Fleet memory: find memories whose name, description or body contain every word of query. Call it before re-deriving something a previous session may have learned. " + mcpMemoryEvidence,
+			"description": "Agent Fleet memory: find memories whose name, description or body contain every word of query, best match first (a name hit outranks a description hit, which outranks a body hit; pinned and often-used memories win ties). If no memory contains every word, it answers with the ones containing some of the words and says so, so a long query degrades instead of returning nothing. Call it before re-deriving something a previous session may have learned. " + mcpMemoryEvidence,
 			"inputSchema": map[string]any{
 				"type": "object", "additionalProperties": false,
 				"properties": map[string]any{
@@ -1065,12 +1082,13 @@ func mcpStdioMemoryTools() []map[string]any {
 			"name": "memory_save",
 			"description": "Agent Fleet memory: create or update a memory every agent kind will read. It is published at once and recorded with your kind and session. " +
 				"Save what is not derivable from the code or git history: a non-obvious fact, a pitfall, a user preference. " +
-				"To update, pass the revision you read; a stale revision is refused, so read again and rewrite. Never include secrets: a body that looks like one is refused.",
+				"To update, pass the revision you read; a stale revision is refused, so read again and rewrite. Never include secrets: a body that looks like one is refused. " +
+				"Write one fact per memory with a description of about 150 characters (above 300 is flagged) and put the essentials in the first 4,096 bytes of the body, which is all claude's recall shows; a longer one is saved with a warning.",
 			"inputSchema": map[string]any{
 				"type": "object", "additionalProperties": false,
 				"properties": map[string]any{
-					"name":        str("Short kebab-case slug, e.g. go-test-memory-cap"),
-					"description": str("One line used to decide relevance"),
+					"name":        str("Short slug of lower-case letters, digits, - _ and . (1-64, not starting with . or -), e.g. go-test-memory-cap"),
+					"description": str("One line used to decide relevance, about 150 characters"),
 					"body":        str("The memory itself, Markdown"),
 					"type":        map[string]any{"type": "string", "enum": []string{"user", "feedback", "project", "reference"}},
 					"kinds":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Only for these agent kinds (e.g. claude); omit when it applies to all"},
@@ -1139,6 +1157,12 @@ func mcpStdioFleetSpawnTools() []map[string]any {
 				"Tell the user you are starting one, and what for. " +
 				"It starts in a NEW worktree by default, so it never shares your working copy; pass " +
 				"worktree=false only for a directory nobody is working in. " +
+				"To run a child in YOUR OWN working copy on purpose (e.g. a reviewer on what you are implementing), " +
+				"pass worktree=false and allow_shared_working_copy=true: it shares your checkout, index and branch, so tell it " +
+				"(and keep to) no checkout/switch/stash/branch changes and stage and commit explicitly by path. " +
+				"It works only while you are running in a canonical path (no symlink in the one you were started with; " +
+				"naming the target dir through an alias is fine) and only for your own copy: another session's working " +
+				"copy cannot be shared this way, and if the refusal repeats with the flag, do not retry - use a worktree. " +
 				"Limits: at most " + strconv.Itoa(session.SpawnChildLimit()) + " children at a time (a slot frees when the user deletes or " +
 				"archives that child" + stoppedChildExpiryClause() + " - list_child_sessions shows what " +
 				"you have), a session you started cannot start its own, and shell sessions cannot be started " +
@@ -1152,18 +1176,19 @@ func mcpStdioFleetSpawnTools() []map[string]any {
 			"inputSchema": map[string]any{
 				"type": "object", "additionalProperties": false,
 				"properties": map[string]any{
-					"dir":            map[string]any{"type": "string", "description": "Working directory (a path from list_repos, or your own). Default: home"},
-					"title":          map[string]any{"type": "string", "description": "Short display name saying what the task is (optional)"},
-					"kind":           map[string]any{"type": "string", "description": "Agent kind: claude (default) | codex | opencode | agy | copilot | cursor | kiro | lcpp | muse. shell/ssm are refused"},
-					"model":          map[string]any{"type": "string", "description": "Model id from list_models for that kind (optional)"},
-					"effort":         map[string]any{"type": "string", "description": "Reasoning effort (optional; default: the model's defaultEffort). Needs model: use one of that model's efforts from list_models; anything else, or an effort without model, is refused. opencode and kiro list none: their value is not checked here, and a wrong one fails the child's first turn. agy and cursor fold effort into the model id instead"},
-					"initial_prompt": map[string]any{"type": "string", "description": "The task, delivered as the child's first instruction. Write it for someone with none of your context: what to do, where, what done looks like. If it has to wait for a message (from you or another session), tell it to end its turn while it waits: a message to a busy session can be held until its turn ends, and waiting inside a tool (a sleep loop, a blocking wait) keeps that turn from ending"},
-					"worktree":       map[string]any{"type": "boolean", "description": "Start in a new worktree off dir. Default TRUE from a session - two agents in one working copy corrupt each other's work"},
-					"branch":         map[string]any{"type": "string", "description": "Base branch for the worktree (optional; default: current HEAD)"},
-					"new_branch":     map[string]any{"type": "string", "description": "Name of the branch to create in the worktree (optional; default: generated)"},
-					"subdir":         map[string]any{"type": "string", "description": "Relative path inside the working copy to start in, e.g. console (optional)"},
-					"report_back":    map[string]any{"type": "boolean", "description": "Ask the child to send you one message when it finishes. Default true. Turn it off when you will read the result in the Console instead"},
-					"spend_cap_usd":  map[string]any{"type": "number", "description": "The child's own spend budget in USD, an estimate at list price (optional; default: the user's default budget; 0 = none). Past it the child stops after its turn. It is not charged to yours"},
+					"dir":                       map[string]any{"type": "string", "description": "Working directory (a path from list_repos, or your own). Default: home"},
+					"title":                     map[string]any{"type": "string", "description": "Short display name saying what the task is (optional)"},
+					"kind":                      map[string]any{"type": "string", "description": "Agent kind: claude (default) | codex | opencode | agy | copilot | cursor | kiro | lcpp | muse. shell/ssm are refused"},
+					"model":                     map[string]any{"type": "string", "description": "Model id from list_models for that kind (optional)"},
+					"effort":                    map[string]any{"type": "string", "description": "Reasoning effort (optional; default: the model's defaultEffort). Needs model: use one of that model's efforts from list_models; anything else, or an effort without model, is refused. opencode and kiro list none: their value is not checked here, and a wrong one fails the child's first turn. agy and cursor fold effort into the model id instead"},
+					"initial_prompt":            map[string]any{"type": "string", "description": "The task, delivered as the child's first instruction. Write it for someone with none of your context: what to do, where, what done looks like. If it has to wait for a message (from you or another session), tell it to end its turn while it waits: a message to a busy session can be held until its turn ends, and waiting inside a tool (a sleep loop, a blocking wait) keeps that turn from ending"},
+					"worktree":                  map[string]any{"type": "boolean", "description": "Start in a new worktree off dir. Default TRUE from a session - two agents in one working copy corrupt each other's work"},
+					"allow_shared_working_copy": map[string]any{"type": "boolean", "description": "Opt in to starting the child in YOUR OWN working copy while you are running in it (default false). Needs worktree=false, dir = your working copy (an alias spelling of it is fine) and that you were started in a canonical path (no symlink); any other directory in use is still refused, and a repeated refusal means it cannot work - do not retry. You and the child then share one checkout, index and branch: no checkout/switch/stash/branch changes, stage and commit explicitly by path"},
+					"branch":                    map[string]any{"type": "string", "description": "Base branch for the worktree (optional; default: current HEAD)"},
+					"new_branch":                map[string]any{"type": "string", "description": "Name of the branch to create in the worktree (optional; default: generated)"},
+					"subdir":                    map[string]any{"type": "string", "description": "Relative path inside the working copy to start in, e.g. console (optional)"},
+					"report_back":               map[string]any{"type": "boolean", "description": "Ask the child to send you one message when it finishes. Default true. Turn it off when you will read the result in the Console instead"},
+					"spend_cap_usd":             map[string]any{"type": "number", "description": "The child's own spend budget in USD, an estimate at list price (optional; default: the user's default budget; 0 = none). Past it the child stops after its turn. It is not charged to yours"},
 				},
 			},
 		},
@@ -2062,7 +2087,7 @@ var mcpStdioTools = []map[string]any{
 	},
 	{
 		"name":        "get_agent_usage",
-		"description": "各エージェント CLI のサブスクリプション使用量とレート制限を返す（claude / codex / agy / muse。opencode / copilot / cursor / kiro は使用量ソースが無いため含まれない）。claude / codex は fiveHour（5時間枠）と sevenDay（週間枠）の pct が使用率（0–100）、resetsAt が解除日時（ISO 8601）で、codex は planType や resetCredits も付く。agy は形が異なり、account / plan と groups（クォータ枠ごとに label・remainingPct・resetsAt。実験枠 Starter 等）を返す。muse は claude / codex と同じ形だが、値はホストが最後に観測したもので、稼働中の muse セッションがターンを1つも終えていない間は ok=false になる（使用量ゼロではなく観測が無いという意味）。windowMins は現在の枠の長さ（分）。authed=false はその CLI に未ログイン、ageSec は計測の古さ（秒）。『あとどれくらい使える?』『制限はいつ解除?』と聞かれた時や、大きなタスクをセッションに振る前の判断材料に呼ぶ。",
+		"description": "各エージェント CLI のサブスクリプション使用量とレート制限を返す（claude / codex / agy / muse。opencode / copilot / cursor / kiro は使用量ソースが無いため含まれない）。claude / codex は fiveHour（5時間利用枠）と sevenDay（週間利用枠）の pct が使用率（0–100）、resetsAt が解除日時（ISO 8601）で、codex は planType や resetCredits も付く。agy は形が異なり、account / plan と groups（クォータ枠ごとに label・remainingPct・resetsAt。実験枠 Starter 等）を返す。muse は claude / codex と同じ形だが、値はホストが最後に観測したもので、稼働中の muse セッションがターンを1つも終えていない間は ok=false になる（使用量ゼロではなく観測が無いという意味）。windowMins は現在の利用枠の長さ（分）。authed=false はその CLI に未ログイン、ageSec は計測の古さ（秒）。『あとどれくらい使える?』『制限はいつ解除?』と聞かれた時や、大きなタスクをセッションに振る前の判断材料に呼ぶ。",
 		"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
 	},
 	{
@@ -2231,7 +2256,7 @@ var mcpStdioWriteTools = []map[string]any{
 	},
 	{
 		"name":        "list_models",
-		"description": "指定エージェントで現在選べるモデル一覧を返す。model 指定で create_session する前には必ず呼び、返った id を使うこと（一覧は利用者が「使わないモデル」で除外したものを除いてある — 記憶や過去の会話にあるモデル名を推測で渡さないこと。除外モデルを渡した create_session は拒否される）。claude は固定の最新ティア別名と、利用者がエージェント設定で登録した完全モデル ID を返す。Claude Code OAuth にはアカウント連動カタログがないため、登録モデルの可否は起動時に判定される。codex／opencode／agy／copilot／cursor／kiro は接続状態を反映したライブカタログ（copilot はプラン反映 — Free は Auto のみで空になる。cursor は effort をモデル id に畳んだアカウント連動カタログ。kiro は Free でも named 指定可・既定は auto。未指定は auto ルーティング）。lcpp はサインイン不要で、自前エンジンの目録に載っているモデルをそのまま返す（エンジンが無い配備では空になる）。muse はサインイン済みのアカウント連動カタログを返す（既定は「製品改善に使われうる」条項の付かない最新モデル）。利用者が terra のような略称で指定した場合も、一覧から対応する完全な id（例: gpt-5.6-terra）を選ぶ。opencode は同じモデルが 2 つの課金経路で並ぶことがある（opencode-go/… = Go サブスクの範囲内、opencode/… = Zen の従量課金）。同名が両方にある場合は先に並んでいる opencode-go/… を選ぶこと（一覧の並びは利用者の設定で整形済み）。利用者が Zen を明示した場合だけ opencode/… を使う。", // model-id-lint:allow an example id; it names no default.
+		"description": "指定エージェントで現在選べるモデル一覧を返す。model 指定で create_session する前には必ず呼び、返った id を使うこと（一覧は利用者が「使わないモデル」で除外したものを除いてある — 記憶や過去の会話にあるモデル名を推測で渡さないこと。除外モデルを渡した create_session は拒否される）。claude は固定の最新ティア別名と、利用者がエージェント設定で登録した完全モデル ID を返す。Claude Code OAuth にはアカウント連動カタログがないため、登録モデルの可否は起動時に判定される。codex／opencode／agy／copilot／cursor／kiro は接続状態を反映したライブカタログ（copilot はプラン反映 — Free は Auto のみで空になる。cursor は effort をモデル id に畳んだアカウント連動カタログ。kiro は Free でも named 指定可・既定は auto。未指定は auto ルーティング）。lcpp はログイン不要で、自前エンジンの目録に載っているモデルをそのまま返す（エンジンが無い配備では空になる）。muse はログイン済みのアカウント連動カタログを返す（既定は「製品改善に使われうる」条項の付かない最新モデル）。利用者が terra のような略称で指定した場合も、一覧から対応する完全な id（例: gpt-5.6-terra）を選ぶ。opencode は同じモデルが 2 つの課金経路で並ぶことがある（opencode-go/… = Go サブスクの範囲内、opencode/… = Zen の従量課金）。同名が両方にある場合は先に並んでいる opencode-go/… を選ぶこと（一覧の並びは利用者の設定で整形済み）。利用者が Zen を明示した場合だけ opencode/… を使う。", // model-id-lint:allow an example id; it names no default.
 		"inputSchema": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -2253,7 +2278,7 @@ var mcpStdioWriteTools = []map[string]any{
 			"properties": map[string]any{
 				"dir":            map[string]any{"type": "string", "description": "作業ディレクトリ（リポジトリの作業コピー等）。省略時はホーム。list_my_sessions の dir か list_repos の path を渡す。"},
 				"title":          map[string]any{"type": "string", "description": "セッションの表示名（任意）。何のタスクかが分かる短い名前。"},
-				"kind":           map[string]any{"type": "string", "description": "エージェント種別（任意）。claude（既定）| codex | opencode | agy | copilot | cursor | kiro | lcpp | shell。agy は Antigravity CLI（接続済みのときのみ起動可）。copilot は GitHub Copilot CLI（GitHub 連携＋Copilot サブスクが前提）。cursor は Cursor CLI（接続済みのときのみ起動可）。kiro は Kiro CLI（接続済みのときのみ起動可・既定は managed ドライバ）。lcpp は自前の llama.cpp ハーネス（サインイン不要・常に managed・Terminal (CLI) 経路は無い）で、model は list_models(kind=\"lcpp\") が返す自前エンジンの目録から選ぶ。muse は Meta の Muse Code（オンデマンド導入＋サインイン済みのときのみ起動可・常に managed・Terminal (CLI) 経路は無い）。shell は生のシェルで initial_prompt/送信文字列がそのままコマンド実行される（エージェントのガードレール無し）ため、起動前に実行内容を利用者へ確認すること。"},
+				"kind":           map[string]any{"type": "string", "description": "エージェント種別（任意）。claude（既定）| codex | opencode | agy | copilot | cursor | kiro | lcpp | shell。agy は Antigravity CLI（接続済みのときのみ起動可）。copilot は GitHub Copilot CLI（GitHub 連携＋Copilot サブスクが前提）。cursor は Cursor CLI（接続済みのときのみ起動可）。kiro は Kiro CLI（接続済みのときのみ起動可・既定は managed ドライバ）。lcpp は自前の llama.cpp ハーネス（ログイン不要・常に managed・Terminal (CLI) 経路は無い）で、model は list_models(kind=\"lcpp\") が返す自前エンジンの目録から選ぶ。muse は Meta の Muse Code（オンデマンド導入＋ログイン済みのときのみ起動可・常に managed・Terminal (CLI) 経路は無い）。shell は生のシェルで initial_prompt/送信文字列がそのままコマンド実行される（エージェントのガードレール無し）ため、起動前に実行内容を利用者へ確認すること。"},
 				"model":          map[string]any{"type": "string", "description": "モデル上書き（任意）。"},
 				"effort":         map[string]any{"type": "string", "description": "推論 effort（任意）。model と一緒に指定し、list_models が返すそのモデルの efforts から選ぶ（それ以外や model 省略は拒否される）。省略時はモデルの defaultEffort。opencode と kiro は一覧に efforts が無く、ここでは値を確かめない（誤った値は子の最初のターンで失敗する）。agy と cursor は effort がモデル id に含まれるので指定しない。"},
 				"initial_prompt": map[string]any{"type": "string", "description": "起動後に自動送信する最初のタスク/引き継ぎ文（任意）。"},
@@ -2628,15 +2653,130 @@ var mcpStdioWriteTools = []map[string]any{
 	},
 }
 
+// mcpCallArgs is the union of every argument the union-decoded tools take. Each field's json
+// tag must be advertised by some tool schema and each advertised property of those tools must
+// have a field here (TestMCPArgsSchemaAndDecoderAgree).
+type mcpCallArgs struct {
+	Name string `json:"name"`
+	// Since is a pointer: an explicit since:0 (re-read from the start) has to be
+	// distinguished from an omitted one (continue from the previous cursor —
+	// mcpSessionOutput).
+	Since *int64 `json:"since"`
+	// Lines is peek_session_output's trailing-line count (the Agent clamps it).
+	Lines     int    `json:"lines"`
+	Prompt    string `json:"prompt"`
+	Assistant string `json:"assistant"`
+	// create_session args
+	Dir           string `json:"dir"`
+	Title         string `json:"title"`
+	Kind          string `json:"kind"`
+	Model         string `json:"model"`
+	Effort        string `json:"effort"`
+	InitialPrompt string `json:"initial_prompt"`
+	// Worktree is a POINTER because the default differs by surface: false for the
+	// operator, true for a session (ADR 0073 decision 7). A plain bool cannot tell
+	// "worktree=false, work right here" from "not mentioned".
+	Worktree *bool `json:"worktree"`
+	// AllowSharedWorkingCopy is a session's explicit opt-in to share its own working copy
+	// with the child (needs worktree=false; the Agent enforces which directory).
+	AllowSharedWorkingCopy bool   `json:"allow_shared_working_copy"`
+	Branch                 string `json:"branch"`
+	NewBranch              string `json:"new_branch"`
+	Subdir                 string `json:"subdir"`
+	// ReportBack asks a spawned child to send one intent=answer peer message home when it
+	// finishes (ADR 0073 decision 9). A pointer for the same reason as On: omitted means
+	// on, and a plain bool would silently turn the report off for every caller that did
+	// not think about it.
+	ReportBack *bool `json:"report_back"`
+	// SpendCapUSD is create_session's per-child budget (#1054). A pointer: omitted means the
+	// user's default, which the Agent applies; an explicit 0 means none.
+	SpendCapUSD *float64 `json:"spend_cap_usd"`
+	// answer_session_question args: 1-based choice numbers, in question order.
+	Choices []int `json:"choices"`
+	// respond_session_plan args
+	Decision string `json:"decision"`
+	Feedback string `json:"feedback"`
+	// set_chat_plan args (docs/log/33 stage 5, option D): the full work plan pinned to
+	// the conversation.
+	Plan string `json:"plan"`
+	// memo args (id in the path; the rest are forwarded verbatim via p.Args).
+	// ID doubles as the cleanup-archive id (restore/purge). Repo names the branch's repo.
+	ID   string `json:"id"`
+	Repo string `json:"repo"`
+	// agent-memory args (docs/log/39 P4). Rev/At pick the snapshot; All/Kinds/Projects
+	// are the restore scope. Limit/Path narrow the read tools.
+	// af_report (docs/log/51 Phase 3): the reporting session's name. Kept separate from
+	// Name because this tool carries "who I am", not "which session to observe".
+	// af_stop_after_turn (docs/log/85) uses the same field for the same reason.
+	Session string `json:"session"`
+	// On is af_stop_after_turn's arm / release. A POINTER because the zero value of the
+	// arming flag has to mean "arm": decoded into a plain bool, a call that omitted it
+	// would silently release the arm it was meant to set.
+	On       *bool    `json:"on"`
+	Rev      string   `json:"rev"`
+	At       string   `json:"at"`
+	Path     string   `json:"path"`
+	Limit    int      `json:"limit"`
+	All      bool     `json:"all"`
+	Kinds    []string `json:"kinds"`
+	Projects []string `json:"projects"`
+	// Chromium Attach View (docs/log/53). MCP is snake_case while the Agent REST is
+	// camelCase, so the conversion is explicit at this boundary. Neither a host nor a
+	// CDP WebSocket URL is accepted as input.
+	Port              int    `json:"port"`
+	TargetID          string `json:"target_id"`
+	ExpectedBrowserID string `json:"expected_browser_id"`
+	AttachmentID      string `json:"attachment_id"`
+	Label             string `json:"label"`
+	Message           string `json:"message"`
+	CompletionLabel   string `json:"completion_label"`
+	AllowCancel       *bool  `json:"allow_cancel"`
+	ControlMode       string `json:"control_mode"`
+	// send_to_peer_session args (docs/log/58 §58.14): the message kind. The Agent derives
+	// the reply policy from it, so this layer passes it through untouched.
+	Intent string `json:"intent"`
+	// generate_image args (ADR 0069). Op/Size/Background/Count are passed through as the
+	// caller wrote them: what a provider cannot honour is REPORTED in the result's
+	// warnings, so narrowing them here would hide exactly what the user needs to see.
+	Op             string   `json:"op"`
+	Provider       string   `json:"provider"`
+	Size           string   `json:"size"`
+	AspectRatio    string   `json:"aspect_ratio"`
+	Background     string   `json:"background"`
+	Count          int      `json:"count"`
+	Inputs         []string `json:"inputs"`
+	Mask           string   `json:"mask"`
+	Seed           *int64   `json:"seed"`
+	NegativePrompt string   `json:"negative_prompt"`
+	// Strength is a pointer so that 0 arrives at the Agent as the request it is and is
+	// refused there by value, instead of reading here as "not given" and becoming the default.
+	Strength *float64 `json:"strength"`
+	// Loras (ADR 0072 decision 5, phase P3). Passed on as written for the same reason as the
+	// rest: the Agent refuses an unknown name or a family that does not match the checkpoint
+	// BY NAME, which is a better answer than a silently shortened list.
+	Loras []imageGenLoraArg `json:"loras"`
+	// Params is the sampler overlay, and a POINTER for the same reason Strength is: an absent
+	// object and an empty one are not the same request, and which of the four a family reads
+	// is answered downstream in warnings rather than guessed at here.
+	Params *imageGenParamsArg `json:"params"`
+}
+
 func mcpStdioCall(req mcpReq) []byte {
 	var p struct {
-		Name string          `json:"name"`
-		Args json.RawMessage `json:"arguments"`
+		Name string                     `json:"name"`
+		Args json.RawMessage            `json:"arguments"`
+		Meta map[string]json.RawMessage `json:"_meta"`
 	}
 	_ = json.Unmarshal(req.Params, &p)
 	// Taken out before anything decodes or forwards p.Args (the memo tools relay it verbatim).
 	p.Args, mcpCallerSID = takeCallerSID(p.Args)
-	defer func() { mcpCallerSID = "" }()
+	mcpCallerFromMeta = false
+	if mcpCallerSID == "" { // the stamp wins: it is what opencode 1 delivers and what was trusted first
+		if mcpCallerSID = metaCallerSID(p.Meta); mcpCallerSID != "" {
+			mcpCallerFromMeta = true
+		}
+	}
+	defer func() { mcpCallerSID, mcpCallerFromMeta = "", false }()
 	// The session-side advertised set IS the scope boundary (see
 	// selfReportOnly()/sessionChromiumEnabled()). Refuse every unadvertised name here
 	// too, or a client that guesses names could reach fleet read/write handlers from any
@@ -2653,108 +2793,10 @@ func mcpStdioCall(req mcpReq) []byte {
 		// when the honest answer is that it named something this server never offered.
 		return mcpToolErr(req.ID, "このサーバーの tools/list に無いツール名です（広告されていないものは呼べません）: "+p.Name)
 	}
-	var a struct {
-		Name string `json:"name"`
-		// Since is a pointer: an explicit since:0 (re-read from the start) has to be
-		// distinguished from an omitted one (continue from the previous cursor —
-		// mcpSessionOutput).
-		Since *int64 `json:"since"`
-		// Lines is peek_session_output's trailing-line count (the Agent clamps it).
-		Lines     int    `json:"lines"`
-		Prompt    string `json:"prompt"`
-		Assistant string `json:"assistant"`
-		// create_session args
-		Dir           string `json:"dir"`
-		Title         string `json:"title"`
-		Kind          string `json:"kind"`
-		Model         string `json:"model"`
-		Effort        string `json:"effort"`
-		InitialPrompt string `json:"initial_prompt"`
-		// Worktree is a POINTER because the default differs by surface: false for the
-		// operator, true for a session (ADR 0073 decision 7). A plain bool cannot tell
-		// "worktree=false, work right here" from "not mentioned".
-		Worktree  *bool  `json:"worktree"`
-		Branch    string `json:"branch"`
-		NewBranch string `json:"new_branch"`
-		Subdir    string `json:"subdir"`
-		// ReportBack asks a spawned child to send one intent=answer peer message home when it
-		// finishes (ADR 0073 decision 9). A pointer for the same reason as On: omitted means
-		// on, and a plain bool would silently turn the report off for every caller that did
-		// not think about it.
-		ReportBack *bool `json:"report_back"`
-		// SpendCapUSD is create_session's per-child budget (#1054). A pointer: omitted means the
-		// user's default, which the Agent applies; an explicit 0 means none.
-		SpendCapUSD *float64 `json:"spend_cap_usd"`
-		// answer_session_question args: 1-based choice numbers, in question order.
-		Choices []int `json:"choices"`
-		// respond_session_plan args
-		Decision string `json:"decision"`
-		Feedback string `json:"feedback"`
-		// set_chat_plan args (docs/log/33 stage 5, option D): the full work plan pinned to
-		// the conversation.
-		Plan string `json:"plan"`
-		// memo args (id in the path; the rest are forwarded verbatim via p.Args).
-		// ID doubles as the cleanup-archive id (restore/purge). Repo names the branch's repo.
-		ID   string `json:"id"`
-		Repo string `json:"repo"`
-		// agent-memory args (docs/log/39 P4). Rev/At pick the snapshot; All/Kinds/Projects
-		// are the restore scope. Limit/Path narrow the read tools.
-		// af_report (docs/log/51 Phase 3): the reporting session's name. Kept separate from
-		// Name because this tool carries "who I am", not "which session to observe".
-		// af_stop_after_turn (docs/log/85) uses the same field for the same reason.
-		Session string `json:"session"`
-		// On is af_stop_after_turn's arm / release. A POINTER because the zero value of the
-		// arming flag has to mean "arm": decoded into a plain bool, a call that omitted it
-		// would silently release the arm it was meant to set.
-		On       *bool    `json:"on"`
-		Rev      string   `json:"rev"`
-		At       string   `json:"at"`
-		Path     string   `json:"path"`
-		Limit    int      `json:"limit"`
-		All      bool     `json:"all"`
-		Kinds    []string `json:"kinds"`
-		Projects []string `json:"projects"`
-		// Chromium Attach View (docs/log/53). MCP is snake_case while the Agent REST is
-		// camelCase, so the conversion is explicit at this boundary. Neither a host nor a
-		// CDP WebSocket URL is accepted as input.
-		Port              int    `json:"port"`
-		TargetID          string `json:"target_id"`
-		ExpectedBrowserID string `json:"expected_browser_id"`
-		AttachmentID      string `json:"attachment_id"`
-		Label             string `json:"label"`
-		Message           string `json:"message"`
-		CompletionLabel   string `json:"completion_label"`
-		AllowCancel       *bool  `json:"allow_cancel"`
-		ControlMode       string `json:"control_mode"`
-		// send_to_peer_session args (docs/log/58 §58.14): the message kind. The Agent derives
-		// the reply policy from it, so this layer passes it through untouched.
-		Intent string `json:"intent"`
-		// generate_image args (ADR 0069). Op/Size/Background/Count are passed through as the
-		// caller wrote them: what a provider cannot honour is REPORTED in the result's
-		// warnings, so narrowing them here would hide exactly what the user needs to see.
-		Op             string   `json:"op"`
-		Provider       string   `json:"provider"`
-		Size           string   `json:"size"`
-		AspectRatio    string   `json:"aspect_ratio"`
-		Background     string   `json:"background"`
-		Count          int      `json:"count"`
-		Inputs         []string `json:"inputs"`
-		Mask           string   `json:"mask"`
-		Seed           *int64   `json:"seed"`
-		NegativePrompt string   `json:"negative_prompt"`
-		// Strength is a pointer so that 0 arrives at the Agent as the request it is and is
-		// refused there by value, instead of reading here as "not given" and becoming the default.
-		Strength *float64 `json:"strength"`
-		// Loras (ADR 0072 decision 5, phase P3). Passed on as written for the same reason as the
-		// rest: the Agent refuses an unknown name or a family that does not match the checkpoint
-		// BY NAME, which is a better answer than a silently shortened list.
-		Loras []imageGenLoraArg `json:"loras"`
-		// Params is the sampler overlay, and a POINTER for the same reason Strength is: an absent
-		// object and an empty one are not the same request, and which of the four a family reads
-		// is answered downstream in warnings rather than guessed at here.
-		Params *imageGenParamsArg `json:"params"`
+	var a mcpCallArgs
+	if msg := mcpCheckCallArgs(p.Name, p.Args, &a); msg != "" {
+		return mcpToolErr(req.ID, msg)
 	}
-	_ = json.Unmarshal(p.Args, &a)
 
 	// The mutating Chromium attachment tools are refused on the call side too, not just in
 	// the advertised set: a read-only client that guesses a name and issues tools/call must
@@ -3245,6 +3287,12 @@ func mcpStdioCall(req mcpReq) []byte {
 		if parent != "" && a.Worktree == nil {
 			worktree = true
 		}
+		// The opt-in only means something against a worktree=false launch from a session; with
+		// the default worktree it would be silently ignored, so say so instead.
+		shared := parent != "" && a.AllowSharedWorkingCopy
+		if shared && worktree {
+			return mcpToolErr(req.ID, "allow_shared_working_copy は worktree=false と一緒に指定してください（既定の worktree=true では作業コピーは共有されません）")
+		}
 		initialPrompt := a.InitialPrompt
 		if parent != "" {
 			initialPrompt = spawnPromptFor(parent, initialPrompt, a.ReportBack)
@@ -3270,7 +3318,7 @@ func mcpStdioCall(req mcpReq) []byte {
 				return mcpToolErr(req.ID, err.Error())
 			}
 		}
-		idemKey := CreateSessionKey(scope, a.Dir, a.Subdir, a.Kind, model, effort, initialPrompt, worktree, a.Branch, a.NewBranch)
+		idemKey := CreateSessionKey(scope, a.Dir, a.Subdir, a.Kind, model, effort, initialPrompt, worktree, a.Branch, a.NewBranch, shared)
 		body := map[string]any{
 			"dir":             a.Dir,
 			"subdir":          a.Subdir,
@@ -3294,6 +3342,9 @@ func mcpStdioCall(req mcpReq) []byte {
 			"origin_conv":    originConv,
 			"origin_session": parent,
 		}
+		if shared {
+			body["allow_shared_working_copy"] = true
+		}
 		if a.SpendCapUSD != nil {
 			body["spend_cap_usd"] = *a.SpendCapUSD
 		}
@@ -3306,6 +3357,9 @@ func mcpStdioCall(req mcpReq) []byte {
 		stop()
 		if err != nil {
 			return mcpToolErr(req.ID, "セッションの作成に失敗しました: "+agentErrDetail(err))
+		}
+		if parent != "" && strings.TrimSpace(a.InitialPrompt) == "" {
+			out = withNoTaskWarning(out)
 		}
 		return mcpTextResult(req.ID, out)
 	case "send_to_session":
@@ -3703,9 +3757,7 @@ func mcpStdioCall(req mcpReq) []byte {
 	if p.Name == "get_session_status" && selfReportOnly() {
 		body = withoutPendingInteraction(body)
 	}
-	return mcpResult(req.ID, map[string]any{
-		"content": []any{map[string]any{"type": "text", "text": body}},
-	})
+	return mcpTextResult(req.ID, body)
 }
 
 // withoutPendingInteraction drops `questions` and `plan` from a session status before a
@@ -3855,6 +3907,14 @@ func takeCallerSID(args json.RawMessage) (json.RawMessage, string) {
 	return rest, sid
 }
 
+// metaCallerSID is the session id opencode 2 sent in the call's `_meta`, "" when absent or not
+// a string (a non-string is nobody's session id, same as in takeCallerSID).
+func metaCallerSID(meta map[string]json.RawMessage) string {
+	var sid string
+	_ = json.Unmarshal(meta[mcpCallerSIDMetaKey], &sid)
+	return sid
+}
+
 // mcpCallerSession resolves the opencode session id stamped on this call to the AF session
 // that owns it. The id arrives as a tool argument, so the model can write one too (the plugin
 // overwrites it, but a member can remove the plugin): it is only ever a key. It must equal
@@ -3863,7 +3923,7 @@ func takeCallerSID(args json.RawMessage) (json.RawMessage, string) {
 // (no stamp, no match, a stopped match, a failed probe) reports ok=false and leaves the
 // decision to the cwd fallback, which is what the call would have got without the plugin.
 func mcpCallerSession(cwd string) (string, bool) {
-	if mcpCallerSID == "" || !mcpCallerStampTrusted() {
+	if mcpCallerSID == "" || !mcpCallerTrusted() {
 		return "", false
 	}
 	var found []string
@@ -3906,7 +3966,20 @@ func mcpCallerSession(cwd string) (string, bool) {
 // through the environment is only as good as the config that delivers it; this check closes the
 // cases where nobody chose to lie.
 func mcpCallerStampTrusted() bool {
-	return mcpreg.IsRotatedAFServerName(os.Getenv(mcpreg.AFServerKeyEnv)) && opencode.CallerPluginCurrent()
+	return mcpCallerKeyRotated() && opencode.CallerPluginCurrent()
+}
+
+func mcpCallerKeyRotated() bool {
+	return mcpreg.IsRotatedAFServerName(os.Getenv(mcpreg.AFServerKeyEnv))
+}
+
+// mcpCallerTrusted is mcpCallerStampTrusted for the call being handled: an id from `_meta` was
+// written by opencode, not by the model or a plugin, so only the rotated key is asked of it.
+func mcpCallerTrusted() bool {
+	if mcpCallerFromMeta {
+		return mcpCallerKeyRotated()
+	}
+	return mcpCallerStampTrusted()
 }
 
 // mcpStampedFolderSessions is who can be calling this MCP child when the answer only arrives
@@ -4445,12 +4518,12 @@ func mcpSessionOutput(id json.RawMessage, name string, since *int64) []byte {
 			}
 		}
 	}
-	return mcpResult(id, map[string]any{
-		"content": []any{map[string]any{"type": "text", "text": body}},
-	})
+	return mcpTextResult(id, body)
 }
 
-// mcpTextResult returns a tools/call RESULT carrying a single text content block.
+// mcpTextResult returns a tools/call RESULT carrying a single text content block. Every
+// tools/call success goes through here or mcpStructuredResult: a 2026-07-28 client rejects a
+// result without resultType outright, so the model never sees the tool's answer.
 func mcpTextResult(id json.RawMessage, text string) []byte {
 	return mcpResult(id, map[string]any{
 		"resultType": "complete",
@@ -4530,9 +4603,20 @@ func CPScheduleDo(method, path string, body []byte) (string, error) {
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("CP 定時実行API エラー (%d): %s", resp.StatusCode, string(b))
+		return "", &CPScheduleError{Status: resp.StatusCode, Body: string(b)}
 	}
 	return string(b), nil
+}
+
+// CPScheduleError is a CP schedule API answer of 4xx/5xx. It is typed so a caller can tell
+// "the schedule is gone" (404) from a failure that may still have left it in place.
+type CPScheduleError struct {
+	Status int
+	Body   string
+}
+
+func (e *CPScheduleError) Error() string {
+	return fmt.Sprintf("CP 定時実行API エラー (%d): %s", e.Status, e.Body)
 }
 
 // WithOwnerConv stamps owner_conv onto a create_schedule body so the schedule's
@@ -4609,12 +4693,12 @@ func agentDoTimeoutHeaders(method, path string, body []byte, timeout time.Durati
 // conversation id, a session its own name (ADR 0073 decision 2). The scope is not optional —
 // an empty one would fold two sessions' identical launches into a single child, and the second
 // caller would be handed the first's session as if it were the one it asked for.
-func CreateSessionKey(scope, dir, subdir, kind, model, effort, prompt string, worktree bool, branch, newBranch string) string {
+func CreateSessionKey(scope, dir, subdir, kind, model, effort, prompt string, worktree bool, branch, newBranch string, allowShared bool) string {
 	if scope == "" {
 		return ""
 	}
 	h := sha256.New()
-	for _, f := range []string{scope, dir, subdir, kind, model, effort, prompt, strconv.FormatBool(worktree), branch, newBranch} {
+	for _, f := range []string{scope, dir, subdir, kind, model, effort, prompt, strconv.FormatBool(worktree), branch, newBranch, strconv.FormatBool(allowShared)} {
 		h.Write([]byte(f))
 		h.Write([]byte{0})
 	}

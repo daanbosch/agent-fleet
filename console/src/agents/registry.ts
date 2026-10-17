@@ -223,6 +223,8 @@ export const AGENTS: Record<SessionKind, AgentDescriptor> = {
       runsInDir: true,
       launchableFromRepo: true,
     }),
+    // Expired still counts as available: the launch menus gate on this, and /login in the pane
+    // is a valid recovery. The setup card asks loginExpired() separately.
     available: (c) => !!c.conns?.claude?.connected,
   },
   codex: {
@@ -723,6 +725,12 @@ export function agentOf(kind: string | null | undefined): AgentDescriptor {
   return (kind && AGENTS[kind as SessionKind]) || AGENTS.claude;
 }
 
+// loginExpired: the kind is connected but its stored login can no longer run a turn. Only
+// claude reports this (conns.claude.expired); every other kind answers false.
+export function loginExpired(kind: string, conns: ConnectionsStatus | null | undefined): boolean {
+  return kind === "claude" && !!conns?.claude?.expired;
+}
+
 // nonPlanModeLabel is the mode label for the non-plan side (docs/log/76).
 //
 // Claude's default label "Bypass" names the state of a session launched with permission prompts
@@ -752,6 +760,13 @@ export function availableKinds(ctx: AvailCtx): Record<SessionKind, boolean> {
 // Kinds a schedule may be pointed at, DERIVED from the cap rather than listed: the hand-kept
 // copy of this list in the schedule editor had already lost agy, and a derived one cannot drift.
 // The order is the registry's own.
+// The kinds a member connects with an account of their own: what a tenant may name as its
+// default agent (ADR 0114 decision 8), and what completes the first-run card's connect step.
+// control-plane/tenant_member_defaults.go accepts exactly these (memberDefaultAgents; a test
+// there reads this line). shell and ssm need no connection, lcpp is governed by engine access,
+// and agy is experimental.
+export const MEMBER_DEFAULT_AGENTS = ["claude", "codex", "opencode", "cursor", "copilot", "kiro", "muse"] as const;
+
 export const scheduledKinds: SessionKind[] = SESSION_KINDS.filter((k) => AGENTS[k].caps.scheduledRuns);
 
 // Kinds offered in a repo row's launch menu, in display order. Every entry must

@@ -2,7 +2,7 @@
 
 English | [日本語](0055-idle-stop-and-carried-interactions.ja.md)
 
-- Status: **adopted** (2026-08-24). The record of the investigation and the measurements is [docs/75](../log/75-idle-stop-and-pending-interactions.md).
+- Status: **adopted** (2026-08-24). Follow-ups: #1830 (bound the hold for managed sessions and the remaining kinds), #1942, #1943. The record of the investigation and the measurements is [docs/75](../log/75-idle-stop-and-pending-interactions.md).
 - See also: [0030-turn-abort-auto-resume.md](0030-turn-abort-auto-resume.md) (splitting live state by "the next move to prompt") /
   [0045-ec2-persistent-workspace.md](0045-ec2-persistent-workspace.md) (stopping = releasing a slot = cost) /
   [docs/history/p3-9-idle-stop.md](../log/p3-9-idle-stop.md) (the prototype of the two-tier arrangement)
@@ -201,3 +201,58 @@ judgement has drifted twice already).
   measured (docs/75 §75.10.1 G). Capturing **permissions** for cursor / kiro / copilot stops at unit
   tests, because the permission request itself could not be reproduced on real hardware (ibid. J) — we
   do not write "it should work".
+
+## Addendum (2026-10-07): a frozen "working" row no longer holds the container forever (#1818)
+
+Decision 9's `machineBusy` had no upper bound: a row whose kind-derived `working` never recorded a
+turn end (agy's conversation DB, copilot's `events.jsonl`, a cursor transcript, kiro's footer) kept the
+workspace awake indefinitely (~21 h measured, #1811). The decisions above are unchanged; this adds one
+bound inside `machineBusy`:
+
+- The Agent reports `progressAt` per live busy row, plus `progressAgeSec` (its age on the Workspace's own
+  clock; the CP compares only the age, so clock skew cannot lapse a live row): the newest of the status
+  file's mtime, the kind's own state source's mtime, the pane's last repaint, and "now" while a tool
+  process lives under the pane. Future mtimes are ignored.
+- It is reported only where those signals are observable: Terminal claude and agy. Managed sessions and
+  the other kinds (codex, cursor, copilot, kiro, ...) report nothing and keep holding, because a long
+  silent build there would otherwise look frozen. Widening the set needs a measured live signal per kind.
+- A `working` / `compacting` row whose progress age exceeds one hour (`busyProgressLapse`) is
+  classified `unknown`: not a reason to stay awake, and not foldable by tier 1 either. Tier 2 may then
+  stop the workspace.
+- Checked after the pin and `backgroundBusy`, which are never subject to it. An absent (or zero)
+  `progressAgeSec` keeps the old behaviour (hold); the lapse reads the age only, never `progressAt`. `holdersOf` goes through the same predicate (decision 11).
+- Not covered (still unbounded): managed sessions and every kind other than claude / agy.
+- The admin forecast (#1819) shows how long the holding session has been working and when the hold would
+  lapse: the Agent reports `stateSince` (approximate: the first poll that saw the state, or the status
+  file's mtime if older; resets on Agent restart), and `idleHolder` for `working` carries `since` and
+  `lapseAt` (progress age bound, on the CP's clock).
+
+## Addendum (2026-10-09): the bound reaches the pane-only Terminal kinds (#1830)
+
+The 2026-10-07 addendum left every kind but claude and agy unbounded until a live signal was
+measured per kind. Measured on the CLIs baked into the Workspace image (codex 0.162, cursor-agent
+2026.10.01, copilot 1.0.94, kiro-cli 2.24, opencode 1.18), each in a tmux pane running a silent
+`sleep 120` tool, frames compared once a second:
+
+| Kind | Pane repaint through the silent tool | Tool-process rule |
+|---|---|---|
+| codex | a new frame every second (110 s: 108 distinct frames, longest identical run 0 s) | unusable: `setsid()` helper daemons under the pane read as a tool even when idle |
+| cursor | 114 distinct frames in 115 s, longest run 0 s | not measured, not needed |
+| copilot | 113 in 115 s, longest run 0 s | not measured, not needed |
+| kiro | 93 in 95 s, longest run 0 s (idle pane: 1 frame in 112 s) | not measured, not needed |
+| opencode | 113 in 115 s, longest run 0 s | not measured, not needed |
+
+- Decision: Terminal codex, cursor, copilot, kiro and opencode now report `progressAgeSec`. The pane
+  repaint is their signal; the Agent records the pane on the idle-settle clock itself (one
+  `capture-pane` per busy row per poll), since these kinds never read their pane for state. The
+  tool-process probe is skipped for them. The one-hour lapse and everything else above are unchanged.
+- Not bounded, because no signal was measured: Managed sessions of every kind (no pane; the
+  runtime's in-flight tool is not visible) and Terminal muse, lcpp, shell and ssm. They keep
+  holding. Follow-ups: #1942 (Managed), #1943 (muse / lcpp / shell / ssm).
+- Caveat: one model and one CLI version per kind; a CLI that stops repainting during a tool would
+  lapse after an hour of silence. Re-measure when bumping a CLI version.
+- Trade-off: for these five kinds the one hour is time since the pane last changed, not total working
+  time, and a running tool process is not a sign of life. A silent tool under a pane that stays
+  static for an hour can lapse, and a stuck session whose spinner keeps animating is held
+  indefinitely (the safe side). The pane must also be captured successfully on the current poll; a
+  failed capture gives no answer rather than a stale age.

@@ -9,13 +9,13 @@ updated: "2026-10"
 English | [日本語](deploy-targets.ja.md)
 
 One core runs on every target; only the edge adapter changes. What differs is
-therefore small and specific — and worth stating precisely, because "it works on my
+therefore small and specific, and worth stating precisely, because "it works on my
 deployment" is the most expensive kind of documentation error here.
 
 | Target | A workspace is | Home lives on | Choose it when |
 |---|---|---|---|
 | docker | a container on the host's Docker daemon | a bind-mounted directory on the host | the on-prem default: one host, a team sharing it |
-| native | sandboxed host processes, no Docker at all | a directory on the host | Docker cannot be installed (a plain WSL2 machine). **Single user only** — without container isolation it refuses to run in a shared mode |
+| native | sandboxed host processes, no Docker at all | a directory on the host | Docker cannot be installed (a plain WSL2 machine). **Single user only**: without container isolation it refuses to run in a shared mode |
 | ecs | a task on AWS ECS / Fargate | EFS | AWS, without managing instances |
 | ecs-ec2 | a task on an EC2 slot taken from a pool | a per-user EBS volume | AWS, when start latency and disk performance matter enough to manage instances |
 | kubernetes | a pod of its own StatefulSet on a Kubernetes cluster | a per-user persistent volume (block storage), plus a second one for logins and Claude's state | **Preview.** You already run Kubernetes, or want Agent Fleet on Google Cloud with workspaces that scale to zero. GKE Standard is the first cluster it is verified on |
@@ -24,8 +24,9 @@ deployment" is the most expensive kind of documentation error here.
 > cluster but is not yet supported for production. Known limits: there are no browser features
 > on this runtime (no browser pane, no headless Chromium), and on GKE the region's SSD disk quota
 > has to hold the deployment before you start ([Preconditions](../../deploy/kubernetes/README.md#preconditions)). Still being
-> measured: what it costs ([The bill](../../deploy/kubernetes/README.md#the-bill)) and how the load balancer's 24-hour
-> WebSocket cut affects day-long sessions ([7. The load balancer](../../deploy/kubernetes/README.md#7-the-load-balancer)).
+> measured: how the load balancer's 24-hour WebSocket cut affects day-long sessions
+> ([7. The load balancer](../../deploy/kubernetes/README.md#7-the-load-balancer)). What it costs on
+> GKE, measured: [The bill](../../deploy/kubernetes/README.md#the-bill).
 
 `docker` also answers to `local`, `ecs` to `aws`, `native` to `wsl`, and `kubernetes` to `k8s`. Anything else
 is rejected at boot rather than quietly defaulting. `ecs` and `ecs-ec2` are separate
@@ -43,7 +44,7 @@ value instead of reverting code.
 | Idle auto-stop | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Stop / start preserving home | ✓ | ✓ | ✓ | ✓ | ✓ |
 | The user guide inside the container | ✓¹ | ✓¹ | ✓² | ✓² | ✓² |
-| Browser pane | ✓ | ✓³ | ✓ | ✓ | —¹² |
+| Browser pane | ✓ | ✓³ | —¹² | ✓ | —¹² |
 | Cost attribution per member | — | — | ✓ | ✓ | — |
 | An image engine the deployment provides | ✓⁴ | ✓⁴ | — | ✓⁵ | ✓⁴ |
 | A chat engine the deployment provides | ✓⁶ | ✓⁶ | — | ✓⁶ | ✓⁶ |
@@ -62,7 +63,7 @@ mechanisms.
 the first time.
 
 ⁴ A ComfyUI **already running on your own network**, pointed at with one environment
-variable — or several engine rows side by side: a LAN ComfyUI, a borrowed engine, an
+variable, or several engine rows side by side: a LAN ComfyUI, a borrowed engine, an
 OpenAI-compatible server ([operate/07](../operate/07-image-engine.md)).
 
 ⁵ The fleet's own GPU, bought when something asks for it. There is no equivalent on
@@ -90,9 +91,9 @@ to the audit log.
 While a task runs, a start and any second operation on that home are refused, even across a
 Control Plane restart. Each operation is recorded in the Control Plane's database before its
 task starts, so a restart in the middle loses nothing: within a minute or two of coming back, a
-Control Plane picks the operation up, waits for the task — or asks ECS to start it again under the
+Control Plane picks the operation up, waits for the task (or asks ECS to start it again under the
 same request token if the answer to starting it was lost, which returns the task already started
-rather than a second one — and then finishes it: the member's workspace is started (not if the
+rather than a second one) and then finishes it: the member's workspace is started (not if the
 member has been removed in the meantime), the reason for a failure is shown, the audit outcome is
 written, and a Destroy removes the workspace row. A start in between is refused as above. The
 task's own log (the workspace log group, stream prefix `home-ops`) says how it ended.
@@ -130,10 +131,12 @@ the last start. After Clean home the first start reinstalls the agent CLIs, as o
 
 ¹¹ The size of the home volume. It can grow, never shrink.
 
-¹² No browser features at all — no browser pane, no Chromium attachments, no headless Chromium.
-The workspace pod's Pod Security `restricted` level leaves Chromium's sandbox neither its setuid
-helper nor user namespaces, and running Chromium unsandboxed was decided against (ADR 0106,
-addendum 2026-10-04). The Console greys the entry points out and says why; the lightweight preview
+¹² No browser features at all: no browser pane, no Chromium attachments, no headless Chromium.
+On `kubernetes`, the workspace pod's Pod Security `restricted` level leaves Chromium's sandbox
+neither its setuid helper nor user namespaces. On `ecs` (Fargate), a task cannot be given
+`SYS_ADMIN`, so the default seccomp profile refuses the namespaces and the setuid helper has no
+capability to use. Running Chromium unsandboxed was decided against (ADR 0106, addendum
+2026-10-04). `ecs-ec2` does offer the browser: its task adds `SYS_ADMIN`, as `docker` does. The Console greys the entry points out and says why; the lightweight preview
 still works ([browser-pane.md](browser-pane.md#where-there-is-no-browser-pane)).
 
 ¹³ A member's Recreate and Clean home mark the home and return; the next start removes the files
@@ -163,7 +166,7 @@ repository next to what they operate:
 | a single EC2 VM running compose | [deploy/aws/ec2-single/README.md](../../deploy/aws/ec2-single/README.md) |
 | kubernetes (preview; GKE, and other clusters) | [deploy/kubernetes/README.md](../../deploy/kubernetes/README.md) |
 
-`ec2-single` is not a separate runtime profile — it is `docker` on a VM, and it exists
+`ec2-single` is not a separate runtime profile. It is `docker` on a VM, and it exists
 because "AWS" and "manage instances yourself" are independent choices.
 
 ## What is the same everywhere

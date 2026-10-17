@@ -8,14 +8,14 @@ updated: "2026-09"
 
 English | [日本語](glossary.ja.md)
 
-Two columns on purpose. The reader-facing shelves may use only the **screen** word;
+The glossary has two columns on purpose. The reader-facing shelves may use only the **screen** word;
 `docs/build/` uses the **implementation** word. Keeping the mapping in
 one place is what lets a support conversation and a stack trace be about the same
 thing.
 
 | Screen | Implementation | Means |
 |---|---|---|
-| Workspace | container / task | One person's private environment: their repositories, work in progress and sessions. Runs as a dedicated container, or as sandboxed host processes on the Docker-less target |
+| Workspace | container / task | One person's private environment: their repositories, work in progress and sessions. Runs as a dedicated container, or as sandboxed host processes on the Docker-less target. The Japanese UI always writes it in katakana (ワークスペース), never Latin "Workspace" |
 | Workspace action bar | — | The strip that starts and stops the workspace and holds Start, Preview and pane splitting |
 | Session | session | One task's conversation, working location and execution state. **It does not imply a terminal** |
 | Execution method | driver | How Agent Fleet runs an agent and delivers instructions to it |
@@ -40,17 +40,27 @@ thing.
 | Lightweight preview | preview proxy | The same service opened in a new tab under a `/preview/{port}/` sub-path. WebSocket and SSE pass through, but an app emitting absolute-path assets breaks |
 | Preview subdomain | preview subdomain | A `https://<random>-<port>.<domain>/` URL issued every time the workspace starts. The app is served at the root and several ports are open at once. Not issued on every deployment |
 | Shared preview | shared preview | A preview a member of your tenant turned "Show it to your tenant" on for. It opens after you sign in, and not while their workspace is stopped |
-| Connection | connection / secrets | A credential you attached from the Console — an agent, a git provider, a tracker |
+| Connection | connection / secrets | A credential you attached from the Console: an agent, a git provider, a tracker |
 | Tenant | tenant | One team or department. Members of different tenants are invisible to each other |
 | Slot | slot | On the EC2 target, one pooled instance a workspace can be placed on |
 | Deployment | deployment | One installation of Agent Fleet. One company runs one |
-| Inference engine | engine / role (`llm`, `image`) | A model server the deployment runs, points at, or borrows — one for chat, one for images. What the top-bar pills report on |
+| Start / spawn | start / spawn | A person starting a session or workspace is "start" (起動). Only a session starting a child session is "spawn" (起こす) |
+| Sign in | sign-in (IdP) | Authenticating to Agent Fleet itself. Authenticating to an external CLI or service (claude, Civitai, gcloud) is "log in" (ログイン) in the Japanese UI |
+| Log in | login | Authenticating to an external CLI or service (claude, Civitai, gcloud). Authenticating to Agent Fleet itself is "sign in" (サインイン) |
+| Deploy | deploy | Used only as a verb (デプロイする). The noun is "deployment" (配備): "deployment default", "deployment-wide" |
+| This browser | browser-local | The scope of settings stored in the browser you are using (Japanese: このブラウザ, never この端末). "端末" is reserved for the terminal emulator |
+| Usage limit | usage limit / quota | The cap on how much you may use (利用枠). The cap on the number of child sessions is "child cap" (子の上限); "slot" is only the EC2 sense |
+| Child cap | child session cap | The most child sessions one session may start (子の上限) |
+| Collapse / fold | collapse / fold | Folding something away on screen only (畳む). Ending a session is written "stop" or "end" (停止 / 終了) |
+| On / Off | on / off | Switches in prose are "オン／オフ", never Latin ON / OFF. When the control's own name is "有効" / "無効" (enabled / disabled), follow it |
+| Default | default | A setting's initial value is 既定 (never デフォルト) |
+| Inference engine | engine / role (`llm`, `image`) | A model server the deployment runs, points at, or borrows (one for chat, one for images). What the top-bar pills report on |
 | Engine row | engine row / `lifecycle` | One declared engine: the deployment's own GPU, a ComfyUI on your network (external), one borrowed from another deployment (remote), or any OpenAI-compatible image server. Which row draws a picture is decided by the row, not by the server's type |
 | Borrowed engine | remote engine | An engine another deployment runs and lends through its gateway. Its catalogue is a read-only copy here; starting, stopping and editing happen over there |
 | Model catalogue | catalog | The checkpoints, LoRAs and VAEs the engines can load, one row per model, one catalogue per deployment |
-| Family | family / `base_model` | The checkpoint's lineage — SD 1.5, SDXL, SD 3.5, FLUX.1, FLUX.2 klein, Z-Image, Anima, Krea 2. It decides the workflow, the default size and which settings are read. The image-generation pane's card for it |
+| Family | family / `base_model` | The checkpoint's lineage: SD 1.5, SDXL, SD 3.5, FLUX.1, FLUX.2 klein, Z-Image, Anima, Krea 2. It decides the workflow, the default size and which settings are read. The image-generation pane's card for it |
 | Plan card | ingest plan / `plan_token` | The quote shown before a model is taken in: every file it needs, what each costs (a download in MiB, or nothing when the bytes are already held), the licence and the warnings. Not the chat plan card a session asks you to approve |
-| S3 Bucket | ledger / object store | The tab ("Bucket") that lists what the deployment's storage actually holds — including objects no catalogue row declares — and lets you register, move or delete them |
+| S3 Bucket | ledger / object store | The tab ("Bucket") that lists what the deployment's storage actually holds (including objects no catalogue row declares) and lets you register, move or delete them |
 | Image generation (pane) | imagegen pane | The pane that makes pictures on the deployment's ComfyUI without an agent: trial run, batches, seeds, LoRAs |
 | Studio | image studio / `ImageStudio` / `studios/<id>.json` | One image-generation draft and the zero or one session bound to it. It has an id of its own, so switching agents keeps the draft, the edit history and the versions. A person presses generate; the agent refines the draft and may trial one picture |
 | Draft | draft | What is in a studio's form (prompt, negative, knobs, size, LoRAs, operation, reference images, model). Both the agent and you write it; a per-field lock stops the agent's writes |

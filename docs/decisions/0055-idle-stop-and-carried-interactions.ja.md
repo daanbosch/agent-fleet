@@ -2,7 +2,7 @@
 
 [English](0055-idle-stop-and-carried-interactions.md) | 日本語
 
-- 状態: **採用**（2026-08-24）。検討・実測の記録は [docs/75](../log/75-idle-stop-and-pending-interactions.md)。
+- 状態: **採用**（2026-08-24）。検討・実測の記録は [docs/75](../log/75-idle-stop-and-pending-interactions.md)。後続: #1830（managed と残りの kind の上限）、#1942、#1943。
 - 関連: [0030-turn-abort-auto-resume.md](0030-turn-abort-auto-resume.ja.md)（live 状態を「促す次の一手」で分ける） /
   [0045-ec2-persistent-workspace.md](0045-ec2-persistent-workspace.ja.md)（停止＝スロット解放＝費用） /
   [docs/history/p3-9-idle-stop.md](../log/p3-9-idle-stop.md)（二段構えの原型）
@@ -180,3 +180,56 @@ ACP の Interaction も agy の合成メニューも、Console に選択カー�
   専用 tmux ソケットで立てた本物の Agent に対する 1 周は実測済み（docs/75 §75.10.1 G）。
   cursor / kiro / copilot の**許可**の写し取りは、実機で許可要求そのものを再現できず
   単体テスト止まり（同 J）— 動くはず、とは書かない。
+
+## 追記（2026-10-07）— 凍った「working」行がコンテナを抱え続けない（#1818）
+
+決定 9 の `machineBusy` には上限が無く、kind 由来の `working`（agy の会話 DB、copilot の
+`events.jsonl`、cursor の転写、kiro のフッター）がターン終了を記録しないまま止まると、
+Workspace が際限なく起き続けた（実測で約 21 時間、#1811）。上の決定は変えず、`machineBusy`
+の内側に上限を 1 つ足す:
+
+- Agent は生きている busy 行ごとに `progressAt` と `progressAgeSec`（Workspace 自身の時計での
+  経過秒。CP は経過秒だけを比べるので時計のずれで生きた行が落ちない）を報告する。値は status
+  ファイルの mtime・kind 自身の状態源の mtime・ペインの最後の再描画・ペイン配下でツール
+  プロセスが生きている間の「いま」のうち最も新しいもの。未来の mtime は無視する。
+- 報告するのは信号が観測できる行だけ: Terminal の claude と agy。managed と他の kind
+  （codex・cursor・copilot・kiro ほか）は何も報告せず従来どおり抱える（無出力の長いビルドが
+  凍結に見えるため）。対象を広げるには kind ごとに実測した生存信号が要る。
+- `working` / `compacting` の行で経過秒が 1 時間（`busyProgressLapse`）を超えるものは
+  `unknown` に分類する。起きている理由にならず、tier 1 の畳み対象にもならない。これで tier 2 が
+  Workspace を止められる。
+- ピンと `backgroundBusy` を先に判定し、これらは対象外。`progressAgeSec` が無い（0 を含む）場合は
+  従来どおり抱える（失効の判定は経過秒だけを読み、`progressAt` は読まない）。`holdersOf` も同じ述語を通す（決定 11）。
+- 対象外（従来どおり上限なし）: managed セッションと claude / agy 以外の kind。
+- 管理画面の見通し（#1819）は、抱えているセッションがどれだけ作業中か・いつ抱えなくなるかを出す。
+  Agent は `stateSince`（近似: 状態を最初に観測した poll、または status ファイルの mtime の古い方。
+  Agent 再起動で戻る）を報告し、`working` の `idleHolder` が `since` と `lapseAt`（経過秒の上限を
+  CP の時計で換算）を持つ。
+
+## 追記（2026-10-09）— 上限をペイン信号のみの Terminal kind に広げる（#1830）
+
+2026-10-07 の追記は claude と agy 以外を、kind ごとの生存信号を実測するまで上限なしのままにした。
+Workspace イメージ同梱の CLI（codex 0.162、cursor-agent 2026.10.01、copilot 1.0.94、kiro-cli 2.24、
+opencode 1.18）を tmux ペインで動かし、無出力のツール `sleep 120` の間のフレームを 1 秒ごとに比較した:
+
+| kind | 無出力ツール中のペイン再描画 | ツールプロセス規則 |
+|---|---|---|
+| codex | 毎秒新しいフレーム（110 秒で 108 種、同一フレームの最長連続 0 秒） | 使えない: ペイン配下の `setsid()` 常駐ヘルパーが idle でもツールに見える |
+| cursor | 115 秒で 114 種、最長 0 秒 | 未計測（不要） |
+| copilot | 115 秒で 113 種、最長 0 秒 | 未計測（不要） |
+| kiro | 95 秒で 93 種、最長 0 秒（idle 時は 112 秒で 1 フレーム） | 未計測（不要） |
+| opencode | 115 秒で 113 種、最長 0 秒 | 未計測（不要） |
+
+- 決定: Terminal の codex・cursor・copilot・kiro・opencode も `progressAgeSec` を報告する。信号は
+  ペインの再描画。これらの kind は状態判定でペインを読まないため、Agent が自分でペインを idle-settle の
+  時計に記録する（busy 行・poll ごとに `capture-pane` 1 回）。ツールプロセスの探索は行わない。
+  1 時間の失効とそれ以外は変更なし。
+- 信号を実測できなかったため上限なしのまま: 全 kind の managed セッション（ペインが無く、ランタイムの
+  実行中ツールが見えない）と、Terminal の muse・lcpp・shell・ssm。従来どおり抱える。
+  後続: #1942（managed）、#1943（muse / lcpp / shell / ssm）。
+- 注意: kind ごとにモデルと CLI のバージョンは 1 つだけ。ツール実行中に再描画しなくなる CLI は、
+  1 時間無出力で失効する。CLI のバージョンを上げるときは再計測すること。
+- トレードオフ: この 5 kind の 1 時間は総作業時間ではなく「ペインが最後に変化してからの時間」で、
+  実行中のツールプロセスは生存信号に数えない。ペインが 1 時間静止したままの無出力ツールは失効し得て、
+  スピナーが動き続ける固まったセッションは無期限に抱える（安全側）。また現在の poll でペインを取得
+  できなかった場合は古い経過秒ではなく「回答なし」を返す。

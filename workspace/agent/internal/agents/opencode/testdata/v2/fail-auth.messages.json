@@ -1,0 +1,63 @@
+{
+ "data": [
+  {
+   "id": "msg_1376f13b0001ufiePtGczTytv5",
+   "time": {
+    "created": 1791931388848
+   },
+   "type": "model-switched",
+   "model": {
+    "id": "m",
+    "providerID": "stub"
+   }
+  },
+  {
+   "id": "msg_1376f13d5001AjCW6m0pbkKFte",
+   "time": {
+    "created": 1791931388913
+   },
+   "text": "FAIL4 go",
+   "type": "user"
+  },
+  {
+   "id": "msg_1376f13fb001ERPCJ4znX5CO8U",
+   "time": {
+    "created": 1791931388944,
+    "completed": 1791931388956
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "m",
+    "providerID": "stub",
+    "variant": "default"
+   },
+   "content": [],
+   "finish": "error",
+   "error": {
+    "type": "provider.auth",
+    "message": "stub: invalid api key",
+    "status": 401,
+    "response": {
+     "body": "{\"error\":{\"message\":\"stub: invalid api key\",\"type\":\"invalid_request_error\"}}"
+    }
+   }
+  },
+  {
+   "id": "msg_1376f1422001i6imvrhr911Nc1",
+   "time": {
+    "created": 1791931388962
+   },
+   "type": "idle",
+   "outcome": "failed",
+   "error": {
+    "type": "provider.auth",
+    "message": "stub: invalid api key",
+    "status": 401,
+    "response": {
+     "body": "{\"error\":{\"message\":\"stub: invalid api key\",\"type\":\"invalid_request_error\"}}"
+    }
+   }
+  }
+ ]
+}

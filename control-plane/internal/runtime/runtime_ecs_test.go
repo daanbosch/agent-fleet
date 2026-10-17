@@ -250,7 +250,7 @@ func newTestECS(fe *fakeECS, ff *fakeEFS, fs *fakeSSM) *ecsRuntime {
 			posixUID: 1000, posixGID: 1000, startTimeout: time.Second,
 		},
 		ecs: fe, efs: ff, ssm: fs,
-		name: "af-ws-acme-alice", membershipID: "M-1", token: "tok", secretKey: "dek",
+		name: "af-ws-acme-alice", membershipID: "M-1", token: "tok", keys: SecretKeys{Key: "dek"},
 		waitReady: func(context.Context, string, time.Duration) error { return nil },
 	}
 }
@@ -315,11 +315,24 @@ func TestECSStartCreatesEverything(t *testing.T) {
 	if c0.LinuxParameters == nil || !aws.ToBool(c0.LinuxParameters.InitProcessEnabled) {
 		t.Errorf("InitProcessEnabled not set — SIGTERM would be suppressed for a PID-1 agent")
 	}
+	// Fargate cannot add SYS_ADMIN, so no capability is requested and the Agent is told
+	// the browser is unavailable.
+	if c0.LinuxParameters.Capabilities != nil {
+		t.Errorf("Fargate task must add no capability, got %+v", c0.LinuxParameters.Capabilities)
+	}
+	var browserEnv []string
 	agentGrace := ""
 	for _, kv := range c0.Environment {
+		if aws.ToString(kv.Name) == BrowserUnavailableEnv {
+			browserEnv = append(browserEnv, aws.ToString(kv.Value))
+		}
 		if aws.ToString(kv.Name) == "AGENT_STOP_GRACE_SEC" {
 			agentGrace = aws.ToString(kv.Value)
 		}
+	}
+	// Dropping the variable would let the Agent list browser tools the CP refuses.
+	if len(browserEnv) != 1 || browserEnv[0] != "ecs" {
+		t.Errorf("%s entries = %q, want exactly [ecs]", BrowserUnavailableEnv, browserEnv)
 	}
 	if agentGrace != "25" {
 		t.Errorf("AGENT_STOP_GRACE_SEC = %q, want 25 (grace - safety margin)", agentGrace)
@@ -580,7 +593,7 @@ func TestECSRunningTasks(t *testing.T) {
 func TestECSSecretsSkippedWhenEmpty(t *testing.T) {
 	fs := &fakeSSM{}
 	rt := newTestECS(&fakeECS{}, &fakeEFS{}, fs)
-	rt.token, rt.secretKey = "", "" // dev: no token / no DEK
+	rt.token, rt.keys = "", SecretKeys{} // dev: no token / no DEK
 	if err := rt.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -629,8 +642,9 @@ func TestECSDestroyRemovesServiceAccessPointsAndSecrets(t *testing.T) {
 	if len(ff.aps) != 1 || aws.ToString(ff.aps[0].AccessPointId) != "fsap-other" {
 		t.Errorf("another membership's access point was touched, left = %d", len(ff.aps))
 	}
-	if len(fs.deletes) != 2 {
-		t.Errorf("both SSM secrets must go, got %d", len(fs.deletes))
+	// agent-token, secret-key and secret-key-next (the home's own key, when it had one).
+	if len(fs.deletes) != 3 {
+		t.Errorf("all three SSM secrets must go, got %d", len(fs.deletes))
 	}
 	for _, want := range []string{"efs:fs-1/home/M-1", "efs:fs-1/claude-config/M-1"} {
 		found := false

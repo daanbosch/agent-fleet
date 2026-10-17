@@ -57,6 +57,9 @@ func wireGoldenTypes() []struct {
 		// Session list / SSE. This is a relay that decodes the Agent's answer and re-emits
 		// it, so a field missing here is dropped silently (it has happened three times).
 		{"sessionWire", reflect.TypeOf(sessionWire{})},
+		// What the catalog sync reads from the Agent's GET /sessions/catalog; its delta
+		// protocol (cursor / delta / deleted) is agreed with workspace/agent's CatalogResponse.
+		{"agentCatalogWire", reflect.TypeOf(agentCatalogWire{})},
 		{"adminSessionRow", reflect.TypeOf(adminSessionRow{})},
 		// Usage: the admin aggregates and the heatmap.
 		{"usageTotal", reflect.TypeOf(usageTotal{})},
@@ -70,6 +73,9 @@ func wireGoldenTypes() []struct {
 		// Memo queue / scheduled execution.
 		{"memoDTO", reflect.TypeOf(memoDTO{})},
 		{"scheduleDTO", reflect.TypeOf(scheduleDTO{})},
+		// Member inbox (ADR 0111). The Console draws the card and the badge from these.
+		{"inboxItemWire", reflect.TypeOf(inboxItemWire{})},
+		{"inboxMailboxWire", reflect.TypeOf(inboxMailboxWire{})},
 		// The model ledger and the one press that completes a row (ADR 0085 decisions 2 and 3).
 		// Here because three separate pieces of work agreed this wire before any of them built
 		// their half: the CP writes it, the Console draws every field of it, and a tag that

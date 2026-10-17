@@ -1,6 +1,7 @@
 package muse
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/lifegate"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/msp"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/transcript"
 )
@@ -85,7 +87,10 @@ type threadHandle struct {
 	starting string
 	// calling is set while the head's turn/start call is out: a host lost meanwhile leaves the
 	// head to the caller, whose call fails with ErrClosed.
-	calling  bool
+	calling bool
+	// parked is set while a pump refused by a move waits for lifegate.Reopen, so the pumps
+	// refused meanwhile do not each register a callback.
+	parked   bool
 	settings agents.ThreadSettings
 	inter    *agents.Interaction
 	pending  *pendingAsk // what inter is waiting on, in muse's own vocabulary
@@ -121,6 +126,14 @@ type threadHandle struct {
 	ctxWindow   *int64      // windowTokens; nil when the basis carries no limit
 	ctxHasUsage bool        // false until the first notification arrives
 	spends      []turnSpend // per-turn token trend from session/tokenUsage, newest last (context.go)
+
+	// limit is set when the last turn failed on the usage limit and cleared when the next turn
+	// starts (ratelimit.go). lastTurn is the newest turn this handle has seen start (or the
+	// one session/resume restated): only that turn's terminal may set or clear limit, because
+	// after settleIdle neither turnID nor starting is left to reject a late completion of an
+	// older turn. Both guarded by mu.
+	limit    *usageLimit
+	lastTurn string
 }
 
 // pendingAsk is the wire identity of the thing an Interaction is standing in for. Two
@@ -243,6 +256,7 @@ func (h *threadHandle) openSession(cl *msp.Client, st agents.ThreadSettings) err
 			h.sid, h.path = prev.ID, prev.Path
 			h.setModelLocked(res.Session.ModelID)
 			h.rebuildBgLocked(items)
+			h.restoreLimitLocked(res.LastTurn)
 			h.mu.Unlock()
 			if ok {
 				h.backfillMirror(items)
@@ -257,6 +271,9 @@ func (h *threadHandle) openSession(cl *msp.Client, st agents.ThreadSettings) err
 	h.resetUsage() // a different conversation from here on
 	h.mu.Lock()
 	h.bg = nil
+	// The old conversation's limit is not this one's: a fresh session has no cut-off request
+	// to resume, and a mark carried over would book a wake-up for it.
+	h.limit, h.lastTurn = nil, ""
 	h.mu.Unlock()
 
 	// A slot born from a fork opens by copying the source rather than starting empty. It is
@@ -403,7 +420,8 @@ func (h *threadHandle) hostLost(cl *msp.Client) {
 // The declared notification table is a decode map, not an allow-list: a host can emit a
 // notification its bundle does not declare (1.3.0-R3401.1 sends `session/started` before the
 // `session/start` response), so an unknown method is dropped rather than treated as a protocol
-// error.
+// error. `turn/foregroundCompleted` (explicitly non-terminal; `turn/completed` ends the turn) and
+// `userInput/engaged` (a host-side countdown release with no timer on our side) are dropped the same way, on purpose.
 func (h *threadHandle) onNotify(method string, params json.RawMessage) {
 	switch method {
 	case msp.NotificationTurnStarted:
@@ -413,6 +431,8 @@ func (h *threadHandle) onNotify(method string, params json.RawMessage) {
 		}
 		h.mu.Lock()
 		h.turnID, h.running = p.TurnID, true
+		h.limit = nil // a turn that runs is past the limit, whatever happened before
+		h.lastTurn = p.TurnID
 		h.runGen++
 		h.state = agents.TurnRunning
 		h.turnModel = h.model
@@ -748,13 +768,18 @@ func (h *threadHandle) finishTurn(p msp.TurnCompletedParams) {
 	// cannot fix: it is aborted, so the operator is told to fix the credential and nudge it
 	// rather than being shown a completed answer that never existed.
 	failure := ""
+	var limit *usageLimit
 	if p.Error != nil {
 		failure = p.Error.Message
 		if p.Error.Kind == museAuthRequired {
 			st = agents.TurnAborted
 		}
+		if lim, ok := usageLimitOf(p.Error); ok && st == agents.TurnFailed {
+			limit = &lim
+		}
 	}
 	h.mu.Lock()
+	newest := p.TurnID == "" || h.lastTurn == "" || p.TurnID == h.lastTurn || p.TurnID == h.starting
 	// A completion for a turn this handle no longer tracks (settleIdle already closed it and
 	// the queue has moved on) must not end the turn that replaced it.
 	if p.TurnID != "" && (h.turnID != "" || h.starting != "") && p.TurnID != h.turnID && p.TurnID != h.starting {
@@ -767,6 +792,12 @@ func (h *threadHandle) finishTurn(p msp.TurnCompletedParams) {
 	h.settleHeadLocked()
 	h.dropResumedLocked(true)
 	h.running, h.state, h.turnID = false, st, ""
+	if newest {
+		h.limit = limit
+		if p.TurnID != "" {
+			h.lastTurn = p.TurnID
+		}
+	}
 	h.mu.Unlock()
 	agents.MarkTurnEndErr(h.slotSid, st, failure)
 	h.emit(agents.Event{Kind: "turn_state", TurnState: st})
@@ -872,7 +903,11 @@ func (h *threadHandle) onUserInput(p msp.UserInputRequestParams) {
 	}
 	inter := &agents.Interaction{ID: "ask-" + p.UserInputID, Kind: agents.InteractionQuestion}
 	for _, q := range p.Questions {
-		tq := transcript.Question{ID: q.ID, Header: q.Header, Question: q.Question}
+		// Every question carries the INTERACTION id, not the model's own question id: the
+		// Console answers and cancels with `pending[0].id`, and Respond refuses anything but
+		// inter.ID. The wire answer is keyed by ask.questions, so the model's id is not lost.
+		tq := transcript.Question{ID: inter.ID, Header: q.Header, Question: q.Question,
+			MultiSelect: q.Selection.Mode == msp.UserInputSelectionModeMultiple}
 		for _, o := range q.Options {
 			opt := transcript.Option{Label: o.Label}
 			if o.Description != nil {
@@ -971,7 +1006,9 @@ func (h *threadHandle) accept(in agents.TurnInput, steer bool) (queued bool, err
 	// at once, ahead of it.
 	if running || h.tq().Head() != nil || h.tq().Len() > 1 {
 		h.mu.Unlock()
-		h.pump()
+		// Not on this goroutine: the caller holds the session's lease, and the pump takes one of
+		// its own, which queues behind a waiting move that waits for the caller's.
+		go h.pump()
 		return true, nil
 	}
 	t := h.tq().Take()
@@ -1146,25 +1183,47 @@ func (h *threadHandle) noteImages(id string, images []string) {
 
 // pump starts the next queued turn once the previous one has settled. It is safe to call at
 // any time: while a turn runs or a start is out it does nothing.
+//
+// Each entry gets a lease of its own on the session's lifecycle gate (ADR 0115 decision 11.1),
+// taken before it leaves the queue and held until turn/start is answered (or the entry is back
+// in the queue). From the answer the host holds the input: as a turn, joined to the running one,
+// or in the host's own queue behind a running turn, and a source with a running turn cannot be
+// moved. So a move finds every accepted entry either with the host or still queued, where its
+// snapshot reads it.
 func (h *threadHandle) pump() {
 	for {
+		// Most calls find a turn running or nothing queued; they return without the gate, which
+		// a move may be holding.
+		if !h.canTake() {
+			return
+		}
+		// Taken without h.mu: a move reads the queue under h.mu while it holds the gate.
+		lease, err := lifegate.Enter(context.Background(), h.name)
+		if err != nil {
+			h.parkForMove(err)
+			return
+		}
 		h.mu.Lock()
 		if !h.alive || h.cl == nil || h.running || h.tq().Head() != nil {
 			h.mu.Unlock()
+			lease.Release()
 			return
 		}
 		t := h.tq().Take()
 		if t == nil {
 			h.mu.Unlock()
+			lease.Release()
 			return
 		}
 		id, ok := h.commitLocked(t)
 		h.mu.Unlock()
 		if !ok {
+			lease.Release()
 			continue
 		}
-		_, err := h.launch(t, id)
+		_, err = h.launch(t, id)
 		if err == nil {
+			lease.Release()
 			return
 		}
 		h.mu.Lock()
@@ -1172,7 +1231,9 @@ func (h *threadHandle) pump() {
 		h.mu.Unlock()
 		// The host went away with the input: it goes back to the head of the queue for the
 		// respawn to start, rather than being lost to a crash nobody saw.
-		if h.startFailed(t, id, err, true) || hostGone {
+		started := h.startFailed(t, id, err, true)
+		lease.Release()
+		if started || hostGone {
 			return // or the turn started after all (a late ack); its completion pumps the rest
 		}
 		// Refused by a live host: resending the same input would be refused again, so it is
@@ -1185,6 +1246,45 @@ func (h *threadHandle) pump() {
 		agents.MarkTurnEndErr(h.slotSid, agents.TurnFailed, err.Error())
 		h.emit(agents.Event{Kind: "turn_state", TurnState: agents.TurnFailed})
 	}
+}
+
+// canTake reports whether pump would take an entry now.
+func (h *threadHandle) canTake() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.alive && h.cl != nil && !h.running && h.tq().Head() == nil && h.tq().Len() > 0
+}
+
+// parkForMove stops a pump that a move refused, leaving its input queued for the move's
+// snapshot. If the move rolls back, the gate reopens and the pump starts again. The second look
+// covers a reopen that ran before the callback was registered.
+//
+// A meta the gate could not read is not a move: nothing will reopen it, so the pump looks again
+// after a pause instead.
+func (h *threadHandle) parkForMove(err error) {
+	if errors.Is(err, lifegate.ErrMetaUnreadable) {
+		time.AfterFunc(time.Second, h.pump)
+		return
+	}
+	h.mu.Lock()
+	registered := h.parked
+	h.parked = true
+	h.mu.Unlock()
+	if !registered {
+		lifegate.WhenReopened(h.name, h.unpark)
+	}
+	if !lifegate.Closed(h.name) {
+		h.unpark()
+	}
+}
+
+// unpark starts the pump of a parked handle again. Never on the caller's goroutine: Reopen runs
+// it inside a move's rollback, which must not wait for a turn/start.
+func (h *threadHandle) unpark() {
+	h.mu.Lock()
+	h.parked = false
+	h.mu.Unlock()
+	go h.pump()
 }
 
 // maxInlineImageBytes caps what AF will base64 into a single frame. The upload endpoint accepts
@@ -1460,6 +1560,10 @@ func reasoningEffort(s string) *msp.ReasoningEffort {
 	return nil
 }
 
+// userInputCancelReason is what a declined question tells the host. Free text: the host
+// records it, and nothing in AF reads it back.
+const userInputCancelReason = "declined by the user"
+
 // Respond answers whichever prompt is pending.
 //
 // Both channels re-deliver and both refuse a second answer with their own "already settled"
@@ -1487,10 +1591,13 @@ func (h *threadHandle) Respond(reply agents.InteractionReply) error {
 		// Declining a question is the runtime's own refusal (ADR 0105 decision 7): the tool call
 		// resolves as cancelled and the turn goes on, so the queue is not touched. Answering
 		// every question with nothing instead would read to the model as a real answer.
+		// `reason` is optional in the schema but required by the host: measured on
+		// 1.4.2-R4684.1, a cancel without it is refused -32602 "missing field `reason`".
 		err = cl.CallInto(msp.MethodUserInputCancel, msp.UserInputCancelParams{
 			CommandID:   msp.NewCommandID(),
 			SessionID:   sid,
 			UserInputID: ask.userInputID,
+			Reason:      strPtr(userInputCancelReason),
 		}, callTimeout, nil)
 	default:
 		err = h.answerUserInput(cl, sid, ask, reply)
@@ -1540,24 +1647,11 @@ func approved(reply agents.InteractionReply) bool {
 func (h *threadHandle) answerUserInput(cl *msp.Client, sid string, ask *pendingAsk, reply agents.InteractionReply) error {
 	answers := make([]msp.UserInputAnswer, 0, len(ask.questions))
 	for i, q := range ask.questions {
-		a := msp.UserInputAnswer{QuestionID: q.ID}
+		var r agents.InteractionAnswer
 		if i < len(reply.Answers) {
-			r := reply.Answers[i]
-			if r.Text != "" {
-				a.FreeText = strPtr(r.Text)
-			}
-			// The wire takes LABELS, not indexes, so an out-of-range index is dropped
-			// rather than sent as a label the host would refuse.
-			for _, idx := range r.Options {
-				if idx >= 0 && idx < len(q.Options) {
-					a.SelectedLabels = append(a.SelectedLabels, q.Options[idx].Label)
-				}
-			}
-			if len(a.SelectedLabels) == 1 {
-				a.SelectedLabel = strPtr(a.SelectedLabels[0])
-			}
+			r = reply.Answers[i]
 		}
-		answers = append(answers, a)
+		answers = append(answers, userInputAnswer(q, r))
 	}
 	return cl.CallInto(msp.MethodUserInputAnswer, msp.UserInputAnswerParams{
 		CommandID:   msp.NewCommandID(),
@@ -1565,6 +1659,39 @@ func (h *threadHandle) answerUserInput(cl *msp.Client, sid string, ask *pendingA
 		UserInputID: ask.userInputID,
 		Answers:     answers,
 	}, callTimeout, nil)
+}
+
+// userInputAnswer builds one question's answer. The host takes EXACTLY ONE of selectedLabel
+// (single mode), selectedLabels (multiple mode) or freeText, plus an optional note, and refuses
+// anything else -32057 userInputAnswerInvalid — the schema leaves all four optional, so only the
+// host's own field docs say so (read out of 1.4.2-R4684.1; sending both label fields was refused
+// with reason invalid_target). Typed text beside a pick therefore rides as the note.
+func userInputAnswer(q msp.UserInputQuestion, r agents.InteractionAnswer) msp.UserInputAnswer {
+	a := msp.UserInputAnswer{QuestionID: q.ID}
+	// The wire takes LABELS, not indexes, so an out-of-range index is dropped rather than sent
+	// as a label the host would refuse.
+	var labels []string
+	for _, idx := range r.Options {
+		if idx >= 0 && idx < len(q.Options) {
+			labels = append(labels, q.Options[idx].Label)
+		}
+	}
+	text := strings.TrimSpace(r.Text)
+	switch {
+	case len(labels) == 0:
+		if text != "" {
+			a.FreeText = strPtr(text)
+		}
+		return a
+	case q.Selection.Mode == msp.UserInputSelectionModeMultiple:
+		a.SelectedLabels = labels
+	default:
+		a.SelectedLabel = strPtr(labels[0])
+	}
+	if text != "" {
+		a.Note = strPtr(text)
+	}
+	return a
 }
 
 func (h *threadHandle) Events() <-chan agents.Event { return h.events }

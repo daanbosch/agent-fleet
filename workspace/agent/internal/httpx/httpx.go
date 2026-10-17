@@ -209,6 +209,9 @@ func LogRequests(next http.Handler) http.Handler {
 // could otherwise lift it, so it is replaced by its reference (the same SHA-256 prefix the
 // login's own log lines and the CP's audit use). The query of a cloud login route is left
 // out: nothing there is needed in an access log.
+//
+// The key after "sessions-idempotency" is replaced the same way: a handoff launch's key
+// carries the recipient's take token (issue #2040).
 func LogURI(u *url.URL) string {
 	p := u.EscapedPath()
 	segs := strings.Split(p, "/")
@@ -217,7 +220,7 @@ func LogURI(u *url.URL) string {
 		if s == "aws-login" || s == "gcp-login" {
 			login = true
 		}
-		if s == "attempts" && i+1 < len(segs) && segs[i+1] != "" {
+		if (s == "attempts" || s == "sessions-idempotency") && i+1 < len(segs) && segs[i+1] != "" {
 			sum := sha256.Sum256([]byte(segs[i+1]))
 			segs[i+1] = "ref:" + hex.EncodeToString(sum[:4])
 		}

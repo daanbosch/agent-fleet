@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/gitx"
@@ -93,6 +95,13 @@ type workItemDetailOut struct {
 	UpdatedAt string `json:"updatedAt"`
 	Draft     bool   `json:"draft"`
 	Merged    bool   `json:"merged"`
+	// StateReason is an issue's close reason: "completed" / "not_planned" ("" while open, for a
+	// pull request, or when the provider says nothing). It is what tells a finished issue from a
+	// declined one, which "done" alone cannot.
+	StateReason string `json:"stateReason"`
+	// Assignees is every assignee of an issue (Assignee keeps the first for the shared rows).
+	// Never nil: the Console iterates it.
+	Assignees []string `json:"assignees"`
 	// Mergeable is "clean" / "conflict" / "unknown". GitHub computes it asynchronously and
 	// answers null while it is still thinking, and Bitbucket does not expose it at all — both
 	// are "unknown", because claiming "clean" from a missing field is how a member is sent to
@@ -113,6 +122,9 @@ func handleWorkItemsDetail(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Provider string `json:"provider"`
 		Key      string `json:"key"`
+		// Kind is what the caller believes the item is: "pr", or "" / "issue" for a reference
+		// that is not in the inbox (`#N` names either). Only GitHub tells the two apart for us.
+		Kind string `json:"kind"`
 	}
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
@@ -120,6 +132,13 @@ func handleWorkItemsDetail(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimSpace(in.Key)
 	if key == "" {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_request", "key is required")
+		return
+	}
+	kind := strings.TrimSpace(in.Kind)
+	switch kind {
+	case "", "pr", "issue":
+	default:
+		httpx.WriteErr(w, http.StatusBadRequest, "bad_request", "kind must be empty, pr or issue")
 		return
 	}
 	s, err := secrets.Load()
@@ -130,19 +149,36 @@ func handleWorkItemsDetail(w http.ResponseWriter, r *http.Request) {
 	var out *workItemDetailOut
 	switch strings.TrimSpace(in.Provider) {
 	case "", "github":
-		e, ok := s.Git["github.com"]
-		if !ok || e.Token == "" {
+		errNotConnected := errors.New("GitHub is not connected")
+		err = gitx.WithGitHubToken(s, errNotConnected, func(tok string) (e error) {
+			if kind == "pr" {
+				out, e = githubPullRequestDetail(tok, key)
+			} else {
+				out, e = githubReferenceDetail(tok, key)
+			}
+			return e
+		})
+		if errors.Is(err, errNotConnected) {
 			httpx.WriteErr(w, http.StatusBadRequest, "not_connected", "GitHub is not connected")
 			return
 		}
-		out, err = githubPullRequestDetail(e.Token, key)
 	case "bitbucket":
 		out, err = bitbucketPullRequestDetail(s, key)
+	case "jira":
+		// A Jira key has no pull request behind it; this is the single-issue read for a key
+		// that is not in the inbox (a finished ticket a status table cites).
+		if kind == "pr" {
+			httpx.WriteErr(w, http.StatusBadRequest, "bad_request", "a Jira key is never a pull request")
+			return
+		}
+		if !jiraConnected(s.Jira) {
+			httpx.WriteErr(w, http.StatusBadRequest, "not_connected", "Jira is not connected")
+			return
+		}
+		out, err = jiraReferenceDetail(s.Jira, key)
 	default:
-		// Jira lands here. There is no pull request behind a Jira key, so this is not a gap to
-		// fill later — the Console asks only for rows whose kind is "pr".
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_provider",
-			"pull request details are available for GitHub and Bitbucket only")
+			"details are available for GitHub, Bitbucket and Jira only")
 		return
 	}
 	if err != nil {
@@ -154,7 +190,134 @@ func handleWorkItemsDetail(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
+// --- Jira ---------------------------------------------------------------------
+
+// jiraKeyRe is the whole shape a key must have before it is put into a request path. Anything
+// else — a slash, a dot, a query — would let the caller steer the request elsewhere on the site.
+var jiraKeyRe = regexp.MustCompile(`^[A-Z][A-Z0-9_]*-[1-9][0-9]{0,9}$`)
+
+// jiraReferenceError words a jiraGet failure for the panel from its status code alone. The
+// error's own text is never forwarded: a 400 carries Jira's errorMessages (worded for a JQL
+// failure), and the OAuth renewal path (jiraEnsureFresh) returns the refresh bridge's response
+// body or an internal URL as a plain error.
+func jiraReferenceError(err error, key string) error {
+	je, ok := err.(*jiraHTTPError)
+	if !ok {
+		return fmt.Errorf("could not reach Jira or renew its authorization (re-connect Jira if this persists)")
+	}
+	switch je.code {
+	case http.StatusNotFound, http.StatusGone:
+		return fmt.Errorf("jira has no %s visible to this connection", key)
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return fmt.Errorf("jira rejected the credentials (re-connect Jira)")
+	case http.StatusTooManyRequests:
+		return fmt.Errorf("jira rate limit reached")
+	}
+	return fmt.Errorf("jira answered %d for %s", je.code, key)
+}
+
+// jiraReferenceDetail reads one Jira issue. The `fields=` list is the no-body promise written
+// into the request: no description, no comments.
+func jiraReferenceDetail(c *secrets.JiraCreds, key string) (*workItemDetailOut, error) {
+	if !jiraKeyRe.MatchString(key) {
+		return nil, fmt.Errorf("cannot read %q (expected a Jira key such as PROJ-123)", key)
+	}
+	body, err := jiraGet(c, jiraAPIBase(c)+"/rest/api/3/issue/"+key+"?fields=summary,status,assignee,labels,issuetype,updated")
+	if err != nil {
+		return nil, jiraReferenceError(err, key)
+	}
+	// The search parser's issue shape is the same; wrap the one issue as a page of one.
+	rows, err := parseJiraSearchIssues([]byte(`{"issues":[`+string(body)+`]}`), c.Site, "")
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) != 1 {
+		return nil, fmt.Errorf("jira answered without an issue for %s", key)
+	}
+	r := rows[0]
+	out := &workItemDetailOut{
+		Provider: "jira", Key: r.Key, Kind: "issue", Title: r.Title, State: r.State, URL: r.URL,
+		Assignee: r.Assignee, Labels: r.Labels, LabelColors: map[string]string{},
+		UpdatedAt: r.UpdatedAt, Mergeable: "unknown", Assignees: []string{}, Reviews: []workItemReviewOut{},
+	}
+	if r.Assignee != "" {
+		out.Assignees = append(out.Assignees, r.Assignee)
+	}
+	return out, nil
+}
+
 // --- GitHub -------------------------------------------------------------------
+
+// githubAPIBase is a variable only so a test can point the detail reads at a local server.
+var githubAPIBase = "https://api.github.com"
+
+// githubReferenceDetail reads a GitHub reference whose kind is unknown (a `#N` clicked in the
+// mirror that is not in the inbox). /issues/{n} answers for both kinds; when it carries
+// `pull_request` the existing pull request read takes over, otherwise the issue row is the
+// answer. Like the PR read it fetches no body — the issue object's `body` is never decoded.
+func githubReferenceDetail(token, key string) (*workItemDetailOut, error) {
+	repo, number, ok := parseGitHubIssueKey(key)
+	if !ok {
+		return nil, fmt.Errorf("cannot read %q (expected owner/name#number)", key)
+	}
+	body, err := githubGetJSON(token, fmt.Sprintf("%s/repos/%s/issues/%d", githubAPIBase, gitx.EscapeRepoPath(repo), number), key)
+	if err != nil {
+		return nil, err
+	}
+	out, isPR, err := parseGitHubIssue(body, key)
+	if err != nil {
+		return nil, err
+	}
+	if isPR {
+		return githubPullRequestDetail(token, key)
+	}
+	return out, nil
+}
+
+// parseGitHubIssue maps an issue object. isPR is true when GitHub says the number is a pull
+// request, in which case the caller discards the row and reads the pull request instead.
+func parseGitHubIssue(body []byte, key string) (out *workItemDetailOut, isPR bool, err error) {
+	var is struct {
+		Title       string          `json:"title"`
+		State       string          `json:"state"`
+		StateReason string          `json:"state_reason"`
+		HTMLURL     string          `json:"html_url"`
+		UpdatedAt   string          `json:"updated_at"`
+		Comments    int             `json:"comments"`
+		PullRequest json.RawMessage `json:"pull_request"`
+		User        struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		Assignees []struct {
+			Login string `json:"login"`
+		} `json:"assignees"`
+		Labels []gitHubLabel `json:"labels"`
+	}
+	if err := json.Unmarshal(body, &is); err != nil {
+		return nil, false, err
+	}
+	if len(is.PullRequest) > 0 && string(is.PullRequest) != "null" {
+		return nil, true, nil
+	}
+	repo, _, _ := parseGitHubIssueKey(key)
+	out = &workItemDetailOut{
+		Provider: "github", Key: key, Kind: "issue", Title: is.Title,
+		State: normalizeGitHubState(is.State, false), StateReason: is.StateReason, URL: is.HTMLURL,
+		Author: is.User.Login, Repo: repo, UpdatedAt: is.UpdatedAt, Comments: is.Comments,
+		Mergeable: "unknown", Labels: []string{}, LabelColors: gitHubLabelColors(is.Labels),
+		Assignees: []string{}, Reviews: []workItemReviewOut{},
+	}
+	for _, a := range is.Assignees {
+		out.Assignees = append(out.Assignees, a.Login)
+	}
+	if len(out.Assignees) > 0 {
+		out.Assignee = out.Assignees[0]
+	}
+	for _, l := range is.Labels {
+		out.Labels = append(out.Labels, l.Name)
+	}
+	return out, false, nil
+}
 
 // githubPullRequestDetail reads one PR: the pull request itself, its reviews, and the check
 // runs of its head commit.
@@ -167,7 +330,7 @@ func githubPullRequestDetail(token, key string) (*workItemDetailOut, error) {
 	if !ok {
 		return nil, fmt.Errorf("cannot read %q (expected owner/name#number)", key)
 	}
-	base := "https://api.github.com/repos/" + gitx.EscapeRepoPath(repo)
+	base := githubAPIBase + "/repos/" + gitx.EscapeRepoPath(repo)
 	body, err := githubGetJSON(token, fmt.Sprintf("%s/pulls/%d", base, number), key)
 	if err != nil {
 		return nil, err
@@ -204,6 +367,9 @@ func githubGetJSON(token, u, key string) ([]byte, error) {
 		case http.StatusUnauthorized, http.StatusForbidden:
 			if strings.Contains(strings.ToLower(string(body)), "rate limit") {
 				return nil, fmt.Errorf("github rate limit reached")
+			}
+			if resp.StatusCode == http.StatusUnauthorized {
+				return nil, gitx.NewGitHubUnauthorized(fmt.Sprintf("github refused this read (%d)", resp.StatusCode))
 			}
 			return nil, fmt.Errorf("github refused this read (%d)", resp.StatusCode)
 		case http.StatusNotFound:
@@ -270,6 +436,10 @@ func parseGitHubPullRequest(body []byte, key string) (*workItemDetailOut, string
 		// Empty slices, never nil: a nil slice marshals to JSON null and the Console iterates
 		// these (the null-labels white screen, docs/log/80 §80.17.5).
 		Labels: []string{}, LabelColors: gitHubLabelColors(pr.Labels), Reviews: []workItemReviewOut{},
+		Assignees: []string{},
+	}
+	for _, a := range pr.Assignees {
+		out.Assignees = append(out.Assignees, a.Login)
 	}
 	if len(pr.Assignees) > 0 {
 		out.Assignee = pr.Assignees[0].Login
@@ -532,6 +702,7 @@ func parseBitbucketPullRequest(body []byte, key string) (*workItemDetailOut, err
 		BaseBranch:  pr.Destination.Branch.Name,
 		HeadBranch:  pr.Source.Branch.Name,
 		Comments:    pr.CommentCount,
+		Assignees:   []string{},
 		Labels:      []string{},
 		LabelColors: map[string]string{},
 		Reviews:     []workItemReviewOut{},

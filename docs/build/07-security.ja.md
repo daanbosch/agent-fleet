@@ -96,7 +96,7 @@ CLI 自身の設定経路まで塞いではいない。つまり承認確認は*
 | ユーザー間ファイル | そのメンバーの home を `<WS_DATA>/[<slug>/]<key>/home` から bind mount。**他ユーザーの home はマウントされない** | membership ごとの EFS アクセスポイント（`/home/<membership>`・`/claude-config/<membership>`）で root dir を固定。uid/gid は全員共通（`AF_ECS_POSIX_UID` / `_GID`） | メンバー専用の EBS ボリューム。**同時に 1 メンバーだけ**に仕えるスロットへ付け（[decisions/0045](../decisions/0045-ec2-persistent-workspace.ja.md) 決定 8）、CP が SSM でマウントする。Claude の状態と保持する dotfile は EFS アクセスポイントに残る | Workspace ごとに claim 2 本。参照するのはその Workspace の StatefulSet だけで、ストレージドライバが対応すれば `ReadWriteOncePod`。メンバーは Workspace の名前空間に Kubernetes API で触れない — そこで Pod を作れる者はどの claim でもマウントできる |
 | プロセス / メモリ | 1 membership = 1 コンテナ。`--memory`（`WS_MEMORY` 既定 `1g`・Workspace ごとに上書き可）、指定時は `--cpus` | 1 タスク。Fargate はタスク間でカーネルを共有しない | スロット 1 台に 1 タスク。メモリはスロットの容量より下で頭打ち（`AF_ECS_EC2_HOST_RESERVE_MB`）。スロットのルートボリュームは前のメンバーより長生きするので `/tmp` は tmpfs | 1 Workspace = 1 Pod。CPU・メモリ・ephemeral-storage の request と limit は Workspace のサイジングから。`/tmp` はサイズ上限付きの `emptyDir`。ephemeral-storage の limit は事後の退避で効くので、ノードのディスクの余裕と disk-pressure の警報が残りを受け持つ |
 | ネットワーク | Workspace ごとの network（`af-net-…`）で相互到達を遮断。Agent はホストの loopback にだけ publish | `awsvpc`: タスクごとに ENI を持ち Workspace 用 SG に入る。SG は CP の SG からの Agent ポートだけを通し、他の Workspace からは通さない。公開 IP は付けない。外向きは開いている（§7.8） | ecs と同じ。スロット自身の SG は ingress なし | NetworkPolicy（実装する CNI でだけ効く）: Agent のポートは CP の Pod からだけ。egress はクラスタ DNS、CP の Workspace 専用リスナ、私設・リンクローカル・クラスタ自身のレンジを除くインターネット。それ以外の外向きは開いている（§7.8） |
-| 権限 | 非特権・`dev` で動く。Chromium の setuid サンドボックスが namespace を作れるよう **bounding set に `SYS_ADMIN` を足す**。他の setuid/setgid バイナリが残るとイメージのビルドが失敗するので、`dev` 自身は実効 capability を持たない | 特権モードなし・capability の追加なし | ecs と同じ | 名前空間に `restricted` の Pod Security Standard を強制（CP には変えられないラベル）: 非特権・非 root・能力の追加なし・ホストの名前空間なし・`hostPath` なし — Fargate の水準で、Chromium 用の `SYS_ADMIN` も無い |
+| 権限 | 非特権・`dev` で動く。Chromium の setuid サンドボックスが namespace を作れるよう **bounding set に `SYS_ADMIN` を足す**。他の setuid/setgid バイナリが残るとイメージのビルドが失敗するので、`dev` 自身は実効 capability を持たない | 特権モードなし・capability の追加なし（Fargate は `SYS_ADMIN` を足せないのでブラウザ機能なし: `BrowserUnavailable`） | 非特権。docker と同じ理由で、agent コンテナの bounding set に **`SYS_ADMIN` を足す**（タスク定義の `linuxParameters.capabilities`）。足さないとスロットの Docker 既定の seccomp が名前空間を断り、Chromium が起動時に落ちる。イメージは `chrome-sandbox` だけを setuid の経路に保つ。スロット側の対策が 2 つ付く（`cfn/40-ec2-pool.yaml` の user data）：`user.max_user_namespaces=0`（`SYS_ADMIN` に届くのは setuid ヘルパー経由だけになり、ほかのプロセスはユーザー名前空間を作れない。実測で `unshare -U` は ENOSPC、browser-smoke は通る）と、ホームボリュームの `nosuid,nodev` マウント。`kernel.unprivileged_bpf_disabled`（1）と `kernel.perf_event_paranoid`（2）は AL2023 で既に厳しいと実測したので触らない。スロットはその場でパッチを当てず、カーネルの修正は AMI の更新とスロット交換で届ける。どちらの対策もテンプレートに入った後に起動したスロットにだけ効く | 名前空間に `restricted` の Pod Security Standard を強制（CP には変えられないラベル）: 非特権・非 root・能力の追加なし・ホストの名前空間なし・`hostPath` なし — Fargate の水準で、Chromium 用の `SYS_ADMIN` も無い |
 | クラウドの権限 | なし | タスクロール `WsTaskRole` は**ポリシーを 1 つも持たない**。`AGENT_TOKEN` と DEK はタスク定義の `secrets`（SSM・実行ロールが読む）で届く | 同じタスクロール。スロットのインスタンスロールは ECS 登録・SSM 管理・イメージ取得・ログだけ | なし: サービスアカウントのトークンはマウントせず、名前空間とそのサービスアカウントを名指す IAM 付与は無い。GKE では Workspace を載せるプールはすべて GKE メタデータサーバを使い、`169.254.0.0/16` への egress は拒否。`AGENT_TOKEN`・DEK・発行したトークンは Workspace ごとの Secret から `envFrom` で届き、Secret は etcd 内で暗号化（GKE では Cloud KMS） |
 | 機微状態の退避 | Agent の平文状態は 2nd mount（`CLAUDE_CONFIG_DIR=/var/lib/af/claude`）で**ファイルブラウザの範囲外**へ。暗号化ストアは home 据置で Agent の denylist（`fsDeny`）の内側 | 同左（イメージ・Agent は共通） | 同左 | 同じ。2 本目の claim の上 |
 
@@ -115,6 +115,8 @@ CLI 自身の設定経路まで塞いではいない。つまり承認確認は*
 `AGENT_TOKEN` を本人のセッションから不可視にはできない（原理的に不可）。ブラウザ不可視 +
 at-rest 暗号 + env 注入で実用十分とする設計判断。セッション内で動くコードにとっての意味は
 [SECURITY.md](../../SECURITY.md) に書いてある。
+同じ理由で、メンバーの Console とセッションを区別すべきルートは Agent が持つものには頼れず、CP だけが作れる
+印に頼る（§7.5.1）。
 
 ### 7.2.1 エンジン: 到達できることがアクセス制御
 
@@ -149,6 +151,33 @@ at-rest 暗号 + env 注入で実用十分とする設計判断。セッショ�
 
 VOICEVOX はこのゲートウェイの後ろではない: Console が CP に頼み（`/api/tts/*`・通常のログインの
 内側）、CP がエンジンを呼ぶ。エンジンの SG は CP だけを通す。
+
+### 7.2.2 フォルダの書き出し（`GET /api/fs/download-zip`）
+
+1 回のリクエストで数に上限の無いファイルを読む、ファイルブラウザ唯一の経路
+（[decisions/0111](../decisions/0111-folder-zip-download.ja.md)）。攻撃者が試す順に境界を並べる。
+
+- **ファイルの読み取りより広くは届かない。** CP の経路は許可リストの明示の 1 行で、通常の本人確認と
+  テナント解決（`withResolved`）の後ろにある。Agent の経路も、ほかと同じトークンの後ろ。閲覧ルート相対の
+  パス、またはスクラッチ／配布ドキュメントのルート配下の絶対パスだけで、それ以外は通らない。
+  **ルートそのものは断る。**
+- **シンボリックリンクは一切たどらない。** 開始フォルダ・各子フォルダ・各ファイルを、ルート fd からの相対で
+  `openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS)` により*使う瞬間に*開くので、走査の後のすり替えは
+  開くのに失敗する。開始パスの途中のリンクは 400、フォルダ内のリンクは除いて数える。**名前が複数ある通常ファイル**
+  （`st_nlink > 1`。走査時と、開いた記述子で再度）も同じ: 拒否リストにあるファイルへのハードリンクは
+  シンボリックリンクではないので、`NO_SYMLINKS` では見えない。
+  `.codex/generated_images` の 1 枚だけ読める例外は**引き継がない**（`resolveZipRoot` は専用の解決器）。
+- **拒否リスト（`fsDeny`）は降りる前に刈る。** 閲覧ルート相対のパスで当てるので、祖先を書き出しても
+  拒否されたツリーは入らない。一時のアーカイブは Agent の状態ディレクトリの下にあり、そこ自体が拒否リストの中。
+- **不正な名前は書き出しを失敗させる**（422）。書き換えも、黙って落とすこともしない。不正な UTF-8・
+  バックスラッシュ・制御文字・`.`/`..`/空の要素・ドライブ指定・重複。
+- **資源の上限。** ファイル数・フォルダ数・深さ・見たエントリ数・名前の量・読んだバイト数（実際に読んだ
+  バイトで数える）・書いたバイト数・走査とビルドの時間・転送の時間のすべてに上限があり（時間の上限は協調的: すでに固まったボリューム上の
+  システムコールは中断されず、返るまでスロットを握る）、ワークスペースごとに
+  同時に作るのは 1 つ、一時ファイルは作った時点でリンクを外すのでクラッシュしても漏れない。上限は
+  [guide/ref/limits](../../guide/ref/limits.ja.md)。
+- **監査はしない**（通常の読み取りはしない、`proxy.go`）。一括の書き出しを監査すべきかは未決
+  （decisions/0111 の状態行）。
 
 ## 7.3 L1 Console 認証（AUTH 3 モード）
 
@@ -319,6 +348,38 @@ L2（エージェントを誰として動かすか）はユーザー本人のサ
   Agent のどのルートもセッション内のコードから呼べる。人の押下でだけ始まるべき機能は、ルート認証に
   頼らず結果をその押下に結び付ける（[decisions/0102](../decisions/0102-aws-login-through-the-console.ja.md)）。
 
+### 7.5.1 メンバー由来の印
+
+メンバー自身の Console からの要求だけを受け付けるべきルートには、CP が印を付ける
+（[decisions/0113](../decisions/0113-member-origin-mark.ja.md)）。現在はメンバー専用のメモリ書き込み
+`entries/pin`・`entries/revert`（忘れさせるも含む）・`entries/member-save`・`entries/project-move`（作業コピーを失った
+プロジェクトのメモリの移動、[decisions/0108](../decisions/0108-af-owned-agent-memory.ja.md) の 2026-10-14 の注）・
+`entries/purge`（履歴の消去、#1982）が対象。
+
+- **非対称にするのは、Agent がセッションに対して秘密を守れないから**（同じ uid、§7.2）。CP はトークン署名
+  マスターから導出した Ed25519 鍵で署名し、Agent は公開鍵だけを持って起動する（`AF_MEMBER_ORIGIN_KEYS` と
+  `AF_WORKSPACE_ID` / `AF_MEMBERSHIP_ID`）。それを読んだセッションは検証できても署名はできない。
+- **署名対象**：メソッド、Agent 側のパス、生のクエリ、本文の SHA-256、Workspace、メンバーシップ、CP の
+  identity、`iat`、`exp`（60 秒）、ノンス。Agent は不一致、期限切れや長すぎる有効期間、既に見たノンス
+  （`exp` まで最大 4,096 件保持。満杯なら拒否し、記録せずに受け入れることはしない）を拒否する。キャッシュは
+  プロセスごとなので、Agent は起動 + 31 秒（受け入れる 30 秒のずれと切り捨て分）より前に発行された印をすべて
+  拒否する。CP の時計にかかわらず再起動をまたいだリプレイはできず、代償として Agent の起動から約 31 秒は
+  メンバーの書き込みが 503 になる。
+- **CP はブラウザが送った `X-AF-Member-Origin` をすべての中継（REST・SSE・プレビュー）で捨て**、列挙した
+  ルートだけを、呼び手自身の Workspace に対してだけ署名する。REST と SSE ではすべての Cookie とゲートウェイの
+  identity ヘッダーも捨てるので、メンバーのログイン Cookie は Workspace に届かない。
+- **別のページのためには署名しない。** 署名の前に CP は `application/json`、送られていれば `Sec-Fetch-Site:
+  same-origin`、送られていれば Console 自身のホストの `Origin` を求めるので、same-site のプレビューアプリが
+  ブラウザーに署名付きのメンバー書き込みをさせることはできない。パス形式のプレビューのアプリは Console の
+  オリジンで動くので対象外（decisions/0062 決定 7）。
+- **閉じる側に倒れる**：鍵なしで起動した Workspace（古い起動、または `AF_MEMBER_ORIGIN_KEY_VERSION=0`）は
+  これらのルートで 503。印がない、または `AGENT_TOKEN` / `X-AF-Relay` だけなら 403。
+- **ローテーション**：Workspace は現在と次の鍵を持って起動するので、`AF_MEMBER_ORIGIN_KEY_VERSION` を 1 つ
+  上げても直前の版で起動した Workspace はそのまま使える。再起動前に 2 回目を上げると使えない。
+- **限界**：署名するのはこの 3 ルートだけで、claude と muse の取り込みはまだ署名なしで作者をメンバーと記録
+  する（#2014）。印が決めるのは Agent のルートで、ストアのファイルではない（セッションは今も直接書ける）。強さは
+  CP のメンバー認証と同じ（`AUTH=dev` では何も足さない）。侵害された CP は対象外。
+
 ## 7.6 シークレット管理と封筒暗号
 
 **原則: 秘密はユーザー領域に閉じ、CP はメンバーの資格情報の平文を保持・解釈しない。ログに秘密を
@@ -352,12 +413,16 @@ agent は `secrets.enc` を読み、`secrets.json` を移行しないので、�
   導出する。`kmsCustodian`（`AF_KEY_CUSTODIAN=kms`、AWS）は値ごとに KMS の新しいデータ鍵で封じ、
   暗号化コンテキストで key ref に結び付け、KMS が失敗すれば失敗する（フェイルクローズ）。同じ custodian が
   上のテナントの秘密と、セッションの引き継ぎ・共有のペイロードも封印する。KMS へ切り替える前に封じた値は
-  形式で見分けて local の custodian が開き、KMS の失敗で振り分けることは無い。
+  形式で見分けて local の custodian が開き、KMS の失敗で振り分けることは無い。`af-cp rewrap-keys` が
+  それを一度に KMS で封じ直す（2026-10-10 追記、[operate/04](../../guide/operate/04-secure.ja.md#切り替え前に保存された値を封じ直す)）。
 - ⚠️ **正直な限界**: local の custodian では KEK がマスター鍵由来で、実効強度は単一のマスター鍵と同等。
   KMS では鍵の無効化で切り替え後に封じたものが shred されるが、ワークスペースの DEK 自体は今もマスター鍵と
   ユーザーキーから導出する（封筒保存より前に書かれたストアを開けるため）ので、メンバーの資格情報ストアは
-  それでは shred されない。ワークスペースごとのランダムな DEK と Vault は 📋
-  （[decisions/0005](../decisions/0005-envelope-custodian.ja.md) の 2026-10-04 追記）。
+  それでは shred されない。`AF_WORKSPACE_DEK=random` ではホームが KMS で封じた専用の鍵を持ち、それに移ったストアは
+  master 由来の鍵では開けなくなる。KMS 鍵を無効化すると CP はその鍵を開けなくなるが、ワークスペースとランタイムに
+  すでに渡した写しでは今も開けるので、shred にはそれらの除去も要る（🚧: 自動でするものは無く、まだ起動していないホームは
+  導いた鍵のまま）。ホームは Agent の報告で確認され、その後は導いた鍵を受け取らない。
+  Vault は 📋（[decisions/0005](../decisions/0005-envelope-custodian.ja.md) の 2026-10-04・2026-10-10 追記）。
 
 ## 7.7 監査
 

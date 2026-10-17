@@ -14,6 +14,7 @@ package sessionx
 // pick per question (bridge-answers store) and submit once every question is picked.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/bridge"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/fstore"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/lifegate"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/secrets"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
@@ -61,6 +63,12 @@ func answerInteraction(pi bridge.ParsedInteraction) (string, error) {
 	if !session.ValidName(pi.Session) {
 		return "", fmt.Errorf("invalid session name %q", pi.Session)
 	}
+	// An answer resumes the turn, and on Managed it Resumes the runtime (ADR 0115 decision 11.1).
+	lease, err := lifegate.Enter(context.Background(), pi.Session)
+	if err != nil {
+		return injectFailureReason(err), nil
+	}
+	defer lease.Release()
 	meta, ok := session.ReadMeta(pi.Session)
 	if !ok {
 		return Fb(en, "セッションが見つかりません", "Session not found"), nil

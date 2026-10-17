@@ -1,15 +1,19 @@
 package cloudlogin
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -336,5 +340,178 @@ func TestASubmitStuckOnAFullPipeDoesNotBlockCancel(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("the cancel did not end the stuck write")
+	}
+}
+
+// waitSpec is a Wait whose first check is made only after a login "lands" (Filed sets the
+// mark), and whose check is check.
+func waitSpec(s *Store[testState], cancel <-chan struct{}, check func() (string, error)) WaitSpec[string] {
+	return WaitSpec[string]{
+		Profile: "p", Key: "k", Wait: 5 * time.Second, Poll: 5 * time.Millisecond, Cancel: cancel,
+		Check:       check,
+		LoginNeeded: func(err error) bool { return err.Error() == "login" },
+		Filed: func() {
+			b := s.Backend.(testBackend)
+			b.state["k"] = testState{Mark: "landed"}
+		},
+	}
+}
+
+// A Ctrl-C that arrives while the check runs wins over the check's outcome, success or not:
+// carrying on into the command would swallow the person's request to stop.
+func TestCancelDuringCheckWinsOverItsOutcome(t *testing.T) {
+	for name, outcome := range map[string]error{"success": nil, "other failure": errors.New("boom"), "login needed": errors.New("login")} {
+		t.Run(name, func(t *testing.T) {
+			s := newStore(t)
+			cancel := make(chan struct{})
+			spec := waitSpec(s, cancel, func() (string, error) {
+				close(cancel)
+				if outcome == nil {
+					return "creds", nil
+				}
+				return "", outcome
+			})
+			c, err := Wait(s, testState{}, spec)
+			var we *WaitError
+			if !errors.As(err, &we) || we.Reason != WaitInterrupted || c != "" {
+				t.Fatalf("got %q, %v; want WaitInterrupted", c, err)
+			}
+		})
+	}
+}
+
+// Waiting for a lock somebody else holds ends with Cancel or the deadline, not the holder.
+func TestFlockExEndsWithCancelOrDeadline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "l")
+	holder, _ := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	defer holder.Close()
+	if err := FlockEx(holder, nil, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	f, _ := os.OpenFile(path, os.O_RDWR, 0o600)
+	defer f.Close()
+	if err := FlockEx(f, nil, time.Now().Add(80*time.Millisecond)); !errors.Is(err, ErrLockTimeout) {
+		t.Fatalf("deadline: %v", err)
+	}
+	cancel := make(chan struct{})
+	time.AfterFunc(50*time.Millisecond, func() { close(cancel) })
+	start := time.Now()
+	if err := FlockEx(f, cancel, time.Now().Add(time.Minute)); !errors.Is(err, ErrLockInterrupted) || time.Since(start) > 2*time.Second {
+		t.Fatalf("cancel: %v after %s", err, time.Since(start))
+	}
+}
+
+// Filing the request waits for the store's directory lock; Ctrl-C ends that wait too.
+func TestCancelEndsTheWaitForTheStoreLock(t *testing.T) {
+	s := newStore(t)
+	unlock, err := s.lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	cancel := make(chan struct{})
+	time.AfterFunc(50*time.Millisecond, func() { close(cancel) })
+	spec := waitSpec(s, cancel, func() (string, error) { return "", errors.New("login") })
+	done := make(chan error, 1)
+	go func() { _, err := Wait(s, testState{Mark: "old"}, spec); done <- err }()
+	select {
+	case err := <-done:
+		var we *WaitError
+		if !errors.As(err, &we) || we.Reason != WaitInterrupted {
+			t.Fatalf("err = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Ctrl-C did not end the wait for the lock")
+	}
+}
+
+// The wait's own budget running out is a timeout (exit 3 for a rerun), not a failure of the
+// request or the check, and never a reason to fall back to a terminal login.
+func TestLockOrCheckTimeoutIsATimeout(t *testing.T) {
+	t.Run("store lock held past the budget", func(t *testing.T) {
+		s := newStore(t)
+		unlock, err := s.lock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unlock()
+		spec := waitSpec(s, nil, func() (string, error) { return "", errors.New("login") })
+		spec.Wait = 100 * time.Millisecond
+		_, err = Wait(s, testState{Mark: "old"}, spec)
+		var we *WaitError
+		if !errors.As(err, &we) || we.Reason != WaitTimedOut {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("check ended by the lock timeout or the deadline", func(t *testing.T) {
+		for name, cerr := range map[string]error{"lock": ErrLockTimeout, "deadline": context.DeadlineExceeded} {
+			s := newStore(t)
+			spec := waitSpec(s, nil, func() (string, error) { return "", fmt.Errorf("check: %w", cerr) })
+			_, err := Wait(s, testState{}, spec)
+			var we *WaitError
+			if !errors.As(err, &we) || we.Reason != WaitTimedOut {
+				t.Fatalf("%s: err = %v", name, err)
+			}
+		}
+	})
+}
+
+// exitBeforeClose forces the race behind a spurious Submit failure: after the write lands it
+// holds Submit until the process has exited and cmd.Wait has closed the pipe, so Submit's
+// own Close always loses.
+type exitBeforeClose struct {
+	io.WriteCloser
+	exited <-chan struct{}
+}
+
+func (w exitBeforeClose) Write(p []byte) (int, error) {
+	n, err := w.WriteCloser.Write(p)
+	<-w.exited
+	return n, err
+}
+
+// A code the process read and acted on is delivered even when the process has exited, and
+// its pipe been closed, by the time Submit closes it.
+func TestSubmitSucceedsWhenTheProcessExitedBeforeTheClose(t *testing.T) {
+	s := newStore(t)
+	a, err := s.Start("k", "", "prod", Process{
+		Name: "test login", Path: "/bin/sh",
+		Args:    []string{"-c", `echo "Go to https://example.invalid/auth"; read code`},
+		Timeout: 10 * time.Second, Stdin: true,
+		Parse: func(o string) (string, string, error) {
+			if strings.Contains(o, "https://example.invalid/auth") {
+				return "https://example.invalid/auth", "", nil
+			}
+			return "", "", nil
+		},
+		Exited: func(err error) (bool, string) { return err == nil, "exited" },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, a, PhaseAuthorize)
+	a.mu.Lock()
+	a.stdin = exitBeforeClose{WriteCloser: a.stdin, exited: a.done}
+	a.mu.Unlock()
+	if err := a.Submit("4/0AbCd"); err != nil {
+		t.Fatalf("submit after the process exited = %v", err)
+	}
+}
+
+// A write that fails means the code was not delivered; that stays an error.
+func TestSubmitKeepsAWriteError(t *testing.T) {
+	s := newStore(t)
+	a := s.Begin("k", "", "prod", nil)
+	a.authorize("https://example.invalid/auth", "")
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr.Close()
+	a.mu.Lock()
+	a.stdin = pw
+	a.mu.Unlock()
+	if err := a.Submit("x"); !errors.Is(err, syscall.EPIPE) {
+		t.Fatalf("submit to a pipe nobody reads = %v", err)
 	}
 }

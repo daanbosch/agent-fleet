@@ -31,6 +31,7 @@ const globalProbeValue = "from_global_config"
 // creation or on the /mcp face. Neither exists today, and this test is written to FAIL
 // when one appears — that failure is the signal that the cwd guess can be retired.
 func TestContractOpencodeMCPHasNoPerSessionConfigPoint(t *testing.T) {
+	skipOnOpencode2(t, "it reads the v1 /doc spec; 2.x sends _meta[\"ai.opencode/sessionID\"] natively")
 	addr, _ := startServe(t)
 	var doc struct {
 		Paths map[string]map[string]struct {
@@ -87,6 +88,7 @@ func TestContractOpencodeMCPHasNoPerSessionConfigPoint(t *testing.T) {
 // sessions — two sharing a directory, which is exactly the shape that defeats the cwd
 // guess — and records what each spawned MCP child was actually told.
 func TestContractOpencodeMCPChildIsSharedAcrossSessions(t *testing.T) {
+	skipOnOpencode2(t, "the v1 plugin-stamped identity it probes does not exist in 2.x, which sends the session id on every tools/call")
 	home := t.TempDir()
 	log := filepath.Join(t.TempDir(), "spawns.log")
 	seedProbeMCP(t, home, log)

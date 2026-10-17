@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/claude"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/codex"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/kiro"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/fleetgraph"
@@ -45,6 +46,11 @@ func HandleSessionDriver(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_name", "invalid session name")
 		return
 	}
+	lease, ok := enterSessionGate(w, r, name)
+	if !ok {
+		return
+	}
+	defer lease.Release()
 	var req driverReq
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_body", "invalid JSON body")
@@ -211,6 +217,8 @@ func writeCodexReleasingErr(w http.ResponseWriter, err error) bool {
 	switch {
 	case errors.Is(err, codex.ErrThreadReleasing):
 		httpx.WriteErr(w, http.StatusConflict, "codex_releasing", err.Error())
+	case errors.Is(err, claude.ErrTranscriptLost):
+		httpx.WriteErr(w, http.StatusConflict, "transcript_lost", err.Error())
 	case errors.Is(err, errDriverSwitching):
 		httpx.WriteErr(w, http.StatusConflict, errCodeDriverSwitching, err.Error())
 	default:

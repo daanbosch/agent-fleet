@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { useSendQueueStore } from "../sendQueue/store.ts";
 import {
   apiJSON,
   errText,
@@ -14,6 +15,7 @@ import {
 } from "../../../core/api/client.ts";
 import type { Discard, InteractionAnswer, QueueItem, TurnResult } from "../../../core/api/client.ts";
 import type { Attachment } from "../../../lib/attachDraft.ts";
+import { toastSendFailure } from "../../../lib/authExpiredToast.tsx";
 import { t as tr } from "../../../lib/i18n/index.ts";
 import { takeLaunchSeed } from "../../../lib/launchSeed.ts";
 import type { useToast } from "../../../ui/ToastProvider.tsx";
@@ -112,6 +114,7 @@ export function useMirrorActions({
     attachments?: string[],
     restoreText?: string,
     wire?: string,
+    restoreDraft = true,
   ): Promise<boolean> => {
     const t = (text || "").trim();
     // sendingRef (not the `sending` state alone) guards re-entrancy: two invocations
@@ -146,8 +149,9 @@ export function useMirrorActions({
       // toast the reason and restore the draft that send() already cleared — without
       // clobbering anything the user has started retyping.
       applyEchoes((p) => p.filter((e) => e.id !== echoId));
-      toast(res.message || tr("mirror.send_failed"));
-      setDraft((d) => d || restoreText || t);
+      toastSendFailure(toast, res, tr("mirror.send_failed"));
+      // A held queue item goes back to the queue, not into the draft (restoreDraft=false).
+      if (restoreDraft) setDraft((d) => d || restoreText || t);
     }
     sendingRef.current = false;
     setSending(false);
@@ -211,7 +215,7 @@ export function useMirrorActions({
     if (!ok) {
       statusRef.current = prev;
       setStatus(prev);
-      toast(res?.error ? errText(res.error) : tr("mirror.answer_send_failed"));
+      toastSendFailure(toast, { code: res?.error?.code, message: res?.error ? errText(res.error) : "" }, tr("mirror.answer_send_failed"));
     }
     setSending(false);
     setTimeout(() => tickRef.current?.(), 400);
@@ -243,7 +247,9 @@ export function useMirrorActions({
   // one that ends what the queue started — is needed (ADR 0105 decision 2). discardQueue is the
   // menu's "stop and discard the queue" (decision 3), which only a Managed session offers.
   const sendInterrupt = async (discardQueue = false) => {
-    if (wsDown()) return; // WS stopped: no live turn to interrupt (also plan-reject / question-cancel)
+    if (wsDown()) return false; // WS stopped: no live turn to interrupt (also plan-reject / question-cancel)
+    // A stop must not be followed by the held follow-ups firing the moment the turn ends.
+    useSendQueueStore.getState().pauseIfHolding(session);
     // An explicit stop (also plan-reject / question-cancel) means the user does NOT expect
     // a reply to render, so disarm the idle→reply bridge — otherwise the spinner would
     // linger over an interrupted, reply-less turn until the grace lapsed.
@@ -255,6 +261,7 @@ export function useMirrorActions({
     // A first stop lets the queue go on, which looks like the stop did nothing unless said.
     else if (managed && res.stop === "first" && queuedCount > 0) toast(tr("mirror.stop_first_continues"));
     setTimeout(() => tickRef.current?.(), 400);
+    return res.ok; // the plan review needs to know the modal was really closed
   };
 
   // cancelQuestion declines a Managed session's pending question (see the QuestionCard's
@@ -262,7 +269,7 @@ export function useMirrorActions({
   const cancelQuestion = async (id: string) => {
     if (wsDown()) return;
     const res = await sessionCancelInteraction(session, id);
-    if (!res.ok) toast(res.message || tr("mirror.answer_send_failed"));
+    if (!res.ok) toastSendFailure(toast, res, tr("mirror.answer_send_failed"));
     setTimeout(() => tickRef.current?.(), 400);
   };
 
@@ -330,7 +337,7 @@ export function useMirrorActions({
       }
     } else if (res.code === "already_started") toast(tr("mirror.queued_already_started"));
     else if (res.code === "not_queued") toast(tr("mirror.queued_gone"));
-    else toast(res.message || tr("mirror.send_failed"));
+    else toastSendFailure(toast, res, tr("mirror.send_failed"));
     setTimeout(() => tickRef.current?.(), 250);
   };
 
@@ -377,16 +384,17 @@ export function useMirrorActions({
     if (!res.ok) {
       statusRef.current = prev;
       setStatus(prev);
-      toast(res.message || tr("mirror.answer_send_failed"));
+      toastSendFailure(toast, res, tr("mirror.answer_send_failed"));
     }
     setSending(false);
     setTimeout(() => tickRef.current?.(), 400);
     return res.ok;
   };
 
-  // sendRespond answers a MANAGED session's pending question by interaction id —
-  // a structured answer (docs/log/27 §5). A tui question is still answered by navigating the
-  // TUI modal with sendKeys/sendSeq; the server rejects /respond for tui anyway.
+  // sendRespond answers a pending question by interaction id — a structured answer
+  // (docs/log/27 §5): a MANAGED session's, or a Terminal one whose question carries an id
+  // (opencode 2 on the shared serve). Any other tui question is answered by navigating the TUI
+  // modal with sendKeys/sendSeq; the server rejects /respond for those.
   const sendRespond = async (id: string, answers: InteractionAnswer[]): Promise<boolean> => {
     if (sending) return false;
     if (wsDown()) return false; // WS stopped: the managed session's structured answer can't be delivered
@@ -401,7 +409,7 @@ export function useMirrorActions({
       // one. The next poll resyncs the real state.
       statusRef.current = prev;
       setStatus(prev);
-      toast(res.message || tr("mirror.answer_send_failed"));
+      toastSendFailure(toast, res, tr("mirror.answer_send_failed"));
     }
     setSending(false);
     setTimeout(() => tickRef.current?.(), 400);

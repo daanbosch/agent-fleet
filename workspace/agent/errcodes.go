@@ -20,6 +20,14 @@ const (
 	errCodeFSReadFailed         = "read_failed"
 	errCodeFSWriteFailed        = "write_failed"
 	errCodeFSWriteStateUnknown  = "write_state_unknown"
+	// Folder zip download (fs_zip.go, ADR 0111). zip_too_large rides 413 and says which limit
+	// in its message; changed_during_zip rides 409 ("try again").
+	errCodeZipTooLarge = "zip_too_large"
+	errCodeZipBusy     = "zip_busy"
+	errCodeZipUnsafe   = "unsafe_name"
+	errCodeZipChanged  = "changed_during_zip"
+	errCodeZipNoSpace  = "zip_no_space"
+	errCodeZipNotDir   = "zip_not_dir"
 	// Sent only when the client already abandoned the request (timeout /
 	// disconnect observed at mutex acquisition), so no live client ever renders
 	// it — deliberately absent from the Console i18n catalogs.
@@ -58,6 +66,9 @@ const (
 	// The chosen way back can only be taken on a new branch: the branch has moved since the
 	// delete, or HEAD was detached (issue #1042).
 	errCodeRecreateNeedsNewBranch = "recreate_needs_new_branch"
+	// A fast-forward failed on an index.lock no running git holds (gitx/index_lock.go). The
+	// payload carries `lock`, its path; the Console offers to remove it and retry.
+	errCodeIndexLockStale = "git_index_lock_stale"
 )
 
 // Stable codes for the user-facing errors (docs/log/28 P3). The backend message is a

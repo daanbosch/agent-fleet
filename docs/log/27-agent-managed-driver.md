@@ -879,3 +879,129 @@ Workspace Agent 内に Claude Session Manager を置き、各セッションを 
 
 thread ごとの会話状態・実行中ツールプロセスのメモリは別途乗る。`--remote` 時の TUI クライアント RSS は
 未実測（§12-3）。
+
+## 2026-10-14 note: serve auth and the v2 routes (#2102, part of #2101)
+
+The §12.2 "no auth" measurement no longer holds. The driver starts `opencode serve` with a
+random per-generation `OPENCODE_SERVER_PASSWORD` and sends Basic auth (user `opencode`) on every
+request, the SSE stream included; both 1.19.0 and 2.0.28 answer 401 without it. The client layer
+is `workspace/agent/internal/agents/opencode/serveapi.go`, which also detects the server's major
+version from a JSON health answer (v2 `/api/info`, v1 `/global/health`; each major answers the
+other's path with 200 HTML) and routes v1 or v2 paths. v1 stays the default until the image pin
+moves. Not mapped on v2: questions (they became forms), live provider config (`PATCH
+/api/experimental/config` takes `shell` only), provider errors and event semantics (#2103).
+The v2 turn path (`/prompt` then waiting on `/api/session/active`) was not run against a model.
+
+Follow-up to the note above (review of #2106). v2 sessions are created with an allow-all permission
+ruleset (measured: a later `POST /api/session/{id}/permission` answers `allow`); v2 events carry
+their body in `data`, which `handleServeEvent` now reads. A v2 turn that ends without being seen
+running is reported as unknown unless an assistant message newer than the input exists. The v2
+contract (`contract_serveapi_test.go`) runs by hand only: `opencode-contract.yml` covers the
+`opencode-ai` pins, not `@opencode/cli` (#2105 owns the drift side).
+
+## 2026-10-14 note: session state on opencode 2 comes from the API (#2103, part of #2101)
+
+On a v2 daemon the read layer no longer touches `opencode.db`: v2 migrates the v1 tables in place
+and never writes them again, so history, state, queue, usage and recall read through
+`/api/session/{id}`, `/message`, `/inbox` and `/api/session/active`
+(`workspace/agent/internal/agents/opencode/v2state.go`; the v1 SQLite path is unchanged and the
+default). Measured on 2.0.28 against a loopback stub provider (fixtures: `testdata/v2/`):
+
+- A turn is several assistant messages (one per model step); v1 stored one. `v2Turns` merges a run
+  back (cost summed, tokens from the last step, as v1 filled them) and hands it to `parseMessage`.
+- Outcomes are explicit. The execution leaves an `idle` message with `outcome` succeeded | failed |
+  interrupted (+ `error`), and `session.execution.*` says the same on the stream. A 4xx fails at once
+  (`provider.auth`, status 401); a 5xx is retried (`session.retry.scheduled`) for about 90 s first
+  (`provider.internal`). An interrupted step carries `error.type = "aborted"`, which maps to the
+  abort that v1 records, so it is never shown as a failure. `sendTurn` reads the outcome off the idle
+  message and returns it in v1's body shape, so `runTurn`'s classification is shared; the stream only
+  wakes the wait early.
+- Cost sits on assistant messages and on `compaction` messages (the session total is both), so the
+  usage fold counts a compaction as a cost-only turn. A failed compaction still ends its execution as
+  succeeded; its failure is on the compaction message. Fork copies keep `time.created` and get new
+  ids, so the v1 "older than its session" rule still finds them.
+- Not available from the API (follow-ups: #2115): todos (no route, no tool, so `Tasks` stays empty) and the question tool
+  (forms; reply is unsupported on v2, #2102), so a v2 turn waiting on a question reads as working.
+- The Terminal route has no daemon address yet: `v2TargetFor` answers false for it (#2105 plugs in
+  there), which leaves it on the SQLite reader.
+
+## 2026-10-14 note: the question tool is a form on opencode 2 (#2115, part of #2101)
+
+Measured on 2.0.28 (isolated HOME, loopback stub provider that makes the model call the question
+tool; fixtures: `testdata/v2/form-*`, contract: `contract_v2form_test.go`). The wire contract is
+written up at the top of `workspace/agent/internal/agents/opencode/v2form.go`; the decisions:
+
+- **Pending state comes from the form list**, `GET /api/session/{id}/form`, and only while the daemon
+  lists the session as running. A waiting turn is still `running` in `/api/session/active`, and
+  the question tool part stays `running` in the messages, including for good after a SIGKILL of the
+  daemon (forms are in memory; a restart or SIGKILL loses a pending one), so the message list
+  cannot be the source. `liveStateV2` answers `question` (the state v1's running question part gives),
+  `readTranscriptV2` fills `Pending`, and `PendingModal` follows.
+- **Events are `form.created {form}`, `form.replied {id,sessionID,answer}`, `form.cancelled
+  {id,sessionID}`** (not `session.form.*`). They feed `h.inter` exactly as `question.asked/replied/
+  rejected` do on v1; `reconcile` reads the form list for a form that was already waiting.
+- **Mapping**: one form per tool call, one field per question (`q0`, `q1`, …; title = header,
+  description = question text, `string` with options = single choice, `multiselect` = multiple choice,
+  `custom:true` = a typed answer is allowed). Answers go as `{answer:{q0:"B", q1:["Cheese","typed"]}}`;
+  a typed answer to a single choice and a multiselect's picks plus typed text both round-trip. Option
+  `value` equals the label.
+- **Dismiss** is `DELETE …/form/{id}?message=`. The question tool then fails with that message and the
+  turn goes on (the model reads the failure). An interrupt cancels the pending form itself and the
+  execution ends `interrupted`.
+- **Double answers are harmless**: replying to or cancelling a settled form is 409
+  `FormAlreadySettledError` (a form the daemon forgot is 404). `Respond` reads the form again before
+  it answers and refuses a settled one.
+- **Terminal slots on the shared serve** show the pending form (question chip, card) but the card
+  carries no form id, so the Console keeps driving the TUI modal with keys and af never posts a form
+  reply for a Terminal session. The TUI follows an answer made through the API (its modal closes), and
+  an answer or Esc typed in the TUI shows up as `form.replied` / `form.cancelled`. Measured TUI
+  keys: a single question answers with Down×i + Enter; several questions are tabbed (`Color
+  Toppings Submit`), Enter confirms a single choice and advances, Enter *toggles* a multiple-choice
+  option, and the last step is the Submit tab (Tab, then Enter). The Console's `buildMenuSeq` does not
+  produce that for a multi-question form or a multiple-choice question (follow-up: #2127).
+- **Todos**: the 2.0.28 tool list (read off the provider request: edit glob grep question read shell
+  skill subagent webfetch websearch write execute) has no todo tool, and the OpenAPI spec has no todo or
+  task route. `@opencode/cli` `latest` is 2.0.28 (the newest 2.x on npm), so `Tasks` stays empty on v2.
+
+## 2026-10-14 note: a Terminal slot's form is answered through the form API (#2127, part of #2101)
+
+- **Decision** (resolves the follow-up #2127 above): a Terminal slot attached to af's shared serve is answered by form id, not by keys. The
+  mirror stamps the pending form's id on the card, the Console then takes the same `/respond` route as
+  Managed, and `/respond` hands a Terminal (`tui`) session to the driver's `RespondTerminal`
+  (`agents.TerminalResponder`; opencode answers only a slot on the serve, others get 501 and keep
+  keys). Terminal has no handle, so the daemon's list is the source: the id must still be in the
+  running session's pending list, the write follows only the conversation af recorded for the slot (never the directory guess the readers use) and only while it carries the slot's `af.sid`/`af.name` tags, `respondForm` reads the form again before replying, and a settled
+  form, a forgotten one (404) or a 409 is `errFormSettled` (HTTP 409 `respond_failed`) — an answer
+  typed in the TUI at the same moment is never doubled. Dismiss is the same call as for Managed
+  (`DELETE`; the turn continues).
+- **Measured** on 2.0.28 (isolated HOME, loopback stub provider, tmux; `TestContractTerminalFormRespond`,
+  build tag `contract`): a real `opencode --server … --session …` TUI shows the tabbed form (`Pick
+  Toppings Submit`); a two-question form with a multiple-choice step answered through the API closes
+  the modal, the turn ends and the TUI shows the answers; a dismissal closes it too; a second answer is
+  refused.
+- **Keys stay v1's.** The Console does not know a slot's opencode major, so for a slot that is not on the
+  serve (v1, or v2 with `AF_OPENCODE_TUI_STANDALONE`) `buildMenuSeq` is unchanged and the opencode card
+  drives only a single question with a single choice (anything else is read-only with the hint to
+  answer in the terminal). The v2 tabbed form's keys (Submit tab, Enter toggling a checklist, Tab
+  leaving it) are not generated: guessing them per slot would mis-answer one of the two majors.
+
+### 2026-10-14 — a provider error under retry (#2129)
+
+Measured with loopback stub providers, one status per run (v1 1.19.0, v2 2.0.28):
+
+- **v1** fails at once on 400 / 401 / 402 / 403 / 404 / 413. It retries without end on 429 (a rate
+  limit and `insufficient_quota` alike), 500, 503 and 529: `GET /session/status` and the SSE
+  `session.status` event carry `{"type":"retry","attempt":N,"message":…,"next":<epoch ms>}`, the
+  status flips to `busy` between two attempts, no `message.part.updated` is sent for a failing
+  attempt, and `/message` never returns. Aborting a retrying session returns a completed message with
+  `error: null` and no parts, so the failure text has to be carried by the driver.
+- **v2** reports the retry only as `session.retry.scheduled` (`attempt`, `at`, `error`);
+  `/api/session/active` stays `running`. It fails a 401 / 403 / quota-429 at once
+  (`provider.auth`, `provider.quota`) and gives up on a 5xx after about eleven attempts.
+
+The driver keeps the live retry on the handle (`RetryInfo`, cleared by output, idle and every
+terminal state) and `/transcript` serves it as `retry`; the mirror draws it as a band. A message
+that no retry can fix (region / privacy, quota and billing, bad key; `retry.go`) seen from the
+second attempt on aborts the turn and lands it failed with that message, and the band stays until
+the next input. Anything else keeps retrying: no attempt cap, because a provider that is down for
+ten minutes does recover and a member can press stop.

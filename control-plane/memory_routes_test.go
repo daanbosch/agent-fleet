@@ -1,8 +1,10 @@
 package main
 
 import (
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -27,6 +29,29 @@ func TestMemoryRoutesProxiedByCP(t *testing.T) {
 		{"GET", "/api/agents/memory/entries/changes", "GET /api/agents/memory/entries/changes"},
 		{"GET", "/api/agents/memory/entries/diff", "GET /api/agents/memory/entries/diff"},
 		{"POST", "/api/agents/memory/entries/revert", "POST /api/agents/memory/entries/revert"},
+		{"GET", "/api/agents/memory/entries/list", "GET /api/agents/memory/entries/list"},
+		{"POST", "/api/agents/memory/entries/pin", "POST /api/agents/memory/entries/pin"},
+		{"POST", "/api/agents/memory/entries/member-save", "POST /api/agents/memory/entries/member-save"},
+		{"GET", "/api/agents/memory/entries/purge-preview", "GET /api/agents/memory/entries/purge-preview"},
+		{"POST", "/api/agents/memory/entries/purge", "POST /api/agents/memory/entries/purge"},
+		{"GET", "/api/agents/memory/entries/member-read", "GET /api/agents/memory/entries/member-read"},
+		{"GET", "/api/agents/memory/entries/projects", "GET /api/agents/memory/entries/projects"},
+		{"GET", "/api/agents/memory/entries/project-move-preview", "GET /api/agents/memory/entries/project-move-preview"},
+		{"POST", "/api/agents/memory/entries/project-move", "POST /api/agents/memory/entries/project-move"},
+		{"GET", "/api/agents/memory/claude-import", "GET /api/agents/memory/claude-import"},
+		{"GET", "/api/agents/memory/claude-import/preview", "GET /api/agents/memory/claude-import/preview"},
+		{"POST", "/api/agents/memory/claude-import", "POST /api/agents/memory/claude-import"},
+		{"GET", "/api/agents/memory/muse-import", "GET /api/agents/memory/muse-import"},
+		{"GET", "/api/agents/memory/muse-import/preview", "GET /api/agents/memory/muse-import/preview"},
+		{"POST", "/api/agents/memory/muse-import", "POST /api/agents/memory/muse-import"},
+		{"GET", "/api/agents/memory/claude-export", "GET /api/agents/memory/claude-export"},
+		{"GET", "/api/agents/memory/claude-export/preview", "GET /api/agents/memory/claude-export/preview"},
+		{"POST", "/api/agents/memory/claude-export", "POST /api/agents/memory/claude-export"},
+		{"GET", "/api/agents/memory/af-import/preview", "GET /api/agents/memory/af-import/preview"},
+		{"POST", "/api/agents/memory/af-import", "POST /api/agents/memory/af-import"},
+		{"GET", "/api/agents/memory/auto-sync", "GET /api/agents/memory/auto-sync"},
+		{"GET", "/api/agents/memory/auto-sync/preview", "GET /api/agents/memory/auto-sync/preview"},
+		{"POST", "/api/agents/memory/auto-sync", "POST /api/agents/memory/auto-sync"},
 		// Must not be swallowed by the existing pattern route /api/agents/{kind}/models.
 		{"GET", "/api/agents/codex/models", "GET /api/agents/{kind}/models"},
 	} {
@@ -82,10 +107,129 @@ func TestMemorySnapshotIsAudited(t *testing.T) {
 	if !ok || action != "memory.entry.revert" || target != "" {
 		t.Fatalf("auditActionTarget = (%q, %q, ok=%v), want memory.entry.revert with an empty target", action, target, ok)
 	}
+	// Pinning is audited with an id-shaped project hint only; the memory name never reaches the ledger.
+	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/entries/pin?project=agent-fleet-0123456789ab", nil)
+	action, target, ok = auditActionTarget(req)
+	if !ok || action != "memory.entry.pin" || target != "agent-fleet-0123456789ab" {
+		t.Fatalf("auditActionTarget = (%q, %q, ok=%v), want memory.entry.pin/agent-fleet-0123456789ab", action, target, ok)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/entries/pin", nil)
+	if action, target, ok = auditActionTarget(req); !ok || action != "memory.entry.pin" || target != "" {
+		t.Fatalf("auditActionTarget = (%q, %q, ok=%v), want memory.entry.pin with an empty target", action, target, ok)
+	}
+	// A member save is audited by project id only; the memory name never reaches the ledger.
+	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/entries/member-save?project=agent-fleet-0123456789ab&name=ghp_secretlooking", nil)
+	if action, target, ok = auditActionTarget(req); !ok || action != "memory.entry.save" || target != "agent-fleet-0123456789ab" {
+		t.Fatalf("auditActionTarget(member-save) = (%q, %q, ok=%v), want memory.entry.save/agent-fleet-0123456789ab", action, target, ok)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/entries/member-save?project=%2Fhome%2Fdev", nil)
+	if action, target, ok = auditActionTarget(req); !ok || action != "memory.entry.save" || target != "" {
+		t.Fatalf("auditActionTarget(member-save, bad hint) = (%q, %q, ok=%v), want memory.entry.save with an empty target", action, target, ok)
+	}
+	// A purge of a memory's history is audited by project id only; the memory name never reaches the ledger.
+	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/entries/purge?project=agent-fleet-0123456789ab&name=ghp_secretlooking", nil)
+	if action, target, ok = auditActionTarget(req); !ok || action != "memory.entry.purge" || target != "agent-fleet-0123456789ab" {
+		t.Fatalf("auditActionTarget(purge) = (%q, %q, ok=%v), want memory.entry.purge/agent-fleet-0123456789ab", action, target, ok)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/entries/purge?project=%2Fhome%2Fdev", nil)
+	if action, target, ok = auditActionTarget(req); !ok || action != "memory.entry.purge" || target != "" {
+		t.Fatalf("auditActionTarget(purge, bad hint) = (%q, %q, ok=%v), want memory.entry.purge with an empty target", action, target, ok)
+	}
+	// Moving an orphaned project's memories is audited by the source project id only.
+	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/entries/project-move?project=app-0123456789ab", nil)
+	if action, target, ok = auditActionTarget(req); !ok || action != "memory.project.move" || target != "app-0123456789ab" {
+		t.Fatalf("auditActionTarget(project-move) = (%q, %q, ok=%v), want memory.project.move/app-0123456789ab", action, target, ok)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/entries/project-move?project=%2Fhome%2Fdev", nil)
+	if action, target, ok = auditActionTarget(req); !ok || action != "memory.project.move" || target != "" {
+		t.Fatalf("auditActionTarget(project-move, bad hint) = (%q, %q, ok=%v), want an empty target", action, target, ok)
+	}
+	// The claude-memory import is audited; only an id-shaped project hint reaches the ledger.
+	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/claude-import?project=agent-fleet-0123456789ab", nil)
+	action, target, ok = auditActionTarget(req)
+	if !ok || action != "memory.claude_import" || target != "agent-fleet-0123456789ab" {
+		t.Fatalf("auditActionTarget = (%q, %q, ok=%v), want memory.claude_import/agent-fleet-0123456789ab", action, target, ok)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/claude-import?project=%2Fhome%2Fdev%2Frepos", nil)
+	action, target, ok = auditActionTarget(req)
+	if !ok || action != "memory.claude_import" || target != "" {
+		t.Fatalf("auditActionTarget = (%q, %q, ok=%v), want memory.claude_import with an empty target", action, target, ok)
+	}
+	// The muse-memory import is audited the same way.
+	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/muse-import?project=agent-fleet-0123456789ab", nil)
+	action, target, ok = auditActionTarget(req)
+	if !ok || action != "memory.muse_import" || target != "agent-fleet-0123456789ab" {
+		t.Fatalf("auditActionTarget = (%q, %q, ok=%v), want memory.muse_import/agent-fleet-0123456789ab", action, target, ok)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/muse-import?project=%2Fhome%2Fdev%2Frepos", nil)
+	action, target, ok = auditActionTarget(req)
+	if !ok || action != "memory.muse_import" || target != "" {
+		t.Fatalf("auditActionTarget = (%q, %q, ok=%v), want memory.muse_import with an empty target", action, target, ok)
+	}
+	// The write-back into claude's memory is audited the same way.
+	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/claude-export?project=agent-fleet-0123456789ab", nil)
+	action, target, ok = auditActionTarget(req)
+	if !ok || action != "memory.claude_export" || target != "agent-fleet-0123456789ab" {
+		t.Fatalf("auditActionTarget = (%q, %q, ok=%v), want memory.claude_export/agent-fleet-0123456789ab", action, target, ok)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/claude-export?project=%2Fhome%2Fdev%2Frepos", nil)
+	action, target, ok = auditActionTarget(req)
+	if !ok || action != "memory.claude_export" || target != "" {
+		t.Fatalf("auditActionTarget = (%q, %q, ok=%v), want memory.claude_export with an empty target", action, target, ok)
+	}
+	// Importing AF memory out of a bundle (#1983) is audited by import id only.
+	for q, want := range map[string]string{
+		"importId=20261014T093000Z": "20261014T093000Z", "importId=20261014T093000Z-2": "20261014T093000Z-2",
+		"importId=%2Fhome%2Fdev": "", "importId=ghp_secretlooking": "",
+	} {
+		req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/af-import?"+q, nil)
+		action, target, ok = auditActionTarget(req)
+		if !ok || action != "memory.af_import" || target != want {
+			t.Fatalf("auditActionTarget(af-import?%s) = (%q, %q, ok=%v), want memory.af_import/%q", q, action, target, ok, want)
+		}
+	}
+	// The member's part in the switch's automatic run (#1972) is audited by action word only.
+	for q, want := range map[string]string{
+		"action=retry": "retry", "action=abandon": "abandon", "action=wake&to=on": "wake:on",
+		"action=wake&to=off": "wake:off", "action=wake&to=%2Fhome": "wake", "action=ghp_secretlooking": "",
+	} {
+		req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/auto-sync?"+q, nil)
+		action, target, ok = auditActionTarget(req)
+		if !ok || action != "memory.auto_sync" || target != want {
+			t.Fatalf("auditActionTarget(auto-sync?%s) = (%q, %q, ok=%v), want memory.auto_sync/%q", q, action, target, ok, want)
+		}
+	}
 	// The other read-only routes are not audited.
-	for _, p := range []string{"/api/agents/memory/snapshots", "/api/agents/memory/tree", "/api/agents/memory/diff"} {
+	for _, p := range []string{"/api/agents/memory/snapshots", "/api/agents/memory/tree", "/api/agents/memory/diff", "/api/agents/memory/claude-import", "/api/agents/memory/claude-import/preview", "/api/agents/memory/muse-import", "/api/agents/memory/muse-import/preview", "/api/agents/memory/claude-export", "/api/agents/memory/claude-export/preview", "/api/agents/memory/auto-sync", "/api/agents/memory/auto-sync/preview", "/api/agents/memory/af-import/preview"} {
 		if _, _, ok := auditActionTarget(httptest.NewRequest(http.MethodGet, p, nil)); ok {
 			t.Errorf("GET %s should not be audited", p)
 		}
+	}
+}
+
+// A transport failure on a memory import preview must not put the (unscanned) query in the CP log.
+func TestMemoryImportRelayLogDoesNotQuoteQuery(t *testing.T) {
+	proxy, res, _, cleanup := newFSProxyTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	logs := &lockedBuf{}
+	old := log.Writer()
+	log.SetOutput(logs)
+	t.Cleanup(func() { log.SetOutput(old) })
+	cleanup() // the Agent is stopped
+	secret := "ghp_" + strings.Repeat("q7Zx", 9)
+	for _, p := range []string{
+		"/api/agents/memory/muse-import/preview?dir=" + secret,
+		"/api/agents/memory/claude-import/preview?slug=" + secret,
+	} {
+		rec := httptest.NewRecorder()
+		proxy.rest(rec, httptest.NewRequest(http.MethodGet, p, nil), res)
+		if rec.Code != http.StatusBadGateway {
+			t.Fatalf("%s: %d", p, rec.Code)
+		}
+	}
+	if !strings.Contains(logs.String(), "agent proxy: GET /api/agents/memory/muse-import/preview") {
+		t.Fatalf("the failure was not logged: %q", logs.String())
+	}
+	if strings.Contains(logs.String(), secret) {
+		t.Errorf("the query reached the CP log: %s", logs.String())
 	}
 }

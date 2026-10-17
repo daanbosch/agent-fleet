@@ -14,12 +14,15 @@
 //
 // The i18n keys stay `env.preview_*`: a key is an identifier, not a location, so moving the
 // UI is not a reason to rewrite every one of them.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useToast } from "../../../ui/ToastProvider.tsx";
 import { useConfirm } from "../../../ui/ConfirmProvider.tsx";
-import { api, apiJSON } from "../../../core/api/client.ts";
+import { api, apiJSON, errText } from "../../../core/api/client.ts";
 import { OnOff, Row } from "../parts/controls.tsx";
 import { useT } from "../../../lib/i18n/index.ts";
+import { Button } from "../../../ui/Button.tsx";
+import { useSettingsUI } from "../store.ts";
+import { previewInfoFrom, previewScopeUnchanged, previewToken, usePreviewStore } from "../../preview/previewState.ts";
 
 // Whether this deployment has preview subdomains at all. null = not known yet; the rail
 // stays empty until it resolves, so the entry never flashes in and disappears again.
@@ -52,6 +55,19 @@ export function usePreviewAvailable(): boolean | null {
   return ok;
 }
 
+// Writes go one after another, so their answers settle in the order they were sent and the last
+// save is the one the shared state ends on (a field blur and a toggle click can overlap).
+// What a queued write resolves to when its scope changed before it was sent.
+const CANCELLED = Symbol("cancelled");
+// What a queued request resolves to when it was sent and its answer was lost.
+const LOST = Symbol("lost");
+let writeChain: Promise<unknown> = Promise.resolve();
+function serialized<T>(fn: () => Promise<T>): Promise<T> {
+  const run = writeChain.then(fn, fn);
+  writeChain = run.catch(() => {});
+  return run;
+}
+
 export function PreviewTab() {
   const tr = useT();
   const toast = useToast();
@@ -76,9 +92,74 @@ export function PreviewTab() {
   }, []);
 
   const save = async (patch: Record<string, unknown>) => {
-    const res = await apiJSON("api/env/ws-settings", "PUT", patch);
-    if (res && !res.error) setAu(res);
-    else toast(tr("common.save_failed"));
+    const from = previewToken(); // taken NOW, when the person acted, not when the queue gets to it
+    const res = await serialized(async () => {
+      // A write queued under another tenant / identity is cancelled, not sent: fetch stamps the
+      // tenant current at send time, so it would land on the wrong workspace.
+      if (!previewScopeUnchanged(from)) return CANCELLED;
+      const r = await apiJSON("api/env/ws-settings", "PUT", patch);
+      if (r && !r.error) usePreviewStore.getState().set(previewInfoFrom(r), from); // the port controls follow
+      return r;
+    });
+    if (res === CANCELLED) return;
+    if (res && !res.error) {
+      setAu(res);
+    } else {
+      // A refusal carries its reason (e.g. the dev IdP is not enabled on this deployment);
+      // a bare "save failed" would leave the person guessing.
+      const why = res?.error ? errText(res.error) : "";
+      toast(why ? `${tr("common.save_failed")}: ${why}` : tr("common.save_failed"));
+    }
+  };
+
+  // Rotating the dev IdP client secret goes through the same queue and scope guard as every
+  // other write, so a slow earlier save cannot answer afterwards and bring the old client id
+  // back. The new secret reaches the container only at its next start, which the confirm text
+  // and the toast say. A lost answer may still have rotated: re-read the settings instead of
+  // retrying (a retry would rotate again), and when that fails too show no client id rather than
+  // an old one as if it were current.
+  const rotateDevIdp = async () => {
+    const ok = await askConfirm({
+      title: tr("env.devidp_rotate_confirm_title"),
+      body: tr("env.devidp_rotate_confirm_body"),
+      confirmLabel: tr("env.devidp_rotate_go"),
+      danger: true,
+    });
+    if (!ok) return;
+    const from = previewToken();
+    const res = await serialized(async () => {
+      if (!previewScopeUnchanged(from)) return CANCELLED;
+      try {
+        return await apiJSON("api/env/ws-settings/dev-idp/rotate", "POST", {});
+      } catch {
+        return LOST;
+      }
+    });
+    if (res === CANCELLED) return;
+    if (res === LOST) {
+      const fresh = await serialized(async () => {
+        try {
+          return await api("api/env/ws-settings");
+        } catch {
+          return null;
+        }
+      });
+      if (fresh && !fresh.error) {
+        setAu(fresh);
+        toast(tr("env.devidp_rotate_lost_reloaded"));
+      } else {
+        setAu((prev: any) => ({ ...prev, devIdpClientId: "" }));
+        toast(tr("env.devidp_rotate_lost_unknown"));
+      }
+      return;
+    }
+    if (res && !res.error) {
+      setAu((prev: any) => ({ ...prev, devIdpClientId: res.devIdpClientId }));
+      toast(tr("env.devidp_rotated"));
+    } else {
+      const why = res?.error ? errText(res.error) : "";
+      toast(why ? `${tr("common.save_failed")}: ${why}` : tr("common.save_failed"));
+    }
   };
 
   // Reissue (docs/log/81 §4.1) throws away URLs that have already been handed out. It
@@ -92,9 +173,18 @@ export function PreviewTab() {
       danger: true,
     });
     if (!ok) return;
-    const res = await apiJSON("api/env/ws-settings/preview/reissue", "POST", {});
+    const from = previewToken();
+    const res = await serialized(async () => {
+      if (!previewScopeUnchanged(from)) return CANCELLED;
+      const r = await apiJSON("api/env/ws-settings/preview/reissue", "POST", {});
+      if (r && !r.error) usePreviewStore.getState().set(previewInfoFrom(r), from);
+      return r;
+    });
+    if (res === CANCELLED) return;
     if (res && !res.error) {
-      setAu(res);
+      // The reissue answer carries the preview block only (no dev IdP fields), so it is merged
+      // over what is shown instead of replacing it, or the IdP switch would vanish.
+      setAu((prev: any) => ({ ...prev, ...res }));
       // While stopped there are no issued URLs to throw away, so a successful reissue
       // changes nothing on screen. Always say which of the two happened, or the button
       // looks dead.
@@ -112,7 +202,7 @@ export function PreviewTab() {
         // blank pane.
         <p className="muted pad">{tr("env.preview_unavailable")}</p>
       ) : (
-        <PreviewSection au={au} save={save} reissue={reissue} />
+        <PreviewSection au={au} save={save} reissue={reissue} rotateDevIdp={rotateDevIdp} />
       )}
     </div>
   );
@@ -122,10 +212,12 @@ function PreviewSection({
   au,
   save,
   reissue,
+  rotateDevIdp,
 }: {
   au: any;
   save: (patch: Record<string, unknown>) => void;
   reissue: () => void;
+  rotateDevIdp: () => void;
 }) {
   const tr = useT();
   const [ports, setPorts] = useState((au.previewPorts || []).join(", "));
@@ -134,6 +226,22 @@ function PreviewSection({
   const issuedPorts = Object.keys(au.previewUrls || {}).sort((a, b) => Number(a) - Number(b));
   // Save only on blur. A PUT per keystroke would persist half-typed input such as
   // "3000, 80" and end up allowing port 80.
+  // "Expose this port…" from a port control asks to add one port. Adding is an explicit act
+  // here (the field above saves on blur, so prefilling it would persist on the next click
+  // anywhere). Nothing is saved until Add; Cancel or closing the dialog saves nothing.
+  const addPort = useSettingsUI((st) => st.previewAddPort);
+  const clearAddPort = useSettingsUI((st) => st.clearPreviewAddPort);
+  const current: number[] = au.previewPorts || [];
+  const maxPorts: number = au.previewMaxPorts || 8;
+  const showAdd = addPort != null && !current.includes(addPort);
+  const atCap = current.length >= maxPorts;
+  const confirmAdd = () => {
+    if (addPort == null) return;
+    const next = [...current, addPort];
+    setPorts(next.join(", "));
+    save({ previewPorts: next });
+    clearAddPort();
+  };
   const commitPorts = () => {
     const parsed = ports
       .split(/[\s,]+/)
@@ -144,6 +252,23 @@ function PreviewSection({
   return (
     <section className="ds-group">
       <h4 className="ds-title">{tr("env.preview_title")}</h4>
+      {showAdd && (
+        <div className="pv-add-strip" role="alert">
+          <span>
+            {atCap
+              ? tr("env.preview_add_cap", { port: addPort!, n: maxPorts })
+              : tr("env.preview_add_ask", { port: addPort! })}
+          </span>
+          {!atCap && (
+            <Button variant="primary" small onClick={confirmAdd}>
+              {tr("env.preview_add_go")}
+            </Button>
+          )}
+          <Button variant="ghost" small onClick={clearAddPort}>
+            {atCap ? tr("common.close") : tr("env.preview_add_cancel")}
+          </Button>
+        </div>
+      )}
       {/* Show what is currently assigned before any setting is touched. Without it both
           the port list and reissue act on something invisible, and pressing them shows no
           change (reissue was reported as doing nothing). */}
@@ -203,6 +328,174 @@ function PreviewSection({
         </button>
       </Row>
       <p className="muted ds-note">{tr("env.preview_reissue_note")}</p>
+      {/* Only where the operator turned the IdP on: a switch that every PUT would refuse
+          must not be offered. */}
+      {au.devIdpAvailable && <DevIdpSection au={au} rotate={rotateDevIdp} />}
     </section>
+  );
+}
+
+// The dev OIDC IdP (ADR 0116): the values the container gets, and the rotate action. There is no
+// per-workspace switch. It lives here because its whole purpose is signing in on
+// a preview URL. The client secret is deliberately absent: the API never returns it.
+function DevIdpSection({ au, rotate }: { au: any; rotate: () => void }) {
+  const tr = useT();
+  const toast = useToast();
+  // "Copied" only after the clipboard accepted it: the API is absent outside secure contexts
+  // and writeText rejects when permission is denied.
+  const copy = async (text: string) => {
+    try {
+      if (!navigator.clipboard) throw new Error("no clipboard");
+      await navigator.clipboard.writeText(text);
+      toast(tr("env.devidp_copied"));
+    } catch {
+      toast(tr("common.copy_failed"));
+    }
+  };
+  const issuer: string = au.devIdpIssuer || "";
+  const values: Array<[string, string]> = [
+    [tr("env.devidp_issuer"), issuer],
+    [tr("env.devidp_discovery"), issuer ? `${issuer}/.well-known/openid-configuration` : ""],
+    [tr("env.devidp_client_id"), au.devIdpClientId || ""],
+  ];
+  return (
+    <>
+      <h4 className="ds-title">{tr("env.devidp_title")}</h4>
+      <p className="muted ds-note">{tr("env.devidp_note")}</p>
+      {values
+          .filter(([, v]) => v)
+          .map(([label, v]) => (
+            <Row key={label} label={label}>
+              <code className="ds-note">{v}</code>{" "}
+              <button className="ghost" onClick={() => copy(v)} aria-label={`${tr("env.devidp_copy")}: ${label}`}>
+                {tr("env.devidp_copy")}
+              </button>
+            </Row>
+          ))}
+      <p className="muted ds-note">{tr("env.devidp_secret_note")}</p>
+      <Row label={tr("env.devidp_rotate_label")}>
+        <button className="ghost" onClick={rotate}>
+          {tr("env.devidp_rotate")}
+        </button>
+      </Row>
+      <p className="muted ds-note">{tr("env.devidp_warn_prod")}</p>
+      <p className="muted ds-note">{tr("env.devidp_warn_rotate")}</p>
+      <p className="muted ds-note">{tr("env.devidp_warn_env")}</p>
+      <PersonaEditor />
+    </>
+  );
+}
+
+interface Persona {
+  id: string;
+  handle: string;
+  name: string;
+  email: string;
+  sub: string;
+}
+
+// Test personas (ADR 0116, #2223): extra identities the consent page offers next to the member
+// themself, for exercising role checks. Their own endpoint, not ws-settings, so a persona edit
+// never queues behind (or clobbers) a preview save.
+function PersonaEditor() {
+  const tr = useT();
+  const toast = useToast();
+  const [list, setList] = useState<Persona[] | null>(null);
+  const [handle, setHandle] = useState("");
+  const [name, setName] = useState("");
+  const [domain, setDomain] = useState("example.test");
+  const [busy, setBusy] = useState(false);
+  // Every request takes a number when it starts and only the newest may write the list: a slow
+  // first load answering after an add must not wipe what the add just showed.
+  const latest = useRef(0);
+  const alive = useRef(true);
+  // Set in setup as well as cleared in cleanup: StrictMode runs setup, cleanup, setup, and a flag
+  // that only ever turns false would drop every later answer.
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
+  // run sends one request and applies its answer if no newer request was started meanwhile.
+  // Returns whether the server accepted it. Failure of any kind clears busy and says why.
+  const run = async (send: () => Promise<any>): Promise<boolean> => {
+    const mine = ++latest.current;
+    setBusy(true);
+    try {
+      const res = await send();
+      if (!alive.current) return false;
+      if (res && !res.error) {
+        if (mine === latest.current) {
+          setList(res.personas || []);
+          if (res.domain) setDomain(res.domain);
+        }
+        return true;
+      }
+      const why = res?.error ? errText(res.error) : "";
+      toast(why ? `${tr("common.save_failed")}: ${why}` : tr("common.save_failed"));
+      return false;
+    } catch {
+      if (alive.current) toast(tr("common.save_failed"));
+      return false;
+    } finally {
+      if (alive.current && mine === latest.current) setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    void run(() => api("api/env/ws-settings/dev-idp/personas"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const add = async () => {
+    const h = handle.trim();
+    if (!h || busy) return;
+    if (await run(() => apiJSON("api/env/ws-settings/dev-idp/personas", "POST", { handle: h, name: name.trim() }))) {
+      setHandle("");
+      setName("");
+    }
+  };
+  const remove = async (id: string) => {
+    if (busy) return;
+    await run(() => apiJSON(`api/env/ws-settings/dev-idp/personas/${encodeURIComponent(id)}`, "DELETE"));
+  };
+
+  return (
+    <>
+      <h4 className="ds-title">{tr("env.persona_title")}</h4>
+      <p className="muted ds-note">{tr("env.persona_note", { domain })}</p>
+      {(list || []).map((p) => (
+        <Row key={p.id} label={p.name || p.handle}>
+          <code className="ds-note">{p.email}</code> <code className="ds-note">{p.sub}</code>{" "}
+          <button className="ghost" disabled={busy} onClick={() => void remove(p.id)} aria-label={`${tr("env.persona_remove")}: ${p.handle}`}>
+            {tr("env.persona_remove")}
+          </button>
+        </Row>
+      ))}
+      <Row label={tr("env.persona_add_label")}>
+        <input
+          className="ds-select"
+          value={handle}
+          onChange={(e) => setHandle(e.target.value)}
+          placeholder={tr("env.persona_handle_ph")}
+          aria-label={tr("env.persona_handle")}
+          spellCheck={false}
+          maxLength={32}
+        />{" "}
+        <input
+          className="ds-select"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder={tr("env.persona_name_ph")}
+          aria-label={tr("env.persona_name")}
+          maxLength={64}
+        />{" "}
+        <button className="ghost" onClick={() => void add()} disabled={!handle.trim() || busy}>
+          {tr("env.persona_add")}
+        </button>
+      </Row>
+    </>
   );
 }

@@ -38,10 +38,12 @@ func buildMux(cfg config) *http.ServeMux {
 	registerSSMRoutes(mux, cfg)
 	registerGCPRoutes(mux, cfg)
 	registerMemoRoutes(mux, cfg)
+	registerInboxRoutes(mux, cfg)
 	registerWorkItemRoutes(mux, cfg)
 	registerScheduleRoutes(mux, cfg)
 	registerMCPServerRoutes(mux, cfg)
 	registerNotificationRoutes(mux, cfg)
+	registerLimitBoardRoutes(mux, cfg)
 	registerUpdateRoutes(mux, cfg)
 	registerRepoFSRoutes(mux, cfg)
 	registerAgentEnvRoutes(mux, cfg)
@@ -51,6 +53,8 @@ func buildMux(cfg config) *http.ServeMux {
 	registerDrawioStencilRoutes(mux, cfg)
 	registerBrandAdminRoutes(mux, cfg)
 	registerTerminalPreviewRoutes(mux, cfg)
+	registerDevIdPRoutes(mux, cfg)
+	registerDevIdPAdminRoutes(mux, cfg)
 	registerLegacyRedirect(mux)
 	registerStatic(mux, cfg)
 	return mux
@@ -161,6 +165,11 @@ func registerAuthRoutes(mux *http.ServeMux, cfg config) {
 	// Unlinking one (docs/log/61 §61.16.4). provider/subject are query parameters, not
 	// path segments — a tenant provider id carries colons; see detachLoginMethod.
 	mux.HandleFunc("DELETE /api/me/login-methods", acct.withIdentity(acct.detachLoginMethod))
+	// The member's Console-only UI state (ADR 0114). Membership-scoped and answered from the CP
+	// database, so the Console reads it before the workspace runs.
+	uiState := newMemberUIStateAPI(cfg.mgr)
+	mux.HandleFunc("GET /api/me/ui-state", uiState.withMembership(uiState.get))
+	mux.HandleFunc("PATCH /api/me/ui-state", uiState.withMembership(uiState.patch))
 	// Identity — who the AuthGateway resolved this request to (and the raw
 	// gateway headers, for verifying the oauth2-proxy -> Caddy -> CP chain).
 	mux.HandleFunc("GET /api/whoami", newWorkspaceAPI(cfg.mgr, cfg.autostart).whoami)
@@ -226,6 +235,10 @@ func registerTenantAdminRoutes(mux *http.ServeMux, cfg config) {
 	// outside it. The Agent's poll is the token-authenticated /internal/branch-rules.
 	mux.HandleFunc("GET /api/admin/tenants/{slug}/branch-rules", adm.tenantBranchRules)
 	mux.HandleFunc("PUT /api/admin/tenants/{slug}/branch-rules", adm.setTenantBranchRules)
+	// Defaults for the tenant's members' Console (ADR 0114 decision 8). Members read them through
+	// GET /api/me/ui-state; only this face writes them.
+	mux.HandleFunc("GET /api/admin/tenants/{slug}/member-defaults", adm.tenantMemberDefaults)
+	mux.HandleFunc("PUT /api/admin/tenants/{slug}/member-defaults", adm.setTenantMemberDefaults)
 	mux.HandleFunc("GET /internal/branch-rules", branchRulesBridgeAPI{cfg.mgr}.list)
 	// Tenant-defined sign-in methods (docs/log/61 §61.11). The rows are the tenant's, so
 	// these gate on tenant_admin mid-handler; ACTIVATION is checked inside setStatus,
@@ -346,6 +359,14 @@ func registerSessionRoutes(mux *http.ServeMux, cfg config) {
 	mux.HandleFunc("GET /api/sessions", ws.withResolved(ws.sessionsList))
 	mux.HandleFunc("POST /api/sessions", ws.withResolved(ws.sessionCreate))
 	mux.HandleFunc("POST /api/sessions/{name}/fork", ws.withResolved(ws.sessionFork))
+	// Move to another agent kind (ADR 0115). The move and its retry create a session, so they
+	// take fork's route through the quota check; the rest are relayed as they are.
+	mux.HandleFunc("POST /api/sessions/{name}/move", ws.withResolved(ws.sessionFork))
+	mux.HandleFunc("POST /api/sessions/{name}/move/retry", ws.withResolved(ws.sessionFork))
+	mux.HandleFunc("GET /api/sessions/{name}/move/preview", rest)
+	mux.HandleFunc("POST /api/sessions/{name}/move/cancel", rest)
+	mux.HandleFunc("POST /api/sessions/{name}/move/reopen", rest)
+	mux.HandleFunc("POST /api/sessions/{name}/move/deliver", rest)
 	mux.HandleFunc("POST /api/sessions/{name}/stop", rest)
 	mux.HandleFunc("POST /api/sessions/{name}/halt", rest)
 	mux.HandleFunc("POST /api/sessions/{name}/recreate", rest)
@@ -446,12 +467,15 @@ func registerSessionRoutes(mux *http.ServeMux, cfg config) {
 	mux.HandleFunc("POST /api/gcp-login/{id}/cancel", rest)
 	mux.HandleFunc("GET /api/gcp-login/profiles", rest)
 	mux.HandleFunc("POST /api/gcp-login/profiles/{name}/start", gcpLogin)
+	// "Log out" of one profile: a plain request, as for AWS.
+	mux.HandleFunc("POST /api/gcp-login/profiles/{name}/logout", rest)
 	mux.HandleFunc("GET /api/gcp-login/profiles/{name}/attempts/{attempt}", gcpLogin)
 	mux.HandleFunc("POST /api/gcp-login/profiles/{name}/attempts/{attempt}/code", proxy.withResolved(proxy.gcpLoginCode))
 	mux.HandleFunc("POST /api/sessions/{name}/start", ws.withResolved(ws.sessionStart))
 	mux.HandleFunc("POST /api/ssm/instances", ws.withResolved(ws.ssmInstances))
 	// Structured transcript for the Console chat view (case-A).
 	mux.HandleFunc("GET /api/sessions/{name}/messages", rest)
+	mux.HandleFunc("GET /api/sessions/{name}/export", rest)
 	mux.HandleFunc("GET /api/sessions/{name}/handoff-proposal", rest)
 	mux.HandleFunc("POST /api/sessions/{name}/handoff-proposal", rest)
 	mux.HandleFunc("DELETE /api/sessions/{name}/handoff-proposal", rest)
@@ -504,14 +528,18 @@ func registerSessionShareRoutes(mux *http.ServeMux, cfg config) {
 	// Handoff to another member (docs/log/77 / ADR 0057). It derives from the share ACL,
 	// so it lives here and shares the inventory-sync throttle with the same instance of
 	// the share API.
-	h := newSessionHandoffAPI(cfg.mgr, a)
+	h := newSessionHandoffAPI(cfg.mgr, a, cfg.autostart)
 	mux.HandleFunc("GET /api/sessions/{name}/handoff-recipients", h.withResolved(h.recipients))
+	mux.HandleFunc("GET /api/sessions/{name}/handoff-context", h.withResolved(h.handoffContextGET))
 	mux.HandleFunc("POST /api/session-handoff-offers", h.withResolved(h.create))
 	mux.HandleFunc("GET /api/session-handoff-offers", h.withMembership(h.listOwned))
 	// The recipient's inbox. A literal segment outranks {id}, so this ordering does not
 	// collide.
 	mux.HandleFunc("GET /api/session-handoff-offers/received", h.withMembership(h.listReceived))
 	mux.HandleFunc("DELETE /api/session-handoff-offers/{id}", h.withMembership(h.withdraw))
+	mux.HandleFunc("POST /api/session-handoff-offers/{id}/take", h.withMembership(h.take))
+	mux.HandleFunc("POST /api/session-handoff-offers/{id}/release", h.withMembership(h.release))
+	mux.HandleFunc("POST /api/session-handoff-offers/{id}/give-back", h.withMembership(h.giveBack))
 	mux.HandleFunc("POST /api/session-handoff-offers/{id}/accept", h.withMembership(h.accept))
 	mux.HandleFunc("POST /api/session-handoff-offers/{id}/decline", h.withMembership(h.decline))
 }
@@ -644,6 +672,7 @@ func registerWorkItemRoutes(mux *http.ServeMux, cfg config) {
 	// relays it to the Agent.
 	mux.HandleFunc("POST /api/work-items/comment", wi.withResolved(wi.comment))
 	mux.HandleFunc("POST /api/work-items/detail", wi.withResolved(wi.detail))
+	mux.HandleFunc("GET /api/work-items/jira-projects", wi.withResolved(wi.jiraProjectsList))
 	mux.HandleFunc("POST /api/work-items/search", wi.withResolved(wi.search))
 	mux.HandleFunc("GET /api/work-item-queries", wi.withMembership(wi.listQueries))
 	mux.HandleFunc("POST /api/work-item-queries", wi.withMembership(wi.createQuery))
@@ -797,6 +826,11 @@ func registerRepoFSRoutes(mux *http.ServeMux, cfg config) {
 	// Re-authentication of an existing SVN working copy (docs/log/41 amendment).
 	mux.HandleFunc("GET /api/repos/{name}/svn-auth", rest)
 	mux.HandleFunc("POST /api/repos/{name}/svn-auth", rest)
+	// Read-only SVN history and local changes (#1705) — proxied to the Agent.
+	mux.HandleFunc("GET /api/repos/{name}/svn-log", rest)
+	mux.HandleFunc("GET /api/repos/{name}/svn-show", rest)
+	mux.HandleFunc("GET /api/repos/{name}/svn-changes", rest)
+	mux.HandleFunc("GET /api/repos/{name}/svn-diff", rest)
 	// Launch prompt templates (repo launch modal) — proxied to the Agent.
 	mux.HandleFunc("GET /api/repos/{name}/prompt-templates", rest)
 	// Launch modal skill picker — the mirror's list before the session exists.
@@ -842,6 +876,10 @@ func registerRepoFSRoutes(mux *http.ServeMux, cfg config) {
 	// flushing stream proxy passes through before the ingress idle timeout.
 	mux.HandleFunc("POST /api/fs/suggest-edit", proxy.withResolved(proxy.stream))
 	mux.HandleFunc("GET /api/fs/download", rest)
+	// A folder as one zip (workspace/agent/fs_zip.go, ADR 0111). The Agent builds the archive
+	// into a temp file first, so a refusal is a JSON error and a success has a Content-Length;
+	// the relay below passes both through. Not audited (ordinary read, ADR 0111 open point).
+	mux.HandleFunc("GET /api/fs/download-zip", rest)
 	// A picture's width and height from its header — read-only, a bounded header read per
 	// path (workspace/agent/fs_imagesize.go).
 	mux.HandleFunc("POST /api/fs/imagesize", rest)
@@ -901,6 +939,42 @@ func registerAgentEnvRoutes(mux *http.ServeMux, cfg config) {
 	mux.HandleFunc("GET /api/agents/memory/entries/changes", rest)
 	mux.HandleFunc("GET /api/agents/memory/entries/diff", rest)
 	mux.HandleFunc("POST /api/agents/memory/entries/revert", rest)
+	mux.HandleFunc("GET /api/agents/memory/entries/list", rest)
+	mux.HandleFunc("POST /api/agents/memory/entries/pin", rest)
+	// The member's create/edit (#1997). The CP signs it, pin and revert (member_origin.go).
+	mux.HandleFunc("POST /api/agents/memory/entries/member-save", rest)
+	mux.HandleFunc("GET /api/agents/memory/entries/member-read", rest)
+	mux.HandleFunc("GET /api/agents/memory/entries/member-search", rest)
+	mux.HandleFunc("GET /api/agents/memory/entries/member-latest", rest)
+	mux.HandleFunc("GET /api/agents/memory/entries/member-forgotten", rest)
+	// The member's purge of one memory's past revisions from the history (#1982). The CP signs
+	// the purge (member_origin.go) and audits it (proxy.go); the preview only reads.
+	mux.HandleFunc("GET /api/agents/memory/entries/purge-preview", rest)
+	mux.HandleFunc("POST /api/agents/memory/entries/purge", rest)
+	// Moving the memories of a project whose working copy is gone (#1984). The move is signed.
+	mux.HandleFunc("GET /api/agents/memory/entries/projects", rest)
+	mux.HandleFunc("GET /api/agents/memory/entries/project-move-preview", rest)
+	mux.HandleFunc("POST /api/agents/memory/entries/project-move", rest)
+	// The one-time import of claude's own memory: sources, a read-only preview, and the apply.
+	mux.HandleFunc("GET /api/agents/memory/claude-import", rest)
+	mux.HandleFunc("GET /api/agents/memory/claude-import/preview", rest)
+	mux.HandleFunc("POST /api/agents/memory/claude-import", rest)
+	// AF memory out of an imported memory bundle (#1983): a read-only preview, and the signed import.
+	mux.HandleFunc("GET /api/agents/memory/af-import/preview", rest)
+	mux.HandleFunc("POST /api/agents/memory/af-import", rest)
+	mux.HandleFunc("GET /api/agents/memory/muse-import", rest)
+	mux.HandleFunc("GET /api/agents/memory/muse-import/preview", rest)
+	mux.HandleFunc("POST /api/agents/memory/muse-import", rest)
+	// The reverse: AF memory written back into claude's own, previewed first (#1914).
+	mux.HandleFunc("GET /api/agents/memory/claude-export", rest)
+	mux.HandleFunc("GET /api/agents/memory/claude-export/preview", rest)
+	mux.HandleFunc("POST /api/agents/memory/claude-export", rest)
+	// What the Agent memory switch does by itself with claude's native memory (#1972): the
+	// reconciler's state, the counts the confirmation shows, and the member's wake / retry /
+	// give-up (signed and audited).
+	mux.HandleFunc("GET /api/agents/memory/auto-sync", rest)
+	mux.HandleFunc("GET /api/agents/memory/auto-sync/preview", rest)
+	mux.HandleFunc("POST /api/agents/memory/auto-sync", rest)
 	// Transfer between environments (P3). export streams the body with its
 	// Content-Disposition untouched and import hands the multipart straight to the
 	// Agent; rest passes body and headers through.
@@ -928,6 +1002,11 @@ func registerAgentEnvRoutes(mux *http.ServeMux, cfg config) {
 	// Reissue the preview URL (docs/log/81 §4.1). POST rather than GET/PUT because it
 	// throws state away.
 	mux.HandleFunc("POST /api/env/ws-settings/preview/reissue", wss.withResolved(wss.reissuePreview))
+	mux.HandleFunc("POST /api/env/ws-settings/dev-idp/rotate", wss.withResolved(wss.rotateDevIdPSecret))
+	// Test personas of the development OIDC IdP (ADR 0116, #2223).
+	mux.HandleFunc("GET /api/env/ws-settings/dev-idp/personas", wss.withResolved(wss.listPersonas))
+	mux.HandleFunc("POST /api/env/ws-settings/dev-idp/personas", wss.withResolved(wss.createPersona))
+	mux.HandleFunc("DELETE /api/env/ws-settings/dev-idp/personas/{id}", wss.withResolved(wss.deletePersona))
 	// Previews shared inside the same tenant (docs/log/81 §14.6). withMembership, not
 	// withResolved: this reads another Workspace's publication settings, so the caller's
 	// own container is not needed and the answer is available while it is stopped.
@@ -1171,6 +1250,8 @@ func registerTerminalPreviewRoutes(mux *http.ServeMux, cfg config) {
 	// must sit on the Console origin, inside authGate, so a logged-out visitor meets the
 	// login first.
 	mux.HandleFunc("GET "+previewOpenPath, newPreviewHostAPI(cfg).openStable)
+	// The owner opening an unlisted port on their own subdomain (preview_grant.go).
+	mux.HandleFunc("GET "+previewOwnOpenPath, newPreviewHostAPI(cfg).openOwn)
 }
 
 // Legacy path compatibility: the deployment used to be served under

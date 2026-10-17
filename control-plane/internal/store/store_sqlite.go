@@ -147,7 +147,64 @@ func (s *SQL) Migrate(ctx context.Context) error {
 			return err
 		}
 	}
-	return s.repairWorkspaceColumns(ctx)
+	if err := s.repairWorkspaceColumns(ctx); err != nil {
+		return err
+	}
+	return s.repairHandoffTakeColumns(ctx)
+}
+
+// repairHandoffTakeColumns adds the session_handoff_offer columns of 0095_handoff_take
+// (pg 0080) to a database where that version is recorded but the file never ran.
+//
+// Two files once shared that version: 0095_member_ui_state (pg 0080, since renumbered to 0097 /
+// 0082) reached develop two minutes before 0095_handoff_take. A database that ran the version as
+// member_ui_state records it as applied and skips handoff_take forever. Migrate still succeeds,
+// and the missing columns surface later as query errors in the handoff paths (measured on both
+// dialects: "no such column: take_token" / SQLSTATE 42703). Checking the columns first keeps
+// this idempotent, so every other database is left as it is.
+func (s *SQL) repairHandoffTakeColumns(ctx context.Context) error {
+	cols := []string{"take_token", "taken_at", "take_confirmed_at"}
+	if s.dialect == "postgres" {
+		for _, c := range cols {
+			if _, err := s.db.ExecContext(ctx,
+				`ALTER TABLE session_handoff_offer ADD COLUMN IF NOT EXISTS `+c+` TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("repair session_handoff_offer.%s: %w", c, err)
+			}
+		}
+		return nil
+	}
+	have := map[string]bool{}
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(session_handoff_offer)`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		have[name] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(have) == 0 {
+		return nil // no handoff table (nothing migrated yet)
+	}
+	for _, c := range cols {
+		if have[c] {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`ALTER TABLE session_handoff_offer ADD COLUMN `+c+` TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("repair session_handoff_offer.%s: %w", c, err)
+		}
+	}
+	return nil
 }
 
 // repairWorkspaceColumns re-adds the workspace columns that the identity/membership
@@ -1238,10 +1295,24 @@ func (s *SQL) SetMembershipRole(ctx context.Context, membershipID, role string) 
 	return err
 }
 
+// SetMembershipStatus sets a membership's status. Deactivating also applies, in the same
+// transaction, what leaving does to the member inbox (inboxMembershipInactiveTx), so the two
+// can neither be separated by a crash nor undone by a re-invite.
 func (s *SQL) SetMembershipStatus(ctx context.Context, membershipID, status string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE membership SET status=? WHERE id=?`, status, membershipID)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE membership SET status=? WHERE id=?`, status, membershipID); err != nil {
+		return err
+	}
+	if status != "active" {
+		if err := inboxMembershipInactiveTx(ctx, tx, membershipID, NowTS()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // membershipCascade is every row keyed to one membership, in the order they must be
@@ -1307,6 +1378,14 @@ func membershipCascade(membershipID string) []struct {
 		{`DELETE FROM work_item_session WHERE membership_id=?`, id},
 		{`DELETE FROM notification WHERE membership_id=?`, id},
 		{`DELETE FROM notification_usage_state WHERE membership_id=?`, id},
+		{`DELETE FROM notification_usage_epoch WHERE membership_id=?`, id},
+		// The limit board (ADR 0111 decision 6). An audience names other memberships, so a
+		// member leaving must also leave every audience they were named in.
+		{`DELETE FROM limit_publication_member WHERE membership_id=? OR viewer_membership_id=?`, both},
+		{`DELETE FROM limit_publication WHERE membership_id=?`, id},
+		{`DELETE FROM limit_observation WHERE membership_id=?`, id},
+		{`DELETE FROM limit_epoch WHERE membership_id=?`, id},
+		{`DELETE FROM limit_session_state WHERE membership_id=?`, id},
 		// A share has two ends: one of them going away ends the share, however alive
 		// the other one is.
 		{`DELETE FROM session_share_proposal WHERE owner_membership_id=? OR proposer_membership_id=?`, both},
@@ -1319,6 +1398,19 @@ func membershipCascade(membershipID string) []struct {
 		{`DELETE FROM session_share_owner_lease WHERE owner_membership_id=?`, id},
 		{`DELETE FROM workspace_stop_intent WHERE owner_membership_id=?`, id},
 		{`DELETE FROM home_operation WHERE membership_id=?`, id},
+		{`DELETE FROM member_ui_state WHERE membership_id=?`, id},
+		// The member inbox (ADR 0111 decision 9): the member's deliveries, read cursor and
+		// receive rules go, and so do rules other members hold about them. An item stays
+		// while anybody else still takes part in it, and the last statement removes the
+		// items nobody is left in, body and all. The item has no foreign key to membership,
+		// so the remaining participants keep their copy.
+		// Mailbox before participant rows: the lock order of store_inbox.go.
+		{`DELETE FROM inbox_mailbox WHERE membership_id=?`, id},
+		{`DELETE FROM inbox_session_origin WHERE membership_id=?`, id},
+		{`DELETE FROM inbox_participant WHERE membership_id=?`, id},
+		{`DELETE FROM inbox_sender_rule WHERE membership_id=? OR sender_membership_id=?`, both},
+		{`DELETE FROM inbox_item WHERE NOT EXISTS (SELECT 1 FROM inbox_participant p WHERE p.item_id=inbox_item.id)`, nil},
+		{`DELETE FROM inbox_attachment WHERE NOT EXISTS (SELECT 1 FROM inbox_item i WHERE i.id=inbox_attachment.item_id)`, nil},
 		// The parent goes last: with foreign keys on, deleting it before its children
 		// fails.
 		{`DELETE FROM membership WHERE id=?`, id},
@@ -1343,6 +1435,23 @@ func (s *SQL) DeleteMembership(ctx context.Context, membershipID string) error {
 // deleteMembershipTx is the body above, inside somebody else's transaction — the tenant
 // delete runs it once per remaining membership so the whole tenant goes in one commit.
 func (s *SQL) deleteMembershipTx(ctx context.Context, tx *sqlTx, membershipID string) error {
+	// The membership row and then the member's inbox items are locked before the cascade
+	// touches any inbox mailbox or participant row: the lock order of store_inbox.go, which a
+	// send in flight to this member holds from its membership lock on (measured on Postgres:
+	// deleting the mailbox first deadlocked against such a send, 40P01). The row itself is
+	// deleted last, for the foreign keys.
+	if err := lockMemberships(ctx, tx, []string{membershipID}); err != nil {
+		return err
+	}
+	items, err := queryIDs(ctx, tx, `SELECT item_id FROM inbox_participant WHERE membership_id=? ORDER BY item_id`, membershipID)
+	if err != nil {
+		return err
+	}
+	for _, id := range items {
+		if _, err := tx.ExecContext(ctx, `UPDATE inbox_item SET updated_at=updated_at WHERE id=?`, id); err != nil {
+			return err
+		}
+	}
 	for _, stmt := range membershipCascade(membershipID) {
 		if _, err := tx.ExecContext(ctx, stmt.sql, stmt.args...); err != nil {
 			return fmt.Errorf("%s: %w", stmt.sql, err)
@@ -1399,6 +1508,8 @@ func (s *SQL) DeleteTenant(ctx context.Context, tenantID string) error {
 		// has no membership left to cascade from; the tenant id still reaches it.
 		`DELETE FROM engine_access_grant WHERE tenant_id=?`,
 		`DELETE FROM tenant_branch_rules WHERE tenant_id=?`,
+		`DELETE FROM tenant_member_defaults WHERE tenant_id=?`,
+		`DELETE FROM limit_board_tenant WHERE tenant_id=?`,
 		// The login rules and allowed_cidrs are columns on tenant, so this one
 		// statement takes them with it.
 		`DELETE FROM tenant WHERE id=?`,
@@ -1511,6 +1622,10 @@ func setWorkspaceStateTx(ctx context.Context, tx *sqlTx, workspaceID, state stri
 	// silently broken. Here, a new stop path is covered without touching it.
 	if state != "running" {
 		if _, err = tx.ExecContext(ctx, `UPDATE workspace SET preview_slug='' WHERE id=?`, workspaceID); err != nil {
+			return err
+		}
+		// Temporary preview grants die with the start they were made in.
+		if err = clearPreviewGrantsTx(ctx, tx, workspaceID); err != nil {
 			return err
 		}
 	}
@@ -1665,6 +1780,11 @@ func deleteWorkspaceTx(ctx context.Context, tx *sqlTx, workspaceID string) error
 		`DELETE FROM workspace_stop_intent WHERE workspace_id=?`,
 		`DELETE FROM workspace_auto_stop WHERE workspace_id=?`,
 		`DELETE FROM workspace_activity WHERE workspace_id=?`,
+		`DELETE FROM preview_temp_port WHERE workspace_id=?`,
+		`DELETE FROM preview_epoch WHERE workspace_id=?`,
+		`DELETE FROM dev_idp_client WHERE workspace_id=?`,
+		`DELETE FROM dev_idp_grant WHERE workspace_id=?`,
+		`DELETE FROM dev_idp_persona WHERE workspace_id=?`,
 		`DELETE FROM shared_session_catalog WHERE workspace_id=?`,
 		`DELETE FROM session WHERE workspace_id=?`,
 		`DELETE FROM wrapped_dek WHERE workspace_id=?`,
@@ -1770,9 +1890,25 @@ func (s *SQL) SetWorkspaceSettings(ctx context.Context, workspaceID, settingsJSO
 // SetWorkspacePreviewSlug records the slug this container start is reachable under
 // (docs/log/81 §4); "" clears it, which is what a stop does. The unique index is partial
 // (non-empty only), so every stopped workspace can hold "" at once.
+//
+// The temporary preview grants (preview_temp_port) belong to one slug, so they go in the same
+// transaction: a grant saved under the old slug can no longer land after the rotation.
 func (s *SQL) SetWorkspacePreviewSlug(ctx context.Context, workspaceID, slug string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE workspace SET preview_slug=? WHERE id=?`, slug, workspaceID)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = lockWorkspace(ctx, tx, workspaceID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE workspace SET preview_slug=? WHERE id=?`, slug, workspaceID); err != nil {
+		return err
+	}
+	if err = clearPreviewGrantsTx(ctx, tx, workspaceID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // SetWorkspaceAutoStop records why the Control Plane stopped the workspace, replacing the
@@ -2646,12 +2782,14 @@ func scanWorkspace(row scanner) (Workspace, error) {
 
 // --- SSM login config (docs/log/p3-ssm-session.md) --------------------------
 
-const ssmProfileCols = `SELECT id, membership_id, label, start_url, sso_region, account_id, role_name, region, created_at FROM ssm_profile`
+const ssmProfileCols = `SELECT id, membership_id, label, start_url, sso_region, account_id, role_name, region, created_at,
+	kind, source_profile_id, role_arn, external_id, session_name, duration_seconds FROM ssm_profile`
 
 func scanSSMProfile(row scanner) (SSMProfile, error) {
 	var p SSMProfile
 	err := row.Scan(&p.ID, &p.MembershipID, &p.Label, &p.StartURL, &p.SSORegion,
-		&p.AccountID, &p.RoleName, &p.Region, &p.CreatedAt)
+		&p.AccountID, &p.RoleName, &p.Region, &p.CreatedAt,
+		&p.Kind, &p.SourceProfileID, &p.RoleARN, &p.ExternalID, &p.SessionName, &p.DurationSeconds)
 	return p, err
 }
 
@@ -2680,21 +2818,115 @@ func (s *SQL) GetSSMProfile(ctx context.Context, id string) (SSMProfile, bool, e
 	return p, err == nil, err
 }
 
-func (s *SQL) CreateSSMProfile(ctx context.Context, p SSMProfile) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO ssm_profile(id, membership_id, label, start_url, sso_region, account_id, role_name, region, created_at)
-		 VALUES(?,?,?,?,?,?,?,?,?)`,
-		p.ID, p.MembershipID, p.Label, p.StartURL, p.SSORegion, p.AccountID, p.RoleName, p.Region, p.CreatedAt)
-	return err
+// checkSSMSource, for an assume-role profile, takes the write lock of its source (lockSSMProfile)
+// and refuses with ErrSSMSourceInvalid unless that is an sso profile of the member's own and
+// not the profile itself. Under the lock the source cannot be deleted or turned into an
+// assume-role profile before this write commits.
+func checkSSMSource(ctx context.Context, tx *sqlTx, p SSMProfile) error {
+	if p.Kind != SSMKindAssumeRole {
+		return nil
+	}
+	if p.SourceProfileID == "" || p.SourceProfileID == p.ID {
+		return ErrSSMSourceInvalid
+	}
+	found, err := lockSSMProfile(ctx, tx, p.SourceProfileID, p.MembershipID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrSSMSourceInvalid
+	}
+	var kind string
+	if err := tx.QueryRowContext(ctx, `SELECT kind FROM ssm_profile WHERE id=?`, p.SourceProfileID).Scan(&kind); err != nil {
+		return err
+	}
+	if kind != SSMKindSSO {
+		return ErrSSMSourceInvalid
+	}
+	return nil
 }
 
+func (s *SQL) CreateSSMProfile(ctx context.Context, p SSMProfile) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := checkSSMSource(ctx, tx, p); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO ssm_profile(id, membership_id, label, start_url, sso_region, account_id, role_name, region, created_at,
+			kind, source_profile_id, role_arn, external_id, session_name, duration_seconds)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		p.ID, p.MembershipID, p.Label, p.StartURL, p.SSORegion, p.AccountID, p.RoleName, p.Region, p.CreatedAt,
+		ssmKindOrDefault(p.Kind), p.SourceProfileID, p.RoleARN, p.ExternalID, p.SessionName, p.DurationSeconds); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func ssmKindOrDefault(k string) string {
+	if k == "" {
+		return SSMKindSSO
+	}
+	return k
+}
+
+// UpdateSSMProfile writes the profile. Turning a profile that other assume-role profiles use
+// as their source into an assume-role profile itself is refused with *SSMProfileInUseError
+// (Dependents), for the same reason DeleteSSMProfile refuses: the chain would be two hops.
 func (s *SQL) UpdateSSMProfile(ctx context.Context, p SSMProfile) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := checkSSMSource(ctx, tx, p); err != nil {
+		return err
+	}
+	if p.Kind == SSMKindAssumeRole {
+		found, err := lockSSMProfile(ctx, tx, p.ID, p.MembershipID)
+		if err != nil || !found {
+			return err
+		}
+		deps, err := ssmDependents(ctx, tx, p.ID)
+		if err != nil {
+			return err
+		}
+		if len(deps) > 0 {
+			return &SSMProfileInUseError{Dependents: deps}
+		}
+	}
 	// membership_id in the WHERE so a member can only update their own row.
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE ssm_profile SET label=?, start_url=?, sso_region=?, account_id=?, role_name=?, region=?
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE ssm_profile SET label=?, start_url=?, sso_region=?, account_id=?, role_name=?, region=?,
+			kind=?, source_profile_id=?, role_arn=?, external_id=?, session_name=?, duration_seconds=?
 		   WHERE id=? AND membership_id=?`,
-		p.Label, p.StartURL, p.SSORegion, p.AccountID, p.RoleName, p.Region, p.ID, p.MembershipID)
-	return err
+		p.Label, p.StartURL, p.SSORegion, p.AccountID, p.RoleName, p.Region,
+		ssmKindOrDefault(p.Kind), p.SourceProfileID, p.RoleARN, p.ExternalID, p.SessionName, p.DurationSeconds,
+		p.ID, p.MembershipID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ssmDependents lists the assume-role profiles whose source is id, by label.
+func ssmDependents(ctx context.Context, q *sqlTx, id string) ([]SSMProfile, error) {
+	rows, err := q.QueryContext(ctx, ssmProfileCols+` WHERE source_profile_id=? AND kind=? ORDER BY label`, id, SSMKindAssumeRole)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SSMProfile
+	for rows.Next() {
+		p, err := scanSSMProfile(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 // lockSSMProfile takes the profile row's write lock for the rest of tx and reports whether
@@ -2743,8 +2975,12 @@ func (s *SQL) DeleteSSMProfile(ctx context.Context, id, membershipID string) err
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if len(using) > 0 {
-		return &SSMProfileInUseError{Hosts: using}
+	deps, err := ssmDependents(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if len(using) > 0 || len(deps) > 0 {
+		return &SSMProfileInUseError{Hosts: using, Dependents: deps}
 	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM ssm_profile WHERE id=? AND membership_id=?`, id, membershipID); err != nil {
@@ -2830,12 +3066,14 @@ func (s *SQL) DeleteSSMHost(ctx context.Context, id, membershipID string) error 
 
 // --- Memo queue (docs/log/21) --------------------------------------------------------
 
-const memoCols = `SELECT id, membership_id, repo, category, kind, body, ref_path, attachments, position, created_at, sent_at FROM memo`
+const memoCols = `SELECT id, membership_id, repo, category, kind, body, ref_path, attachments, position, created_at, sent_at,
+	origin_item_id, origin_sender_membership_id, origin_sender_key FROM memo`
 
 func scanMemo(row scanner) (Memo, error) {
 	var m Memo
 	err := row.Scan(&m.ID, &m.MembershipID, &m.Repo, &m.Category, &m.Kind,
-		&m.Body, &m.RefPath, &m.Attachments, &m.Position, &m.CreatedAt, &m.SentAt)
+		&m.Body, &m.RefPath, &m.Attachments, &m.Position, &m.CreatedAt, &m.SentAt,
+		&m.OriginItemID, &m.OriginSenderMembershipID, &m.OriginSenderKey)
 	return m, err
 }
 
@@ -2869,6 +3107,8 @@ func (s *SQL) GetMemo(ctx context.Context, id string) (Memo, bool, error) {
 	return m, err == nil, err
 }
 
+// CreateMemo inserts a memo a member or their agent wrote. It never writes an origin: a
+// taken-in memo is created only by TakeInInboxRecipe.
 func (s *SQL) CreateMemo(ctx context.Context, m Memo) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO memo(id, membership_id, repo, category, kind, body, ref_path, attachments, position, created_at, sent_at)
@@ -3551,13 +3791,13 @@ func (s *SQL) DeleteTenantIdP(ctx context.Context, tenantID, id string) error {
 // --- tenant-owned git provider OAuth apps (docs/log/71 + ADR0052) ------------------
 
 const tenantGitOAuthCols = `SELECT id, tenant_id, provider, client_id, secret_enc, key_ref,
-       source, app_type, app_type_by, install_url,
+       source, app_type, app_type_by, install_url, scope_groups,
        updated_by, created_at, updated_at FROM tenant_git_oauth`
 
 func scanTenantGitOAuth(sc scanner) (TenantGitOAuth, error) {
 	var g TenantGitOAuth
 	err := sc.Scan(&g.ID, &g.TenantID, &g.Provider, &g.ClientID, &g.SecretEnc, &g.KeyRef,
-		&g.Source, &g.AppType, &g.AppTypeBy, &g.InstallURL,
+		&g.Source, &g.AppType, &g.AppTypeBy, &g.InstallURL, &g.ScopeGroups,
 		&g.UpdatedBy, &g.CreatedAt, &g.UpdatedAt)
 	return g, err
 }
@@ -3593,16 +3833,16 @@ func (s *SQL) GetTenantGitOAuth(ctx context.Context, tenantID, provider string) 
 func (s *SQL) PutTenantGitOAuth(ctx context.Context, g TenantGitOAuth) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO tenant_git_oauth(id, tenant_id, provider, client_id, secret_enc, key_ref,
-		   source, app_type, app_type_by, install_url,
+		   source, app_type, app_type_by, install_url, scope_groups,
 		   updated_by, created_at, updated_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(tenant_id, provider) DO UPDATE SET
 		   client_id=excluded.client_id, secret_enc=excluded.secret_enc, key_ref=excluded.key_ref,
 		   source=excluded.source, app_type=excluded.app_type, app_type_by=excluded.app_type_by,
-		   install_url=excluded.install_url,
+		   install_url=excluded.install_url, scope_groups=excluded.scope_groups,
 		   updated_by=excluded.updated_by, updated_at=excluded.updated_at`,
 		g.ID, g.TenantID, g.Provider, g.ClientID, g.SecretEnc, g.KeyRef,
-		g.Source, g.AppType, g.AppTypeBy, g.InstallURL,
+		g.Source, g.AppType, g.AppTypeBy, g.InstallURL, g.ScopeGroups,
 		g.UpdatedBy, g.CreatedAt, g.UpdatedAt)
 	return err
 }

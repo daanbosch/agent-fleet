@@ -56,6 +56,18 @@ describe("notification row headings", () => {
     expect(w.body).toBe("残作業の続き");
   });
 
+  // #2058: a session the recipient's Agent reported after they gave the handoff back. The body
+  // must name that session, since the offer it came from was left unchanged.
+  it("a session after a give-back names the session and the handoff", () => {
+    setLocale("en");
+    const w = notificationWording({ kind: "handoff-late-session", displayName: "Carry on", payload: { sessionName: "s-1" } });
+    expect(w.title).toBe(en["notif.handoff_late_session.title"]);
+    expect(w.body).toContain("s-1");
+    expect(w.body).toContain("Carry on");
+    expect(notificationKindLabel("handoff-late-session")).toBe(en["noti.kind_handoff_late_session"]);
+    setLocale("ja");
+  });
+
   // Notification about residue an architecture change could not restore automatically
   // (docs/decisions/0068). Its subject is the workspace, not a session, so displayName is empty:
   // taking the default "body = displayName" would produce a notification with no content. The row
@@ -92,6 +104,22 @@ describe("notification row headings", () => {
       payload: { from: "amd64", repos: ["demo/node_modules"], bins: ["mytool"] },
     });
     expect(sub).toBe("demo/node_modules, mytool");
+  });
+
+  // The Agent memory switch's own run left files to look at (#1972). The workspace is the
+  // subject, so the row's body has to carry the counts, and each kind of run has its own title.
+  it("a memory-sync run words its kind and counts on the notification and the row", () => {
+    setLocale("ja");
+    const payload = { run: "write_back", leftovers: 3, conflicts: 2, secrets: 1 };
+    const w = notificationWording({ kind: "memory-sync", displayName: "", payload });
+    expect(w.title).toBe(ja["notif.memory_sync.write_back.title"]);
+    expect(w.body).toBe("確認が必要なファイルが 3 件あります（競合 2 件、秘密情報あり 1 件）。設定 > Agent Fleet のメモリに一覧があります。");
+    expect(notificationRowSubtitle({ kind: "memory-sync", displayName: "", payload })).toBe(w.body);
+    expect(notificationWording({ kind: "memory-sync", displayName: "", payload: { run: "catch_up" } }).title).toBe(
+      ja["notif.memory_sync.catch_up.title"],
+    );
+    expect(notificationWording({ kind: "memory-sync", displayName: "", payload: {} }).title).toBe(ja["notif.memory_sync.import.title"]);
+    expect(notificationKindLabel("memory-sync")).toBe(ja["noti.kind_memory_sync"]);
   });
 
   // The start deadline stopped a launch that never finished (#1298). The workspace is the

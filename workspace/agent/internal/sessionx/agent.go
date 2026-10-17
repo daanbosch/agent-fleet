@@ -78,6 +78,12 @@ func SessionAlive(m session.Meta) bool {
 	return tmuxx.HasSession(session.TmuxName(m.Name))
 }
 
+// musePendingState is muse.PendingState, a variable so a test can stand in for a live handle.
+var musePendingState = muse.PendingState
+
+// readPane is tmuxx.ReadPane, replaceable in tests.
+var readPane = tmuxx.ReadPane
+
 // DriveState is the live state for the drive endpoints (status/output/messages):
 // "stopped" when not alive, else idle-or-recorded. heal self-corrects a stale
 // non-idle cache when the claude pane is back at its ready prompt (killed+resumed,
@@ -113,6 +119,14 @@ func DriveState(m session.Meta, alive, heal bool) string {
 			// happened — turn_end_poll.go.)
 			notifyPolledTurnEnd(m, st)
 			return st
+		}
+		// No opinion: also what a stale "working" (agy.LiveState withdraws it after an hour
+		// with no tool running) turns into. The stored optimistic "working" must not stand in
+		// for it past the warm-up, or the chip says in progress forever; nothing is persisted
+		// and no notification fires, so a turn that really finishes later still reports.
+		sid := session.UUID(m.Dir, m.Name)
+		if status.LiveState(sid) == "working" && !status.RecentlyWorking(sid) {
+			return "idle"
 		}
 	}
 	// copilot: no hooks either — the classification derived from events.jsonl is the only
@@ -151,6 +165,13 @@ func DriveState(m session.Meta, alive, heal bool) string {
 			return st
 		}
 	}
+	// muse: the status file holds only turn start/end, so a waiting prompt reads "working".
+	// The live handle knows, and WireLive asks it the same way.
+	if m.Kind == session.KindMuse {
+		if st := musePendingState(m.Name); st != "" {
+			return st
+		}
+	}
 	sid := session.UUID(m.Dir, m.Name)
 	// Same resolution as WireLive (status.EffectiveModal): a permission whose question/plan
 	// payload has been captured reports itself as the modal the TUI is actually showing
@@ -175,7 +196,7 @@ func DriveState(m session.Meta, alive, heal bool) string {
 	// capture whenever either of those two needs it.
 	var pane tmuxx.PaneRead
 	if heal || isClaude {
-		pane = tmuxx.ReadPane(m.Name)
+		pane = readPane(m.Name)
 	}
 	// claude pins the pane on the usage-limit menu, waiting for a human (see the comment on
 	// agents.StateBlocked). The same verdict as WireLive is repeated here because chat and the
@@ -205,6 +226,10 @@ func DriveState(m session.Meta, alive, heal bool) string {
 	if m.DriverKind() == session.DriverManaged && NormalizeKind(m.Kind) == session.KindCodex && state == "idle" && codex.IsRateLimited(m.Name) {
 		return agents.StateLimited
 	}
+	// muse: the same reading as its WireLive, from the handle's last turn error.
+	if m.Kind == session.KindMuse && state == "idle" && museRateLimited(m.Name) {
+		return agents.StateLimited
+	}
 	// Folding on pane.IdleSettled (not the raw pane.Idle) for the same reason as WireLive:
 	// while claude renders an answer it draws the same picture as the ready prompt, so a single
 	// frame cannot tell them apart (measured, tmuxx/idlesettle.go). Leaving Idle here would put
@@ -221,14 +246,14 @@ func DriveState(m session.Meta, alive, heal bool) string {
 		} else {
 			status.Remove(sid)
 		}
-	} else if heal && state == "idle" && pane.Busy {
+	} else if heal && state == "idle" && pane.Busy && claude.ReopenFromPane(sid) {
 		// Reverse-heal: the hook state reads idle (its "working" file was never written,
 		// or the self-heal above removed it during a transient prompt frame) but the pane
 		// is plainly mid-turn (interrupt affordance shown). Trust the live TUI and persist
 		// working so the chat shows "in progress" + the stop button, and the eventual Stop still
 		// fires the answer-ready notification (recorded off the previous "working" state).
+		// A turn the Stop hook closed is not reopened here: see claude.PaneMayReopen.
 		state = "working"
-		status.Persist(sid, "working")
 	}
 	// After a turn cut off by a usage limit (the menu has already been dismissed, and a
 	// per-model limit shows no menu at all) the pane returns to the ready prompt, so the state

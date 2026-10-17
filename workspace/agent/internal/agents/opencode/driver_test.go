@@ -139,6 +139,10 @@ type mockServe struct {
 	statusGate    chan struct{}
 	statusEntered chan struct{}
 	aborts        int
+	// holdFirstAbort, when set, parks the first POST /abort until it is closed (it is consumed by that call).
+	holdFirstAbort chan struct{}
+	// failAborts makes the next N POST /abort answer 500 without releasing the turn.
+	failAborts int
 	// turnBody overrides the assistant message the blocking /message call answers with.
 	// opencode reports a provider-side failure INSIDE a 200 response (errors.go), so a
 	// failing turn is simulated by the body, not by the status code.
@@ -208,6 +212,19 @@ func newMockServe(t *testing.T) (*mockServe, *httptest.Server) {
 		w.Write([]byte(resp))
 	})
 	mux.HandleFunc("POST /session/ses_test/abort", func(w http.ResponseWriter, r *http.Request) {
+		m.mu.Lock()
+		if m.failAborts > 0 {
+			m.failAborts--
+			m.mu.Unlock()
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		hold := m.holdFirstAbort
+		m.holdFirstAbort = nil
+		m.mu.Unlock()
+		if hold != nil {
+			<-hold
+		}
 		m.mu.Lock()
 		m.aborts++
 		if m.turnGate != nil && !m.holdAbort {
@@ -591,12 +608,19 @@ func TestManagedTurnNotifiesCompletion(t *testing.T) {
 	}
 	waitState(t, h, agents.TurnCompleted)
 
+	// The notifier runs on its own goroutine (agents.notify is async on purpose), so it is
+	// not ordered against the state we just waited for. Wait for the signal itself; the
+	// ceiling only exists so a notification that never comes fails instead of hanging, and
+	// is far above anything a loaded runner needs (measured: a 3 s budget was exceeded in a full
+	// -p 2 run).
+	notifyDeadline := time.NewTimer(30 * time.Second)
+	defer notifyDeadline.Stop()
 	select {
 	case tr := <-got:
 		if tr[0] != h.ocSid || tr[1] != "working" || tr[2] != "idle" {
 			t.Fatalf("transition = %v, want %s working→idle", tr, h.ocSid)
 		}
-	case <-time.After(3 * time.Second):
+	case <-notifyDeadline.C:
 		t.Fatal("turn completed without notifying the state seam - no report is sent")
 	}
 }

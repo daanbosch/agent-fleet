@@ -8,13 +8,14 @@ import { useEffect, useRef, useState } from "react";
 import { agentOf } from "../../agents/registry.ts";
 import { useSessionsStore } from "../sessions/store.ts";
 import { useRepoRailContext } from "./useRepoRail.ts";
-import { useStartWork } from "./useStartWork.ts";
+import { useStartWork, type HandoffTake } from "./useStartWork.ts";
 import { StartModal } from "./StartModal.tsx";
 import { branchItemOf } from "./branchRule.ts";
 import { LaunchModal } from "./LaunchModal.tsx";
 import { useLaunchTarget, useLaunchSeed } from "./store.ts";
 import { markHandoffLaunched } from "../mirror/HandoffProposal.tsx";
-import { acceptHandoffOffer } from "../sharing/acceptHandoff.ts";
+import { launchFromHandoffOffer } from "../sharing/acceptHandoff.ts";
+import { useToast } from "../../ui/ToastProvider.tsx";
 import { recordWorkItemLaunch } from "../workitems/launch.ts";
 import { workItemLaunchBranch } from "../workitems/read.ts";
 
@@ -47,6 +48,7 @@ export function StartHost() {
     }
   }, [startTick, clearLaunch]);
 
+  const toast = useToast();
   const ctx = useRepoRailContext(); // connection-gated kinds, like the repo rows
   const startWork = useStartWork();
   // Coding agents only (runsInDir) — shell/ssm have their own rows in the hub.
@@ -65,6 +67,7 @@ export function StartHost() {
       {show && (
         <StartModal
           kinds={agentKinds}
+          claudeExpired={ctx.claudeExpired}
           onClose={() => {
             setShow(false);
             clearSeed();
@@ -94,21 +97,22 @@ export function StartHost() {
           }}
           onBack={show ? clearLaunch : undefined}
           onLaunch={async (o) => {
-            const r = await startWork({ dir: launch.path || "", repo: launch.name }, o);
+            const run = (take?: HandoffTake) => startWork({ dir: launch.path || "", repo: launch.name }, o, take);
+            // A handoff received from another member (docs/log/77) is taken BEFORE the session
+            // is created and given back if the launch fails, so a just-withdrawn offer is never
+            // launched (#2020).
+            const r = seedOfferId ? await launchFromHandoffOffer(seedOfferId, run, toast) : await run();
             if (r.ok) {
               // Seeded by a handoff proposal: badge it as launched now that a session
               // really exists. The proposal itself stays — discarding is the user's call.
               if (seedHandoff && seedHandoffId) void markHandoffLaunched(seedHandoff, seedHandoffId);
-              // A handoff received from another member (docs/log/77) is declared accepted only
-              // AFTER the launch succeeded: this is the one point where a session is known to
-              // really exist.
-              if (seedOfferId) void acceptHandoffOffer(seedOfferId, r.name || "");
               // The work-item ledger (docs/log/80 §80.8). Same reason: this is the only point
               // where a session is known to exist, so it is where the next person can be shown
               // that the item has been started.
               if (seedWorkItem && r.name) {
                 void recordWorkItemLaunch(seedWorkItem, r.name, launch.name, workItemLaunchBranch(o, launch.branch || ""));
               }
+              useLaunchSeed.getState().onLaunched?.(r.name || "");
               setShow(false); // launched — drop the hub underneath too
               clearSeed();
             }

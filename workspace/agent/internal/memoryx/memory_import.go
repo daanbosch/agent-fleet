@@ -98,6 +98,10 @@ type memoryImportPreview struct {
 // as a hint when guessing the format.
 func memoryImportPrepare(src, name string, now time.Time) (memoryImportPreview, error) {
 	var pv memoryImportPreview
+	// The fetch adds refs and objects; a purge (agent_memory_purge.go) must see the ref set it
+	// rewrites and nothing arriving behind it.
+	memorySnapshotMu.Lock()
+	defer memorySnapshotMu.Unlock()
 	if err := memoryEnsureRepo(); err != nil {
 		return pv, err
 	}

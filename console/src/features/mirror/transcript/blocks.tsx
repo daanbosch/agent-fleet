@@ -1062,6 +1062,8 @@ export function PlanBlock({
   onApprove,
   onReject,
   onReview,
+  onReviewAgain,
+  reviewAgainName,
   onSendComments,
   sendDisabled,
   sending,
@@ -1078,6 +1080,10 @@ export function PlanBlock({
   onReject?: () => void;
   /** Reject and open the launch dialog for a session that reviews this plan. */
   onReview?: () => void;
+  /** Reject and send the revised plan to the session that reviewed it before; shown only with
+   *  its display name (the reviewer still exists). */
+  onReviewAgain?: () => void;
+  reviewAgainName?: string;
   onSendComments?: () => void;
   /** Why sending is blocked ("" or absent = allowed); blocks the button on a stopped session. */
   sendDisabled?: string;
@@ -1210,6 +1216,17 @@ export function PlanBlock({
                 onClick={onReview}
               >
                 <Icon name="comment-discussion" /> {tr("plan.review_in_session")}
+              </button>
+            )}
+            {onReviewAgain && reviewAgainName && (
+              <button
+                type="button"
+                className="ghost mt-plan-review-again"
+                disabled={sending || !!sendDisabled}
+                title={sendDisabled || tr("plan.review_again_title", { name: reviewAgainName })}
+                onClick={onReviewAgain}
+              >
+                <Icon name="comment-discussion" /> {tr("plan.review_again", { name: reviewAgainName })}
               </button>
             )}
           </>

@@ -38,7 +38,7 @@ connections.go handleDiscordInspect x1 {applicationId,botName,inviteUrl}
 connections.go handlePutAWSMCPConn x1 {connected,endpoint,profile,region,sso,write} cond{region,sso}
 connections.go handlePutCloudWatchConn x1 {connected,profile,region,sso} cond{region,sso}
 connections.go handlePutDiscordConn x1 {botName,channelId,connected,events,fullText,mention,mentionUserId,mirrorInput,mode,notify,operator,receive,test,testError,threads} cond{botName,channelId,fullText,mention,mentionUserId,mirrorInput,mode,operator,receive,test,testError,threads}
-connections.go handlePutGitConn x1 {connected,host,username,warn} cond{warn}
+connections.go handlePutGitConn x1 {connected,host,renewable,username,warn} cond{renewable,warn}
 connections.go handlePutGrafanaConn x1 {connected,url}
 connections.go handlePutLcppConn x1 {connected,enabled,model,model_count,reachable,url} cond{connected,model,model_count,reachable,url}
 connections.go handlePutPagerDutyConn x1 {connected,host} cond{host}
@@ -60,7 +60,7 @@ fs.go handleFSNewFile x1 {path}
 fs.go handleFSRename x1 {path}
 fs.go handleFSTree x1 {entries,path,root}
 fs.go handleFSUpload x2 {conflicts,path,written}
-fs_file_api.go handleFSFile x1 {binary,content,editabilityReason,editable,lfs,path,revision,size,truncated} cond{binary,content,editabilityReason,editable,lfs,revision,truncated}
+fs_file_api.go handleFSFile x1 {binary,content,editabilityReason,editable,lfs,nestedRepo,path,revision,size,truncated} cond{binary,content,editabilityReason,editable,lfs,nestedRepo,revision,truncated}
 fs_git.go handleFSChanges x2 {changes}
 fs_resolve.go handleFSResolve x1 {resolved}
 fs_search.go handleFSSearch x1 {results,root,truncated}
@@ -167,12 +167,12 @@ internal/sessionx/session_carried.go HandleSessionCarriedAnswer x2 {delivering,k
 internal/sessionx/session_cleanup.go HandleSessionsCleanup x1 {candidates,counts}
 internal/sessionx/session_files.go HandleSessionCommittedFiles x1 {committed,repo}
 internal/sessionx/session_handlers.go HandleArchiveSession x1 {archived}
-internal/sessionx/session_handlers.go HandleIdempotencyLookup x1 {status}
+internal/sessionx/session_handlers.go HandleIdempotencyReserve x1 {status}
 internal/sessionx/session_handlers.go HandleListArchived x1 {sessions}
-internal/sessionx/session_handlers.go HandleListSessions x1 {imageJobs,repoJobs,sessions}
-internal/sessionx/session_handlers.go HandleSessionCatalog x1 {sessions}
+internal/sessionx/session_handlers.go HandleListSessions x1 {imageJobs,limits,repoJobs,sessions} cond{limits}
 internal/sessionx/session_handlers.go HandleStopSession x1 {archive,deleted,stopped}
 internal/sessionx/session_handlers.go HandleStopSession x1 {stopped}
+internal/sessionx/session_handlers.go writeCreateState x1 {status}
 internal/sessionx/session_handoff_proposal.go HandleSessionHandoffProposal x1 {proposals}
 internal/sessionx/session_handoff_proposal.go HandleSessionHandoffProposal x2 {proposal}
 internal/sessionx/session_io.go HandleSessionInput x1 {queued}
@@ -194,7 +194,7 @@ internal/sessionx/session_suggest_reply.go HandleSuggestReplies x1 {suggestions}
 internal/sessionx/session_title.go HandleSessionSuggestBranch x1 {branch,kind,slug}
 internal/sessionx/session_title.go HandleSuggestTitle x1 {suggestedTitle}
 internal/sessionx/session_transcript.go HandleSessionMessages x1 {aggSame,aggSig,alive,answers,backgroundBusy,backgroundBusyReason,compactProgress,cursor,files,firstLine,hasMore,jsonlLines,jsonlMatches,jsonlMtime,jsonlPath,liveText,messages,mode,name,pendingPeers,queuedPrompts,reset,status,suggestedTitle,tasks,terminalState} cond{aggSame,answers,backgroundBusy,backgroundBusyReason,compactProgress,files,firstLine,hasMore,liveText,mode,pendingPeers,queuedPrompts,suggestedTitle,tasks,terminalState} dyn
-internal/sessionx/session_transcript.go handleGenericMessages x1 {alive,backgroundBusy,backgroundBusyReason,context,cursor,discardedInputs,files,firstLine,hasMore,jsonlLines,jsonlMatches,jsonlMtime,jsonlPath,messages,mode,name,pendingApproval,pendingPeers,pendingQuestions,queuedItems,queuedPrompts,reset,status,suggestedTitle,tasks,terminalState} cond{backgroundBusy,backgroundBusyReason,context,discardedInputs,files,firstLine,hasMore,mode,pendingApproval,pendingPeers,pendingQuestions,queuedItems,queuedPrompts,suggestedTitle,tasks,terminalState}
+internal/sessionx/session_transcript.go handleGenericMessages x1 {alive,backgroundBusy,backgroundBusyReason,context,cursor,discardedInputs,files,firstLine,hasMore,jsonlLines,jsonlMatches,jsonlMtime,jsonlPath,messages,mode,name,pendingApproval,pendingPeers,pendingQuestions,queuedItems,queuedPrompts,reset,retry,status,suggestedTitle,tasks,terminalState} cond{backgroundBusy,backgroundBusyReason,context,discardedInputs,files,firstLine,hasMore,mode,pendingApproval,pendingPeers,pendingQuestions,queuedItems,queuedPrompts,retry,suggestedTitle,tasks,terminalState}
 internal/sessionx/session_turn.go HandleSessionRespond x1 {id,responded}
 internal/sessionx/session_turn.go HandleSessionSettings x1 {effort,mode,model,updated}
 internal/sessionx/session_turn.go HandleSessionTurn x2 {op,sent}
@@ -206,7 +206,7 @@ internal/sessionx/session_usage.go HandleSessionsUsage x1 {sessions}
 jdk_install_http.go handleJDKInstall x3 {error,java_available,java_installed,major,state}
 kiro_install_http.go handleKiroInstall x1 {error,installed,pin,state,updateAvailable,version} cond{installed,pin,updateAvailable,version}
 kiro_install_http.go handleKiroInstall x3 {state}
-main.go handleHealth x1 {ok}
+main.go handleHealth x1 {ok,secrets_key,secrets_key_next,secrets_key_start}
 memo_paste.go handleMemoImageGC x1 {removed}
 muse_install_http.go handleMuseInstall x1 {error,installed,pin,state,updateAvailable,version} cond{installed,pin,updateAvailable,version}
 muse_install_http.go handleMuseInstall x3 {state}

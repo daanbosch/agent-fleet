@@ -6,9 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/claude"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/gitx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
@@ -376,5 +378,352 @@ func TestPurgeKeepsTheLedgerAnotherArchiveNeeds(t *testing.T) {
 	dropPurgedLedgers([]cleanupManifest{man})
 	if _, err := os.Stat(ledgerFile); err == nil {
 		t.Fatal("the ledger stayed after the last archive holding the session was purged")
+	}
+}
+
+// The Agent's backup of a session's transcript (claude.BackupTranscript) is removed when the
+// session is deleted, and a session whose own log was already gone does not lose its
+// conversation in the same step: the cleanup archive carries the backup, and restoring it puts
+// the log back where claude looks for it.
+func TestTrashRemovesTranscriptBackupAndArchivesItWhenLogIsGone(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AF_SESSIONS_DIR", filepath.Join(home, "sessions"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
+	srv := httptest.NewServer(trashMux())
+	defer srv.Close()
+	dir := filepath.Join(home, "repos", "app")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	backupRoot := filepath.Join(paths.AgentDataDir(), "claude-transcripts")
+
+	for _, tc := range []struct {
+		name    string
+		logGone bool
+	}{{"bkplive", false}, {"bkpgone", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := session.Meta{Name: tc.name, Dir: dir, Kind: session.KindClaude, CreatedAt: time.Now().Format(time.RFC3339)}
+			session.WriteMeta(m)
+			sid := session.UUID(dir, m.Name)
+			jsonl := filepath.Join(home, "claude", "projects", claude.ProjectKey(dir), sid+".jsonl")
+			if err := os.MkdirAll(filepath.Dir(jsonl), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			body := `{"type":"user","message":"keep me"}` + "\n"
+			if err := os.WriteFile(jsonl, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := claude.BackupTranscript(m); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(backupRoot, sid)); err != nil {
+				t.Fatalf("no backup was made: %v", err)
+			}
+			if tc.logGone {
+				if err := os.Remove(jsonl); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var out struct{ Archive string }
+			do(t, srv, "DELETE", "/sessions/"+tc.name, nil, http.StatusOK, &out)
+			if left, _ := filepath.Glob(filepath.Join(backupRoot, sid+"*")); len(left) != 0 {
+				t.Fatalf("backup left after the delete: %v", left)
+			}
+			do(t, srv, "POST", "/cleanup/archives/"+out.Archive+"/restore", nil, http.StatusOK, nil)
+			got, err := os.ReadFile(jsonl)
+			if err != nil || string(got) != body {
+				t.Fatalf("restored transcript = %q, %v; want the conversation back", got, err)
+			}
+		})
+	}
+}
+
+// A stub where the current log was must not stand in for it: the archive takes the good backup,
+// and restoring the archive gives the conversation back, not the stub.
+func TestTrashArchivesBackupWhenLogIsReplacedByStub(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AF_SESSIONS_DIR", filepath.Join(home, "sessions"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
+	srv := httptest.NewServer(trashMux())
+	defer srv.Close()
+	dir := filepath.Join(home, "repos", "app")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	m := session.Meta{Name: "bkpstub", Dir: dir, Kind: session.KindClaude, CreatedAt: time.Now().Format(time.RFC3339)}
+	session.WriteMeta(m)
+	jsonl := filepath.Join(home, "claude", "projects", claude.ProjectKey(dir), session.UUID(dir, m.Name)+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(jsonl), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"type":"user","message":"keep me"}` + "\n"
+	if err := os.WriteFile(jsonl, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := claude.BackupTranscript(m); err != nil {
+		t.Fatal(err)
+	}
+	// Not even a complete line: the substring "user" is present, a conversation is not.
+	if err := os.WriteFile(jsonl, []byte(`{"type":"user","message":"INCOMPLETE`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out struct{ Archive string }
+	do(t, srv, "DELETE", "/sessions/bkpstub", nil, http.StatusOK, &out)
+	_ = os.Remove(jsonl)
+	do(t, srv, "POST", "/cleanup/archives/"+out.Archive+"/restore", nil, http.StatusOK, nil)
+	if got, err := os.ReadFile(jsonl); err != nil || string(got) != body {
+		t.Fatalf("restored = %q, %v; want the backed-up conversation", got, err)
+	}
+}
+
+// "A good log exists somewhere" is not a reason to drop the backup: an older complete log in
+// another project, or an older complete log at the canonical path, must not displace a newer
+// backup in the archive.
+func TestTrashKeepsNewerBackupAgainstOlderCompleteLogs(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		other bool // the older log sits in another project, with a partial one at the canonical path
+	}{{"bkpoldother", true}, {"bkpoldlive", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("AF_SESSIONS_DIR", filepath.Join(home, "sessions"))
+			t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
+			srv := httptest.NewServer(trashMux())
+			defer srv.Close()
+			dir := filepath.Join(home, "repos", "app")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			m := session.Meta{Name: tc.name, Dir: dir, Kind: session.KindClaude, CreatedAt: time.Now().Format(time.RFC3339)}
+			session.WriteMeta(m)
+			id := session.UUID(dir, m.Name)
+			canon := filepath.Join(home, "claude", "projects", claude.ProjectKey(dir), id+".jsonl")
+			if err := os.MkdirAll(filepath.Dir(canon), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			newest := `{"type":"user","message":"NEWEST"}` + "\n"
+			older := `{"type":"user","message":"OLDER"}` + "\n"
+			if err := os.WriteFile(canon, []byte(newest), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := claude.BackupTranscript(m); err != nil {
+				t.Fatal(err)
+			}
+			oldPath := canon
+			if tc.other {
+				if err := os.WriteFile(canon, []byte(`{"type":"user","message":"INCOMPLETE`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				oldPath = filepath.Join(home, "claude", "projects", "elsewhere", id+".jsonl")
+				if err := os.MkdirAll(filepath.Dir(oldPath), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(oldPath, []byte(older), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			past := time.Now().Add(-24 * time.Hour)
+			if err := os.Chtimes(oldPath, past, past); err != nil {
+				t.Fatal(err)
+			}
+
+			var out struct{ Archive string }
+			do(t, srv, "DELETE", "/sessions/"+tc.name, nil, http.StatusOK, &out)
+			_ = os.RemoveAll(filepath.Join(home, "claude", "projects"))
+			do(t, srv, "POST", "/cleanup/archives/"+out.Archive+"/restore", nil, http.StatusOK, nil)
+			if got, err := os.ReadFile(canon); err != nil || string(got) != newest {
+				t.Fatalf("restored canonical log = %q, %v; want the newer backup", got, err)
+			}
+		})
+	}
+}
+
+// A complete live log newer than the backup takes the canonical path in the archive; the backup
+// is still archived (beside it), so nothing depends on a check made before the read.
+func TestTrashNewerLiveLogWinsAndBackupStillArchived(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AF_SESSIONS_DIR", filepath.Join(home, "sessions"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
+	srv := httptest.NewServer(trashMux())
+	defer srv.Close()
+	dir := filepath.Join(home, "repos", "app")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	m := session.Meta{Name: "bkplivewin", Dir: dir, Kind: session.KindClaude, CreatedAt: time.Now().Format(time.RFC3339)}
+	session.WriteMeta(m)
+	canon := filepath.Join(home, "claude", "projects", claude.ProjectKey(dir), session.UUID(dir, m.Name)+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(canon), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(canon, []byte(`{"type":"user","m":"OLD"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := claude.BackupTranscript(m); err != nil {
+		t.Fatal(err)
+	}
+	newer := `{"type":"user","m":"NEW"}` + "\n"
+	if err := os.WriteFile(canon, []byte(newer), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(canon, future, future); err != nil {
+		t.Fatal(err)
+	}
+	var out struct{ Archive string }
+	do(t, srv, "DELETE", "/sessions/bkplivewin", nil, http.StatusOK, &out)
+	do(t, srv, "POST", "/cleanup/archives/"+out.Archive+"/restore", nil, http.StatusOK, nil)
+	if got, _ := os.ReadFile(canon); string(got) != newer {
+		t.Fatalf("canonical = %q, want the newer live log", got)
+	}
+	if got, err := os.ReadFile(canon + ".backup.archived"); err != nil || len(got) == 0 {
+		t.Fatalf("backup not archived beside it: %q %v", got, err)
+	}
+}
+
+// The two races of the delete: a live log removed after it was listed (claude's sweep), and the
+// backup loop publishing a different backup after the archive took its snapshot. Neither may
+// lose the conversation: the snapshot is already in the archive.
+func TestTrashRacesKeepTheBackupSnapshot(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		race func(t *testing.T, m session.Meta, canon, other string)
+		want string // content restored at the canonical path; "" = the delete must be refused
+	}{
+		{"racesweep", func(t *testing.T, m session.Meta, canon, other string) {
+			if err := os.Remove(canon); err != nil {
+				t.Fatal(err)
+			}
+		}, "BACKUP"},
+		{"racebackup", func(t *testing.T, m session.Meta, canon, other string) {
+			// Canonical turns partial; a newer complete log appears elsewhere and the real backup
+			// loop publishes it, replacing the project directory the snapshot came from.
+			if err := os.WriteFile(canon, []byte(`{"type":"user","m":"INCOMPLETE`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(other), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(other, []byte(`{"type":"user","m":"NEWER"}`+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			future := time.Now().Add(time.Hour)
+			if err := os.Chtimes(other, future, future); err != nil {
+				t.Fatal(err)
+			}
+			if err := claude.BackupTranscript(m); err != nil {
+				t.Fatal(err)
+			}
+		}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("AF_SESSIONS_DIR", filepath.Join(home, "sessions"))
+			t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
+			srv := httptest.NewServer(trashMux())
+			defer srv.Close()
+			dir := filepath.Join(home, "repos", "app")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			m := session.Meta{Name: tc.name, Dir: dir, Kind: session.KindClaude, CreatedAt: time.Now().Format(time.RFC3339)}
+			session.WriteMeta(m)
+			id := session.UUID(dir, m.Name)
+			canon := filepath.Join(home, "claude", "projects", claude.ProjectKey(dir), id+".jsonl")
+			other := filepath.Join(home, "claude", "projects", "elsewhere", id+".jsonl")
+			if err := os.MkdirAll(filepath.Dir(canon), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			backed := `{"type":"user","m":"BACKUP"}` + "\n"
+			if err := os.WriteFile(canon, []byte(backed), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := claude.BackupTranscript(m); err != nil {
+				t.Fatal(err)
+			}
+			archiveAfterMatch = func(cur session.Meta) { tc.race(t, cur, canon, other) }
+			defer func() { archiveAfterMatch = nil }()
+
+			var out struct{ Archive string }
+			if tc.want == "" {
+				// A log that appeared meanwhile is the trash's own "resumed" guard: nothing is
+				// deleted, and the backup (now the newer conversation) is still there.
+				do(t, srv, "DELETE", "/sessions/"+tc.name, nil, http.StatusConflict, nil)
+				if _, ok := session.ReadMeta(tc.name); !ok {
+					t.Fatal("the refused delete removed the meta")
+				}
+				if left, _ := filepath.Glob(filepath.Join(paths.AgentDataDir(), "claude-transcripts", id+"*")); len(left) == 0 {
+					t.Fatal("the refused delete removed the backup")
+				}
+				return
+			}
+			do(t, srv, "DELETE", "/sessions/"+tc.name, nil, http.StatusOK, &out)
+			_ = os.RemoveAll(filepath.Join(home, "claude", "projects"))
+			do(t, srv, "POST", "/cleanup/archives/"+out.Archive+"/restore", nil, http.StatusOK, nil)
+			got, err := os.ReadFile(canon)
+			if err != nil || !strings.Contains(string(got), tc.want) {
+				t.Fatalf("restored canonical = %q, %v; want the backup snapshot", got, err)
+			}
+		})
+	}
+}
+
+// The live log's age and its bytes must come from one state of one file: swapped for an older
+// complete log after its metadata was taken, it must not win the canonical path over the newer
+// backup (ported from the round-5 review reproduction).
+func TestArchiveLiveSwappedAfterStatDoesNotOutrankBackup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AF_SESSIONS_DIR", filepath.Join(home, "sessions"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
+	srv := httptest.NewServer(trashMux())
+	defer srv.Close()
+	dir := filepath.Join(home, "repos", "app")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	m := session.Meta{Name: "readage", Dir: dir, Kind: session.KindClaude, CreatedAt: time.Now().Format(time.RFC3339)}
+	session.WriteMeta(m)
+	jsonl := filepath.Join(home, "claude", "projects", claude.ProjectKey(dir), session.UUID(dir, m.Name)+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(jsonl), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"type":"user","message":"KNOWN NEWER BACKUP"}` + "\n"
+	if err := os.WriteFile(jsonl, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := claude.BackupTranscript(m); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(jsonl, []byte(`{"type":"user","message":"NEWER LIVE THAT WAS STATTED"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(jsonl, future, future); err != nil {
+		t.Fatal(err)
+	}
+	archiveLiveReadGate = func(path string) {
+		if path != jsonl {
+			return
+		}
+		_ = os.WriteFile(jsonl, []byte(`{"type":"user","message":"OLD"}`+"\n"), 0o600)
+		past := time.Now().Add(-24 * time.Hour)
+		_ = os.Chtimes(jsonl, past, past)
+	}
+	defer func() { archiveLiveReadGate = nil }()
+	var out struct{ Archive string }
+	do(t, srv, "DELETE", "/sessions/"+m.Name, nil, http.StatusOK, &out)
+	archiveLiveReadGate = nil
+	do(t, srv, "POST", "/cleanup/archives/"+out.Archive+"/restore", nil, http.StatusOK, nil)
+	got, err := os.ReadFile(jsonl)
+	if err != nil || string(got) != body {
+		aside, _ := os.ReadFile(jsonl + ".backup.archived")
+		t.Fatalf("restored canonical = %q, %v; the newer backup is hidden beside it: %q", got, err, aside)
 	}
 }

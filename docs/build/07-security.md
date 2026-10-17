@@ -109,7 +109,7 @@ This table is what separates one member's workspace from another's, and from the
 | Files between users | the member's home, bind-mounted from `<WS_DATA>/[<slug>/]<key>/home`. **No other user's home is mounted at all** | EFS access points per membership (`/home/<membership>`, `/claude-config/<membership>`) fixing the root directory; one uid/gid for everyone (`AF_ECS_POSIX_UID` / `_GID`) | the member's own EBS volume, attached to a slot that serves **one member at a time** ([decisions/0045](../decisions/0045-ec2-persistent-workspace.md) decision 8) and mounted by the CP over SSM. The Claude state and the kept dotfiles stay on EFS access points | one pair of claims per workspace, referenced by that workspace's StatefulSet alone, `ReadWriteOncePod` where the storage driver supports it. Members have no Kubernetes API access to the workspace namespace: whoever can create pods there can mount any claim |
 | Process and memory | one membership, one container: `--memory` (`WS_MEMORY`, default `1g`, overridable per workspace), `--cpus` when set | one task; Fargate shares no kernel between tasks | one task per slot, memory capped below the slot's size (`AF_ECS_EC2_HOST_RESERVE_MB`). `/tmp` is a tmpfs, because the slot's root volume outlives its previous member | one pod per workspace, with CPU, memory and ephemeral-storage requests and limits from the workspace sizing. `/tmp` is an `emptyDir` with a size limit. The ephemeral-storage limit is enforced by eviction after the fact, so node disk headroom and a disk-pressure alert do the rest |
 | Network | a network per workspace (`af-net-…`), so containers cannot reach each other; the agent is published on the host's loopback only | `awsvpc`: each task has its own ENI in the workspace security group, which admits the agent port from the CP's security group only — never from another workspace — and assigns no public IP. Outbound is open (§7.8) | the same as ecs. The slot's own security group has no ingress | NetworkPolicies, enforced only by a CNI that implements them: the agent port admits the CP's pods only; egress to cluster DNS, to the CP's workspace-only listener, and to the internet minus private, link-local and the cluster's own ranges. Outbound is open otherwise (§7.8) |
-| Privileges | not privileged; runs as `dev`. **`SYS_ADMIN` is added to the bounding set** so Chromium's setuid sandbox can create namespaces; the image build fails if any other setuid/setgid binary remains, so `dev` itself holds no effective capability | no privileged mode, no added capabilities | the same as ecs | the `restricted` Pod Security Standard, enforced on the namespace by a label the CP cannot change: not privileged, non-root, no added capabilities, no host namespaces, no `hostPath` — Fargate's level, so no `SYS_ADMIN` for Chromium |
+| Privileges | not privileged; runs as `dev`. **`SYS_ADMIN` is added to the bounding set** so Chromium's setuid sandbox can create namespaces; the image build fails if any other setuid/setgid binary remains, so `dev` itself holds no effective capability | no privileged mode, no added capabilities (Fargate cannot add `SYS_ADMIN`, so there is no browser: `BrowserUnavailable`) | not privileged; **`SYS_ADMIN` is added to the agent container's bounding set** (task definition `linuxParameters.capabilities`) for the same reason as docker, because the slot's Docker default seccomp profile otherwise refuses the namespaces and Chromium dies at startup; the image keeps `chrome-sandbox` the only setuid path. Two slot measures go with it (`cfn/40-ec2-pool.yaml` user data): `user.max_user_namespaces=0`, so `SYS_ADMIN` is reachable only through the setuid helper and no other process can create user namespaces (measured: `unshare -U` fails with ENOSPC, browser-smoke still passes), and the home volume mounted `nosuid,nodev`. `kernel.unprivileged_bpf_disabled` (1) and `kernel.perf_event_paranoid` (2) were measured already strict on AL2023 and are left alone. Slots are not patched in place: kernel fixes arrive by AMI refresh plus slot replacement, and both measures reach only slots launched after the template carries them | the `restricted` Pod Security Standard, enforced on the namespace by a label the CP cannot change: not privileged, non-root, no added capabilities, no host namespaces, no `hostPath` — Fargate's level, so no `SYS_ADMIN` for Chromium |
 | Cloud identity | none | the task role `WsTaskRole` has **no policy at all**; `AGENT_TOKEN` and the DEK arrive through the task definition's `secrets` (SSM, read by the execution role) | the same task role. The slot's instance role carries ECS registration, SSM management, image pull and logs only | none: no service account token is mounted, and no IAM grant names the namespace or its service account. On GKE every workspace pool serves the GKE metadata server and egress to `169.254.0.0/16` is denied. `AGENT_TOKEN`, the DEK and the minted tokens arrive in a per-workspace Secret through `envFrom`; Secrets are encrypted in etcd (Cloud KMS on GKE) |
 | Sensitive state | the agent's plaintext state is moved to a second mount (`CLAUDE_CONFIG_DIR=/var/lib/af/claude`) **outside the file browser's reach**; the encrypted store stays in the home behind the agent's denylist (`fsDeny`) | the same — the image and the agent are common | the same | the same, on the second claim |
 
@@ -130,6 +130,8 @@ invisible to that user's own sessions. That is not solvable in principle. Keepin
 out of the browser, encrypting them at rest and injecting them as environment variables
 is judged good enough; what it means for code running in a session is stated in
 [SECURITY.md](../../SECURITY.md).
+For the same reason a route that must tell the member's Console from a session cannot rely on
+anything the agent holds; it relies on a mark only the CP can make (§7.5.1).
 
 ### 7.2.1 Engines: reachability is the access control
 
@@ -169,6 +171,37 @@ the context window the running engine started with (`engine_gateway.go`):
 
 VOICEVOX is not behind this gateway: the Console asks the CP (`/api/tts/*`, behind the
 normal login), and the CP calls the engine, whose security group admits the CP only.
+
+### 7.2.2 Exporting a folder (`GET /api/fs/download-zip`)
+
+The one file-browser route that reads an unbounded number of files for one request
+([decisions/0111](../decisions/0111-folder-zip-download.md)). Its boundary, in the order an
+attacker would try it:
+
+- **Same reach as a file read, not wider.** The CP route is an explicit allowlist line behind the
+  ordinary identity and tenant resolution (`withResolved`); the Agent route sits behind the same
+  token as every other. A browse-relative path, or an absolute one under the scratch or staged-docs
+  root, and nothing else; **a root itself is refused**.
+- **No symlink is ever followed.** The start folder, every child folder and every file is opened
+  with `openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS)` relative to a root fd, *when it is used*, so
+  a swap after the walk fails the open. A symlink in the start path is a 400; one inside the folder
+  is left out and counted — and so is **any regular file with more than one name**
+  (`st_nlink > 1`, at the walk and again on the open descriptor): a hard link to a denylisted
+  file is not a symlink, so `NO_SYMLINKS` cannot see it. The `.codex/generated_images` single-image read exception is **not**
+  carried over (`resolveZipRoot` is its own resolver).
+- **The denylist (`fsDeny`) prunes before descending**, by browse-relative path, so exporting an
+  ancestor never includes a denied tree. The temp archive lives under the agent state dir, which
+  is itself denylisted.
+- **Hostile names fail the export** (422) rather than being rewritten or dropped: invalid UTF-8,
+  backslash, control characters, `.`/`..`/empty components, a drive prefix, duplicates.
+- **Resource bound.** Files, folders, depth, entries looked at, name volume, bytes read (counted
+  on the bytes actually read), bytes written, walk-and-build time and transfer time are all capped
+  (the time limit is cooperative: a system call already stuck on a hung volume is not interrupted
+  and holds the slot until it returns),
+  one build runs at a time per workspace, and the temp file is unlinked at creation so a crash
+  cannot leak it. The limits are in [guide/ref/limits](../../guide/ref/limits.md).
+- **Not audited** (ordinary reads are not, `proxy.go`); whether a bulk export should be is open
+  (decisions/0111, Status line).
 
 ## 7.3 L1 Console authentication — three modes
 
@@ -381,6 +414,41 @@ returns the result without storing the token.
   binds the result to that press instead of relying on route authentication
   ([decisions/0102](../decisions/0102-aws-login-through-the-console.md)).
 
+### 7.5.1 The member-origin mark
+
+Where a route must accept only the member's own Console request, the CP marks it
+([decisions/0113](../decisions/0113-member-origin-mark.md)). Today that is the member-only memory writes:
+`entries/pin`, `entries/revert` (which also forgets), `entries/member-save`, `entries/project-move` (moving the
+memories of an orphaned project, [decisions/0108](../decisions/0108-af-owned-agent-memory.md) note of 2026-10-14) and
+`entries/purge` (the history purge, #1982).
+
+- **Asymmetric, because the Agent cannot keep a secret from its sessions** (same uid, §7.2). The CP signs
+  with an Ed25519 key derived from the token-signing master; the Agent is started with the public keys only
+  (`AF_MEMBER_ORIGIN_KEYS`, plus `AF_WORKSPACE_ID` / `AF_MEMBERSHIP_ID`). A session reading them can verify,
+  not sign.
+- **Signed fields**: method, Agent-side path, raw query, body SHA-256, workspace, membership, CP identity,
+  `iat`, `exp` (60 s) and a nonce. The Agent refuses any mismatch, an expired or over-long mark, and a nonce
+  it has seen (kept until `exp`, at most 4,096; full means refuse, never accept unrecorded). The cache is
+  per process, so the Agent also refuses every mark issued before its start + 31 s (the accepted 30 s skew
+  plus rounding): no replay across a restart whatever the CP's clock, at the price of member writes
+  answering 503 for the first ~31 s after the Agent starts.
+- **The CP drops any `X-AF-Member-Origin` the browser sent** on every relay (REST, SSE and the preview
+  relay), signs only the listed routes, and only for the caller's own workspace. REST and SSE also drop every
+  cookie and the gateway identity headers, so the member's login cookie never reaches the workspace.
+- **No signing for another page.** Before signing, the CP requires `application/json`, `Sec-Fetch-Site:
+  same-origin` when sent, and an `Origin` of the Console's own host when sent, so a same-site preview app
+  cannot have the browser make a signed member write. An app in the path-form preview runs on the
+  Console's origin and is not covered (decisions/0062 decision 7).
+- **Fails closed**: a workspace started without the keys (an older start, or `AF_MEMBER_ORIGIN_KEY_VERSION=0`)
+  answers 503 on these routes; no mark, or only `AGENT_TOKEN` / `X-AF-Relay`, is 403.
+- **Rotation**: a workspace starts with the current and the next key, so raising
+  `AF_MEMBER_ORIGIN_KEY_VERSION` by one keeps workspaces started under the previous version working; a
+  second raise before they restart does not.
+- **Limits**: only these three routes are signed; the claude and muse imports still record the member as
+  author unsigned (#2014). The mark governs the Agent's routes, not the store's files, which a session can still write
+  directly; it is as strong as the CP's member authentication (nothing under `AUTH=dev`); a compromised CP
+  is out of scope.
+
 ## 7.6 Secrets and envelope encryption
 
 **The principle: secrets stay in the user's own area; the CP neither holds nor
@@ -419,13 +487,19 @@ credentials as exposed and rotate them.
   with a fresh KMS data key, bound to the key ref by the encryption context, and fails closed
   when KMS does. The same custodian seals the tenant secrets above and the session handoff
   and share payloads. Values sealed before a switch to KMS are opened by the local custodian,
-  chosen by their format, never by a KMS failure.
+  chosen by their format, never by a KMS failure; `af-cp rewrap-keys` re-seals them under KMS
+  in one pass (2026-10-10 addendum, [operate/04](../../guide/operate/04-secure.md#re-sealing-values-stored-before-the-switch)).
 - ⚠️ **The honest limit**: with the local custodian the KEK derives from the master key, so
   the effective strength equals a single master key. With KMS, disabling the key shreds what
   was sealed after the switch — but the workspace DEK itself is still derived from the master
   key and the user key (so that stores written before envelope storage still open), so
-  members' credential stores are not shredded by it. A random DEK per workspace and Vault
-  are 📋 ([decisions/0005](../decisions/0005-envelope-custodian.md), 2026-10-04 addendum).
+  members' credential stores are not shredded by it. With `AF_WORKSPACE_DEK=random` a home gets
+  a KMS-sealed key of its own, and a store that has moved to it no longer opens with the
+  master-derived key; disabling the KMS key then stops the CP from unwrapping it, but copies
+  already handed to the workspace and its runtime still open it, so a shred also needs those
+  removed (🚧: nothing does that automatically, and homes not yet started stay derived). A
+  home is confirmed from the Agent's report and then no longer receives the derived key. Vault is 📋
+  ([decisions/0005](../decisions/0005-envelope-custodian.md), 2026-10-04 and 2026-10-10 addenda).
 
 ## 7.7 Audit
 

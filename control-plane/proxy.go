@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -85,6 +86,47 @@ func auditActionTarget(r *http.Request) (action, target string, ok bool) {
 			// Only a commit id is copied into the ledger: the hint is free text the Agent never
 			// reads, so anything else is recorded as an empty target.
 			return "memory.entry.revert", auditCommitHint(q.Get("commit")), true
+		case p == "/api/agents/memory/entries/pin":
+			// #1703: the member pins or unpins a memory. The Console repeats the project id in the query;
+			// only an id-shaped value is recorded, never the free-text memory name.
+			return "memory.entry.pin", auditProjectHint(q.Get("project")), true
+		case p == "/api/agents/memory/entries/member-save":
+			// #1997: the member writes a memory by hand. Same id-shaped project hint as the pin;
+			// the memory name is free text and never copied into the ledger.
+			return "memory.entry.save", auditProjectHint(q.Get("project")), true
+		case p == "/api/agents/memory/entries/purge":
+			// #1982: the member rewrites the memory history to drop one memory's past revisions.
+			// Same id-shaped project hint as the save; the memory name is never copied.
+			return "memory.entry.purge", auditProjectHint(q.Get("project")), true
+		case p == "/api/agents/memory/entries/project-move":
+			// #1984: the member moves an orphaned project's memories into another project. The
+			// Console repeats the source project id in the query; only an id-shaped value is
+			// recorded, never a memory name.
+			return "memory.project.move", auditProjectHint(q.Get("project")), true
+		case p == "/api/agents/memory/claude-import":
+			// ADR 0108 decision 6: the one-time import of claude's memory writes the store. The
+			// Console repeats the project id in the query; only an id-shaped value is recorded.
+			return "memory.claude_import", auditProjectHint(q.Get("project")), true
+		case p == "/api/agents/memory/af-import":
+			// #1983: the member imports AF memory out of a bundle into this workspace's store. The
+			// Console repeats the import id in the query; only an id-shaped value is recorded.
+			return "memory.af_import", auditImportHint(q.Get("importId")), true
+		case p == "/api/agents/memory/auto-sync":
+			// #1972: the Agent memory switch imports / writes back by itself, so nothing else
+			// passes through here for those runs (the Agent has no channel to this ledger; each
+			// memory change is a commit by the member in the 0022 history). What does pass is
+			// the member's part: the Console wakes the run once the confirmation flipped the
+			// switch, retries a failed write-back, or gives it up. The Console repeats the action
+			// (and the direction of a wake) in the query; only those words are recorded.
+			return "memory.auto_sync", auditAutoSyncHint(q.Get("action"), q.Get("to")), true
+		case p == "/api/agents/memory/muse-import":
+			// #1991: the one-time import of muse's project memory writes the store; the project id
+			// in the query is the only value recorded, as for the claude import.
+			return "memory.muse_import", auditProjectHint(q.Get("project")), true
+		case p == "/api/agents/memory/claude-export":
+			// #1914: the write-back changes claude's store. The Console repeats the project id in
+			// the query; only an id-shaped value is recorded.
+			return "memory.claude_export", auditProjectHint(q.Get("project")), true
 		case strings.HasPrefix(p, "/api/aws-login/profiles/") && strings.HasSuffix(p, "/logout"):
 			return "aws.logout", "profile: " + name, true
 		case strings.HasPrefix(p, "/api/aws-login/profiles/") && strings.HasSuffix(p, "/start"):
@@ -105,6 +147,12 @@ func auditActionTarget(r *http.Request) (action, target string, ok bool) {
 			return "session.create", "", true
 		case name != "" && strings.HasSuffix(p, "/fork"):
 			return "session.fork", name, true
+		case name != "" && p == "/api/sessions/"+name+"/move":
+			return "session.move", name, true
+		case name != "" && strings.HasPrefix(p, "/api/sessions/"+name+"/move/"):
+			// retry, cancel, reopen and deliver (ADR 0115 decisions 1, 11.4 and 11.6); the preview
+			// is a GET.
+			return "session.move." + strings.TrimPrefix(p, "/api/sessions/"+name+"/move/"), name, true
 		case name != "" && strings.HasSuffix(p, "/stop"):
 			// /stop is the old name of deleting a session (it moves it to the trash, ADR 0101),
 			// so it is recorded as the delete it is.
@@ -206,18 +254,30 @@ func (a agentProxyAPI) rest(w http.ResponseWriter, r *http.Request, res *resolve
 		target += "?" + r.URL.RawQuery
 	}
 
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
+	body, mark, aerr := a.mgr.relayBody(w, r, res)
+	if aerr != nil {
+		writeAPIErr(w, aerr)
+		return
+	}
+	if u, ok := body.(spooledUpload); ok {
+		defer u.Close() // the transport closes it too; this covers a request that never goes out
+	}
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, body)
 	if err != nil {
 		http.Error(w, "bad proxy request", http.StatusBadGateway)
 		return
 	}
 	req.Header = r.Header.Clone()
+	stripAgentRelayCredentials(req, r, a.mgr.emailHeader)
 	if rt.Token() != "" {
 		req.Header.Set("Authorization", "Bearer "+rt.Token()) // CP↔Agent auth
 	}
 	// A hint for the Agent's own log (ADR 0102 decision 4): an agent calling the Agent
 	// directly can set it too, so the Agent never decides anything on it.
 	req.Header.Set("X-AF-Relay", "cp")
+	if mark != "" {
+		req.Header.Set(memberOriginHeader, mark)
+	}
 
 	resp, err := agentRelayClient.Do(req)
 	if err != nil {
@@ -328,6 +388,7 @@ func (a agentProxyAPI) stream(w http.ResponseWriter, r *http.Request, res *resol
 		return
 	}
 	req.Header = r.Header.Clone()
+	stripAgentRelayCredentials(req, r, a.mgr.emailHeader) // as rest; no stream route is signed
 	if rt.Token() != "" {
 		req.Header.Set("Authorization", "Bearer "+rt.Token())
 	}
@@ -521,6 +582,43 @@ func relay(src, dst *websocket.Conn, errc chan<- error, onInput func()) {
 			return
 		}
 	}
+}
+
+// agentMemProjectIDRe is the form of an agent-memory project id: a readable prefix, then 12
+// hex digits of the repository key's hash.
+var agentMemProjectIDRe = regexp.MustCompile(`^[a-z0-9._-]{1,40}-[0-9a-f]{12}$`)
+
+// auditProjectHint keeps a project-id-shaped audit hint and drops anything else.
+func auditProjectHint(s string) string {
+	if agentMemProjectIDRe.MatchString(s) {
+		return s
+	}
+	return ""
+}
+
+var auditImportIDRe = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z(-[0-9]+)?$`)
+
+// auditImportHint keeps an import-id-shaped audit hint and drops anything else.
+func auditImportHint(s string) string {
+	if auditImportIDRe.MatchString(s) {
+		return s
+	}
+	return ""
+}
+
+// auditAutoSyncHint keeps the member's action on the Agent memory switch's run, and for a wake the
+// direction ("wake:on"); anything else is recorded as an empty target.
+func auditAutoSyncHint(action, to string) string {
+	switch action {
+	case "retry", "abandon":
+		return action
+	case "wake":
+		if to == "on" || to == "off" {
+			return action + ":" + to
+		}
+		return action
+	}
+	return ""
 }
 
 // auditCommitHint keeps a commit-id-shaped audit hint and drops anything else.

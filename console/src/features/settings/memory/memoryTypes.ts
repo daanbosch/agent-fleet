@@ -104,6 +104,25 @@ export interface MemoryChange {
   /** The history holds the memory's text on at least one side of this change. A forget of a
    *  file that was never committed has none, so there is nothing to bring back. */
   revertible: boolean;
+  /** The memory's earlier revisions were purged from the history (#1982): this change cannot
+   *  be reverted, only the memory forgotten. */
+  purgedBefore?: boolean;
+}
+
+/** What purging one memory's past revisions would rewrite (#1982). No memory text. */
+export interface PurgePreview {
+  scope: string;
+  project?: MemoryChangeProject;
+  name: string;
+  live: boolean;
+  keepsCurrent: boolean;
+  nothing: boolean;
+  changes: { commit: string; at: string; op: string; authorKind: string }[];
+  changesTotal: number;
+  snapshots: number;
+  refs: { name: string; kind: "main" | "branch" | "import" | "rescue"; affected: number }[];
+  findings: SecretFinding[];
+  plan: string;
 }
 /** One change's diff from the Agent, scanned first: withheld carries masked findings instead. */
 export interface ChangeDiff {
@@ -116,4 +135,296 @@ export interface MemoryChangeProject {
   root: string;
   vcs: string;
   display: string;
+  /** Normalised origin ("host/owner/repo", no credentials); absent when unknown. */
+  remote?: string;
+}
+
+/** One claude project with memory files that could be imported into AF memory (ADR 0108). */
+export interface ClaudeImportSource {
+  slug: string;
+  count: number;
+  /** Where the files would go; absent when `reason` says why they cannot (no_project | ambiguous). */
+  project?: MemoryChangeProject;
+  reason?: string;
+}
+export type ClaudeImportStatus = "new" | "update" | "unchanged" | "forgotten" | "secret" | "invalid";
+/** One claude file in a preview. Findings are masked by the Agent; a hit is never importable. */
+export interface ClaudeImportItem {
+  name: string;
+  status: ClaudeImportStatus;
+  reason?: string;
+  description?: string;
+  type?: string;
+  sourceHash?: string;
+  sourceModified?: string;
+  afUpdated?: string;
+  findings?: SecretFinding[];
+}
+export interface ClaudeImportPreview {
+  slug: string;
+  project?: MemoryChangeProject;
+  reason?: string;
+  items: ClaudeImportItem[];
+  counts: Partial<Record<ClaudeImportStatus, number>>;
+  withheld?: number;
+  truncated?: boolean;
+}
+export interface ClaudeImportResult {
+  name: string;
+  result: "imported" | "updated" | "skipped";
+  reason?: string;
+  commit?: string;
+}
+
+export type MuseScope = "project" | "personal_project" | "personal";
+/** One muse directory with notes: a working copy's `.agents/memory` (#1991), or one of muse's personal stores (#2005). */
+export interface MuseImportSource {
+  scope: MuseScope;
+  /** Working copy name (project), muse's own directory name (personal_project), "" (personal). */
+  dir: string;
+  /** "user": the personal scope lands in AF's user scope and needs an explicit choice. */
+  target?: "user";
+  count: number;
+  /** Files git tracks in the working copy: they may be shared with teammates. */
+  shared: number;
+  project?: MemoryChangeProject;
+  reason?: string;
+}
+/** `diverged`: AF has its own version of that name, so muse's file is shown and not applied. */
+export type MuseImportStatus = ClaudeImportStatus | "diverged";
+export interface MuseImportItem extends Omit<ClaudeImportItem, "status"> {
+  status: MuseImportStatus;
+  /** git tracks this file in the working copy. */
+  shared?: boolean;
+  /** The note's path under the scope root, when the name is not simply that path minus ".md". */
+  path?: string;
+  /** No frontmatter: name from the file name, description from the first line, no type. */
+  derived?: boolean;
+}
+export interface MuseImportPreview extends Omit<ClaudeImportPreview, "slug" | "items" | "counts"> {
+  scope: MuseScope;
+  dir: string;
+  target: "project" | "user";
+  items: MuseImportItem[];
+  counts: Partial<Record<MuseImportStatus, number>>;
+}
+
+/** One AF project whose memory can be written back to claude's own (#1914). */
+export interface ClaudeExportSource {
+  project: MemoryChangeProject;
+  count: number;
+  /** no_root: no main working copy is recorded, so claude's directory is unknown. */
+  reason?: string;
+}
+export type ClaudeExportStatus = "new" | "update" | "remove" | "conflict" | "secret" | "unchanged" | "native_only";
+export interface ClaudeExportItem {
+  name: string;
+  status: ClaudeExportStatus;
+  reason?: string;
+  description?: string;
+  type?: string;
+  revision?: number;
+  afUpdated?: string;
+  nativeModified?: string;
+  findings?: SecretFinding[];
+}
+export interface ClaudeExportPreview {
+  project: MemoryChangeProject;
+  slug: string;
+  items: ClaudeExportItem[];
+  counts: Partial<Record<ClaudeExportStatus, number>>;
+  token: string;
+  nativeExists: boolean;
+  userScope: number;
+  notForClaude?: number;
+  withheld?: number;
+  index: "new" | "rewrite" | "unchanged" | "symlink";
+  indexListed: number;
+  indexMore: number;
+  switchOn: boolean;
+  truncated?: boolean;
+}
+export interface ClaudeExportResult {
+  name: string;
+  result: "written" | "updated" | "removed" | "skipped";
+  reason?: string;
+  /** A hidden file in Claude's memory directory that holds a newer edit which could not be put back. */
+  kept?: string;
+}
+
+/** One memory in the Console's list (#1703): the pin is the member's, the count is the agents' use. */
+export interface MemoryListed {
+  name: string;
+  scope: "user" | "project";
+  project?: MemoryChangeProject;
+  description: string;
+  type?: string;
+  updated: string;
+  pinned: boolean;
+  uses: number;
+  /** What a member forget passes back, so a memory changed since is not removed unseen. */
+  revision: number;
+  authorKind: string;
+  authorSession: string;
+}
+
+/** One memory with its body (member-read). */
+export interface MemoryBody extends MemoryListed {
+  body: string;
+  kinds?: string[];
+  created?: string;
+}
+
+/** One hit of the Console's body search (member-search): no body, the lines that matched. */
+export interface MemorySearchHit extends MemoryListed {
+  snippets?: string[];
+}
+
+/** One project of the store (member `entries/projects`): orphaned means its working copy is known to be gone. */
+export interface ProjectRow {
+  project: MemoryChangeProject;
+  count: number;
+  /** Files left out because they failed the scan or cannot be parsed; they are never moved. */
+  withheld?: number;
+  orphaned: boolean;
+  /** A working copy under ~/repos belongs to the project, so it can receive a move before it holds a memory. */
+  live: boolean;
+  /** The one live project with the same remote as this orphan: a suggested target, never applied on its own. */
+  mergeInto?: MemoryChangeProject;
+}
+
+export type MoveStatus = "move" | "same" | "collision" | "rename" | "skip";
+export type MoveCollision = "skip" | "rename";
+export interface MoveItem {
+  name: string;
+  /** Present when the memory moves under another name (rename) or an earlier run already put it there (same). */
+  newName?: string;
+  status: MoveStatus;
+  description: string;
+  type?: string;
+  revision: number;
+}
+export interface MovePreview {
+  from: MemoryChangeProject;
+  to: MemoryChangeProject;
+  items: MoveItem[];
+  counts: Partial<Record<MoveStatus, number>>;
+  withheld?: number;
+  collision?: MoveCollision;
+  /** A name is taken in the target and no policy was chosen, so the Agent would refuse the move. */
+  needsPolicy?: boolean;
+}
+export interface MoveResultItem {
+  name: string;
+  newName?: string;
+  /** partial: the copy is in the target and the source copy is still there; failed: nothing was written. */
+  result: "moved" | "merged" | "renamed" | "skipped" | "partial" | "failed";
+  reason?: string;
+  commit?: string;
+}
+
+/** One memory of a memory bundle's AF store (`af-import/preview`, #1983). */
+export type BundleStatus = "new" | "unchanged" | "exists" | "forgotten" | "secret" | "invalid";
+export interface BundleItem {
+  name: string;
+  status: BundleStatus;
+  reason?: string;
+  description?: string;
+  type?: string;
+  /** The bundle's own revision, for display only: the import resets it. */
+  revision?: number;
+  sourceHash?: string;
+  findings?: SecretFinding[];
+}
+/** A source project of the bundle, or the user scope (`source` "user"). */
+export interface BundleScope {
+  source: string;
+  display?: string;
+  remote?: string;
+  /** The local project it maps to; absent when `reason` says why not. */
+  target?: MemoryChangeProject;
+  match?: "id" | "remote" | "user";
+  reason?: "no_local_project" | "ambiguous" | "search_incomplete";
+  items: BundleItem[];
+  counts: Record<string, number>;
+  withheld?: number;
+}
+export interface BundlePreview {
+  importId: string;
+  hasAF: boolean;
+  scopes: BundleScope[];
+  /** Source project folders left out because their name fails the scan; never named. */
+  withheld?: number;
+  truncated?: boolean;
+  /** The search for local working copies was cut short, so an unmatched project may only be one not found. */
+  incomplete?: boolean;
+}
+export interface BundleResult {
+  scope: string;
+  name: string;
+  result: "imported" | "skipped";
+  reason?: string;
+  commit?: string;
+}
+
+/** Where the Agent memory switch's reconciler is (`auto-sync`, #1972). */
+/** "unreadable": the Agent's state file cannot be read, so the phase is unknown and native memory stays off. */
+export type AutoSyncPhase = "off" | "importing" | "on" | "writing_back" | "unreadable";
+
+export interface AutoSyncProject {
+  id: string;
+  display?: string;
+  /** import: imported, updated, unchanged, conflict, secret, invalid, forgotten, skipped; write-back: written, updated, removed, unchanged, conflict, secret, skipped */
+  counts: Record<string, number>;
+}
+
+/** One file a run did not apply. Names passed the scan; a secret row carries rule names only. */
+export interface AutoSyncRow {
+  project: string;
+  name: string;
+  status: string;
+  reason?: string;
+  rules?: string[];
+}
+
+export interface AutoSyncRun {
+  kind: "import" | "write_back" | "catch_up";
+  started: string;
+  finished?: string;
+  /** The kind of failure that stopped the run. */
+  error?: string;
+  complete: boolean;
+  projects: AutoSyncProject[];
+  unmapped?: number;
+  noRoot?: number;
+  rows?: AutoSyncRow[];
+  rowsCut?: number;
+}
+
+export interface AutoSyncStatus {
+  phase: AutoSyncPhase;
+  want: boolean;
+  /** Phase and switch agree: nothing is running. */
+  settled: boolean;
+  since?: string;
+  failing?: boolean;
+  attempts?: number;
+  nextAttempt?: string;
+  catchUpPending?: number;
+  nativeMemoryOff: boolean;
+  nativeBackOn?: boolean;
+  /** What the Agent could not do by itself: state_unreadable, state_not_saved, codex_flag. */
+  problems?: string[];
+  run?: AutoSyncRun;
+}
+
+/** What flipping the switch would do (`auto-sync/preview?to=`). */
+export interface AutoSyncPreview {
+  to: "on" | "off";
+  projects: AutoSyncProject[];
+  totals: Record<string, number>;
+  /** What a run would write: import new + update, write-back new + update + remove. */
+  apply: number;
+  unmapped?: number;
+  noRoot?: number;
 }

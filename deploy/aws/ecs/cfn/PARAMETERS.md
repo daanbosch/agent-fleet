@@ -232,9 +232,10 @@ for fast restarts wants 0, and one that wants the root-volume bill bounded picks
 pay 135s and the slot's root-volume caches. Must be ≥ `Ec2SlotSleepSec` to mean "sleep, then
 terminate"; a smaller value simply skips the sleeping stage.
 
-It is not the way to move retained slots onto a changed launch template: reserve them for
-replacement in the Console's Settings → Admin → Slots tab, and each workspace moves to a new
-slot at its next start (`deploy/aws/ecs/README.md`, "Moving retained slots onto new user data").
+It is not the way to move retained slots onto a changed launch template: a slot below `$Latest`
+is replaced at its workspace's next start by itself (switch: the CP env
+`AF_ECS_EC2_AUTO_REPLACE_OUTDATED_SLOTS`, default on), and you can reserve slots for replacement in
+the Console's Settings → Admin → Slots tab to force it; each workspace moves to a new slot at its next start (`deploy/aws/ecs/README.md`, "Moving retained slots onto new user data").
 
 ### `Ec2HibernateAfterSec`
 
@@ -597,6 +598,16 @@ existing membership is consulted first, so this only stops NEW auto-admissions. 
 built-in default is still `auto` — it is this template that starts closed, so a deployment
 that never set it keeps its behaviour until you redeploy.)
 
+### `EfsBackup`
+
+The data stack's daily EFS backup state, for the Console's admin warning. Not a setting:
+`update.sh` / `standup.sh` write it after reading the data stack (`present` = `Persistence=retain`
+with a vault and a plan selecting the file system, `missing` = `retain` without them, `off` =
+`Persistence=delete`). It reaches the CP as `AF_EFS_BACKUP`, which warns on `missing` and
+only on an ECS runtime. Empty (the default, so existing stacks need no new value) = never
+filled or unreadable = no warning. It exists because the CP must learn this without new IAM:
+importing a data-stack export would fail the deploy for a data stack older than 0.26.0.
+
 ### `AuthMode`
 
 CP auth mode. `oauth` (default) = the CP-native login (Google and/or OIDC). `dev` = fixed
@@ -620,10 +631,61 @@ long as it is symmetric, in this account, and its policy lets the account's IAM 
 An alias ARN is refused by the pattern on purpose: IAM matches a key's calls against the key
 ARN, so a grant on an alias would allow nothing.
 
-⚠️ `AF_MASTER_KEY` stays required: values stored before the switch are not re-encrypted and
-open with it. Do not clear this parameter again while KMS-sealed values exist; the local
+⚠️ `AF_MASTER_KEY` stays required: values stored before the switch open with it until
+`af-cp rewrap-keys` re-seals them, and it still derives the workspace DEKs and the signing keys
+after that. Do not clear this parameter again while KMS-sealed values exist; the local
 custodian refuses them. The operator's side is `guide/operate/04-secure.md`, "Keys at rest on
 AWS KMS".
+
+### `WorkspaceDekRandom`
+
+`off` (the default) or `on`. `on` sets `AF_WORKSPACE_DEK=random` on the CP task: each member's
+home gets a random credential-store key sealed by KMS (ADR 0005 addenda, #1646). The CP refuses
+that flag unless the custodian is kms ("AF_WORKSPACE_DEK=random needs AF_KEY_CUSTODIAN=kms",
+`control-plane/dek.go`), so the template carries a Rule: `on` without `CustodianKmsKeyArn` fails
+the stack operation when it runs and rolls it back with the assertion message. It does **not**
+refuse at change-set creation: `create-stack` and `execute-change-set` are accepted (exit 0),
+and `aws cloudformation deploy --no-execute-changeset` succeeds too; the failure shows up as stack
+events. A plain `deploy` (which executes the change set and waits) is expected to exit non-zero
+when the stack rolls back, but that was not measured; check the stack status, not only the
+accepting call's exit code. The env var is also gated by the same condition on its own, so
+the flag without a key is inert at the template level: no `AF_WORKSPACE_DEK` is set and the CP
+could not crash-loop on it even without the Rule. Clearing `CustodianKmsKeyArn` is the normal
+switch back to the local custodian. `deploy/local/cfn-workspace-dek-test.py` holds both.
+
+Measured 2026-10-11 on throwaway stacks in a sandbox account (deleted afterwards):
+
+- `create-stack` with `on` and an empty ARN returned exit 0; the stack went `CREATE_IN_PROGRESS`
+  -> `ROLLBACK_IN_PROGRESS` -> `ROLLBACK_COMPLETE`, reason "Parameter validation failed:
+  assertion error: WorkspaceDekRandom=on needs CustodianKmsKeyArn (AF_KEY_CUSTODIAN=kms)."
+- `aws cloudformation deploy --no-execute-changeset` with `on` and an empty ARN exited 0
+  ("Changeset created successfully"), and the change set carried `on` and `""`. Executing it
+  exited 0, then the stack ran `UPDATE_IN_PROGRESS` -> `UPDATE_ROLLBACK_IN_PROGRESS` (same
+  assertion text) -> `UPDATE_ROLLBACK_COMPLETE`, parameters back to their old values.
+- A direct `update-stack` on a stack whose resources do not depend on the parameters answered
+  "No updates are to be performed" and never evaluated the Rule. On `30-ingress` the task
+  definition does change, so it behaves like the change-set case.
+
+Before turning it on: kept homes keep the derived key until their first start with the flag;
+turning it off only stops keys for new homes (homes that have one keep using it, no
+reconnecting), while going back to a CP that does not know the home's key, or losing `home_dek`,
+can need credentials reconnected (see 04-secure); unmigrated homes and old snapshots are not shredded (#1956). The
+per-workspace SSM parameter `secret-key-next` (deleted best-effort by the next start after confirm, or by Destroy) is under `/af-ws/*`: the CP role's
+`SsmWorkspaceParams` (20-platform: Put/Get/Delete) and the workspace execution role's `ssm-read`
+(GetParameters) already cover it, so no IAM statement was added. Operator view:
+`guide/operate/04-secure.md`, "A key of its own for each home".
+
+### Home task grant
+
+The CP's grant for the home task: it lives in this stack because only this stack can name the
+family. RunTask is fenced to that family (any revision: a stack update deregisters the old one,
+and the CP runs the family by name) in this deployment's cluster. The task's roles need no new
+PassRole: it names only the execution role, which PassTaskRoles in 20-platform already lets the
+CP pass to ecs-tasks. ListTasks and DescribeTasks are EcsDrive's, unscoped there already. The
+task's cost tags (af-membership, af-role, af-tenant) are authorized as ecs:TagResource on the new
+task: only as part of a RunTask (ecs:CreateAction), so no task that exists can be retagged, only
+in this cluster, and only the keys EcsTagServiceOnCreate (20-platform) allows on a workspace
+service. `deploy/local/cfn-cp-ec2-scope-test.py` holds the allowed calls and the denied ones.
 
 ## Alarms
 

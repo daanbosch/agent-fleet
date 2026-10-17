@@ -190,13 +190,13 @@ describe("EnginesAdminView", () => {
   it("marks a row naming an images provider this build does not implement", async () => {
     api.mockResolvedValue({ super_admin: true, engines: [row({ provider_unserved: true })] });
     await mount();
-    expect(host!.textContent).toContain("sdcpp」を名乗っていますが");
+    expect(host!.textContent).toContain("sdcpp」として設定されていますが");
   });
 
   it("leaves a row naming a servable provider unmarked", async () => {
     api.mockResolvedValue({ super_admin: true, engines: [row({ provider: "comfy" })] });
     await mount();
-    expect(host!.textContent).not.toContain("comfy」を名乗っていますが");
+    expect(host!.textContent).not.toContain("comfy」として設定されていますが");
   });
 
   it("warns about the bill only while an engine is pinned on, and names no price of its own", async () => {
@@ -580,9 +580,9 @@ describe("EnginesAdminView", () => {
     await mount();
     const gate = host!.querySelector(".engines-spot")!.textContent || "";
     // The pin cannot be honoured, so the picker is sitting on an offer nothing is buying.
-    expect(gate).toContain("自動選択に落ちています");
+    expect(gate).toContain("自動選択になっています");
     // And withdrawing consent is not a stop: it reaches the next purchase, like a rung.
-    expect(gate).toContain("次に買うインスタンスから効きます");
+    expect(gate).toContain("次に買うインスタンスから反映されます");
   });
 
   it("states a pin permanently and takes it off in one click", async () => {

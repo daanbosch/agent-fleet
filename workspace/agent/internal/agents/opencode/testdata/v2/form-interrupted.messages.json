@@ -1,0 +1,123 @@
+{
+ "data": [
+  {
+   "id": "msg_138492944001gX7burSs5Vqauf",
+   "time": {
+    "created": 1791945681220
+   },
+   "type": "model-switched",
+   "model": {
+    "id": "m",
+    "providerID": "stub"
+   }
+  },
+  {
+   "id": "msg_138492d4b001RojW4y4qXxsMyS",
+   "time": {
+    "created": 1791945682292
+   },
+   "text": "MULTI please",
+   "type": "user"
+  },
+  {
+   "id": "msg_138492d7d001GJXMkJ6N8Q8aVQ",
+   "time": {
+    "created": 1791945682321,
+    "streamed": 1791945682344,
+    "completed": 1791945691204
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "m",
+    "providerID": "stub",
+    "variant": "default"
+   },
+   "content": [
+    {
+     "type": "tool",
+     "id": "call_q",
+     "name": "question",
+     "executed": false,
+     "state": {
+      "status": "error",
+      "input": {
+       "questions": [
+        {
+         "question": "Which color?",
+         "header": "Color",
+         "options": [
+          {
+           "label": "Red",
+           "description": "r"
+          },
+          {
+           "label": "Blue",
+           "description": "b"
+          }
+         ]
+        },
+        {
+         "question": "Which toppings?",
+         "header": "Toppings",
+         "multiple": true,
+         "options": [
+          {
+           "label": "Cheese",
+           "description": "c"
+          },
+          {
+           "label": "Ham",
+           "description": "h"
+          },
+          {
+           "label": "Egg",
+           "description": "e"
+          }
+         ]
+        }
+       ]
+      },
+      "error": {
+       "type": "aborted",
+       "message": "Tool execution interrupted"
+      }
+     },
+     "time": {
+      "created": 1791945682332,
+      "ran": 1791945682340,
+      "completed": 1791945691198
+     }
+    }
+   ],
+   "finish": "error",
+   "rawFinish": "tool_calls",
+   "cost": 0,
+   "tokens": {
+    "input": 10,
+    "output": 5,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   },
+   "error": {
+    "type": "aborted",
+    "message": "Step interrupted"
+   }
+  },
+  {
+   "id": "msg_13849504b001xOLvgGtQ8jBRN7",
+   "time": {
+    "created": 1791945691211
+   },
+   "type": "idle",
+   "outcome": "interrupted"
+  }
+ ],
+ "cursor": {
+  "previous": "eyJpZCI6Im1zZ18xMzg0OTI5NDQwMDFnWDdidXJTczVWcWF1ZiIsIm9yZGVyIjoiYXNjIiwiZGlyZWN0aW9uIjoicHJldmlvdXMifQ",
+  "next": "eyJpZCI6Im1zZ18xMzg0OTUwNGIwMDF4T0x2Z0d0UThqQlJONyIsIm9yZGVyIjoiYXNjIiwiZGlyZWN0aW9uIjoibmV4dCJ9"
+ }
+}

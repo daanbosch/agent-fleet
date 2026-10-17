@@ -13,18 +13,21 @@
 package secrets
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
+	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 )
@@ -34,6 +37,18 @@ type GitEntry struct {
 	Token string `json:"token"`
 	Login string `json:"login,omitempty"` // cached real provider account/handle (resolved from the API)
 	Email string `json:"email,omitempty"` // cached account email (resolved from the API)
+
+	// Renewal state of an expiring GitHub App user token from the device flow. All empty
+	// for a pasted PAT and for a non-expiring app token, which is how those keep their
+	// old behaviour: no RefreshToken, nothing to renew. No client secret is stored — the
+	// device flow's refresh grant takes only the ClientID.
+	RefreshToken  string `json:"refresh_token,omitempty"`
+	Expiry        int64  `json:"expiry,omitempty"`         // access token expiry, unix seconds; 0 = unknown
+	RefreshExpiry int64  `json:"refresh_expiry,omitempty"` // refresh token expiry, unix seconds; 0 = unknown
+	ClientID      string `json:"client_id,omitempty"`      // the OAuth app that minted the pair
+	// ReconnectNeeded is set once GitHub has refused the refresh token for good (expired,
+	// revoked, app uninstalled). Only a new connect clears it.
+	ReconnectNeeded bool `json:"reconnect_needed,omitempty"`
 }
 
 // GitIdentity is a provider's explicit commit identity (user.name / user.email),
@@ -95,7 +110,8 @@ type PagerDutyCreds struct {
 // (docs/log/80 P1). Site is the instance base URL (https://<tenant>.atlassian.net), Email
 // the Atlassian account address and Token an API token — Jira's REST v3 authenticates
 // with HTTP Basic over those two, so BOTH are credentials and neither leaves the
-// container. A read-only account is recommended (see guide): af only ever reads.
+// container. The jira CLI wrapper (jira_cred.go) writes to Jira with it as the member, so
+// it carries whatever the account is allowed to do.
 type JiraCreds struct {
 	// AuthKind is "oauth" (Atlassian 3LO, docs/log/80 §80.17) or "token" (email + API
 	// token). "" reads as "token": stores written before OAuth existed have no field
@@ -112,6 +128,10 @@ type JiraCreds struct {
 	Account string `json:"account,omitempty"`
 
 	// --- OAuth (3LO) only ---
+	// Login is the account email /myself reported at connect time, kept for the jira CLI's
+	// `login` (`jira me`, assignee filters). A bearer token carries no email, and Jira Cloud
+	// answers /myself without one when the account hides it, so "" is a normal value.
+	Login        string `json:"login,omitempty"`
 	AccessToken  string `json:"accessToken,omitempty"`
 	RefreshToken string `json:"refreshToken,omitempty"`
 	// Expiry is the unix second the access token dies. ~1h out, which is why the CP
@@ -353,7 +373,26 @@ type MCPTargets struct {
 	Session   bool `json:"session"`   // materialized into the agent CLIs' native config
 }
 
+// ghSnap is the GitHub entry as a snapshot saw it: whether there was one, and what it held.
+type ghSnap struct {
+	Exists bool
+	E      GitEntry
+}
+
+// sameConn reports whether two snapshots describe the same connection: the same entry
+// (existence, user, tokens, expiries, client id, flag). The cached Login/Email are the
+// account lookup's to refine and do not make a different connection.
+func (a ghSnap) sameConn(b ghSnap) bool {
+	a.E.Login, a.E.Email, b.E.Login, b.E.Email = "", "", "", ""
+	return a == b
+}
+
 type Data struct {
+	// ghBase is the GitHub entry as this snapshot was loaded (or last saved); ghBaseSet is
+	// false for a Data that did not come from the store. Save uses it to tell "the caller
+	// left the GitHub connection alone" from "the caller changed it".
+	ghBase      ghSnap
+	ghBaseSet   bool
 	Git         map[string]GitEntry    `json:"git"`                   // host -> https cred
 	GitIdentity map[string]GitIdentity `json:"gitIdentity,omitempty"` // host -> explicit commit identity
 	Claude      string                 `json:"claude"`                // CLAUDE_CODE_OAUTH_TOKEN
@@ -389,9 +428,19 @@ type Data struct {
 	InternalGitEpoch int64 `json:"internalGitEpoch,omitempty"`
 }
 
-// agentSecretKey returns the 32-byte per-user key from AF_SECRET_KEY (hex), or
-// nil when unset/invalid (dev: store is plaintext JSON).
+// agentSecretKey returns the 32-byte key the store is sealed with: AF_SECRET_KEY_NEXT when the
+// CP injected one (the home's own random key, ADR 0005 addendum 2026-10-10), else
+// AF_SECRET_KEY. nil when neither is set or AF_SECRET_KEY is invalid (dev: store is
+// plaintext JSON).
 func agentSecretKey() []byte {
+	if k := nextSecretKey(); k != nil {
+		return k
+	}
+	return derivedSecretKey()
+}
+
+// derivedSecretKey is AF_SECRET_KEY (hex), the key the CP derives for the member.
+func derivedSecretKey() []byte {
 	h := os.Getenv("AF_SECRET_KEY")
 	if h == "" {
 		return nil
@@ -402,6 +451,133 @@ func agentSecretKey() []byte {
 		return nil
 	}
 	return b
+}
+
+// nextSecretKey is AF_SECRET_KEY_NEXT (hex), or nil. It counts only beside a valid
+// AF_SECRET_KEY: the CP always sends both, and sealing under NEXT alone would leave a store
+// the derived key cannot open if this env were ever half-delivered. A malformed value is
+// ignored, so the store stays under AF_SECRET_KEY as before.
+func nextSecretKey() []byte {
+	h := os.Getenv("AF_SECRET_KEY_NEXT")
+	if h == "" || derivedSecretKey() == nil {
+		return nil
+	}
+	b, err := hex.DecodeString(strings.TrimSpace(h))
+	if err != nil || len(b) != 32 {
+		log.Printf("WARNING: AF_SECRET_KEY_NEXT is set but not 32-byte hex — ignored, the store stays under AF_SECRET_KEY")
+		return nil
+	}
+	return b
+}
+
+// NextKeyInUse reports whether the store is sealed under AF_SECRET_KEY_NEXT. The CP reads it
+// beside MigrateKey's state on /healthz: without it, "current" only says the store opens with
+// AF_SECRET_KEY, which is not the home's key while the home is migrating.
+func NextKeyInUse() bool { return nextSecretKey() != nil }
+
+// fallbackSecretKey is the key a store may still be sealed with while it moves to
+// AF_SECRET_KEY_NEXT: AF_SECRET_KEY. nil when there is no NEXT.
+func fallbackSecretKey() []byte {
+	if nextSecretKey() == nil {
+		return nil
+	}
+	return derivedSecretKey()
+}
+
+// openStore decrypts the stored bytes with the sealing key, else with the fallback key.
+// usedFallback reports the second, which means the store still has to be re-sealed.
+func openStore(ct []byte) (plain []byte, usedFallback bool, err error) {
+	key := agentSecretKey()
+	if key == nil {
+		return ct, false, nil
+	}
+	plain, err = aesOpen(key, ct)
+	if err == nil {
+		return plain, false, nil
+	}
+	if fb := fallbackSecretKey(); fb != nil {
+		if p, ferr := aesOpen(fb, ct); ferr == nil {
+			return p, true, nil
+		}
+	}
+	return nil, false, err
+}
+
+// Key states MigrateKey reports (the Agent's /healthz secrets_key). They name a state, never
+// a key or its length.
+const (
+	KeyStateNone       = "none"       // no store yet and no NEXT, or no key (plaintext dev store)
+	KeyStateCurrent    = "current"    // the store opens with the sealing key
+	KeyStateMigrated   = "migrated"   // it opened with AF_SECRET_KEY and is now sealed under NEXT
+	KeyStateDerived    = "derived"    // the store could not be put under NEXT (re-seal or creation failed)
+	KeyStateUnreadable = "unreadable" // neither key opens it; nothing was rewritten
+)
+
+// MigrateKey re-seals the store under AF_SECRET_KEY_NEXT when it is still sealed with
+// AF_SECRET_KEY, under the store lock, and reports where it stands. It never rewrites a store
+// it could not open: the CP cannot see this home, and a guess would destroy credentials.
+func MigrateKey() string {
+	// Unreadable until shown otherwise: "none" lets the CP confirm the home, so it is only
+	// ever the answer of a look made under the lock that found no store. A lock that cannot
+	// be taken (an I/O error, a file system without flock) must not read as "no store".
+	state := KeyStateUnreadable
+	storeMu.Lock()
+	defer storeMu.Unlock()
+	err := withFileLock(func() error {
+		if agentSecretKey() == nil {
+			state = KeyStateNone
+			return nil
+		}
+		ct, err := os.ReadFile(Path())
+		if os.IsNotExist(err) {
+			if nextSecretKey() == nil {
+				state = KeyStateNone
+				return nil
+			}
+			// No store yet, while the home moves to its own key: create an empty one under
+			// NEXT now. Left absent, a writer that holds only AF_SECRET_KEY (an earlier task
+			// still running beside this one, or its git helper) could create one under the
+			// derived key after this report, and a home confirmed on "no store" would then
+			// hold a store its key does not open. An existing store under NEXT is one that
+			// writer refuses to touch.
+			if err := (&Data{Git: map[string]GitEntry{}}).save(); err != nil {
+				state = KeyStateDerived
+				return fmt.Errorf("create the store under the home's key: %w", err)
+			}
+			state = KeyStateCurrent
+			return nil
+		}
+		if err != nil {
+			state = KeyStateUnreadable
+			return err
+		}
+		_, usedFallback, err := openStore(ct)
+		switch {
+		case err != nil:
+			state = KeyStateUnreadable
+			return fmt.Errorf("decrypt secrets: %w", err)
+		case !usedFallback:
+			state = KeyStateCurrent
+			return nil
+		}
+		s, err := load()
+		if err != nil {
+			state = KeyStateDerived
+			return err
+		}
+		if err := s.save(); err != nil {
+			state = KeyStateDerived
+			return fmt.Errorf("re-seal secrets: %w", err)
+		}
+		state = KeyStateMigrated
+		return nil
+	})
+	if err != nil {
+		log.Printf("secrets: credential-store key: %s: %v", state, err)
+	} else if state == KeyStateMigrated {
+		log.Printf("secrets: credential store re-sealed under the home's own key")
+	}
+	return state
 }
 
 // Path is the on-disk location of the store (encrypted or plaintext by key presence).
@@ -415,13 +591,37 @@ func Path() string {
 
 // storeMu serializes this process's access to the store file; the flock below
 // extends that across processes (the git cred helper is a separate binary).
-var storeMu sync.Mutex
+var storeMu = make(ctxMutex, 1)
+
+// ctxMutex is a mutex whose wait can end with a context, so the bounded entry points
+// (LoadContext, UpdateContext) honour their deadline here as well as at the file lock.
+type ctxMutex chan struct{}
+
+func (m ctxMutex) Lock()   { m <- struct{}{} }
+func (m ctxMutex) Unlock() { <-m }
+func (m ctxMutex) LockContext(ctx context.Context) error {
+	select {
+	case m <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ErrLockTimeout
+	}
+}
 
 // withFileLock runs fn while holding an exclusive flock on <store>.lock. The
 // lockfile is separate from the store itself so the atomic rename in Save never
 // replaces the locked inode.
 func withFileLock(fn func() error) error {
-	lockPath := Path() + ".lock"
+	return withFileLockContext(context.Background(), fn)
+}
+
+func withFileLockContext(ctx context.Context, fn func() error) error {
+	return flockedContext(ctx, Path()+".lock", fn)
+}
+
+// flockedContext runs fn under an exclusive flock on lockPath, giving up with
+// ErrLockTimeout when ctx ends first.
+func flockedContext(ctx context.Context, lockPath string, fn func() error) error {
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return err
 	}
@@ -430,11 +630,40 @@ func withFileLock(fn func() error) error {
 		return err
 	}
 	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		return err
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if err != syscall.EWOULDBLOCK && err != syscall.EINTR {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ErrLockTimeout
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
 	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
 	return fn()
+}
+
+// WithLock runs fn while holding an exclusive flock on <store>.<name>.lock, across
+// processes (the agent and the git credential helper are separate binaries). It is a
+// different lock from the store's own, so fn may call Load / Update — but must never be
+// called from inside an Update, or two such callers can deadlock in opposite orders.
+func WithLock(name string, fn func() error) error {
+	return WithLockContext(context.Background(), name, fn)
+}
+
+// ErrLockTimeout is WithLockContext giving up its wait.
+var ErrLockTimeout = errors.New("timed out waiting for the credential store lock")
+
+// WithLockContext is WithLock that stops waiting for the lock when ctx ends. A holder that
+// is stopped or stuck must not hold every other process (the git credential helper runs
+// under git's own patience) behind it.
+func WithLockContext(ctx context.Context, name string, fn func() error) error {
+	return flockedContext(ctx, Path()+"."+name+".lock", fn)
 }
 
 // Update atomically applies fn to the store under the process mutex + file lock:
@@ -442,9 +671,17 @@ func withFileLock(fn func() error) error {
 // the cred helper process) cannot lose each other's changes. Prefer this over a
 // bare Load→modify→Save for any read-modify-write.
 func Update(fn func(*Data) error) error {
-	storeMu.Lock()
+	return UpdateContext(context.Background(), fn)
+}
+
+// UpdateContext is Update whose wait for the store (this process's mutex and the file
+// lock) ends with ctx. Once the lock is held the update itself runs to the end.
+func UpdateContext(ctx context.Context, fn func(*Data) error) error {
+	if err := storeMu.LockContext(ctx); err != nil {
+		return err
+	}
 	defer storeMu.Unlock()
-	return withFileLock(func() error {
+	return withFileLockContext(ctx, func() error {
 		s, err := load()
 		if err != nil {
 			return err
@@ -456,11 +693,16 @@ func Update(fn func(*Data) error) error {
 	})
 }
 
-func Load() (*Data, error) {
-	storeMu.Lock()
-	defer storeMu.Unlock()
+func Load() (*Data, error) { return LoadContext(context.Background()) }
+
+// LoadContext is Load whose wait for the store ends with ctx (ErrLockTimeout).
+func LoadContext(ctx context.Context) (*Data, error) {
 	var s *Data
-	err := withFileLock(func() (lerr error) {
+	if err := storeMu.LockContext(ctx); err != nil {
+		return &Data{Git: map[string]GitEntry{}}, err
+	}
+	defer storeMu.Unlock()
+	err := withFileLockContext(ctx, func() (lerr error) {
 		s, lerr = load()
 		return lerr
 	})
@@ -475,14 +717,15 @@ func load() (*Data, error) {
 	b, err := os.ReadFile(Path())
 	if err != nil {
 		if os.IsNotExist(err) {
+			// A store not yet created is a successful, empty snapshot: Save must still tell
+			// a GitHub connection added after it from one the caller made.
+			s.ghBase, s.ghBaseSet = ghSnap{}, true
 			return s, nil
 		}
 		return s, err
 	}
-	if key := agentSecretKey(); key != nil {
-		if b, err = aesOpen(key, b); err != nil {
-			return s, fmt.Errorf("decrypt secrets: %w", err)
-		}
+	if b, _, err = openStore(b); err != nil {
+		return s, fmt.Errorf("decrypt secrets: %w", err)
 	}
 	if err := json.Unmarshal(b, s); err != nil {
 		return s, err
@@ -490,13 +733,63 @@ func load() (*Data, error) {
 	if s.Git == nil {
 		s.Git = map[string]GitEntry{}
 	}
+	e, ok := s.Git["github.com"]
+	s.ghBase, s.ghBaseSet = ghSnap{ok, e}, true
 	return s, nil
 }
 
+// AdoptGitHub replaces the snapshot's GitHub entry with e, which was read from the store
+// (a renewal's result), and moves the baseline along with it. Assigning s.Git directly
+// would leave the baseline behind, and a later Save would take the newer entry for a
+// change the caller meant and write the old pair over it.
+func (s *Data) AdoptGitHub(e GitEntry) {
+	s.Git["github.com"] = e
+	s.ghBase, s.ghBaseSet = ghSnap{true, e}, true
+}
+
+// Save writes the whole snapshot, so a snapshot loaded before the GitHub connection
+// changed would write the old one back: a spent token pair after a renewal (the next
+// renewal would meet bad_refresh_token), a connection that was replaced (its client id
+// with the new tokens), one that was removed, or one added meanwhile. Inside the lock Save
+// compares the stored GitHub entry with the one this snapshot was loaded with. When the
+// store has moved on and the caller left the connection alone, the stored state wins as a
+// whole — present, absent or replaced — and the caller's cached Login/Email ride along only
+// while the stored entry still carries the account they were read for. A caller that did
+// change the connection (a reconnect, a disconnect) wins. Code that rewrites other fields
+// should still prefer Update.
 func (s *Data) Save() error {
 	storeMu.Lock()
 	defer storeMu.Unlock()
-	return withFileLock(s.save)
+	return withFileLock(func() error {
+		cur, err := load()
+		if err != nil {
+			// The stored file exists and does not open (wrong or half-delivered key, a store
+			// the boot migration left unreadable): writing this snapshot over it would destroy
+			// every credential in it. Update refuses the same way.
+			return err
+		}
+		if s.ghBaseSet {
+			ep, ok := s.Git["github.com"]
+			ce, cok := cur.Git["github.com"]
+			if (ghSnap{ok, ep}).sameConn(s.ghBase) && !(ghSnap{cok, ce}).sameConn(s.ghBase) {
+				if !cok {
+					delete(s.Git, "github.com")
+				} else {
+					if ok && s.ghBase.Exists && s.ghBase.E.Login != "" &&
+						ce.Login == s.ghBase.E.Login && ce.Email == s.ghBase.E.Email {
+						ce.Login, ce.Email = ep.Login, ep.Email
+					}
+					s.Git["github.com"] = ce
+				}
+			}
+		}
+		if err := s.save(); err != nil {
+			return err
+		}
+		e, ok := s.Git["github.com"]
+		s.ghBase, s.ghBaseSet = ghSnap{ok, e}, true
+		return nil
+	})
 }
 
 // save writes the store atomically (tmp + rename): every git token, OAuth,
@@ -516,13 +809,37 @@ func (s *Data) save() error {
 			return err
 		}
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(p), ".secrets-*")
+	return writeFileDurably(p, b)
+}
+
+// writeTemp is the temp-file write, a seam for the tests that make it fail or fall short.
+var writeTemp = func(f *os.File, b []byte) (int, error) { return f.Write(b) }
+
+// syncTemp is the temp file's fsync, the same kind of seam.
+var syncTemp = func(f *os.File) error { return f.Sync() }
+
+// writeFileDurably replaces p with b so that a crash or a failed write leaves either the old
+// file or the complete new one: the temp file is written in full and fsynced before the
+// rename, and the directory is fsynced after it so the rename itself survives a host crash.
+// Any error before the rename leaves p as it was. Without the syncs a re-seal could report
+// success while the only copy of the store sat in an unflushed inode.
+func writeFileDurably(p string, b []byte) error {
+	dir := filepath.Dir(p)
+	tmp, err := os.CreateTemp(dir, ".secrets-*")
 	if err != nil {
 		return err
 	}
 	tmpName := tmp.Name()
-	if err := tmp.Chmod(0o600); err == nil {
-		_, err = tmp.Write(b)
+	err = tmp.Chmod(0o600)
+	if err == nil {
+		var n int
+		n, err = writeTemp(tmp, b)
+		if err == nil && n != len(b) {
+			err = io.ErrShortWrite
+		}
+	}
+	if err == nil {
+		err = syncTemp(tmp)
 	}
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
@@ -535,7 +852,12 @@ func (s *Data) save() error {
 		os.Remove(tmpName)
 		return err
 	}
-	return nil
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 func aesSeal(key, plaintext []byte) ([]byte, error) {

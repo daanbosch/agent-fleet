@@ -63,6 +63,9 @@ type browserPageResponse struct {
 	URL   string `json:"url"`
 	Title string `json:"title,omitempty"`
 	State string `json:"state"`
+	// Reason says why a target-unreachable page failed when the Agent could tell
+	// (preview_not_http, preview_tls); absent for nothing listening.
+	Reason string `json:"reason,omitempty"`
 }
 
 func normalizeBrowserViewport(v browserViewportRequest) (browserViewport, error) {

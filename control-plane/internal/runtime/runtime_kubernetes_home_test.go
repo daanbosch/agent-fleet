@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -12,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -109,6 +112,69 @@ func TestHomeWipeScriptCarriesOutEachGenerationOnce(t *testing.T) {
 		b, _ := os.ReadFile(filepath.Join(record, k))
 		if strings.TrimSpace(string(b)) != v {
 			t.Errorf("record %s = %q, want %s", k, b, v)
+		}
+	}
+}
+
+// A read-only directory (Go's module cache is mode 0555) is removed by both wipes, one that
+// is not even searchable too, and a link to one outside the home is neither followed nor
+// changed; a directory whose owner write is set but whose read or search is missing is
+// opened as well (#1546).
+func TestHomeWipeScriptRemovesReadOnlyDirectories(t *testing.T) {
+	for _, c := range []struct {
+		name         string
+		clean, repos string
+		under        string
+	}{
+		{"Clean home", "1", "0", "go/pkg/mod/m@v1"},
+		{"Recreate", "0", "1", "repos/go/pkg/mod/m@v1"},
+	} {
+		for _, subMode := range []os.FileMode{0o000, 0o300, 0o200, 0o600} {
+			t.Run(fmt.Sprintf("%s %04o", c.name, subMode), func(t *testing.T) {
+				home, record := homeFixture(t)
+				outside := filepath.Join(t.TempDir(), "outside")
+				if err := os.MkdirAll(outside, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(outside, 0o555); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(outside, 0o755) })
+				dir := filepath.Join(home, c.under)
+				if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "sub", "f.go"), []byte("x"), 0o444); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, filepath.Join(dir, "out")); err != nil {
+					t.Fatal(err)
+				}
+				// Read-only from the cache entry up to the wipe's target; the innermost one lacks read and/or search with owner write possibly set.
+				parts := strings.Split(c.under, "/")
+				dirs := []string{filepath.Join(dir, "sub")}
+				for i := len(parts); i >= 1; i-- {
+					dirs = append(dirs, filepath.Join(append([]string{home}, parts[:i]...)...))
+				}
+				for k, d := range dirs {
+					mode := os.FileMode(0o555)
+					if k == 0 {
+						mode = subMode
+					}
+					if err := os.Chmod(d, mode); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := runScript(t, homeWipeScript(home, record), "AF_WIPE_CLEAN="+c.clean, "AF_WIPE_REPOS="+c.repos); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Lstat(filepath.Join(home, parts[0])); !os.IsNotExist(err) {
+					t.Fatalf("%s is still there: %v", parts[0], err)
+				}
+				if fi, err := os.Stat(outside); err != nil || fi.Mode().Perm() != 0o555 {
+					t.Fatalf("the directory behind the link changed: %v, %v", fi, err)
+				}
+			})
 		}
 	}
 }
@@ -248,7 +314,7 @@ func TestKubeWipeHomeMarksTheStatefulSet(t *testing.T) {
 // shape as the agent, with the generations the marks hold.
 func TestKubeAddHomeWipe(t *testing.T) {
 	f := &kubeFactory{cfg: &kubeConfig{namespace: "ns", image: "img:1", serviceAccount: "default"}}
-	rt := f.New(Workspace{ContainerName: "af-ws-x"}, "", nil).(*kubeRuntime)
+	rt := f.New(Workspace{ContainerName: "af-ws-x"}, SecretKeys{}, nil).(*kubeRuntime)
 	tmpl := rt.podTemplate("img:1@sha256:"+strings.Repeat("0", 64), 2, testEpoch)
 	rt.addHomeWipe(&tmpl, map[string]string{})
 	if len(tmpl.Spec.InitContainers) != 1 || tmpl.Spec.InitContainers[0].Name != kubeLayoutContainer {
@@ -658,12 +724,6 @@ func TestKubeHomeLayoutRefusesAnAmbiguousClaim(t *testing.T) {
 // layout is ambiguous.
 func TestKubeEraseScriptOnAnEarlierLayout(t *testing.T) {
 	vol, record := layoutVolume(t)
-	// Out of this test: rm as dev cannot remove a read-only directory's contents (#1546).
-	for _, d := range []string{"go", "go/pkg/mod/m@v1"} {
-		if err := os.Chmod(filepath.Join(vol, d), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
 	home := filepath.Join(vol, kubeHomeSubPath)
 	sh := homeLayoutScript(vol, record) + "\n" + homeEraseScript(home, record)
 	if err := runScript(t, sh, "AF_WIPE_CLEAN=1", "AF_WIPE_REPOS=0"); err != nil {
@@ -879,7 +939,7 @@ func TestKubeRollbackScriptResumes(t *testing.T) {
 // alone mounts the claim's root; the agent never sees the root.
 func TestKubePodMountsTheHomeThroughTheLayout(t *testing.T) {
 	f := &kubeFactory{cfg: &kubeConfig{namespace: "ns", image: "img:1", serviceAccount: "default"}}
-	rt := f.New(Workspace{ContainerName: "af-ws-x"}, "", nil).(*kubeRuntime)
+	rt := f.New(Workspace{ContainerName: "af-ws-x"}, SecretKeys{}, nil).(*kubeRuntime)
 	tmpl := rt.podTemplate("img:1@sha256:"+strings.Repeat("0", 64), 2, testEpoch)
 	rt.addHomeWipe(&tmpl, map[string]string{kubeAnnWipePrefix + "repos": "1"})
 	homeMounts := func(c kContainer) []kVolumeMount {
@@ -1155,13 +1215,69 @@ func TestKubeEraseHomeWaitsForAnEvictedPodToStop(t *testing.T) {
 	f.set(podsPathX, 200, podListJSON())
 	f.set(homeClaimGetPath, 200, `{"metadata":{"name":"af-ws-x-home"},"spec":{"resources":{}}}`)
 	f.set("GET "+erasePodPath, 200, erasePodJSON("Failed", eraseRunning))
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	// The deadline is delivered by a signal, not a clock: after a few polls the next read of
+	// the erase pod expires the context while that request is in flight. A wall-clock
+	// deadline raced the poll and made the outcome depend on where it landed.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	var reads atomic.Int32
+	f.onRequest = func(r *http.Request) {
+		if r.Method+" "+r.URL.Path != "GET "+erasePodPath || reads.Add(1) < 4 {
+			return
+		}
+		cancel()
+		<-r.Context().Done()
+	}
 	err := rt.EraseHome(ctx)
 	if err == nil || !strings.Contains(err.Error(), "still running") {
 		t.Fatalf("EraseHome = %v, want still running", err)
 	}
+	if reads.Load() < 4 {
+		t.Fatalf("erase pod read %d times, want it polled before the deadline", reads.Load())
+	}
 	if f.saw("DELETE "+erasePodPath) || f.saw("POST /api/v1/namespaces/ns/pods") {
 		t.Fatalf("EraseHome deleted or replaced a pod that may still run: %v", f.seen)
+	}
+}
+
+type eraseRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f eraseRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// cancelOnRead is a response body that cancels the caller's context as it is read.
+type cancelOnRead struct {
+	io.Reader
+	cancel context.CancelFunc
+}
+
+func (b cancelOnRead) Read(p []byte) (int, error) { b.cancel(); return b.Reader.Read(p) }
+func (cancelOnRead) Close() error                 { return nil }
+
+// A poll that fails for a reason of its own keeps that error when the deadline passes in the
+// same moment: the Forbidden stays visible to errors.As and to the audit record.
+func TestKubeEraseHomeKeepsAPollErrorThatIsNotTheDeadline(t *testing.T) {
+	rt, f := fakeKubeRuntime(t)
+	f.set(stsPathX, 200, stsJSON(0, 6, 6, 0, "r", "2"))
+	f.set(podsPathX, 200, podListJSON())
+	f.set(homeClaimGetPath, 200, `{"metadata":{"name":"af-ws-x-home"},"spec":{"resources":{}}}`)
+	f.set("GET "+erasePodPath, 200, erasePodJSON("Failed", eraseRunning))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	forbidden := `{"kind":"Status","status":"Failure","reason":"Forbidden","message":"no","code":403}`
+	real := rt.c.hc.Transport
+	var reads atomic.Int32
+	rt.c.hc.Transport = eraseRoundTripper(func(r *http.Request) (*http.Response, error) {
+		if r.Method+" "+r.URL.Path != "GET "+erasePodPath || reads.Add(1) < 3 {
+			return real.RoundTrip(r)
+		}
+		return &http.Response{StatusCode: 403, Header: http.Header{}, Request: r,
+			Body: cancelOnRead{strings.NewReader(forbidden), cancel}}, nil
+	})
+	err := rt.EraseHome(ctx)
+	if kubeErrCode(err) != 403 {
+		t.Fatalf("EraseHome = %v, want the 403 kept", err)
+	}
+	if strings.Contains(err.Error(), "still running") {
+		t.Fatalf("EraseHome = %v, a Forbidden was reported as the deadline", err)
 	}
 }

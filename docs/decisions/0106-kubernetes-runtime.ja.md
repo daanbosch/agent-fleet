@@ -673,3 +673,21 @@ runbook の "The load balancer" も同じことを書いている。
 ## 注記（2026-10-04）— このランタイムでは af MCP サーバーがブラウザツールを一覧に出さない（#1614）
 
 7 つのブラウザツール（`list_chromium_targets` … `set_chromium_control_mode`）は af MCP サーバーの `tools/list` に残り、呼ばれて初めて断っていた。Agent は自分が構成するすべての `mcp-stdio`（全 kind のセッション側 af サーバーとアシスタントのもの）に `--browser-unavailable <runtime>` を渡し、サーバーはそれらのツールを `tools/list` から外す。それでも名前で呼ばれたときは `browser_unavailable` を返す。変数ではなく argv で渡すのは、変数がすべてのエージェントの MCP 子プロセスに届くわけではないからである（codex は既定で環境を渡さず、muse・cursor・kiro・copilot には明示した環境だけが渡る）。
+
+## 注記（2026-10-09）— ecs-ec2 が `SYS_ADMIN` を足すようになった（#1927）
+
+上の「クラウドの配備先では能力を足さない」の行は、ecs-ec2 についてはもう成り立たない。
+スロットの Docker の既定 seccomp プロファイルは `SYS_ADMIN` なしではユーザー名前空間を断るため、
+ecs-ec2 では Chromium が起動時に落ちるのにブラウザ機能は使えると案内されていた。ecs-ec2 の
+タスク定義は、docker と同じく agent コンテナに `SYS_ADMIN` を足す。スロット側も合わせて固める
+（`user.max_user_namespaces=0`、ホームを `nosuid,nodev` でマウント。[07 §7.2](../build/07-security.ja.md)）。
+Fargate は足せないので、ecs ランタイムは kubernetes と同じく `BrowserUnavailable` を名乗る。
+この注記は決定 7 など、どの決定も変えない。
+
+## 注記（2026-10-09）— ホームの消去は先に読み取り専用ディレクトリを書込み可能にする（#1546）
+
+決定 4 は消去を `dev` で実行するが、`rm -rf` は所有者の書込み権がないディレクトリ（Go のモジュール
+キャッシュは 0555）の中身を消せない。Clean home は `Permission denied` で失敗し、init コンテナが
+Pod を止めていた。いまは両方の消去（init コンテナと erase Pod の Clean home、Recreate の `~/repos`）が、
+消す対象に `find … -type d ! -perm -u+rwx -exec chmod u+rwx {} \;` を先に当てる。保持する名前は除き、
+リンクは辿らず、1 つのファイルシステムの中に限る。決定 4 そのものは変えない。

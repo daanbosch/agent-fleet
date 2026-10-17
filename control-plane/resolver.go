@@ -385,17 +385,16 @@ func (m *manager) buildResolved(ctx context.Context, ident store.Identity, mv st
 			return nil, internalErr(err)
 		}
 	}
-	dekHex, err := m.resolveDEK(ctx, ws, ident.UserKey)
+	keys, err := m.resolveDEK(ctx, ws, ident.UserKey)
 	if err != nil {
 		return nil, internalErr(err)
 	}
 	// Resolve the per-workspace size axes (0 = deployment default) so the factory can
 	// size the next container start; the built runtime captures them by value.
-	ws.MemBytes, ws.CPUUnits, ws.DiskGB = m.resolveWorkspaceSize(ctx, ws)
-	ws.SlotClass, _ = m.resolveSlotClass(ctx, ws)
+	ws = m.withResolvedSize(ctx, ws)
 	env := m.workspaceExtraEnv(ctx, ws)
 	gitEpoch := m.gitEpochOfEnv(ws.MembershipID, env)
-	rt := m.runtimeFor(ws, dekHex, env...)
+	rt := m.runtimeFor(ws, keys, env...)
 	m.mu.Lock()
 	m.rts[mv.MembershipID] = cachedRT{rt: rt, ws: ws, gitEpoch: gitEpoch}
 	m.mu.Unlock()

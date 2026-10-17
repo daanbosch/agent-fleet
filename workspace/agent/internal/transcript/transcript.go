@@ -48,6 +48,9 @@ type Part struct {
 	// and cleared once persisted. kind=tool (Tool="view_image") only.
 	ViewImageCallID string   `json:"-"`
 	ViewImageData   []string `json:"-"`
+	// CallID is kind=tool's own tool_use id, for a parser that pairs the call with its
+	// result only on request (claude.CollectAllTurns, the Markdown export). Never sent.
+	CallID string `json:"-"`
 }
 
 // Edit is one before/after pair for an edit-family tool, so the Console can render

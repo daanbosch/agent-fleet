@@ -3,7 +3,7 @@
 English | [日本語](0005-envelope-custodian.ja.md)
 
 - Status: decided (P3-3)
-- Follow-ups: #1645, #1646
+- Follow-ups: #1645, #1646, #1956
 - See also: [history/p3-3-envelope-crypto](../log/p3-3-envelope-crypto.md) / [build/07 §7.6 Secrets and envelope encryption](../build/07-security.md#76-secrets-and-envelope-encryption) (formerly security §4.4) / [Roadmap §12.3](../log/roadmap.md#123-tos-と分離の留意自社ホスト前提)
 
 ## Context
@@ -95,3 +95,189 @@ Remaining: random DEKs for workspaces, with a way to re-encrypt an existing `sec
 headers, sign-in client secrets, engine tokens, handoffs, shares) under KMS (#1645);
 per-tenant KMS keys; Vault transit. KMS key rotation is AWS's automatic rotation (`EnableKeyRotation`), which
 needs nothing from the Control Plane.
+
+## Addendum (2026-10-10) — re-sealing legacy values (#1645)
+
+The 2026-10-04 addendum stands. `af-cp rewrap-keys` (`control-plane/rewrap_keys.go`) is the
+one-shot rewrite it left for later: an operator runs it once the Control Plane is on
+`AF_KEY_CUSTODIAN=kms`, and every value without the `kms1:` prefix is opened by the local
+custodian and sealed again by KMS. Format dispatch stays as it is: the command only changes
+which format a row is in.
+
+- **Scope.** The six tables in `store.sealedColumns` (`wrapped_dek`, `mcp_server`,
+  `tenant_idp`, `tenant_git_oauth`, `session_share_proposal`, `session_handoff_offer`) and the
+  three settings rows of the engine tokens (Hugging Face, Civitai, the ComfyUI record). Two
+  tests keep the list complete: one fails on a schema column that looks sealed (`key_ref`,
+  `*_enc`, `ciphertext`) and is not listed, the other on any `Wrap` / `sealTenantSecret` call in
+  the module that is not mapped to a target. Values stored unsealed (empty key ref) are counted
+  and left alone.
+- **Per row, fail closed.** Open with the master key, seal with KMS, open the new value through
+  KMS with the data-key cache off, and only then write it with a compare-and-swap on the old
+  value. A KMS error, a refused `Decrypt` or a read-back mismatch stops the run before the row is
+  written; a row that changed meanwhile is left to the newer value. Every row is therefore in
+  one of the two formats at every moment, and both open. `--dry-run` counts without calling KMS.
+- **Exit `0` comes from a final read-only pass**, for `--dry-run` and a real run alike: no
+  legacy value and no unreadable row when the command last looked. It is not a lock. Control
+  Plane edits that carry a stored value forward (an IdP or Git OAuth app saved without its
+  secret, the ComfyUI panel saved without its key) write back what they read, so one that read a
+  legacy value before the swap can restore it; the final pass catches that during the run, not
+  after it. The guide therefore says to run it while no administrator is editing and to confirm
+  with `--dry-run`. Re-sealing in those edit paths instead was left out to keep the change to
+  the command.
+- **`AF_MASTER_KEY` can still not be dropped.** It derives the workspace DEK
+  (`HMAC(master, userKey)`) — the command moves `wrapped_dek` to KMS, but the DEK inside is still
+  derivable, so credential stores are still not crypto-shredded (#1646) — and every bridge
+  signing key, and `kms` without it stops the Control Plane at boot. What the rewrap does buy:
+  once a `--dry-run` exits `0` with no edit in flight, disabling the KMS key shreds every
+  custodian-sealed value, including the ones stored before the switch, and the master key no
+  longer opens them.
+
+Not verified against a real KMS key: the tests use an in-memory KMS. The first run on a real
+deployment should be a `--dry-run`.
+
+## Addendum (2026-10-10) — a random credential-store key per home, part A (#1646)
+
+The decision's "a `wrapped_dek` structure that lets the DEK be rotated to a random one in
+future" is taken up, opt-in. The derived DEK and every decision above stand.
+
+- **Per home, not per workspace.** `home_dek` (migration 0090 / pg 0075) holds one random key
+  per membership, sealed by the custodian under the tenant key ref. `DeleteWorkspace` drops
+  `wrapped_dek` while the home may be kept, so a random key that went with the workspace row
+  would shred a kept home by accident. Nothing deletes a row yet, Destroy included: an adapter's
+  Destroy does not prove the whole home is gone (ecs without the home task removes only the
+  access points, and a retry after a partial failure then reports no leftovers). A kept row is
+  an unused sealed key, never an unreadable store. Follow-ups: #1956.
+- **Opt-in, kms only.** `AF_WORKSPACE_DEK=random`, refused at boot unless
+  `AF_KEY_CUSTODIAN=kms`: under the local custodian the key would be wrapped by a
+  master-derived KEK and buy nothing. A home that has a key keeps getting it after the flag is
+  turned off, because its store may already be sealed under it.
+- **Migration without guessing.** The CP cannot see a kept home's `secrets.enc`, so it does not
+  decide which key a store uses. While a home is `migrating` it injects both: `AF_SECRET_KEY`
+  stays the derived key and `AF_SECRET_KEY_NEXT` is the home's key, through each runtime's
+  secret channel. The Agent opens with either, re-seals under NEXT at boot (temp file + rename
+  under the store lock), and never rewrites a store neither key opens. The naming is chosen
+  for version skew: an Agent that predates NEXT ignores it and keeps the store on the derived
+  key, so a new CP with an old workspace image loses nothing until the store has moved.
+  `/healthz` reports `secrets_key` (a state name, never a key or length).
+- **Fail closed.** A custodian that cannot seal or open the home's key fails the start; it is
+  never started on the derived key alone. The keys are resolved again at every real start, not
+  taken from the memoized runtime.
+
+Limits, stated plainly:
+
+- Homes not started since the flag was turned on stay derived and are **not** shredded by
+  disabling the KMS key; `af-cp home-dek-status` counts them. Snapshots and backups taken
+  before a store moved hold the derived-key file.
+- Disabling the key is not by itself a shred of a moved store. It means the master-derived
+  key no longer opens the store and, once the data-key cache has expired, the CP can no longer
+  unwrap the home key, so it refuses the next start (within the TTL a start can still
+  succeed). Copies of the home key already handed out still open the store, each under
+  something other than the custodian key: a running workspace's environment, and the
+  runtime's own copy, which outlives a stop (docker container env, the Kubernetes Secret, ECS
+  SSM SecureStrings under the account's SSM key). Shredding a home's store while keeping the
+  home needs those removed too; nothing does that automatically. Destroy is not that
+  procedure: it removes them and tries to remove the home, and on ecs without the home task it
+  leaves the home's EFS directories.
+- The Agent's `Save` now refuses to write over a store it cannot open (the same rule `Update`
+  already had), so a member whose store is unreadable cannot overwrite it until it is removed.
+- Part A does not stop injecting the derived key; it no longer opens a moved store, and the
+  confirm step that marks a home `random` and stops it is part B.
+- After a store moved, going back to a CP without the home key, or losing `home_dek`, leaves
+  it unreadable; an Agent of this version then refuses every write to it, reconnecting
+  included. An Agent from before this version has no such guard (its `Save` writes after a
+  failed read), so a workspace image from before this version must not be started on a moved
+  home: it can write an empty store over it. The guide says to restore the CP version,
+  `home_dek` and the KMS key before any workspace starts there, and only to give the
+  credentials up by stopping the workspace and moving the unreadable `secrets.enc` aside by
+  hand. Nothing removes or overwrites it automatically.
+- Verified by unit tests with fakes only. A kept home recreated on real ECS/EFS, and a
+  downgrade, have not been run. The ECS stacks do not expose the flag yet.
+
+## Addendum (2026-10-10) — the home key's confirm step, part B (#1646)
+
+Part A stands. This adds the step that stops handing out the derived key once a home's store
+has moved. Migration 0091 / pg 0076 adds `home_dek.confirm_epoch` (below).
+
+- **What confirms.** After a start that injected `AF_SECRET_KEY_NEXT`, the CP polls the new
+  Agent's `/healthz` (15 minutes at most). Only a report that the Agent sealed under NEXT
+  (`secrets_key_next: true`, added for this) and found `migrated` or `current` marks
+  the home `random`. Without that flag, `current` only says the store opens with
+  `AF_SECRET_KEY`, so an Agent of part A, or one that ignored a malformed NEXT, never
+  confirms. The update is conditioned on the sealed key and on `migrating`, so a report about
+  another key, or a second report, changes nothing. `unreadable` and `derived` are logged and
+  change nothing, and nothing is deleted. `none` does not confirm: "no store at boot" says
+  nothing about a store a derived-key writer (an earlier task still running, its git helper)
+  could create afterwards. An Agent with NEXT therefore creates an empty store under NEXT
+  under the lock when there is none and reports `current`; a writer with the derived key alone
+  then finds a store it cannot open and refuses to write it (an Agent of part A or later; one
+  from before part A has no such guard, as above). A lock it cannot take reads as
+  `unreadable`.
+- **Whose report.** The endpoint does not identify the Agent: Service Connect can route to a
+  task still draining from an earlier start, and a native port can be another home's by now.
+  Each start of a home with a key carries a fresh nonce (`AF_HOME_KEY_START`, plain env, not a
+  secret), the Agent echoes it as `secrets_key_start`, and the CP waits past any report without
+  it. The poll does not follow redirects. A member who controls their own workspace can fake
+  the report; the only home that harms is their own.
+- **Remigrate fence.** `--remigrate` bumps `confirm_epoch`, and a confirm must carry the epoch
+  its start read. Without it a report taken before the remigrate would match membership, key
+  and scheme again and undo the remigrate from any replica.
+- **After it.** A `random` home starts with `AF_SECRET_KEY` = the home key, no NEXT, and no
+  derived key (its `wrapped_dek` row is not even opened). On ECS that start deletes the
+  `secret-key-next` parameter. A running container keeps both keys in its environment until
+  it restarts.
+- **What has to hold across failures.** The confirm is idempotent and keyed on the stored
+  ciphertext and epoch: a CP that restarts during the wait leaves the home `migrating`, and a
+  later start confirms it. Concurrent starts are serialized per workspace as before, and
+  replicas racing to confirm hit the same conditional update.
+- **Going back.** A CP of part A after a confirm hands out both keys again, which still opens
+  the store. A CP from before part A cannot open it (members reconnect after the recovery the
+  guide describes), and an Agent from before part A must not be started on a moved home (its
+  `Save` can overwrite it). A copy restored from before the move is sealed under the derived
+  key, which a confirmed home no longer receives: the workspace reports `unreadable` and
+  refuses to write. `af-cp home-dek-status --remigrate <membership-id>` puts the home back to
+  `migrating`, so its next start re-seals the restored store.
+
+Verified by unit tests with fakes (an httptest Agent and an in-memory KMS) only. Real ECS/EFS
+starts, a draining task's report, a snapshot restore and a real KMS key have not been run.
+
+## Addendum (2026-10-14) — dropping a home's key once its home is proven gone (#1956)
+
+The parts above say nothing deletes a `home_dek` row. This changes that for one case and
+leaves the rest as it was; the format, the confirm step and the custodian are untouched. No
+migration.
+
+- **The shred.** Destroying a home was meant to end its data for good, but its random key lived
+  on, so a surviving copy of the store stayed openable. A `home_dek` row is now deleted when
+  Destroy has finished, the workspace row is gone, and the runtime **proves** the home gone.
+  The proof is a separate port (`runtime.ProveHomeGone`: gone / present / unknown, unknown
+  being the zero value), asked after the destroy under the membership's lifecycle lease. It is
+  never derived from "Destroy returned no leftovers", which PR #1955 showed to be empty on
+  `ecs` without the home task. `docker` and `native` can say present but never gone: a missing
+  directory is also what a detached volume's empty mountpoint or a mistaken `WS_DATA` looks
+  like, so their keys go through the operator path. `kubernetes` and `ecs`/`ecs-ec2` answer only
+  from the Destroy of the same runtime value (the StatefulSet deleted after the inventory showed
+  every claim and volume gone; the EFS home task exiting 0 with every access point rooted at a
+  directory the task removes), because the Control Plane cannot list volumes back or mount EFS.
+  An access point rooted elsewhere (or nowhere) is no longer deleted by Destroy, so that a retry
+  cannot forget it and prove the home gone; it is reported on every Destroy until an operator
+  deals with the directory. A fresh runtime value, such as an orphan sweep would build, answers
+  unknown.
+- **The delete is conditional and fenced**: in one transaction it locks the membership row
+  (`FOR UPDATE` on Postgres, which a workspace insert's foreign key also needs), checks that the
+  destroy's lifecycle lease token is still the stored, unexpired one, and then deletes by the row
+  read (sealed key, confirm epoch), scheme `random` and no workspace row for the membership. A
+  destroy that lost its lease keeps the key. The operator removal takes the same lock and
+  refuses while any lease on the membership is live.
+  A re-created home, a remigrate and a re-mint therefore cannot be undone by a stale decision.
+  A row still `migrating` is never deleted automatically, since its confirm may only have been
+  lost while the store is already re-sealed; that leaves the `migrating` probe rows of a golden
+  bake, for the operator.
+- **The operator.** `af-cp home-dek-status --orphans` lists keys no workspace row names
+  (a candidate only: a home can outlive its workspace row), and
+  `--remove-orphan <membership-id> --force` removes one. The command has no runtime, so
+  `--force` is the operator's statement that the home is gone; it still refuses a key a
+  workspace names.
+
+Verified by unit tests (SQLite and Postgres for the store; fakes for the runtimes). No real ECS,
+EFS, EBS, EKS or KMS run: `ecs`, `ecs-ec2` and `kubernetes` proofs are unverified on a real
+deployment.

@@ -89,7 +89,7 @@ describe("SessionRow link line", () => {
     await render({ ports: [5173, 7700, 8080] });
     // 7700 is the Agent's own port, which the browser pane refuses.
     expect(ports().map((b) => b.textContent)).toEqual([":5173", ":8080"]);
-    expect(ports()[0].title).toBe(t("srow.port_title", { port: 5173 }));
+    expect(ports()[0].title).toBe(t("portopen.title_pane", { port: 5173 }));
     await act(async () => ports()[0].click());
     expect(openTarget).toHaveBeenCalledWith({ content: { kind: "browser", port: 5173, path: "/" } });
     await act(async () => {
@@ -102,7 +102,7 @@ describe("SessionRow link line", () => {
     useWorkspaceStore.setState({ browserUnavailable: "kubernetes" });
     const open = vi.spyOn(window, "open").mockReturnValue(null);
     await render({ ports: [5173] });
-    expect(ports()[0].title).toBe(t("srow.port_title_preview", { port: 5173 }));
+    expect(ports()[0].title).toBe(t("portopen.title_light", { port: 5173 }));
     await act(async () => ports()[0].click());
     expect(openTarget).not.toHaveBeenCalled();
     expect(open).toHaveBeenCalledWith(expect.stringMatching(/5173\/$/), "_blank", "noopener");

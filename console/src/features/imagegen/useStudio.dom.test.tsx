@@ -9,12 +9,15 @@ import type { StudioPatch, StudioWire } from "./wire.ts";
 const calls: { body: StudioPatch; ifMatch: string }[] = [];
 let putAnswers: ((body: StudioPatch) => { status: number; studio?: StudioWire })[] = [];
 let current: StudioWire;
+// When set, patchStudio answers only after this resolves — a save still in flight.
+let patchGate: Promise<void> | null = null;
 
 vi.mock("./api.ts", () => ({
   getStudio: async () => current,
   patchStudio: async (_id: string, body: StudioPatch, ifMatch: string) => {
     calls.push({ body, ifMatch });
     const next = putAnswers.shift();
+    if (patchGate) await patchGate;
     if (next) return next(body);
     // Apply the merge patch the way the Agent does (params one level deep), so the answer
     // carries what was saved.
@@ -71,6 +74,7 @@ beforeEach(() => {
   localStorage.clear();
   calls.length = 0;
   putAnswers = [];
+  patchGate = null;
   current = {
     id: ID,
     title: "t",
@@ -122,6 +126,47 @@ describe("useStudio: 保存", () => {
     await act(async () => st.patchForm({ sampler: "" }));
     await tick(600);
     expect(calls[0].body.draft).toEqual({ params: { steps: 30, cfg: 7, sampler: null } });
+  });
+});
+
+describe("useStudio: a save answered after the pane is gone", () => {
+  const unanswered = async () => {
+    await mount();
+    let release!: () => void;
+    patchGate = new Promise<void>((r) => (release = r));
+    putAnswers.push(() => ({ status: 0 }));
+    await act(async () => st.patchForm({ prompt: "mine" }));
+    await tick(600);
+    expect(calls).toHaveLength(1);
+    await act(async () => root.unmount());
+    return release;
+  };
+
+  it("is still retried in a live window", async () => {
+    const release = await unanswered();
+    release();
+    await tick(2100);
+    expect(calls).toHaveLength(2);
+    expect(calls[1].body.draft).toEqual({ prompt: "mine" });
+    root = createRoot(host); // afterEach unmounts again
+  });
+
+  it("arms nothing, and does not throw, once `window` is gone", async () => {
+    const release = await unanswered();
+    const rejections: unknown[] = [];
+    const onRejection = (e: unknown) => rejections.push(e);
+    process.on("unhandledRejection", onRejection);
+    vi.stubGlobal("window", undefined);
+    try {
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.unstubAllGlobals();
+      process.off("unhandledRejection", onRejection);
+    }
+    expect(rejections).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+    root = createRoot(host);
   });
 });
 

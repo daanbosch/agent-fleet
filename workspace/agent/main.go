@@ -33,6 +33,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/mcpreg"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/mcpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/memoryx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/secrets"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/sessionx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/statemig"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/status"
@@ -122,6 +123,10 @@ func serve() {
 			log.Printf("state: migration: %v", err)
 		}
 	}
+	// Re-seal the credential store under the home's own key when the CP sent one, before
+	// anything below reads or writes the store.
+	secretsKeyState, secretsKeyNext = secrets.MigrateKey(), secrets.NextKeyInUse()
+	secretsKeyStart = os.Getenv("AF_HOME_KEY_START")
 	// Fold any pre-A3 plaintext credential files into the encrypted store.
 	migrateLegacySecrets()
 	// Seed the CP-injected internal git token (docs/reference/internal-git-provider)
@@ -151,6 +156,11 @@ func serve() {
 	// destroyed anything the user had added to those files on every container start.
 	// Sessions are started by us, so nothing can read a half-composed file.
 	reconcileAgentInstructions()
+	// opencode 2 starts a shared background service that outlives, and takes the environment of,
+	// the first command that needs it; keep every command on a private server instead.
+	if err := opencode.EnsureServiceDisabled(); err != nil {
+		log.Printf("opencode service: %v (left as is)", err)
+	}
 	// Mint this boot's name for af's own MCP server, BEFORE anything materializes a
 	// config. A repository's project-scoped MCP config beats af's user-scope one on
 	// every kind but claude (docs/log/48 §8.4), so a repo that happens to define a server
@@ -223,6 +233,11 @@ func serve() {
 	if n := sessionx.RecoverPendingInitialPrompts(); n > 0 {
 		log.Printf("initial-prompt: %d pending delivery(ies) from the previous process marked unknown", n)
 	}
+	// A move the previous process committed but did not finish (ADR 0115 decision 11.5): its
+	// source may still be running and its peer messages still spooled.
+	if n := sessionx.RecoverMoves(); n > 0 {
+		log.Printf("move: finished %d move(s) the previous process had committed", n)
+	}
 	// The image studios: install the store, settle a binding written on one side only, and give
 	// every press the previous process left without a result one (ADR 0100 decisions 2 and 9).
 	imagegen.StartStudios()
@@ -281,6 +296,9 @@ func serve() {
 	// (memory_trigger.go), committing only when the changes have gone quiet and the
 	// session in question is not running. AF_MEMORY_SNAPSHOT=off disables it.
 	memoryx.StartMemorySnapshotLoop()
+	// The Agent memory switch's import / write-back of claude's native memory (#1972). Level
+	// triggered: starting it is what resumes a run a restart interrupted.
+	memoryx.AutoSyncStart()
 
 	// Automatic recovery of a claude session stopped by a rate limit (docs/log/47 §4-4):
 	// dismiss the menu on its default ("wait for the reset") and hand the CP a one-shot
@@ -325,8 +343,18 @@ func serve() {
 	}
 }
 
+// secretsKeyState is secrets.MigrateKey's answer at boot, secretsKeyNext whether the store is
+// sealed under AF_SECRET_KEY_NEXT, and secretsKeyStart the nonce of the CP start that booted
+// this Agent (AF_HOME_KEY_START), which ties the report to that start; all set before the
+// listener serves.
+var (
+	secretsKeyState = secrets.KeyStateUnreadable
+	secretsKeyNext  bool
+	secretsKeyStart string
+)
+
 func handleHealth(w http.ResponseWriter, r *http.Request) {
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "secrets_key": secretsKeyState, "secrets_key_next": secretsKeyNext, "secrets_key_start": secretsKeyStart})
 }
 
 // --- small helpers ---

@@ -1,7 +1,7 @@
 # JSON key sets of the DTOs the Console and CP read. Generated - do not edit by hand.
 # Update: cd workspace/agent && go test -run TestWireShapeGolden -update-wire-golden .
 # Format: <type>.<key path> <JSON type>[,omitempty] ([]=array / raw=passed-through JSON)
-# count: 112
+# count: 142
 Repo.ahead number
 Repo.behind number
 Repo.branch string
@@ -55,6 +55,31 @@ resources.Stats.disk_used number,omitempty
 resources.Stats.mem_max number,omitempty
 resources.Stats.mem_used number,omitempty
 resources.Stats.oom_kill_total number,omitempty
+session.CatalogEntry.alive bool
+session.CatalogEntry.archived bool,omitempty
+session.CatalogEntry.createdAt string
+session.CatalogEntry.dir string
+session.CatalogEntry.kind string
+session.CatalogEntry.label string,omitempty
+session.CatalogEntry.name string
+session.CatalogEntry.repo string
+session.CatalogEntry.state string,omitempty
+session.CatalogEntry.title string,omitempty
+session.CatalogEntry.workingCopyId string,omitempty
+session.CatalogResponse.cursor string,omitempty
+session.CatalogResponse.deleted [string],omitempty
+session.CatalogResponse.delta bool,omitempty
+session.CatalogResponse.sessions[].alive bool
+session.CatalogResponse.sessions[].archived bool,omitempty
+session.CatalogResponse.sessions[].createdAt string
+session.CatalogResponse.sessions[].dir string
+session.CatalogResponse.sessions[].kind string
+session.CatalogResponse.sessions[].label string,omitempty
+session.CatalogResponse.sessions[].name string
+session.CatalogResponse.sessions[].repo string
+session.CatalogResponse.sessions[].state string,omitempty
+session.CatalogResponse.sessions[].title string,omitempty
+session.CatalogResponse.sessions[].workingCopyId string,omitempty
 session.Session.alive bool
 session.Session.archived bool,omitempty
 session.Session.authOkAt string,omitempty
@@ -88,6 +113,8 @@ session.Session.label string
 session.Session.lastSay string,omitempty
 session.Session.lastTurnEndAt string,omitempty
 session.Session.locked bool,omitempty
+session.Session.movedTo string,omitempty
+session.Session.moving string,omitempty
 session.Session.name string
 session.Session.origin string,omitempty
 session.Session.originSession string,omitempty
@@ -97,6 +124,8 @@ session.Session.pr.draft bool,omitempty
 session.Session.pr.number number
 session.Session.pr.state string
 session.Session.pr.url string
+session.Session.progressAgeSec number,omitempty
+session.Session.progressAt string,omitempty
 session.Session.rateLimitResumeAt string,omitempty
 session.Session.remoteUrl string
 session.Session.repo string
@@ -105,6 +134,7 @@ session.Session.spendCapHitAt string,omitempty
 session.Session.spendCapUsd number,omitempty
 session.Session.started string
 session.Session.state string
+session.Session.stateSince string,omitempty
 session.Session.stopAfterTurnAt string,omitempty
 session.Session.studio string,omitempty
 session.Session.subdir string,omitempty

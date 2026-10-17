@@ -2798,3 +2798,78 @@ Muse 1.4.2-R4684.1 は追加だけだったが、検査器が非互換と判定�
 宣言し古いバイナリに無いものは「消えた」と読まれるので、1.4.2 の束ねはピンが動くまで 1.4.1 のピン（実測で
 18 件）にも PATH 上の古い `muse` にも赤になる。現行の束ねで実物を測った: 1.4.2 は変更前はその 1 件で赤、
 変更後は緑（追加 25 件、うち `feedback` が 2 件）、1.4.1 のピンは緑、`SessionStatus` から `running` を抜いた束ねでは 1.4.2 で再び赤。
+
+### 注記 2026-10-06: 1.4.3-R5018.1 に合わせてバンドルを再エクスポート（#1741）
+
+1.4.3-R5018.1 は、エクスポートがバンドルの上位集合にならない最初のリリース。`SessionDelete*` の
+5 型が消え（`session/delete` と `session/deleteCompleted` は残るので、ドライバは使っていなかった）、
+`ItemKind` に `hookRun` が増えた（クライアントが switch する型）。P2-24 によりこれは再エクスポートの
+理由なので、`internal/msp/schema` と `types_gen.go` を 1.4.3 のエクスポート（fingerprint
+`sha256:4cb67108…`）に置き換えた。
+
+`turnsWithCommentary` は `default` を持たず、列挙にない item の種別を読み飛ばしていた。`hookRun` と
+今後の未知の種別は `genericPart`（種別名・`label`/`fallbackText`・未完了なら理由）で描くようにした。
+スキーマがクライアントに求める描き方である。
+
+2026-09 の注記と同じ代償がある。1.4.3 のバンドルは 1.4.2 のバイナリに対して赤になる
+（バンドルが宣言する `hookRun` などの 1.4.3 の追加が 1.4.2 に無く、削除として読まれる）。
+`MUSE_VERSION` を動かすまで Dockerfile のピンに対する `muse-contract.yml` は赤のまま。実測: 1.4.3 緑・
+1.4.2 赤。ピンの更新は cli-pin-bump の仕事。
+
+### 注記 2026-10-09: 1.4.4-R5419.1 に合わせてバンドルを再エクスポート（#1919）
+
+1.4.4-R5419.1 で `ToolReceiptOutcome` に `failed` が増えた。この型はクライアントが decode する
+メッセージから辿れるため、互換検査は非互換と判定する。ただし `types_gen.go` の外で `ToolReceipt` を
+読む箇所はなく、これを switch するコードは無い。ほかの差分は追加だけ（メソッド・エラーコード・型）。
+P2-24 により再エクスポートが答えなので、`internal/msp/schema` と `types_gen.go` を 1.4.4 の
+エクスポート（fingerprint `sha256:7c94f153…`。リリース manifest の `msp_schema_fingerprint` と一致）に
+置き換えた。検査器は変えていない。
+
+同じ代償がある。1.4.4 のバンドルは `MUSE_VERSION` を動かすまで 1.4.3 のバイナリに対して赤になる。
+実測: 1.4.4 緑・1.4.3 赤。ピンの更新は cli-pin-bump の仕事。
+
+### 注記 2026-10-14: 1.4.7-R6101.1 に合わせてバンドルを再エクスポート（#2088）
+
+1.4.7-R6101.1 で、クライアントが decode する閉じた enum 3 つに値が増えた（`ErrorKind` に
+plugin/marketplace 系 4 値、`TurnErrorKind` に `mcpLinkError`、`ItemKind` に `webSearch`）。また
+optional なメンバー 7 つが明示的に nullable になった（`Session.sideFrom`、
+`SessionBranchChangedParams.branch`、`SessionGoalChangedParams.goal`、
+`SessionModelChangedParams` と `SessionModelRouteUnservedParams` の `providerId`、
+`SessionTokenUsageParams.modelId`、`SnapshotState.name`）。互換検査はこれらをすべて非互換と判定する。
+ただし Go の振る舞いは変わらない。7 メンバーは元からポインタなので `null` は `nil` になる。
+`ErrorKind` と `TurnErrorKind` を switch するコードは無い。`webSearch` 項目は転写の汎用表示で描かれる。
+ほかは追加だけで、通知 4 つ（`computerUseSetup/changed`・`plugin/changed`・
+`plugin/marketplaceChanged`・`recap/completed`）も含む。これらはハンドルが扱わない他の通知と同じく
+捨てられる。P2-24 により再エクスポートが答えなので、`internal/msp/schema` と `types_gen.go` を 1.4.7 の
+エクスポート（fingerprint `sha256:6de32db0…`。リリース manifest の `msp_schema_fingerprint` と一致）に
+置き換えた。検査器は変えていない。`types_gen.go` の既存フィールドで型が変わったものは無い。
+
+2026-10-05 に上流へ報告したホスト側の 2 件（#1695）は 1.4.7 でも直っていない。`reason` なしの
+`userInput/cancel` は今も `-32602` で拒否される（`TestLiveUserInputCancelNeedsAReason` で実測。
+使い捨て HOME・ターンなし）。スキーマの `Item` にも commentary の phase はまだ無い。回避策（#1699・#1696）は
+そのまま残す。
+
+同じ代償がある。1.4.7 のバンドルは `MUSE_VERSION` を動かすまで 1.4.4 のバイナリに対して赤になる。
+実測: 1.4.7 緑・1.4.4 赤。ピンの更新は cli-pin-bump の仕事。
+
+### 注記 2026-10-15: 1.4.8-R6256.1 に合わせてバンドルを再エクスポート（#2164）
+
+1.4.8-R6256.1 で、クライアントが decode する閉じた enum に値が 1 つ増えた（`ItemKind` に
+`monitorFeed`。monitor タスクのイベントで、`monitorId` で紐づく）。互換検査はこれを非互換と判定する。
+ただし Go の振る舞いは変わらない。`monitorFeed` 項目は `webSearch` と同じく転写の汎用表示で描かれる。
+ほかは追加だけである。新しい optional メンバー（`Item.messagePhase`・`Item.monitorId`・
+`Session.generatedName`・`SessionResumeParams.permissionProfile` など）、computer-use のアプリ系の型、
+付与可能な能力 `sessionRename`（メンバーシップ enum）、通知 1 つ（`turn/modelRetryScheduled`）。
+この通知はハンドルが扱わない他の通知と同じく捨てられる。P2-24 により再エクスポートが答えなので、
+`internal/msp/schema` と `types_gen.go` を 1.4.8 のエクスポート（fingerprint `sha256:4e3200c3…`。
+リリース manifest の `msp_schema_fingerprint` と一致）に置き換えた。検査器は変えていない。
+`types_gen.go` の既存フィールドで型が変わったものは無い。
+
+上流へ報告したホスト側の 2 件（#1695）のうち、`reason` なしの `userInput/cancel` は 1.4.8 でも
+`-32602` で拒否される（`TestLiveUserInputCancelNeedsAReason` で実測。使い捨て HOME・ターンなし）。
+もう 1 件にはスキーマ上の答えが出た。`Item.messagePhase` が完了した `agentMessage` を `commentary` か
+`finalAnswer` と示す。ツール呼び出し前の commentary が実際にワイヤに載るようになったかは実ターンでしか
+確かめられないので、測るまでは session.jsonl の読み取り（#1696）を残す（#2168）。
+
+同じ代償がある。1.4.8 のバンドルは `MUSE_VERSION` を動かすまで 1.4.7 のバイナリに対して赤になる。
+実測: 1.4.8 緑・1.4.7 赤。ピンの更新は cli-pin-bump の仕事。

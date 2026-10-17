@@ -111,3 +111,7 @@ func (w *etagWriter) finish() {
 	w.ResponseWriter.WriteHeader(w.status)
 	_, _ = w.ResponseWriter.Write(w.buf.Bytes())
 }
+
+// Unwrap lets http.NewResponseController reach the connection through this wrapper (read
+// deadlines, flushing); without it those calls answer ErrNotSupported.
+func (w *etagWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }

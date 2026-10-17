@@ -7,6 +7,14 @@ package main
 const (
 	errCodeQuotaSessions = "quota_sessions"
 
+	// The owner's workspace is running but its session catalog could not be read
+	// (catalogSyncAPIError). Distinct from workspace_not_running, which sends the owner to
+	// start a workspace that is already up.
+	errCodeCatalogSyncFailed = "catalog_sync_failed"
+	// The same sync, refused because the catalog exceeds agentCatalogMaxBytes. Permanent
+	// until sessions are deleted, so it must not share catalog_sync_failed's "try again".
+	errCodeCatalogTooLarge = "catalog_too_large"
+
 	// An irreversible admin action refused because its request could not be written to the
 	// audit log first (store.BeginIrreversible). internal/tenantsrv emits the same literal.
 	errCodeAuditUnavailable = "audit_unavailable"
@@ -192,4 +200,33 @@ const (
 	// tenant_admin, because deleting takes the bare and its LFS objects with it.
 	errCodeGitRepoCreateForbidden = "git_repo_create_forbidden"
 	errCodeGitRepoManageForbidden = "git_repo_manage_forbidden"
+
+	// The member inbox (ADR 0111, inbox.go). An unknown, removed or other-tenant recipient
+	// is one code with one message, so the answer tells nobody who exists. A recipient who
+	// does not accept from the sender has its own code and is named, because the roster
+	// already shows who is a member (docs/log/130 §130.8 item 1).
+	errCodeInboxInvalidRecipient  = "inbox_invalid_recipient"
+	errCodeInboxNotAccepting      = "inbox_recipient_not_accepting"
+	errCodeInboxTooManyRecipients = "inbox_too_many_recipients"
+	errCodeInboxBodyTooLarge      = "inbox_body_too_large"
+	errCodeInboxRateLimited       = "inbox_rate_limited"
+	errCodeInboxPendingLimit      = "inbox_pending_limit"
+	errCodeInboxBadRequest        = "inbox_bad_request"
+	errCodeInboxStateConflict     = "inbox_state_conflict"
+	errCodeInboxNotFound          = "inbox_not_found"
+	errCodeInboxLaunchBusy        = "inbox_launch_in_progress"
+	// A launch from a request asked the Agent and the CP cannot tell whether a session came
+	// of it. It is never asked again under a new key (that could make a second session):
+	// the assignee checks their sessions, and handing the request back clears it.
+	errCodeInboxLaunchUnknown = "inbox_launch_unknown"
+	// Attachments (ADR 0111 decisions 4 and 5). A repository that does not reduce to a
+	// canonical host/owner/repo is refused rather than passed through; only a session's owner
+	// can share it by attaching, and only with every recipient and the scope confirmed.
+	errCodeInboxAttachmentInvalid = "inbox_attachment_invalid"
+	errCodeInboxRepoInvalid       = "inbox_repo_invalid"
+	errCodeInboxShareNotOwner     = "inbox_share_not_owner"
+	errCodeInboxShareUnconfirmed  = "inbox_share_unconfirmed"
+	// A memo taken in from the inbox is flushed on its own, never in one message with other
+	// memos (ADR 0111 decision 3).
+	errCodeMemoOriginAlone = "memo_origin_alone"
 )

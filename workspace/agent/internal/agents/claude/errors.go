@@ -53,6 +53,12 @@ var authKinds = map[string]bool{
 	"authentication_error":  true, // in case the API's own type name is carried through as is
 }
 
+// oauthExpiredFragment is the stable part of claude's "Failed to authenticate: OAuth session
+// expired and could not be refreshed". Narrower than "failed to authenticate" on purpose: that
+// phrase also covers failures a new sign-in does not fix. The Console keeps a twin in
+// lib/claudeAuthError.ts.
+const oauthExpiredFragment = "oauth session expired"
+
 // authMarkers are the texts that say the same thing, for when `error` is empty or an unknown
 // value. Held as stems, covering the measured wording ("Please run /login · API Error: 401
 // OAuth access token has expired. Re-authenticate to continue.").
@@ -63,6 +69,7 @@ var authMarkers = []string{
 	"authentication_failed",
 	"invalid api key",
 	"unauthorized",
+	oauthExpiredFragment,
 }
 
 // isAuth reports whether this failure clears by signing in again. status 401 is also an entry

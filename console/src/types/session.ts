@@ -23,6 +23,9 @@ export type SessionState = "" | "working" | "idle" | "question" | "plan" | "perm
 // A session as returned by GET /api/sessions and used across the left pane, the
 // terminal header, and the chat mirror. Optional fields may be absent per kind.
 export interface Session {
+  /** The member inbox item this session was launched from and its sender (ADR 0111), from
+   *  the Control Plane's own record of the create; never what the workspace reported. */
+  inboxOrigin?: { sender: string; item: string };
   name: string; // auto-allocated unique slug ("s" + 6 base32 chars, e.g. "sukbq4s") — the session's immutable identity
   kind: SessionKind;
   // Control route (docs/log/27): "managed" = shared runtime + structured RPC (AF is the only
@@ -55,6 +58,11 @@ export interface Session {
   resumable?: boolean; // a stopped session whose dir still exists (false = archive only)
   backgroundBusy?: boolean; // idle by hook but a run_in_background task is still running
   backgroundBusyReason?: string;
+  // RFC3339: the Agent's newest sign that a working row is still moving (state file, state
+  // source, pane repaint, live tool process). Read by the Control Plane's reaper, not drawn.
+  progressAt?: string;
+  stateSince?: string; // RFC3339, approximate: when a working row's current state began (admin forecast)
+  progressAgeSec?: number; // the same instant as an age on the Workspace's clock; what the reaper reads
   // The reserved auto-resume instant (RFC3339), present only while state === "limited"
   // (waiting for a usage limit to reset). Empty = no resume is scheduled (auto-resume off,
   // nothing to derive a time from, or a per-model limit). Display-only, so the chip can say
@@ -89,6 +97,11 @@ export interface Session {
   // How far the create's initial prompt got (ADR 0100 decision 2). The studio pane offers a
   // resend on failed / unknown, and never while it is pending.
   initialPromptState?: "pending" | "delivered" | "failed" | "unknown";
+  // A move to another agent kind (ADR 0115 decision 11): `moving` names the target while the
+  // move runs or waits for retry / cancel, `movedTo` once the target exists. Either closes the
+  // session's input; only "resume here anyway" (POST …/move/reopen) clears movedTo.
+  moving?: string;
+  movedTo?: string;
   model?: string; // claude model
   context?: SessionContextUsage; // context-window usage (the Agent's session.ContextUsage); absent for agy/shell/ssm
   branch?: string; // git branch the working copy was on when the session started

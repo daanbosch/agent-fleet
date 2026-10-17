@@ -1,0 +1,57 @@
+{
+ "data": [
+  {
+   "id": "msg_1377065330016Q7KIj7LldN1ye",
+   "time": {
+    "created": 1791931475251
+   },
+   "type": "model-switched",
+   "model": {
+    "id": "m",
+    "providerID": "stub"
+   }
+  },
+  {
+   "id": "msg_13770693a001uTnydKyr2y6qZI",
+   "time": {
+    "created": 1791931476313
+   },
+   "text": "first SLOW",
+   "type": "user"
+  },
+  {
+   "id": "msg_137706966001FRdSVYHBSgDlkP",
+   "time": {
+    "created": 1791931476358,
+    "streamed": 1791931483425,
+    "completed": 1791931483430
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "m",
+    "providerID": "stub",
+    "variant": "default"
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "working ......."
+    }
+   ],
+   "finish": "error",
+   "error": {
+    "type": "aborted",
+    "message": "Step interrupted"
+   }
+  },
+  {
+   "id": "msg_13770852d001w8lJ3EJ43c4vt7",
+   "time": {
+    "created": 1791931483437
+   },
+   "type": "idle",
+   "outcome": "interrupted"
+  }
+ ]
+}

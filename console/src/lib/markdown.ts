@@ -1,5 +1,5 @@
 import { load, YAML11_SCHEMA, mergeTag } from "js-yaml";
-import { Marked, Tokenizer } from "marked";
+import { Marked, Tokenizer, type Token, type Tokens } from "marked";
 
 export interface YamlFrontMatter {
   attributes: Record<string, unknown>;
@@ -235,7 +235,7 @@ export const HTML_TAGS = new Set(
   ("a abbr acronym address area article aside audio b bdi bdo big blockquote br button canvas " +
     "caption center cite code col colgroup data datalist dd del details dfn dialog dir div dl " +
     "dt em fieldset figcaption figure font footer form h1 h2 h3 h4 h5 h6 header hgroup hr i " +
-    "img input ins kbd label legend li main map mark marquee math menu meter nav nobr ol " +
+    "img input ins kbd label legend li main map mark math menu meter nav nobr ol " +
     "optgroup option output p picture pre progress q rp rt ruby s samp search section select " +
     "slot small source span strike strong sub summary sup svg table tbody td textarea tfoot " +
     "th thead time tr track tt u ul var video wbr").split(" "),
@@ -248,6 +248,242 @@ const TAG_NAME = /^<\/?([a-zA-Z][a-zA-Z0-9-]*)[\s/>]/;
 export function isRenderedHtmlTag(raw: string): boolean {
   const name = TAG_NAME.exec(raw);
   return !name || HTML_TAGS.has(name[1].toLowerCase());
+}
+
+// An opening tag that is never closed does not stay where it was written. The HTML parser
+// closes a formatting element at the end of its paragraph and re-opens it in the next one, so
+// prose that merely names `<a download>` colours every later paragraph as a link — measured on
+// the sanitized output, so DOMPurify does not prevent it. These 14 are the elements the parser
+// re-opens (the HTML Standard's "formatting" category). Containers such as <div> stay open
+// on purpose, and an inline <span> is closed with its paragraph, so neither is touched.
+//
+// Pairing is decided on lexed tokens, never on the source text: a `</a>` inside a code span,
+// a comment or an escape is a different token and cannot close anything. An opener without a
+// closer is turned back into text, which is what the author typed. The stock tokenizer is left
+// alone on purpose — it would set `inLink` on `<a` before we could know.
+const FORMATTING_TAGS = new Set("a b big code em font i nobr s small strike strong tt u".split(" "));
+
+// Two more kinds of tag change what a closer means, so they are read as well:
+// - Raw-text and RCDATA elements: everything up to their own end tag is text, so a `</a>` in
+//   there closes nothing. (Only some reach the parser as elements — `<script>` is vetoed to text
+//   by HTML_TAGS above and DOMPurify drops it from a block — but a block is scanned whole.)
+// - Scope markers: a formatting element is not closed from inside a table cell, caption,
+//   object, applet or template — the parser's active-formatting list stops there. A cell or
+//   caption only counts inside a <table> (the parser drops it elsewhere), and it ends at its
+//   own end tag or with the table: the end tags are optional.
+//   <marquee> is deliberately not honored as markup at all (see HTML_TAGS): it scrolls its text.
+const RAW_TEXT_TAGS = new Set("script style textarea title xmp iframe noembed noframes".split(" "));
+const SCOPE_TAGS = new Set("applet caption object td template th".split(" "));
+const CELL_TAGS = new Set("caption td th".split(" "));
+
+interface TagEvent {
+  name: string;
+  open: boolean;
+}
+
+function tagEvent(raw: string): TagEvent | null {
+  const name = TAG_NAME.exec(raw)?.[1].toLowerCase();
+  if (!name || !(FORMATTING_TAGS.has(name) || SCOPE_TAGS.has(name) || RAW_TEXT_TAGS.has(name) || name === "table")) return null;
+  return { name, open: !raw.startsWith("</") };
+}
+
+// Pairs each closer with the nearest unmatched opener of the same name, never across a scope
+// marker, and ignores everything inside a raw-text element; `finish` reports the openers
+// nothing closed. A closer with no opener is left alone, as the HTML parser does.
+class TagPairing {
+  private open: { name: string; stray: () => void; at: number; marker?: boolean }[] = [];
+  // Set while inside a raw-text element: the name whose end tag leaves it.
+  rawText: string | null = null;
+  // Matched pairs by position, for the caller that needs to know what lies between them.
+  readonly pairs: { name: string; from: number; to: number }[] = [];
+  // Closers that found no opener here; a block opener elsewhere may own them.
+  readonly orphans: TagEvent[] = [];
+
+  push(event: TagEvent, stray: () => void, at = 0): void {
+    if (this.rawText) {
+      if (!event.open && event.name === this.rawText) this.rawText = null;
+      return;
+    }
+    if (event.open && RAW_TEXT_TAGS.has(event.name)) {
+      this.rawText = event.name;
+      return;
+    }
+    if (event.name === "table") {
+      this.tableTag(event, at);
+      return;
+    }
+    if (SCOPE_TAGS.has(event.name)) {
+      if (CELL_TAGS.has(event.name) && !this.inTable()) return; // dropped by the parser, so no boundary
+      if (event.open) this.open.push({ name: event.name, stray: () => {}, at, marker: true });
+      else this.closeScope(event.name);
+      return;
+    }
+    if (event.open) {
+      this.open.push({ name: event.name, stray, at });
+      return;
+    }
+    for (let i = this.open.length - 1; i >= 0; i--) {
+      // A scope boundary stops the closer for good: it is not offered to the document either,
+      // because the parser would not let it out of the scope.
+      if (this.open[i].marker) return;
+      if (this.open[i].name === event.name) {
+        this.pairs.push({ name: event.name, from: this.open[i].at, to: at });
+        this.open.splice(i, 1);
+        return;
+      }
+    }
+    this.orphans.push(event);
+  }
+
+  private inTable(): boolean {
+    return this.open.some((o) => o.name === "table");
+  }
+
+  // The end tag of a cell is optional, so a cell boundary is only known to be over when its
+  // table ends: `</table>` drops every boundary opened since `<table>`, and what was left open
+  // in there is stray. Rows and sections need no handling of their own for the same reason.
+  private tableTag(event: TagEvent, at: number): void {
+    if (event.open) {
+      this.open.push({ name: "table", stray: () => {}, at });
+      return;
+    }
+    const table = this.open.map((o) => o.name).lastIndexOf("table");
+    if (table >= 0) for (const o of this.open.splice(table)) o.stray();
+  }
+
+  // The end tag of a scope element: whatever was left open inside it is closed with it, and
+  // still reported as stray.
+  private closeScope(name: string): void {
+    const at = this.open.map((o) => o.marker && o.name === name).lastIndexOf(true);
+    if (at < 0) return;
+    for (const o of this.open.splice(at)) o.stray();
+  }
+
+  finish(): void {
+    for (const o of this.open) o.stray();
+    this.open = [];
+  }
+}
+
+// One inline unit (paragraph, heading, list-item text, table cell) is paired as a whole,
+// recursing into emphasis and links so `*<a href="x">y*</a>` still counts as closed. The walk
+// is flat and in document order; `at` is a token's position in it.
+type InlineItem = { tag: TagEvent; token: Token } | { url: Tokens.Link };
+
+function collectInline(tokens: Token[], items: InlineItem[]): void {
+  for (const t of tokens) {
+    // An image's children become its alt attribute, never tags in the body.
+    if (t.type === "image") continue;
+    if (t.type === "html") {
+      const tag = tagEvent(t.raw);
+      if (tag) items.push({ tag, token: t });
+    } else if (t.type === "link" && t.raw === t.text) {
+      items.push({ url: t as Tokens.Link }); // a bare URL (GFM autolink extension)
+    } else if ("tokens" in t && Array.isArray(t.tokens)) {
+      collectInline(t.tokens, items);
+    }
+  }
+}
+
+function toText(t: Token): void {
+  const token = t as Tokens.Generic;
+  token.type = "text";
+  token.text = t.raw;
+  delete token.escaped;
+  delete token.tokens;
+  delete token.href;
+}
+
+// `doc` is where a closer this unit cannot pair is offered, so `<a href>` alone on a line can
+// still be closed by `</a>` in a later paragraph. The reverse — an inline opener closed by a
+// later block — is not honored: a paragraph's own stray opener must not reach past it. A table
+// cell passes no `doc`: the HTML parser stops a closer at the cell boundary.
+//
+// The stock tokenizer would otherwise decide bare-URL linking by `inLink`, set on `<a` before
+// anyone knows whether it is closed; instead bare URLs are always lexed, and the ones that end
+// up inside a real `<a>…</a>` are turned back into text here, so they never nest an anchor.
+function pairUnit(tokens: Token[], doc?: TagPairing): void {
+  const items: InlineItem[] = [];
+  collectInline(tokens, items);
+  const unit = new TagPairing();
+  items.forEach((item, at) => {
+    if ("tag" in item) unit.push(item.tag, () => toText(item.token), at);
+  });
+  unit.finish();
+  for (const { name, from, to } of unit.pairs) {
+    if (name !== "a") continue;
+    for (let at = from + 1; at < to; at++) {
+      const item = items[at];
+      if ("url" in item) toText(item.url);
+    }
+  }
+  if (doc) for (const event of unit.orphans) doc.push(event, () => {});
+}
+
+// A comment (skipped) or a tag with quoted attributes, inside block-level raw HTML. A comment
+// ends as the HTML tokenizer ends it: `<!-->` and `<!--->` are complete, `--!>` also closes,
+// and an unclosed one runs to the end.
+const HTML_RUN = /<!--(?:-?>|[\s\S]*?--!?>|[\s\S]*$)|<\/?[a-zA-Z][a-zA-Z0-9-]*(?:"[^"]*"|'[^']*'|[^'">])*>/g;
+
+// Raw HTML blocks are paired across the whole document: `<a href>` alone on a line may be
+// closed by a later block. Strays are escaped once the document is done, right to left so
+// the earlier offsets stay valid.
+function pairBlockHtml(token: Tokens.HTML, pairing: TagPairing, escapes: (() => void)[]): void {
+  const strays: number[] = [];
+  const run = new RegExp(HTML_RUN);
+  for (let m = run.exec(token.text); m; m = run.exec(token.text)) {
+    const event = tagEvent(m[0]);
+    if (event) pairing.push(event, () => strays.push(m!.index));
+    // Inside a raw-text element nothing is a tag until its end tag; look for that, not for
+    // the next `<`.
+    if (pairing.rawText) {
+      const end = new RegExp(`</${pairing.rawText}(?=[\\s/>])`, "ig");
+      end.lastIndex = run.lastIndex;
+      const hit = end.exec(token.text);
+      if (!hit) break;
+      run.lastIndex = hit.index;
+    }
+  }
+  escapes.push(() => {
+    let text = token.text;
+    for (const at of strays.sort((a, b) => b - a)) text = text.slice(0, at) + "&lt;" + text.slice(at + 1);
+    token.text = text;
+  });
+}
+
+function walkBlocks(tokens: Token[], pairing: TagPairing, escapes: (() => void)[]): void {
+  for (const t of tokens) {
+    switch (t.type) {
+      case "paragraph":
+      case "heading":
+      case "text":
+        pairUnit((t as Tokens.Paragraph).tokens ?? [], pairing);
+        break;
+      case "html":
+        pairBlockHtml(t as Tokens.HTML, pairing, escapes);
+        break;
+      case "list":
+        for (const item of (t as Tokens.List).items) walkBlocks(item.tokens, pairing, escapes);
+        break;
+      case "blockquote":
+        walkBlocks((t as Tokens.Blockquote).tokens, pairing, escapes);
+        break;
+      case "table": {
+        const table = t as Tokens.Table;
+        for (const cell of [...table.header, ...table.rows.flat()]) pairUnit(cell.tokens);
+        break;
+      }
+    }
+  }
+}
+
+export function neutralizeStrayFormattingTags(tokens: Token[]): Token[] {
+  const doc = new TagPairing();
+  const escapes: (() => void)[] = [];
+  walkBlocks(tokens, doc, escapes);
+  doc.finish();
+  for (const apply of escapes) apply();
+  return tokens;
 }
 
 // CommonMark decides whether `**` opens or closes emphasis from the two characters around
@@ -363,6 +599,9 @@ function retryWithCjkRules<T>(
 // out empty, and every later `[保留]` in the document silently becomes a link to it.
 // Definitions are still honored — but only when the destination could actually be one.
 export const marked = new Marked({
+  hooks: {
+    processAllTokens: neutralizeStrayFormattingTags,
+  },
   tokenizer: {
     def(src) {
       // Marked's own rule decides whether this is a definition and where it ends;
@@ -383,7 +622,11 @@ export const marked = new Marked({
     // downstream (see HTML_TAGS). `undefined` means "no tag here", so the run falls through to
     // text and is escaped, which is how the author wrote it.
     tag(src) {
+      const before = this.lexer.state.inLink;
       const token = Tokenizer.prototype.tag.call(this, src);
+      // `<a` / `</a>` flip `inLink` in the stock rule; neutralizeStrayFormattingTags decides
+      // what a bare URL inside an anchor does once it knows which anchors are real.
+      this.lexer.state.inLink = before;
       return token && !isRenderedHtmlTag(token.raw) ? undefined : token;
     },
     html(src) {

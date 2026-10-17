@@ -92,3 +92,16 @@ describe("admin modal — where it was left (#1100)", () => {
     expect(store.lastAdminPlace()).toEqual({ root: "tenants", scope: null, scopeSection: "limits" });
   });
 });
+
+describe("settings modal — scroll target", () => {
+  it("carries the requested target, and a plain open or a close drops it", () => {
+    const ui = store.useSettingsUI;
+    ui.getState().openSettings("agents", { target: "claude" });
+    expect(ui.getState().settingsTarget).toBe("claude");
+    ui.getState().openSettings("agents");
+    expect(ui.getState().settingsTarget).toBeNull();
+    ui.getState().openSettings("agents", { target: "codex" });
+    ui.getState().closeSettings();
+    expect(ui.getState().settingsTarget).toBeNull();
+  });
+});

@@ -15,7 +15,7 @@
 # ran this exact version and passed". Anything short of that stays at its pin and is
 # listed in the PR body with the reason. For claude, `tested` comes from
 # claude-tui-contract.yml, which drives the real TUI against internal/tmuxx's footer and
-# spinner detection — the check the drift issue's footer-corpus step asks for.
+# spinner detection, which internal/tmuxx/testdata/footers/SOURCE.txt documents.
 #
 # The gate is deliberately equality, never a version comparison (cursor's dates and
 # muse's build ids do not order like semver). The cost: when a kind publishes again
@@ -25,6 +25,18 @@
 #
 # rtk is deliberately left out: it has a release source but no contract, so there is no
 # `tested` to gate on. It is listed as drifting and bumped by hand.
+#
+# ## Upstream message fragments
+#
+# For every kind whose pin is behind (tested or not, bumped or not), cli-fragment-check.sh
+# looks for the text Agent Fleet matches on (cli-message-fragments.txt) in the pinned and
+# the latest package. A fragment that was there and is gone is written into the kind's
+# update issue (cli-contract-report.sh fragments; cleared when none is gone) and into the
+# PR body, by name. It never holds a bump back: it is a place to look, not a verdict.
+# A checker that could not run (no download, no unpack, nothing matched even in the pinned
+# version) is not an empty result: it is written to the PR body and stderr, sets
+# `fragment_error=true` and leaves the issue as it was, and the workflow fails its last
+# step on it after the PR has been opened, so the other steps still run.
 #
 # ## Checksums
 #
@@ -58,7 +70,9 @@
 #   DRIFT_CHECK    the latest-version source (default: cli-drift-check.sh)
 #   RELEASE_STATE  the `tested` source (default: cli-release-state.sh)
 #   BODY_FILE      where the PR body is written (default: none)
-#   GITHUB_OUTPUT  count=, bumped=, title=, edit_id=, incomplete=
+#   FRAGMENT_CHECK the message-fragment checker (default: cli-fragment-check.sh)
+#   REPORT         the red-contracts section owner (default: cli-contract-report.sh)
+#   GITHUB_OUTPUT  count=, bumped=, title=, edit_id=, incomplete=, fragment_error=
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -67,6 +81,8 @@ DOCKERFILE="${DOCKERFILE:-$ROOT/workspace/Dockerfile}"
 DRIFT_CHECK="${DRIFT_CHECK:-$HERE/cli-drift-check.sh}"
 RELEASE_STATE="${RELEASE_STATE:-$HERE/cli-release-state.sh}"
 BODY_FILE="${BODY_FILE:-}"
+FRAGMENT_CHECK="${FRAGMENT_CHECK:-$HERE/cli-fragment-check.sh}"
+REPORT="${REPORT:-$HERE/cli-contract-report.sh}"
 OUT="${GITHUB_OUTPUT:-/dev/null}"
 
 # kind|version ARG|contract workflow
@@ -91,6 +107,9 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 die() { echo "cli-pin-bump: $*" >&2; exit 1; }
+
+# Leading integer of a version, 0 when there is none.
+major_of() { local m="${1%%.*}"; case "$m" in ''|*[!0-9]*) echo 0 ;; *) echo "$m" ;; esac; }
 
 # The single value of `ARG <name>=`, or failure when it is absent or appears twice: a
 # second definition would make "the pin" ambiguous and the rewrite would miss one.
@@ -194,6 +213,64 @@ resolve_muse() {
   NEW[MUSE_VERSION]="$v"; NEW[MUSE_SHA256_X64]="$x64"; NEW[MUSE_SHA256_ARM64]="$arm64"
 }
 
+# check_fragments <kind> <pin> <latest>: look, report to the kind's issue, and queue the PR
+# body lines. Never aborts the run: every failure here ends up in fragment_notes and
+# fragment_error instead.
+fragment_error=false
+fragment_notes=()   # PR body list lines
+check_fragments() {
+  local kind="$1" pin="$2" latest="$3" rc i status frag why gone=() gone_why=() unver=()
+  set +e
+  "$FRAGMENT_CHECK" has "$kind"
+  rc=$?
+  set -e
+  case "$rc" in
+    0) ;;
+    1) return 0 ;;   # nothing registered for this kind
+    *) fragment_error=true
+       echo "::error::cli-pin-bump: could not read the message-fragment registry (exit $rc)" >&2
+       fragment_notes+=("- \`$kind\`: the fragment registry could not be read (exit $rc); nothing was checked")
+       return 0 ;;
+  esac
+  set +e
+  "$FRAGMENT_CHECK" check "$kind" "$pin" "$latest" > "$WORK/frag.out" 2> "$WORK/frag.err"
+  rc=$?
+  set -e
+  case "$rc" in
+    0|1) ;;
+    3) fragment_notes+=("- \`$kind\`: not checked ($(tr '\n' ' ' < "$WORK/frag.err" | sed 's/ *$//'))")
+       return 0 ;;
+    *) fragment_error=true
+       echo "::error::cli-pin-bump: the message-fragment check for $kind $pin -> $latest could not run (exit $rc)" >&2
+       cat "$WORK/frag.err" >&2
+       fragment_notes+=("- \`$kind\`: **the fragment check could not run** (exit $rc): $(tr '\n' ' ' < "$WORK/frag.err" | sed 's/ *$//')")
+       return 0 ;;
+  esac
+  while IFS=$'\t' read -r status frag why; do
+    case "$status" in
+      missing) gone+=("$frag"); gone_why+=("$why") ;;
+      unverifiable) unver+=("$frag") ;;
+    esac
+  done < "$WORK/frag.out"
+  if [ "${#gone[@]}" -gt 0 ]; then
+    for i in "${!gone[@]}"; do
+      fragment_notes+=("- \`$kind\` \`$latest\`: **\`${gone[$i]}\` is gone** (was in \`$pin\`; used in ${gone_why[$i]})")
+    done
+    if ! "$REPORT" fragments "$kind" "$latest" "${gone[@]}"; then
+      fragment_error=true
+      echo "::error::cli-pin-bump: could not write the $kind fragment report to its issue" >&2
+      fragment_notes+=("- \`$kind\`: **the report to its update issue failed**; the list above is the only copy")
+    fi
+  elif ! "$REPORT" fragments-clear "$kind"; then
+    fragment_error=true
+    echo "::error::cli-pin-bump: could not clear the $kind fragment report" >&2
+    fragment_notes+=("- \`$kind\`: **clearing the fragment report in its update issue failed**")
+  fi
+  for frag in ${unver[@]+"${unver[@]}"}; do
+    fragment_notes+=("- \`$kind\`: \`$frag\` is unverifiable (absent from \`$pin\` too: split, escaped or encoded in the package), so it was not judged")
+  done
+}
+
 incomplete=false
 bumped=()    # kind
 evidence=()  # table rows
@@ -210,6 +287,15 @@ for row in "${KINDS[@]}"; do
   fi
   [ "$pin" != "$latest" ] || continue
   [[ "$latest" =~ $VALUE_RE ]] || { left+=("$kind|$pin|$latest|the published version has an unexpected shape"); continue; }
+
+  check_fragments "$kind" "$pin" "$latest"
+
+  # opencode 1 -> 2 changes the npm package, the server API, the plugin API and the TUI flags
+  # at once: a bump PR must never carry it, whatever a contract says about the newer line.
+  if [ "$kind" = opencode ] && [ "$(major_of "$pin")" != "$(major_of "$latest")" ]; then
+    left+=("$kind|$pin|$latest|a new major ($(major_of "$pin") -> $(major_of "$latest")): the cut-over is manual (#2101), never an automatic bump")
+    continue
+  fi
 
   tested="$("$RELEASE_STATE" get tested "$kind")" || die "could not read the release state for $kind"
   if [ "$tested" != "$latest" ]; then
@@ -343,6 +429,7 @@ edit_id=""
   printf 'count=%s\n' "${#bumped[@]}"
   printf 'edit_id=%s\n' "$edit_id"
   printf 'incomplete=%s\n' "$incomplete"
+  printf 'fragment_error=%s\n' "$fragment_error"
   printf 'bumped=%s\n' "$(IFS=,; printf '%s' "${bumped[*]-}")"
   printf 'title=%s\n' "$title"
 } >> "$OUT"
@@ -366,10 +453,16 @@ if [ -n "$BODY_FILE" ]; then
         echo "| $kind | \`$pin\` | \`$latest\` | $reason |"
       done
     fi
+    if [ "${#fragment_notes[@]}" -gt 0 ]; then
+      echo
+      echo "**Upstream message fragments** (\`deploy/local/cli-message-fragments.txt\`; a place to look, not a verdict):"
+      echo
+      printf '%s\n' "${fragment_notes[@]}"
+    fi
     echo
     echo "Opened by \`cli-pin-bump.yml\` (\`deploy/local/cli-pin-bump.sh\`). Nothing merges it"
-    echo "automatically. Once it is merged, \`cli-drift.yml\` closes the drift issue on its next"
-    echo "run if no other pin is behind. Closing it without merging declines this exact edit;"
+    echo "automatically. Merging it closes the update issue of each bumped CLI that has one"
+    echo "(the \`Closes\` lines below). Closing it without merging declines this exact edit;"
     echo "it is proposed again only when a version changes."
     echo
     echo "<!-- cli-pin-bump edit=$edit_id -->"

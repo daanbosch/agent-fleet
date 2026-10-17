@@ -12,12 +12,41 @@ import { useRetryLoad } from "../../../lib/retryLoad.ts";
 import { useToast } from "../../../ui/ToastProvider.tsx";
 import { useConfirm } from "../../../ui/ConfirmProvider.tsx";
 import { Diff } from "../../scm/GitDiff.tsx";
+import { OnOff, Row } from "../parts/controls.tsx";
+import { useSettings } from "../../../lib/settings.ts";
 import { useT, tMaybe } from "../../../lib/i18n/index.ts";
 import { fmtDateTime, DATETIME_FULL } from "../../../lib/intl.ts";
+import { ClaudeImportPanel } from "./memoryClaudeImport.tsx";
+import { AutoSyncPanel, useFlipAgentMemory } from "./memoryAutoSync.tsx";
+import { ProjectMovePanel } from "./memoryProjectMove.tsx";
+import { MuseImportPanel } from "./memoryMuseImport.tsx";
+import { ClaudeExportPanel } from "./memoryClaudeExport.tsx";
+import { MemoryPinsPanel } from "./memoryPins.tsx";
+import { MemoryBrowserPanel } from "./memoryBrowser.tsx";
 import type { ChangeDiff, MemoryChange, SecretFinding } from "./memoryTypes.ts";
 
 // An unknown op from a newer Agent is printed raw rather than breaking the row.
 const opLabel = (op: string): string => tMaybe("mem.af_op_" + op) ?? op;
+
+// AgentMemorySwitch is the sessions' switch (ui-prefs agentMemory, default off). It is a
+// ui-pref, not Agent state, so it must stay reachable while the workspace is stopped: the member
+// decides it for the next start, and this page is its only home.
+export function AgentMemorySwitch() {
+  const tr = useT();
+  const enabled = useSettings().agentMemory;
+  // The flip asks first, with the counts of what the Agent will import or write back by itself.
+  const flip = useFlipAgentMemory();
+  return (
+    <>
+      <Row label={tr("mem.af_switch")}>
+        <OnOff value={enabled} onChange={(v) => void flip(v)} />
+      </Row>
+      <AutoSyncPanel />
+      <p className="muted ds-note">{tr("mem.af_switch_note")}</p>
+      {!enabled && <p className="muted ds-note">{tr("mem.af_switch_off_export")}</p>}
+    </>
+  );
+}
 
 export function AgentMemorySection({ reload, onChanged }: { reload: number; onChanged: () => void }) {
   const tr = useT();
@@ -143,8 +172,13 @@ export function AgentMemorySection({ reload, onChanged }: { reload: number; onCh
         <h3>{tr("mem.af_title")}</h3>
       </div>
       <p className="muted ds-hint">{tr("mem.af_intro")}</p>
+      {/* The list, the diff and the way back below work with the switch either way; only the
+          import's confirm needs it on. */}
+      <AgentMemorySwitch />
       {loadErr && <p className="mem-warn">{loadErr}</p>}
       {withheld > 0 && <p className="mem-warn">{tr("mem.af_withheld", { n: withheld })}</p>}
+      <MemoryPinsPanel reload={reload + mine} onChanged={() => setMine((n) => n + 1)} />
+      <MemoryBrowserPanel reload={reload + mine} onChanged={() => setMine((n) => n + 1)} />
       <div className="mem-body">
         <ul className="mem-list">
           {changes === null ? (
@@ -181,7 +215,9 @@ export function AgentMemorySection({ reload, onChanged }: { reload: number; onCh
                 <span className="muted">{tr("mem.af_not_latest")}</span>
               ) : (
                 <>
-                  {selected.revertible ? (
+                  {selected.purgedBefore ? (
+                    <span className="muted">{tr("mem.pg_not_revertible")}</span>
+                  ) : selected.revertible ? (
                     <button type="button" disabled={busy} onClick={() => void act(selected, false)}>
                       {tr("mem.af_revert")}
                     </button>
@@ -216,6 +252,10 @@ export function AgentMemorySection({ reload, onChanged }: { reload: number; onCh
             ))}
         </div>
       </div>
+      <ClaudeImportPanel reload={reload} onChanged={() => setMine((n) => n + 1)} />
+      <MuseImportPanel reload={reload} onChanged={() => setMine((n) => n + 1)} />
+      <ClaudeExportPanel reload={reload} />
+      <ProjectMovePanel reload={reload} onChanged={() => setMine((n) => n + 1)} />
     </section>
   );
 }

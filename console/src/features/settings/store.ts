@@ -88,7 +88,16 @@ interface SettingsUIStore {
   tenantSection: string;
   /** Getting-started guide modal (re-openable first-run checklist — GuideModal). */
   guideOpen: boolean;
-  openSettings(section?: string): void;
+  /** A port the "Expose this port…" entry asked to add to the preview list. Nothing is saved
+   *  until the Preview tab's Add strip is confirmed; closing the dialog drops it. */
+  previewAddPort: number | null;
+  /** An element inside the opened section that should be scrolled into view and flashed, named by
+   *  the `data-settings-target` it carries (an agent kind for Settings > Agents). The section
+   *  that owns it consumes it once its content exists (useSettingsTarget); null = nothing asked. */
+  settingsTarget: string | null;
+  openSettings(section?: string, opts?: { addPort?: number; target?: string }): void;
+  clearSettingsTarget(): void;
+  clearPreviewAddPort(): void;
   closeSettings(): void;
   openAdmin(): void;
   closeAdmin(): void;
@@ -109,19 +118,29 @@ export const useSettingsUI = create<SettingsUIStore>((set) => ({
   tenantOpen: false,
   tenantSection: lastTenantSection() || "signin",
   guideOpen: false,
+  previewAddPort: null,
+  settingsTarget: null,
 
-  openSettings(section?: string) {
+  openSettings(section?: string, opts?: { addPort?: number; target?: string }) {
     // "connections" is a legacy alias for the merged agents tab (the old connections
     // tab was folded into it), so any caller asking for connections lands there.
     // No explicit section → restore the last-opened one (localStorage), else display.
     set({
       settingsSection: section === "connections" ? "agents" : section || lastSection() || "display",
       settingsOpen: true,
+      previewAddPort: opts?.addPort ?? null,
+      settingsTarget: opts?.target ?? null,
     });
+  },
+  clearSettingsTarget() {
+    set({ settingsTarget: null });
+  },
+  clearPreviewAddPort() {
+    set({ previewAddPort: null });
   },
   closeSettings() {
     // Close-on-back is handled by ui/Modal (useBackClose); just drop the flag.
-    set({ settingsOpen: false });
+    set({ settingsOpen: false, previewAddPort: null, settingsTarget: null });
   },
 
   // The admin modal rides on the same ui/Modal as the personal settings, so close-on-back is

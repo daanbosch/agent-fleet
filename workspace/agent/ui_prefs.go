@@ -21,6 +21,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/chatx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/mcpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memoryx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/uiprefs"
 )
@@ -294,7 +295,7 @@ func handlePutUIPrefs(w http.ResponseWriter, r *http.Request) {
 	fleetSpawnBefore := uiprefs.FleetSpawn()
 	sessionSearchBefore := uiprefs.SessionSearch()
 	agentMemoryBefore := uiprefs.AgentMemory()
-	if err := os.WriteFile(uiprefs.Path(), body, 0o600); err != nil {
+	if err := uiprefs.WriteAtomic(body); err != nil {
 		httpx.WriteErr(w, http.StatusInternalServerError, "write_failed", err.Error())
 		return
 	}
@@ -315,6 +316,14 @@ func handlePutUIPrefs(w http.ResponseWriter, r *http.Request) {
 		uiprefs.FleetSpawn() != fleetSpawnBefore || uiprefs.SessionSearch() != sessionSearchBefore ||
 		uiprefs.AgentMemory() != agentMemoryBefore {
 		mcpx.MaterializeAll()
+	}
+	// The memory guidance block follows the same switch (ADR 0108 decision 5): written while it
+	// is on, removed when it goes off. Sessions already running have read their instructions.
+	if uiprefs.AgentMemory() != agentMemoryBefore {
+		reconcileAgentInstructions()
+		// The import (on) or write-back (off) of claude's native memory follows the switch
+		// (#1972). Only the phase moves here, before the answer; the work runs in the background.
+		memoryx.AutoSyncWake()
 	}
 	// Switching the tier changes the env that is injected (the free tier drops
 	// OPENCODE_API_KEY). Treated like a key change: without recreating the running serve, it

@@ -22,6 +22,19 @@ vi.mock("./pathResolve.ts", () => ({
     }),
 }));
 
+// The Jira project list (jiraProjects.ts reads it through the shared api client).
+let jiraProjectsAnswer: unknown = { connected: true, keys: [], truncated: false };
+const jiraProjectsCalls = vi.fn();
+vi.mock("../../core/api/client.ts", async (orig) => ({
+  ...(await orig<typeof import("../../core/api/client.ts")>()),
+  api: async (path: string) => {
+    if (path !== "api/work-items/jira-projects") return { error: { message: "unexpected " + path } };
+    jiraProjectsCalls();
+    if (jiraProjectsAnswer instanceof Error) throw jiraProjectsAnswer;
+    return jiraProjectsAnswer;
+  },
+}));
+
 // The inbox read behind ensureWorkItems (the "cache not loaded yet" path).
 const workItemList = vi.fn();
 vi.mock("../workitems/api.ts", () => ({
@@ -34,6 +47,7 @@ const { useReposStore } = await import("../repos/store.ts");
 const { useWorkItemStore } = await import("../workitems/store.ts");
 const { useWorkItemModal } = await import("../workitems/modal.ts");
 const { useChatStore } = await import("../chat/store.ts");
+const { resetJiraProjects, useJiraProjects } = await import("../workitems/jiraProjects.ts");
 const { isPathCandidateCode } = await import("./parts/mdRefLinks.ts");
 
 const row = (provider: string, key: string, extra: Partial<WorkItem> = {}): WorkItem => ({
@@ -72,6 +86,10 @@ const click = async (a: Element, init: MouseEventInit = {}) =>
   });
 
 beforeEach(() => {
+  // Module-level cache and retry clock: a key left by one case would link in the next.
+  resetJiraProjects();
+  jiraProjectsCalls.mockReset();
+  jiraProjectsAnswer = { connected: true, keys: [], truncated: false };
   workItemList.mockReset();
   workItemList.mockResolvedValue(payload([]));
   useChatStore.setState({ convs: [], titles: {} });
@@ -113,6 +131,42 @@ describe("ticket references", () => {
     // A search the user typed, quoted back by the agent: #166 exists on GitHub, but is not cited.
     await render("typed `#166` and `octo/fleet#166`; `#956` is ours; merged in #167");
     expect(links().map((a) => a.textContent)).toEqual(["#956", "#167"]);
+  });
+
+  it("links both ends of a range, and not a hyphen after a non-reference (#1909)", async () => {
+    await render("done in #573-#598; also octo/fleet#5-octo/fleet#9; but abc#1-#2 and foo-#12");
+    expect(links().map((a) => a.textContent)).toEqual(["#573", "#598", "octo/fleet#5", "octo/fleet#9"]);
+  });
+
+  it("keeps a range in inline code literal unless the inbox holds the ends, and a code block untouched", async () => {
+    await render("typed `#573-#598`, cached `#956-#1649`\n\n```\n#956-#1649\n```");
+    expect(links().map((a) => a.textContent)).toEqual(["#956", "#1649"]);
+    expect(host.querySelector("pre a")).toBeNull();
+  });
+
+  it("links the back end of a range that reached the cache after the front end, in either order", async () => {
+    const only = (...keys: string[]) => payload(keys.map((k) => row("github", k)));
+    useWorkItemStore.setState({ payload: only("octo/fleet#956") });
+    await render("cached `#956-#1649`");
+    expect(links().map((a) => a.textContent)).toEqual(["#956"]);
+    await act(async () => useWorkItemStore.setState({ payload: only("octo/fleet#956", "octo/fleet#1649") }));
+    expect(links().map((a) => a.textContent)).toEqual(["#956", "#1649"]);
+
+    await act(async () => root.unmount());
+    root = createRoot(host);
+    useWorkItemStore.setState({ payload: only("octo/fleet#1649") });
+    await render("cached `#956-#1649`");
+    expect(links().map((a) => a.textContent)).toEqual(["#1649"]);
+    await act(async () => useWorkItemStore.setState({ payload: only("octo/fleet#956", "octo/fleet#1649") }));
+    expect(links().map((a) => a.textContent)).toEqual(["#956", "#1649"]);
+  });
+
+  it("does not link a third end or double a link when the range is re-linked", async () => {
+    useWorkItemStore.setState({ payload: payload([956, 1649, 1650].map((n) => row("github", `octo/fleet#${n}`))) });
+    await render("cached `#956-#1649-#1650`");
+    expect(links().map((a) => a.textContent)).toEqual(["#956", "#1649"]);
+    await act(async () => useWorkItemStore.setState({ payload: payload([956, 1649, 1650, 1].map((n) => row("github", `octo/fleet#${n}`))) }));
+    expect(links().map((a) => a.textContent)).toEqual(["#956", "#1649"]);
   });
 
   it("opens a merged or closed ticket the inbox no longer holds as a reference with a tracker link", async () => {
@@ -347,5 +401,46 @@ describe("ticket references", () => {
     expect(links().map((a) => a.textContent)).toEqual(["G3M-12"]);
     await click(links()[0]);
     expect(useWorkItemModal.getState().detail?.item.url).toBe("https://jira.example.test/browse/G3M-12");
+  });
+
+  it("links a Jira key of a project with no cached row once the project list lands (#1899)", async () => {
+    jiraProjectsAnswer = { connected: true, keys: ["OPS", "bad key", 7], truncated: false };
+    await render("blocked on OPS-7 and WEB-1 (UTF-8, SHA-256)", null);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(jiraProjectsCalls).toHaveBeenCalledTimes(1);
+    expect(useJiraProjects.getState().keys).toEqual(["OPS"]);
+    expect(links().map((a) => a.textContent)).toEqual(["OPS-7"]);
+    await click(links()[0]);
+    // Not cached, so the modal opens the reference stand-in (the live read happens there).
+    expect(useWorkItemModal.getState().detail).toMatchObject({ reference: true, item: { provider: "jira", key: "OPS-7" } });
+  });
+
+  it("leaves Jira-shaped text alone when the list is empty, failed, or not asked for", async () => {
+    await render("OPS-7", null);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(links()).toHaveLength(0);
+
+    resetJiraProjects();
+    jiraProjectsAnswer = new Error("down");
+    await render("OPS-8", null);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(links()).toHaveLength(0);
+
+    // Text with no Jira-shaped token never costs the request.
+    resetJiraProjects();
+    jiraProjectsCalls.mockReset();
+    await render("nothing to see, #12", null);
+    expect(jiraProjectsCalls).not.toHaveBeenCalled();
+  });
+
+  it("does not ask for the list on a surface with ticket links off", async () => {
+    await render("OPS-7", null, false);
+    expect(jiraProjectsCalls).not.toHaveBeenCalled();
   });
 });

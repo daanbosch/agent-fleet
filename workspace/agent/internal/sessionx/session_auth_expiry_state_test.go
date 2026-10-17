@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,5 +108,35 @@ func TestPromptBlockerAuthValid(t *testing.T) {
 	session.WriteMeta(m)
 	if st := promptBlocker(m.Name); st == agents.StateAuth {
 		t.Fatalf("promptBlocker = %q - refusing a send with live credentials", st)
+	}
+}
+
+// TestTypeInitialPromptRefusedWhenAuthExpired: a launch's task must not be typed into a claude
+// TUI that will accept it and start no turn. The tmux stand-in logs every call, so "nothing
+// typed" is read off the log rather than assumed.
+func TestTypeInitialPromptRefusedWhenAuthExpired(t *testing.T) {
+	// No isolateAgentState: it routes tmux through a private socket (-L), which the stand-in
+	// below does not parse. The stand-in is what keeps the real tmux server out of this test.
+	t.Setenv("AF_SESSIONS_DIR", t.TempDir())
+	bin := t.TempDir()
+	logPath := filepath.Join(bin, "tmux.log")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TMUX_TEST_LOG\"\ncase \"$1\" in\n  has-session) exit 0 ;;\n  list-panes) printf '1 %%7\\n' ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("TMUX_TEST_LOG", logPath)
+
+	const name = "authexp_initial"
+	session.WriteMeta(session.Meta{Name: name, Dir: t.TempDir(), Kind: session.KindClaude, InitialPromptState: session.InitialPromptPending})
+
+	writeClaudeCreds(t, -8*24*time.Hour+8*time.Hour, -8*24*time.Hour)
+	deliverInitialPrompt(name, "do the task")
+
+	if m, _ := session.ReadMeta(name); m.InitialPromptState != session.InitialPromptFailed {
+		t.Errorf("InitialPromptState = %q, want %q", m.InitialPromptState, session.InitialPromptFailed)
+	}
+	if b, _ := os.ReadFile(logPath); strings.Contains(string(b), "paste-buffer") || strings.Contains(string(b), "send-keys") {
+		t.Errorf("the prompt was typed into an expired claude; tmux calls:\n%s", b)
 	}
 }

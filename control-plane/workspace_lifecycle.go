@@ -139,7 +139,7 @@ func (m *manager) countRunningInTenant(ctx context.Context, tenantID string) (in
 	}
 	n := 0
 	for _, ws := range wss {
-		switch m.runtimeFor(ws, "").State(ctx) {
+		switch m.runtimeFor(ws, noSecretKeys).State(ctx) {
 		case "running", "starting":
 			n++
 		}
@@ -154,7 +154,7 @@ func (m *manager) workspaceStateByMembership(ctx context.Context, membershipID s
 	if err != nil || !ok {
 		return "", "none"
 	}
-	return ws.ContainerName, m.runtimeFor(ws, "").State(ctx)
+	return ws.ContainerName, m.runtimeFor(ws, noSecretKeys).State(ctx)
 }
 
 // stopWorkspaceByMembership force-stops a member's workspace (admin action).
@@ -178,7 +178,7 @@ func (m *manager) stopWorkspaceByMembershipIf(ctx context.Context, membershipID 
 		return err
 	}
 	defer lease.Close()
-	rt := m.runtimeFor(ws, "")
+	rt := m.runtimeFor(ws, noSecretKeys)
 	releaseFence, err := m.acquireWorkspaceOperationFence(lease.Context(), ws.ID, rt)
 	if err != nil {
 		return err
@@ -265,7 +265,7 @@ func (m *manager) beginCleanHome(ctx context.Context, membershipID string, audit
 		}
 		return func() error { return nil }, err
 	}
-	rt := m.runtimeFor(ws, "")
+	rt := m.runtimeFor(ws, noSecretKeys)
 	if !runtime.CanEraseHome(rt) {
 		return nil, runtime.ErrHomeWipeUnsupported
 	}
@@ -356,7 +356,7 @@ func (m *manager) homeBackupsByMembership(ctx context.Context, membershipID stri
 	if !found {
 		return runtime.HomeBackups{}, m.homeOperations().Backups, nil
 	}
-	return runtime.HomeBackupsOf(ctx, m.runtimeFor(ws, ""))
+	return runtime.HomeBackupsOf(ctx, m.runtimeFor(ws, noSecretKeys))
 }
 
 // deleteHomeBackupsByMembership deletes those copies and returns how many went. It takes
@@ -373,7 +373,7 @@ func (m *manager) deleteHomeBackupsByMembership(ctx context.Context, membershipI
 	if !found {
 		return 0, m.homeOperations().Backups, nil
 	}
-	return runtime.DeleteHomeBackups(ctx, m.runtimeFor(ws, ""))
+	return runtime.DeleteHomeBackups(ctx, m.runtimeFor(ws, noSecretKeys))
 }
 
 // homeOperations says which home operations this deployment's runtime performs; the
@@ -411,14 +411,13 @@ func (m *manager) homeOperations() runtime.HomeOperations {
 // this one start differs, and every later call (state/exec/endpoint) is unaffected by
 // container env.
 func (m *manager) runtimeForUnattended(ctx context.Context, res *resolved) (runtime.Runtime, error) {
-	dekHex, err := m.resolveDEK(ctx, res.ws, res.ident.UserKey)
+	keys, err := m.resolveDEK(ctx, res.ws, res.ident.UserKey)
 	if err != nil {
 		return nil, err
 	}
-	ws := res.ws
-	ws.MemBytes, ws.CPUUnits, ws.DiskGB = m.resolveWorkspaceSize(ctx, ws)
+	ws := m.withResolvedSize(ctx, res.ws)
 	env := append(m.workspaceExtraEnv(ctx, ws), runtime.UnattendedStartEnv)
-	return m.runtimeFor(ws, dekHex, env...), nil
+	return m.runtimeFor(ws, keys, env...), nil
 }
 
 // armPreviewForStart mints the preview slug for the container start that is about to
@@ -430,7 +429,7 @@ func (m *manager) runtimeForUnattended(ctx context.Context, res *resolved) (runt
 // and the runtime buildResolved assembled does not yet know this start's slug. "The URL was
 // issued but the app inside the container does not know it" is exactly a half-broken state
 // for anything that reads its own public URL out of env, Next.js being the usual case.
-func (m *manager) armPreviewForStart(ctx context.Context, res *resolved, extraEnv []string) runtime.Runtime {
+func (m *manager) armPreviewForStart(ctx context.Context, res *resolved, keys runtime.SecretKeys, extraEnv []string) runtime.Runtime {
 	if m.previewDomain == "" {
 		return nil
 	}
@@ -439,16 +438,10 @@ func (m *manager) armPreviewForStart(ctx context.Context, res *resolved, extraEn
 		log.Printf("preview slug for ws %s: %v (starting without preview URLs)", res.ws.ID, err)
 		return nil
 	}
-	dekHex, err := m.resolveDEK(ctx, res.ws, res.ident.UserKey)
-	if err != nil {
-		log.Printf("preview arm: resolve DEK for ws %s: %v (starting without preview URLs)", res.ws.ID, err)
-		return nil
-	}
 	ws := res.ws
 	ws.PreviewSlug = slug
-	ws.MemBytes, ws.CPUUnits, ws.DiskGB = m.resolveWorkspaceSize(ctx, ws)
-	ws.SlotClass, _ = m.resolveSlotClass(ctx, ws)
-	return m.runtimeFor(ws, dekHex, append(m.workspaceExtraEnv(ctx, ws), extraEnv...)...)
+	ws = m.withResolvedSize(ctx, ws)
+	return m.runtimeFor(ws, keys, append(m.workspaceExtraEnv(ctx, ws), extraEnv...)...)
 }
 
 // refreshGitTokenForStart returns a runtime rebuilt with the current internal git token
@@ -460,7 +453,7 @@ func (m *manager) armPreviewForStart(ctx context.Context, res *resolved, extraEn
 // the lifecycle lease, right before Start. A rotation on another replica in the moment
 // between this check and Start still goes unseen (docs/build/91 §91.5). extraEnv is
 // carried over, as armPreviewForStart does.
-func (m *manager) refreshGitTokenForStart(ctx context.Context, res *resolved, extraEnv []string) runtime.Runtime {
+func (m *manager) refreshGitTokenForStart(ctx context.Context, res *resolved, keys runtime.SecretKeys, extraEnv []string) runtime.Runtime {
 	if m.internalGitHost == "" || res.ws.MembershipID == "" {
 		return nil
 	}
@@ -468,17 +461,11 @@ func (m *manager) refreshGitTokenForStart(ctx context.Context, res *resolved, ex
 	if err != nil || !ok || epoch == res.gitEpoch {
 		return nil
 	}
-	dekHex, err := m.resolveDEK(ctx, res.ws, res.ident.UserKey)
-	if err != nil {
-		log.Printf("internal git: rebuild for ws %s: resolve DEK: %v (starting with the token it had)", res.ws.ID, err)
-		return nil
-	}
 	ws := res.ws
-	ws.MemBytes, ws.CPUUnits, ws.DiskGB = m.resolveWorkspaceSize(ctx, ws)
-	ws.SlotClass, _ = m.resolveSlotClass(ctx, ws)
+	ws = m.withResolvedSize(ctx, ws)
 	// Next resolve rebuilds the memo too, so the stale env is not kept for later starts.
 	m.evictMembershipCache(res.ws.MembershipID)
-	return m.runtimeFor(ws, dekHex, append(m.workspaceExtraEnv(ctx, ws), extraEnv...)...)
+	return m.runtimeFor(ws, keys, append(m.workspaceExtraEnv(ctx, ws), extraEnv...)...)
 }
 
 // rotatePreviewSlug decides which slug THIS start runs under and persists it.
@@ -523,6 +510,8 @@ func (m *manager) rotatePreviewSlug(ctx context.Context, ws store.Workspace) (st
 	if err := m.store.SetWorkspacePreviewSlug(ctx, ws.ID, slug); err != nil {
 		return "", err
 	}
+	// Temporary grants (preview_grant.go) are dropped by SetWorkspacePreviewSlug itself, in the
+	// same transaction, so a grant made under the previous slug cannot land after this point.
 	return slug, nil
 }
 
@@ -565,6 +554,9 @@ func (m *manager) workspaceExtraEnv(ctx context.Context, ws store.Workspace) []s
 			"AF_PREVIEW_SLUG="+ws.PreviewSlug,
 			"AF_PREVIEW_PORTS="+strings.Join(strs, ","))
 	}
+	// Development OIDC IdP (ADR 0116): issuer + this workspace's client id and secret, whenever
+	// the deployment offers it; the workspace opt-in is checked per request, not here.
+	env = append(env, m.devIdPEnv(ctx, ws)...)
 	// The Agent withholds the workspace task's AWS identity from sessions unless told
 	// otherwise (awsx.IsolateWorkloadChain). The ECS runtimes do not pass WS_ENV on, so
 	// the deployment's opt-in has to travel from here to reach them.
@@ -589,6 +581,10 @@ func (m *manager) workspaceExtraEnv(ctx context.Context, ws store.Workspace) []s
 				"AF_INTERNAL_GIT_EPOCH="+strconv.FormatInt(epoch, 10))
 		}
 	}
+	// Member-origin mark (ADR 0113): the public keys the Agent verifies a relayed member write
+	// with, and the workspace and membership it must be signed for. Not tied to the public base:
+	// the relay reaches the Agent without it.
+	env = append(env, memberOriginEnv(m.tokenSignMaster(), memberOriginKeyVersion(), ws.ID, ws.MembershipID)...)
 	// Memo bridge: inject the CP public base + this membership's memo token so the
 	// in-container fleet operator can read/write the memo queue over the public
 	// hairpin (memo_bridge.go). Deterministic token → idempotent re-injection. Requires
@@ -699,6 +695,17 @@ func (m *manager) resolveWorkspaceSize(ctx context.Context, ws store.Workspace) 
 		}
 	}
 	return memBytes, cpuUnits, diskGB
+}
+
+// withResolvedSize returns ws with every axis the next container start depends on
+// resolved onto it: memory, CPU, disk and machine class. Every path that builds a
+// runtime for a start (or a resize) goes through it; resolving only the size axes
+// leaves SlotClass empty, and ecs-ec2 then places the member on the deployment default
+// class instead of the tenant's.
+func (m *manager) withResolvedSize(ctx context.Context, ws store.Workspace) store.Workspace {
+	ws.MemBytes, ws.CPUUnits, ws.DiskGB = m.resolveWorkspaceSize(ctx, ws)
+	ws.SlotClass, _ = m.resolveSlotClass(ctx, ws)
+	return ws
 }
 
 // resolveSlotClass returns the machine class ws's NEXT container start lands on, and
@@ -837,7 +844,7 @@ func (m *manager) beginDestroyWorkspace(ctx context.Context, membershipID string
 		lock.Unlock()
 		return nil, err
 	}
-	rt := m.runtimeFor(ws, "")
+	rt := m.runtimeFor(ws, noSecretKeys)
 	releaseFence, err := m.acquireWorkspaceOperationFence(lease.Context(), ws.ID, rt)
 	if err != nil {
 		lease.Close()
@@ -879,13 +886,16 @@ func (m *manager) beginDestroyWorkspace(ctx context.Context, membershipID string
 		defer release()
 		leftovers, err := runtime.DestroyRuntime(lease.Context(), rt)
 		if record != nil {
-			m.finishHomeOperation(*record, err, leftovers)
+			if m.finishHomeOperation(*record, err, leftovers) && err == nil {
+				m.releaseHomeDEKAfterDestroy(membershipID, rt, lease)
+			}
 			return leftovers, err
 		}
 		if err == nil {
 			if err = lease.checkpoint(ctx); err == nil {
 				if err = m.store.DeleteWorkspace(ctx, ws.ID); err == nil {
 					m.evictMembershipCache(membershipID)
+					m.releaseHomeDEKAfterDestroy(membershipID, rt, lease)
 				}
 			}
 		}

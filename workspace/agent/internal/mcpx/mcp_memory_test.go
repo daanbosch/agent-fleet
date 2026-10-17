@@ -2,6 +2,7 @@ package mcpx
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -171,6 +172,10 @@ func TestMemoryToolsRoundTrip(t *testing.T) {
 	if r.IsError || !strings.Contains(r.Text, "go-test-cap") || !strings.Contains(r.Text, "-p 2") {
 		t.Fatalf("search = %+v", r)
 	}
+	r = callMemoryTool(t, "memory_search", map[string]any{"query": "busy nosuchword"})
+	if r.IsError || !strings.Contains(r.Text, "No memory contains every word") || !strings.Contains(r.Text, "go-test-cap") || !strings.Contains(r.Text, "[matched: busy]") {
+		t.Fatalf("fallback search = %+v", r)
+	}
 	r = callMemoryTool(t, "memory_read", map[string]any{"name": "go-test-cap"})
 	if r.IsError || !strings.Contains(r.Text, "revision: 1") || !strings.Contains(r.Text, "author: claude (session owner01)") {
 		t.Fatalf("read = %+v", r)
@@ -260,5 +265,107 @@ func TestGetMemorySnapshotAsksForNativeDiff(t *testing.T) {
 	}
 	if q, _ := url.ParseQuery(listQuery); q.Get("native") != "1" {
 		t.Fatalf("snapshots query = %q, want native=1", listQuery)
+	}
+}
+
+// The budget is measured on the Agent's line text, so the formatter must print the same bytes
+// (memoryx pins the same literal in agent_memory_index_test.go).
+func TestMemoryIndexLineFormatIsPinned(t *testing.T) {
+	out := mcpMemoryFormatIndex(`{"project":{"display":"p"},"entries":[{"name":"n","scope":"user","description":"d","type":"feedback","kinds":["claude"],"updated":"2026-10-04T09:00:00Z"}]}`)
+	if want := "- [user] n — d (feedback; for claude; 2026-10-04)\n"; !strings.Contains(out, want) {
+		t.Fatalf("index = %q, want a line %q", out, want)
+	}
+}
+
+func TestMemoryIndexRendersTailAndOmittedAsTheAgentCutThem(t *testing.T) {
+	out := mcpMemoryFormatIndex(`{"project":{"display":"p"},"entries":[{"name":"a","scope":"user","description":"d"}],"more":["adr-{1,2}","solo"],"omitted":7,"truncated":true}`)
+	for _, want := range []string{"names only", "prefix", "memory_search", "adr-{1,2} solo\n", "and 7 more (use memory_search)\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in %q", want, out)
+		}
+	}
+	if strings.Contains(out, "truncated") {
+		t.Errorf("the formatter must not invent its own truncation note: %q", out)
+	}
+	// Nothing cut: no tail, no count.
+	if out := mcpMemoryFormatIndex(`{"project":{"display":"p"},"entries":[{"name":"a","scope":"user","description":"d"}]}`); strings.Contains(out, "names only") || strings.Contains(out, "more (use") {
+		t.Errorf("unexpected tail: %q", out)
+	}
+}
+
+// The Agent reserves agentMemIndexTailOverhead (320) of its 8 KiB tail budget for what this
+// formatter adds; the real tail, header and count line included, must stay within 8 KiB.
+func TestMemoryIndexTailWithinBudgetWithOverhead(t *testing.T) {
+	names := make([]string, 0, 1000)
+	size := 0
+	for i := 0; size+len("n0000 ") <= 8192-320; i++ {
+		n := fmt.Sprintf("n%04d", i)
+		names = append(names, n)
+		size += len(n) + 1
+	}
+	more, _ := json.Marshal(names)
+	out := mcpMemoryFormatIndex(`{"project":{"display":"p"},"entries":[],"more":` + string(more) + `,"omitted":99999,"pinnedOmitted":99999}`)
+	if !strings.Contains(out, "99999 of these are pinned") {
+		t.Fatalf("the pinned count is not printed: %q", out)
+	}
+	i := strings.Index(out, "Not listed above")
+	if i < 0 {
+		t.Fatalf("no tail: %q", out)
+	}
+	if tail := len(out) - i; tail > 8192 {
+		t.Fatalf("tail = %d bytes, over 8192", tail)
+	}
+}
+
+// Nothing described does not mean nothing known: names and the count still render, alongside withheld.
+func TestMemoryIndexWithNoDescribedLinesStillRendersTail(t *testing.T) {
+	out := mcpMemoryFormatIndex(`{"project":{"display":"p"},"entries":[],"more":["real-memory"],"omitted":3,"withheld":1,"truncated":true}`)
+	for _, want := range []string{"real-memory", "and 3 more", "1 memory file(s) are withheld"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in %q", want, out)
+		}
+	}
+	if strings.Contains(out, "No memories yet") {
+		t.Errorf("claimed an empty store: %q", out)
+	}
+}
+
+// cursor has no local user layer for the 0042 distributor (ADR 0108 decision 5), so the guidance
+// on when to call the tools lives in their descriptions; they must keep saying it.
+func TestMemoryToolDescriptionsCarryTheWhenToCallGuidance(t *testing.T) {
+	desc := map[string]string{}
+	for _, tool := range mcpStdioMemoryTools() {
+		desc[tool["name"].(string)], _ = tool["description"].(string)
+	}
+	if !strings.Contains(desc["memory_index"], "start work") {
+		t.Errorf("memory_index no longer says when to call it: %q", desc["memory_index"])
+	}
+	if !strings.Contains(desc["memory_search"], "before re-deriving") {
+		t.Errorf("memory_search no longer says when to call it: %q", desc["memory_search"])
+	}
+}
+
+// The authoring guidance is said in the save answer's text and in the tool description, and a
+// memory over it is still saved.
+func TestMemorySaveReturnsGuidanceWarnings(t *testing.T) {
+	memoryTestEnv(t)
+	r := callMemoryTool(t, "memory_save", map[string]any{
+		"name": "wordy", "description": strings.Repeat("d", 500), "body": strings.Repeat("b", 5000),
+	})
+	if r.IsError || !strings.Contains(r.Text, `"revision":1`) || !strings.Contains(r.Text, `"warnings":[`) ||
+		!strings.Contains(r.Text, "Saved, with guidance:") || !strings.Contains(r.Text, "500 characters") || !strings.Contains(r.Text, "4096 bytes") {
+		t.Fatalf("save = %+v", r)
+	}
+	r = callMemoryTool(t, "memory_save", map[string]any{"name": "tidy", "description": "short", "body": "b"})
+	if r.IsError || strings.Contains(r.Text, "warnings") || strings.Contains(r.Text, "guidance") {
+		t.Fatalf("a memory inside the guidance must carry no warning: %+v", r)
+	}
+	for _, tool := range mcpStdioMemoryTools() {
+		if tool["name"] == "memory_save" {
+			d := tool["description"].(string)
+			if !strings.Contains(d, "150 characters") || !strings.Contains(d, "4,096 bytes") {
+				t.Errorf("memory_save description lacks the authoring guidance: %s", d)
+			}
+		}
 	}
 }

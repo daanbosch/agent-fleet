@@ -549,6 +549,10 @@ func (b *transcriptBuilder) add(r Record) {
 		}
 		for _, tc := range r.ToolCalls {
 			p := transcript.Part{Kind: "tool", Tool: tc.Name, Info: transcript.Clip(tc.Arguments)}
+			if name, args, ok := bridgeCallTarget(tc); ok {
+				// A deferred MCP call (mcp_bridge.go) reads as the tool it reaches, not "tool_call".
+				p.Tool, p.Info = name, transcript.Clip(args)
+			}
 			// Edit-family calls additionally carry their target and before/after, which is
 			// what the changed-files strip counts and what opens the trace as a diff
 			// (fileedits.go). Verb is left to transcript.EditVerb: an `edit` has an Old and

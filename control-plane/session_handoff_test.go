@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/k-k1/agent-fleet/control-plane/internal/store"
@@ -20,7 +21,26 @@ type handoffAPIFixture struct {
 	owner     store.Membership
 	recipient store.Membership
 	tenant    store.Tenant
-	agentHits map[string]int
+	agentHits *pathHits
+}
+
+// pathHits counts Agent requests per path. The catalog sync reads /sessions/catalog and
+// /repos concurrently, so the stub's handler runs on two goroutines at once.
+type pathHits struct {
+	mu sync.Mutex
+	n  map[string]int
+}
+
+func (h *pathHits) add(path string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.n[path]++
+}
+
+func (h *pathHits) get(path string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.n[path]
 }
 
 func newHandoffAPIFixture(t *testing.T, sessions []map[string]any) handoffAPIFixture {
@@ -45,9 +65,9 @@ func newHandoffAPIFixture(t *testing.T, sessions []map[string]any) handoffAPIFix
 	if err := st.CreateWorkspace(ctx, ws); err != nil {
 		t.Fatal(err)
 	}
-	hits := map[string]int{}
+	hits := &pathHits{n: map[string]int{}}
 	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits[r.URL.Path]++
+		hits.add(r.URL.Path)
 		switch r.URL.Path {
 		case "/sessions/catalog":
 			_ = json.NewEncoder(w).Encode(map[string]any{"sessions": sessions})
@@ -72,7 +92,7 @@ func newHandoffAPIFixture(t *testing.T, sessions []map[string]any) handoffAPIFix
 	}}}
 	share := newSessionShareAPI(mgr)
 	return handoffAPIFixture{
-		st: st, api: newSessionHandoffAPI(mgr, share), owner: owner, recipient: recipient, tenant: tenant,
+		st: st, api: newSessionHandoffAPI(mgr, share, false), owner: owner, recipient: recipient, tenant: tenant,
 		agentHits: hits,
 		res:       &resolved{ident: oi, mv: ownerViews[0], ws: ws, rt: stubRuntime{endpoint: agent.URL, token: "tok"}},
 	}
@@ -160,7 +180,7 @@ func TestHandoffRecipientsThrottlesInventorySync(t *testing.T) {
 	if rec := f.getRecipients(t, "session-1"); rec.Code != http.StatusOK {
 		t.Fatalf("status=%d", rec.Code)
 	}
-	first := f.agentHits["/repos"]
+	first := f.agentHits.get("/repos")
 	if first == 0 {
 		t.Fatal("the very first call must sync")
 	}
@@ -169,7 +189,55 @@ func TestHandoffRecipientsThrottlesInventorySync(t *testing.T) {
 			t.Fatalf("status=%d", rec.Code)
 		}
 	}
-	if got := f.agentHits["/repos"]; got != first {
+	if got := f.agentHits.get("/repos"); got != first {
 		t.Fatalf("/repos hits=%d (first=%d) - a re-read within the TTL is running the inventory sync", got, first)
+	}
+}
+
+// The modal opens on the recipient list alone: ?context=skip must not make the owner's Agent
+// run the git status behind the verdict, and the verdict is read from its own route.
+func TestHandoffRecipientsContextSkipDoesNotAskTheAgentForTheVerdict(t *testing.T) {
+	f := newHandoffAPIFixture(t, oneSession)
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/session-1/handoff-recipients?context=skip", nil)
+	req.SetPathValue("name", "session-1")
+	rec := httptest.NewRecorder()
+	f.api.recipients(rec, req, f.res)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := got["context"]; has {
+		t.Fatalf("body has a context although it was skipped: %s", rec.Body.String())
+	}
+	if _, has := got["members"]; !has {
+		t.Fatalf("body has no members: %s", rec.Body.String())
+	}
+	if n := f.agentHits.get("/sessions/session-1/handoff-context"); n != 0 {
+		t.Fatalf("the Agent was asked for the verdict %d times", n)
+	}
+}
+
+func TestHandoffContextRouteRelaysTheAgentsVerdict(t *testing.T) {
+	f := newHandoffAPIFixture(t, oneSession)
+	get := func(name string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/sessions/"+name+"/handoff-context", nil)
+		req.SetPathValue("name", name)
+		rec := httptest.NewRecorder()
+		f.api.handoffContextGET(rec, req, f.res)
+		return rec
+	}
+	rec := get("session-1")
+	var got struct {
+		Context map[string]any `json:"context"`
+	}
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &got) != nil || got.Context["branch"] != "main" {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	// "No such session" stays a 404, never "no working copy" and never an empty verdict.
+	if rec := get("no-such-session"); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown session: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }

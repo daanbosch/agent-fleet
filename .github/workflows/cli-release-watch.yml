@@ -4,10 +4,17 @@
 # different question "did a public version change since we last reacted?" and
 # dispatches the expensive TUI/pane contracts only on that edge.
 #
-# Successful contracts append a "tested" marker to the release-state issue. An
-# unavailable credential appends a separate "seen" marker after the tracking issue is
-# updated (one report per release); a failed dispatched contract never advances tested
-# state, so the watcher retries it the next day.
+# Successful contracts append a "tested" marker to the release-state issue; a failed
+# dispatched contract never advances tested state, so the watcher retries it on its next
+# run - unless it finished red (see below). A release this job cannot test (cursor and
+# kiro, or a missing secret) is not reported from here: cli-drift.yml opens that CLI's
+# update issue, which names the step a person has to take.
+#
+# A contract that finishes red writes a `red` marker for that version (and a row in that
+# CLI's update issue). At a 2-hour cadence the watcher would otherwise spend the
+# contract's LLM quota ~12 times a day on a version that keeps failing; cli-release-edges.sh
+# skips a `latest` that carries the marker. A newer release, a passing run or a manual
+# dispatch releases it.
 #
 # One unreadable release source holds back that row and nothing else. It used to abort
 # the job: on 2026-09-09 claude 2.1.267 was detected, rtk's GitHub Releases call failed,
@@ -19,7 +26,7 @@ name: cli-release-watch
 
 on:
   schedule:
-    - cron: "30 20 * * *" # daily 05:30 JST, after cli-drift at 05:00
+    - cron: "30 */2 * * *" # every 2 hours at :30, after cli-drift at :00
   workflow_dispatch:
 
 permissions:
@@ -47,7 +54,7 @@ jobs:
           deploy/local/cli-release-state.sh ensure watcher ok
           for name in claude codex opencode copilot agy cursor kiro muse; do
             echo "tested_$name=$(deploy/local/cli-release-state.sh get tested "$name")" >> "$GITHUB_OUTPUT"
-            echo "seen_$name=$(deploy/local/cli-release-state.sh get seen "$name")" >> "$GITHUB_OUTPUT"
+            echo "red_$name=$(deploy/local/cli-release-state.sh get red "$name")" >> "$GITHUB_OUTPUT"
           done
 
       - name: fetch all public versions
@@ -68,13 +75,21 @@ jobs:
         env:
           FAILED: ${{ steps.versions.outputs.failed }}
           TESTED_CLAUDE: ${{ steps.state.outputs.tested_claude }}
+          RED_CLAUDE: ${{ steps.state.outputs.red_claude }}
           TESTED_CODEX: ${{ steps.state.outputs.tested_codex }}
+          RED_CODEX: ${{ steps.state.outputs.red_codex }}
           TESTED_OPENCODE: ${{ steps.state.outputs.tested_opencode }}
+          RED_OPENCODE: ${{ steps.state.outputs.red_opencode }}
           TESTED_COPILOT: ${{ steps.state.outputs.tested_copilot }}
+          RED_COPILOT: ${{ steps.state.outputs.red_copilot }}
           TESTED_AGY: ${{ steps.state.outputs.tested_agy }}
+          RED_AGY: ${{ steps.state.outputs.red_agy }}
           TESTED_CURSOR: ${{ steps.state.outputs.tested_cursor }}
+          RED_CURSOR: ${{ steps.state.outputs.red_cursor }}
           TESTED_KIRO: ${{ steps.state.outputs.tested_kiro }}
+          RED_KIRO: ${{ steps.state.outputs.red_kiro }}
           TESTED_MUSE: ${{ steps.state.outputs.tested_muse }}
+          RED_MUSE: ${{ steps.state.outputs.red_muse }}
           LATEST_CLAUDE: ${{ steps.versions.outputs.latest_claude }}
           LATEST_CODEX: ${{ steps.versions.outputs.latest_codex }}
           LATEST_OPENCODE: ${{ steps.versions.outputs.latest_opencode }}
@@ -107,7 +122,6 @@ jobs:
           deploy/local/cli-release-state.sh set watcher at "$at"
 
       - name: dispatch latest TUI / mirror contracts when auth is configured
-        id: dispatch
         if: steps.changed.outputs.count != '' && steps.changed.outputs.count != '0'
         env:
           CLAUDE_CHANGED: ${{ steps.changed.outputs.claude }}
@@ -115,8 +129,6 @@ jobs:
           OPENCODE_CHANGED: ${{ steps.changed.outputs.opencode }}
           COPILOT_CHANGED: ${{ steps.changed.outputs.copilot }}
           AGY_CHANGED: ${{ steps.changed.outputs.agy }}
-          CURSOR_CHANGED: ${{ steps.changed.outputs.cursor }}
-          KIRO_CHANGED: ${{ steps.changed.outputs.kiro }}
           MUSE_CHANGED: ${{ steps.changed.outputs.muse }}
           CLAUDE_KEY: ${{ secrets.E2E_ANTHROPIC_API_KEY }}
           CLAUDE_TOKEN: ${{ secrets.E2E_CLAUDE_OAUTH_TOKEN }}
@@ -128,7 +140,6 @@ jobs:
             if [ -n "$CLAUDE_KEY" ] || [ -n "$CLAUDE_TOKEN" ]; then
               gh workflow run claude-tui-contract.yml -f cli_version=latest
             else
-              echo "claude_unavailable=true" >> "$GITHUB_OUTPUT"
               echo "::warning::Claude changed but no TUI-contract credential is configured"
             fi
           fi
@@ -142,28 +153,20 @@ jobs:
             if [ -n "$COPILOT_TOKEN" ]; then
               gh workflow run copilot-contract.yml -f cli_version=latest
             else
-              echo "copilot_unavailable=true" >> "$GITHUB_OUTPUT"
+              echo "::warning::Copilot changed but E2E_COPILOT_GITHUB_TOKEN is not configured"
             fi
           fi
           if [ "$AGY_CHANGED" = true ]; then
             if [ -n "$AGY_TOKEN" ]; then
               gh workflow run agy-contract.yml -f cli_version=latest
             else
-              echo "agy_unavailable=true" >> "$GITHUB_OUTPUT"
+              echo "::warning::agy changed but E2E_AGY_OAUTH_TOKEN is not configured"
             fi
           fi
-          if [ "$CURSOR_CHANGED" = true ]; then
-            # Cursor auth.json is a refreshable interactive credential.  Keep the
-            # dedicated workflow runnable by dispatch, but do not turn a stale
-            # snapshot into an unattended release gate.
-            echo "cursor_manual=true" >> "$GITHUB_OUTPUT"
-          fi
-          if [ "$KIRO_CHANGED" = true ]; then
-            # Kiro's device-flow DB rotates and is intentionally split across
-            # manual-workflow secrets.  A release edge asks for a deliberate run;
-            # it must never spend a user's device-flow credential unattended.
-            echo "kiro_manual=true" >> "$GITHUB_OUTPUT"
-          fi
+          # cursor and kiro are never dispatched from here. Cursor's auth.json is a
+          # refreshable interactive credential, and kiro's device-flow DB rotates; an
+          # unattended run must never spend either. Their update issue asks a person to
+          # dispatch the contract.
           if [ "$MUSE_CHANGED" = true ]; then
             # muse is the one kind whose release contract needs NO credential: it checks the
             # MSP schema fingerprint and the shape of `muse --version`, both free (ADR 0095
@@ -171,112 +174,6 @@ jobs:
             # would cost a member's subscription, and muse-contract.yml never runs one.
             gh workflow run muse-contract.yml -f version=latest
           fi
-
-      - name: report releases whose credential is unavailable
-        if: steps.dispatch.outputs.claude_unavailable == 'true' || steps.dispatch.outputs.copilot_unavailable == 'true' || steps.dispatch.outputs.agy_unavailable == 'true' || steps.dispatch.outputs.cursor_manual == 'true' || steps.dispatch.outputs.kiro_manual == 'true'
-        env:
-          CLAUDE_UNAVAILABLE: ${{ steps.dispatch.outputs.claude_unavailable }}
-          COPILOT_UNAVAILABLE: ${{ steps.dispatch.outputs.copilot_unavailable }}
-          AGY_UNAVAILABLE: ${{ steps.dispatch.outputs.agy_unavailable }}
-          CURSOR_MANUAL: ${{ steps.dispatch.outputs.cursor_manual }}
-          KIRO_MANUAL: ${{ steps.dispatch.outputs.kiro_manual }}
-          SEEN_CLAUDE: ${{ steps.state.outputs.seen_claude }}
-          SEEN_COPILOT: ${{ steps.state.outputs.seen_copilot }}
-          SEEN_AGY: ${{ steps.state.outputs.seen_agy }}
-          SEEN_CURSOR: ${{ steps.state.outputs.seen_cursor }}
-          SEEN_KIRO: ${{ steps.state.outputs.seen_kiro }}
-          LATEST_CLAUDE: ${{ steps.versions.outputs.latest_claude }}
-          LATEST_COPILOT: ${{ steps.versions.outputs.latest_copilot }}
-          LATEST_AGY: ${{ steps.versions.outputs.latest_agy }}
-          LATEST_CURSOR: ${{ steps.versions.outputs.latest_cursor }}
-          LATEST_KIRO: ${{ steps.versions.outputs.latest_kiro }}
-        run: |
-          set -euo pipefail
-          title="CLI release needs fleet TUI/mirror probe"
-          body="$(mktemp)"
-          {
-          echo "The release watcher found public versions that need a fleet TUI/mirror probe:"
-            echo
-            for name in CLAUDE COPILOT AGY; do
-              eval "unavailable=\${${name}_UNAVAILABLE:-}"
-              eval "latest=\${LATEST_${name}}"
-              eval "seen=\${SEEN_${name}:-}"
-              [ "$unavailable" = true ] && [ "$latest" != "$seen" ] && echo "- \`${name,,}=$latest\`"
-            done
-            for name in CURSOR KIRO; do
-              eval "manual=\${${name}_MANUAL:-}"
-              eval "latest=\${LATEST_${name}}"
-              eval "seen=\${SEEN_${name}:-}"
-              [ "$manual" = true ] && [ "$latest" != "$seen" ] && echo "- \`${name,,}=$latest\` (manual credentialed workflow)"
-            done
-            cat <<'EOF'
-
-          Cursor/Kiro use refreshable interactive credentials, so dispatch their
-          dedicated workflow deliberately after updating its secret.  For a missing
-          Claude/Copilot/Antigravity credential, run the real signed-in CLI through
-          Terminal (CLI), then verify:
-
-          1. the composer readiness/footer is detected;
-          2. a prompt sent from the mirror reaches the TUI;
-          3. user/assistant turns appear in `/messages`;
-          4. working returns to idle after the response.
-
-          This issue is intentionally not called a passing contract. Close it only after the
-          fleet probe succeeds or an automated contract replaces it.
-          EOF
-          } > "$body"
-          # `first` inside jq, not `| head -1`: with `pipefail` a SIGPIPE'd gh is a 141
-          # that `set -e` turns into a failed step for a lookup that worked.
-          num="$(gh issue list --state open --search "in:title $title" --json number,title \
-            --jq "[.[] | select(.title == \"$title\") | .number] | first // empty")"
-          gh label create cli-drift --color FBCA04 --description "upstream CLI version drift" 2>/dev/null || true
-          if ! grep -q '^-' "$body"; then
-            exit 0
-          elif [ -n "$num" ]; then
-            gh issue comment "$num" --body-file "$body"
-          else
-            gh issue create --title "$title" --body-file "$body" --label cli-drift
-          fi
-
-      - name: remember handled releases
-        if: steps.changed.outputs.count != '' && steps.changed.outputs.count != '0'
-        env:
-          CLAUDE_UNAVAILABLE: ${{ steps.dispatch.outputs.claude_unavailable }}
-          COPILOT_UNAVAILABLE: ${{ steps.dispatch.outputs.copilot_unavailable }}
-          AGY_UNAVAILABLE: ${{ steps.dispatch.outputs.agy_unavailable }}
-          CURSOR_MANUAL: ${{ steps.dispatch.outputs.cursor_manual }}
-          KIRO_MANUAL: ${{ steps.dispatch.outputs.kiro_manual }}
-          SEEN_CLAUDE: ${{ steps.state.outputs.seen_claude }}
-          SEEN_COPILOT: ${{ steps.state.outputs.seen_copilot }}
-          SEEN_AGY: ${{ steps.state.outputs.seen_agy }}
-          SEEN_CURSOR: ${{ steps.state.outputs.seen_cursor }}
-          SEEN_KIRO: ${{ steps.state.outputs.seen_kiro }}
-          LATEST_CLAUDE: ${{ steps.versions.outputs.latest_claude }}
-          LATEST_COPILOT: ${{ steps.versions.outputs.latest_copilot }}
-          LATEST_AGY: ${{ steps.versions.outputs.latest_agy }}
-          LATEST_CURSOR: ${{ steps.versions.outputs.latest_cursor }}
-          LATEST_KIRO: ${{ steps.versions.outputs.latest_kiro }}
-        run: |
-          set -euo pipefail
-          # A missing credential gets one Issue report per public version. It is
-          # deliberately stored separately from TESTED: no unavailable/failing run
-          # may look like a passed TUI/mirror contract.
-          for name in CLAUDE COPILOT AGY; do
-            eval "unavailable=\${${name}_UNAVAILABLE:-}"
-            [ "$unavailable" = true ] || continue
-            eval "latest=\${LATEST_${name}}"
-            eval "seen=\${SEEN_${name}:-}"
-            [ "$latest" != "$seen" ] || continue
-            deploy/local/cli-release-state.sh set seen "${name,,}" "$latest"
-          done
-          for name in CURSOR KIRO; do
-            eval "manual=\${${name}_MANUAL:-}"
-            [ "$manual" = true ] || continue
-            eval "latest=\${LATEST_${name}}"
-            eval "seen=\${SEEN_${name}:-}"
-            [ "$latest" != "$seen" ] || continue
-            deploy/local/cli-release-state.sh set seen "${name,,}" "$latest"
-          done
 
       # Last, so the watcher state is already written when it runs. Every source failing
       # is not release news, it is the check being unable to run at all — the one case

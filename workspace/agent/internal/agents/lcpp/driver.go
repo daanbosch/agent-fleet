@@ -19,6 +19,7 @@ import (
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/harness"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/lifegate"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/mcpc"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/transcript"
@@ -209,6 +210,21 @@ func ManagedBusy(name string) bool {
 	return h.running || h.q.Len() > 0
 }
 
+// ManagedInFlight reports that the handle holds an entry it took from the queue and has not
+// settled. The pump gives its move-gate lease back once the runtime has the input, which can be
+// before the runtime's own record (and so DriveState) shows the turn; a move asks this, under the
+// exclusive gate, so it never starts in that window (ADR 0115 decision 11.2). Entries still
+// queued do not count: the move carries them.
+func ManagedInFlight(name string) bool {
+	h := handleFor(name)
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.running || h.q.Head() != nil
+}
+
 // DropHandle detaches a managed session from its runtime: interrupt any running turn and
 // forget the handle. The store on disk is untouched, so a later Resume reattaches to the same
 // conversation with no data lost — there is no process to stop, only the in-memory handle.
@@ -342,6 +358,9 @@ type threadHandle struct {
 	mcpCtx    context.Context
 	mcpCancel context.CancelFunc
 	mcpMgr    *mcpc.Manager
+	// mcpDescribed is the set of MCP tools the model has read the schema of through the
+	// tool_describe bridge tool (mcp_bridge.go).
+	mcpDescribed describedSet
 	// mcpFailures is the per-server backoff/error state syncMCPServers (mcp.go) maintains
 	// across turns: a server present here is known broken as of its own mcpFailure.err, and is
 	// skipped (not retried) until mcpFailure.next. See syncMCPServers' own doc comment for why
@@ -483,17 +502,28 @@ func (h *threadHandle) accept(in agents.TurnInput) (queued bool, err error) {
 // single-flight turn model.
 func (h *threadHandle) pump() {
 	for {
+		// Each entry gets a lease of its own on the session's lifecycle gate (ADR 0115 decision
+		// 11.1), taken before it leaves the queue and held until the user turn is in the store.
+		// The input path that queued it released its lease at the accept, so a move finds every
+		// accepted entry either in the store or still queued, where its snapshot reads it. Taken
+		// without h.mu: a move reads the queue under h.mu while it holds the gate.
+		lease, err := lifegate.Enter(context.Background(), h.name)
+		if err != nil {
+			h.parkForMove(err)
+			return
+		}
 		h.mu.Lock()
 		t := h.q.Take()
 		if t == nil {
 			h.pumping = false
 			h.mu.Unlock()
+			lease.Release()
 			return
 		}
 		h.running = true
 		h.mu.Unlock()
 
-		h.runTurn(t)
+		h.runTurn(t, lease)
 
 		h.mu.Lock()
 		h.q.Settle(t)
@@ -502,12 +532,53 @@ func (h *threadHandle) pump() {
 	}
 }
 
+// parkForMove stops a pump that a move refused, leaving its input queued for the move's
+// snapshot. If the move rolls back, the gate reopens and the pump starts again. The second look
+// covers a reopen that ran before the callback was registered or while pumping was still set,
+// when resumePump would have found nothing to do.
+//
+// A meta the gate could not read is not a move: nothing will reopen it, so the pump looks again
+// after a pause instead.
+func (h *threadHandle) parkForMove(err error) {
+	if errors.Is(err, lifegate.ErrMetaUnreadable) {
+		h.mu.Lock()
+		h.pumping = false
+		h.mu.Unlock()
+		time.AfterFunc(time.Second, h.resumePump)
+		return
+	}
+	lifegate.WhenReopened(h.name, h.resumePump)
+	h.mu.Lock()
+	h.pumping = false
+	h.mu.Unlock()
+	if !lifegate.Closed(h.name) {
+		h.resumePump()
+	}
+}
+
+// resumePump starts the pump for what is queued, unless one runs.
+func (h *threadHandle) resumePump() {
+	h.mu.Lock()
+	start := !h.pumping && h.q.Len() > 0
+	if start {
+		h.pumping = true
+	}
+	h.mu.Unlock()
+	if start {
+		go h.pump()
+	}
+}
+
 // runTurn is Send's own "ループ1周（harness.Run）" (decision 4): append the real user input,
 // read the store's full history back, run the tool loop once against llama-server, and
 // persist exactly the delta Run produced (diff.go's newMessagesSince — see store.go's
 // AppendMessage doc comment for why the naive "everything past the old length" is wrong once
 // a compaction fires inside the same Run call).
-func (h *threadHandle) runTurn(t *agents.Taken) {
+//
+// lease is the entry's hold on the lifecycle gate (pump), released once the user turn is in the
+// store, which is this kind's transcript; a turn can run for hours and must not hold a move off.
+func (h *threadHandle) runTurn(t *agents.Taken, lease *lifegate.Lease) {
+	defer lease.Release()
 	agents.MarkTurnStartRun(h.sid, t.In)
 	h.setState(agents.TurnStarting)
 	if h.beforeCommit != nil {
@@ -546,6 +617,7 @@ func (h *threadHandle) runTurn(t *agents.Taken) {
 		h.finishTurn(agents.TurnFailed)
 		return
 	}
+	lease.Release()
 	before, err := st.Full()
 	if err != nil {
 		log.Printf("lcpp: reading history: %v", err)

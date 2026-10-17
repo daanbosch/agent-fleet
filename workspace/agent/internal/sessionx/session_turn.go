@@ -23,6 +23,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/muse"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/opencode"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/lifegate"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/tmuxx"
 )
@@ -91,6 +92,13 @@ func HandleSessionTurn(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_op", "op must be start, steer, interrupt, remove or dismiss_discard")
 		return
 	}
+	// Every op, not only start and steer: on Managed each one Resumes the runtime, which starts
+	// a process on a stopped session (ADR 0115 decision 11.1).
+	lease, ok := enterSessionGate(w, r, name)
+	if !ok {
+		return
+	}
+	defer lease.Release()
 	meta, ok := session.ReadMeta(name)
 	if !ok {
 		httpx.WriteErr(w, http.StatusNotFound, "not_found", "no such session: "+name)
@@ -105,7 +113,7 @@ func HandleSessionTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if meta.DriverKind() == session.DriverManaged {
-		handleManagedTurn(w, meta, req)
+		handleManagedTurn(lease, w, meta, req)
 		return
 	}
 	// tui route: delegate to the existing tmux path. The guards (not_running / no_pane /
@@ -143,7 +151,7 @@ func HandleSessionTurn(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusBadRequest, "empty_prompt", "prompt is required for start/steer")
 		return
 	}
-	if !submitPromptTUI(w, name, pane, req.Prompt) {
+	if !submitPromptTUI(lease, w, name, pane, req.Prompt) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"sent": name, "op": req.Op})
@@ -152,7 +160,11 @@ func HandleSessionTurn(w http.ResponseWriter, r *http.Request) {
 // handleManagedTurn routes a turn op to the session's ThreadHandle (docs/log/27 P2).
 // Resume is idempotent — it returns the live handle if there is one — so calling it every
 // time is safe, and it also brings the runtime back up on a halted → send sequence.
-func handleManagedTurn(w http.ResponseWriter, meta session.Meta, req turnReq) {
+func handleManagedTurn(lease *lifegate.Lease, w http.ResponseWriter, meta session.Meta, req turnReq) {
+	if err := lease.Check(meta.Name); err != nil {
+		writeGateErr(w, err)
+		return
+	}
 	d, ok := driverOf(meta)
 	if !ok {
 		httpx.WriteErr(w, http.StatusNotImplemented, "driver_unavailable",
@@ -260,17 +272,26 @@ func handleQueueEdit(w http.ResponseWriter, d agents.Driver, meta session.Meta, 
 	}
 }
 
+// respondKeysMsg: a Terminal question this route cannot answer is driven with keys.
+const respondKeysMsg = "tui セッションの質問は keys/seq（/input）で TUI モーダルを駆動して答えます"
+
 // HandleSessionRespond (POST /sessions/{name}/respond) answers a pending
-// Interaction by id (docs/log/27 §5 — the general form of approvals and questions). This
-// semantic route is for managed drivers only: a tui session's question is still answered
-// through /input keys/seq, with the Console navigating the TUI modal, because a TUI modal
-// offers no way to answer by id.
+// Interaction by id (docs/log/27 §5 — the general form of approvals and questions). It is for
+// managed drivers, and for a tui session only when its driver can answer through the runtime's
+// API (agents.TerminalResponder: opencode 2 on the shared serve). Any other tui question is
+// answered through /input keys/seq, with the Console navigating the TUI modal, because a TUI
+// modal offers no way to answer by id.
 func HandleSessionRespond(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !session.ValidName(name) {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_name", "invalid session name")
 		return
 	}
+	lease, ok := enterSessionGate(w, r, name)
+	if !ok {
+		return
+	}
+	defer lease.Release()
 	var reply agents.InteractionReply
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&reply); err != nil {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_body", "invalid JSON body")
@@ -291,23 +312,36 @@ func HandleSessionRespond(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusNotFound, "not_found", "no such session: "+name)
 		return
 	}
+	var respond func(agents.InteractionReply) error
 	if meta.DriverKind() != session.DriverManaged {
-		httpx.WriteErr(w, http.StatusNotImplemented, "respond_unsupported",
-			"tui セッションの質問は keys/seq（/input）で TUI モーダルを駆動して答えます")
-		return
+		// A Terminal slot whose runtime has an API for the pending Interaction (opencode 2 on
+		// af's shared serve) is answered by id; every other one is driven with keys.
+		d, _ := driverOf(meta)
+		tr, ok := d.(agents.TerminalResponder)
+		if !ok {
+			httpx.WriteErr(w, http.StatusNotImplemented, "respond_unsupported", respondKeysMsg)
+			return
+		}
+		respond = func(r agents.InteractionReply) error { return tr.RespondTerminal(meta, r) }
+	} else {
+		d, ok := driverOf(meta)
+		if !ok {
+			httpx.WriteErr(w, http.StatusNotImplemented, "driver_unavailable",
+				"managed driver はこの kind ではまだ利用できません")
+			return
+		}
+		h, err := d.Resume(meta)
+		if err != nil {
+			writeRuntimeErr(w, err)
+			return
+		}
+		respond = h.Respond
 	}
-	d, ok := driverOf(meta)
-	if !ok {
-		httpx.WriteErr(w, http.StatusNotImplemented, "driver_unavailable",
-			"managed driver はこの kind ではまだ利用できません")
-		return
-	}
-	h, err := d.Resume(meta)
-	if err != nil {
-		writeRuntimeErr(w, err)
-		return
-	}
-	if err := h.Respond(reply); err != nil {
+	if err := respond(reply); err != nil {
+		if errors.Is(err, agents.ErrTerminalRespond) {
+			httpx.WriteErr(w, http.StatusNotImplemented, "respond_unsupported", respondKeysMsg)
+			return
+		}
 		httpx.WriteErr(w, http.StatusConflict, "respond_failed", err.Error())
 		return
 	}
@@ -331,11 +365,26 @@ type settingsReq struct {
 // HandleSessionSettingsGet reports the settings that the managed driver will use
 // for the next turn. Reading the latest transcript turn is insufficient: it is stale
 // immediately after a settings change and empty before the first prompt.
+//
+// Resume starts the runtime of a stopped session, so the read holds the session's lease (ADR
+// 0115 decision 11.1). A moving or moved source answers from its meta instead, without a
+// runtime: the meta is where POST persists the next turn's settings, and such a source runs no
+// turn that could make the driver's copy differ.
 func HandleSessionSettingsGet(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !session.ValidName(name) {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_name", "invalid session name")
 		return
+	}
+	lease, err := lifegate.Enter(r.Context(), name)
+	var moved *lifegate.MovedError
+	switch {
+	case errors.As(err, &moved):
+	case err != nil:
+		writeGateErr(w, err)
+		return
+	default:
+		defer lease.Release()
 	}
 	meta, ok := session.ReadMeta(name)
 	if !ok {
@@ -353,6 +402,14 @@ func HandleSessionSettingsGet(w http.ResponseWriter, r *http.Request) {
 			"managed driver はこの kind ではまだ利用できません")
 		return
 	}
+	caps := d.Capabilities()
+	if moved != nil {
+		httpx.WriteJSON(w, http.StatusOK, managedThreadSettingsWire{
+			Model: meta.Model, Effort: meta.Effort, Mode: meta.Mode,
+			DynamicModel: caps.DynamicModel, DynamicEffort: caps.DynamicEffort, DynamicMode: caps.DynamicMode,
+		})
+		return
+	}
 	h, err := d.Resume(meta)
 	if err != nil {
 		writeRuntimeErr(w, err)
@@ -363,7 +420,6 @@ func HandleSessionSettingsGet(w http.ResponseWriter, r *http.Request) {
 		writeRuntimeErr(w, err)
 		return
 	}
-	caps := d.Capabilities()
 	httpx.WriteJSON(w, http.StatusOK, managedThreadSettingsWire{
 		Model: snap.Settings.Model, Effort: snap.Settings.Effort, Mode: snap.Settings.Mode,
 		DynamicModel: caps.DynamicModel, DynamicEffort: caps.DynamicEffort, DynamicMode: caps.DynamicMode,
@@ -392,6 +448,13 @@ func HandleSessionSettings(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusBadRequest, "empty_settings", "nothing to update")
 		return
 	}
+	// Refused on a moving or moved source, not only because Resume starts its runtime: the
+	// change would land on a session whose conversation has gone to the target.
+	lease, ok := enterSessionGate(w, r, name)
+	if !ok {
+		return
+	}
+	defer lease.Release()
 	meta, ok := session.ReadMeta(name)
 	if !ok {
 		httpx.WriteErr(w, http.StatusNotFound, "not_found", "no such session: "+name)

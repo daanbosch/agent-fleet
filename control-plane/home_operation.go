@@ -242,7 +242,7 @@ func (m *manager) resumeHomeOperation(ctx context.Context, op store.HomeOperatio
 		return
 	}
 	defer lease.Close()
-	rt := m.runtimeFor(ws, "")
+	rt := m.runtimeFor(ws, noSecretKeys)
 	releaseFence, err := m.acquireWorkspaceOperationFence(lease.Context(), ws.ID, rt)
 	if err != nil {
 		log.Printf("home operation %s: fence: %v", op.ID, err)
@@ -280,7 +280,9 @@ func (m *manager) resumeHomeOperation(ctx context.Context, op store.HomeOperatio
 		m.finishMemberWipe(lease, op, err)
 		return
 	}
-	m.finishHomeOperation(op, err, leftovers)
+	if m.finishHomeOperation(op, err, leftovers) && err == nil && op.Kind == store.HomeOpDestroy {
+		m.releaseHomeDEKAfterDestroy(op.MembershipID, rt, lease)
+	}
 }
 
 // finishMemberWipe applies what follows a member's wipe task, for its starter and for the

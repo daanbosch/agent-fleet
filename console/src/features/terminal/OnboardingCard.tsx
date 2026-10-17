@@ -1,18 +1,12 @@
-// OnboardingCard — first-run guide, v2 (launch flow redesign, phase 1). The old card was a
-// single developer-shaped checklist (WS → git → agent → session) that chat-only
-// users could never complete (it only auto-hid on session creation) and that
-// guide/member/lite.md had to patch in prose ("steps 2 and 4 can be skipped").
-// v2 splits it into the two steps everyone needs — start workspace, connect an
-// agent — followed by a goal choice: chat (repo-less Q&A / translation, done in
-// one click) or development (git → clone → first session, expanded on demand).
-// The card hides once the user has a session OR a started chat, or on "later"
-// (remembered in localStorage). The same body is reused by GuideModal, reachable
-// from the account menu as the getting-started guide (「はじめかたガイド」) after dismissal.
-// Rendered on the active empty pane so it shows just once — BOTH kinds of empty:
-// a blank terminal pane (TerminalView) and a cell with no view at all
-// (EmptyPane in panes/Pane.tsx). The latter is a new user's initial layout (ops.ts's
-// emptyCell has views: [], i.e. not a single pane), so while this lived only in
-// TerminalView the first-run guide missed exactly the people it is for.
+// OnboardingCard — the first-run guide: the two steps everyone needs (start the workspace,
+// connect an agent), then a goal choice: chat (repo-less Q&A / translation, one click) or
+// development (git → clone → first session, expanded on demand).
+//
+// SetupCard is that checklist as the Setup section at the top of Home (features/home). It hides
+// once the member has a session OR a started chat, or on "later". "later" and the chosen track
+// live in the member's UI state in the CP (ADR 0114), so they follow the member to another
+// device. GuideModal shows the same body from the account menu (the getting-started guide) after
+// the card is gone, with no hide rules.
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { api } from "../../core/api/client.ts";
@@ -25,10 +19,10 @@ import { useSettingsUI } from "../settings/store.ts";
 import { useChatStore } from "../chat/store.ts";
 import { chatList } from "../chat/api.ts";
 import { openAssistantDraft } from "../chat/open.ts";
+import { useUIStateStore } from "../../core/store/uiState.ts";
+import { AGENTS, MEMBER_DEFAULT_AGENTS, agentOf, loginExpired } from "../../agents/registry.ts";
 import type { ConnectionsStatus } from "../../types/session.ts";
 
-const DISMISS_KEY = "af.onboarding.dismissed";
-const TRACK_KEY = "af.onboarding.track";
 // The flagship builtin assistant (workspace/agent/assistants.go: afAssistantID).
 // Always present, so the "start a chat" CTA can open a draft on it without listing.
 const AF_ASSISTANT_ID = "af";
@@ -73,13 +67,9 @@ function useGuideState(): GuideState {
     cpDown: wsState === "unknown", // fetch failed — see the field's comment
     startBusy: wsStartBusy(wsState), // start already in flight / ECS cold pull
     gitOk: !!(conns?.github?.connected || conns?.bitbucket?.connected),
-    agentOk: !!(
-      conns?.claude?.connected ||
-      conns?.codex?.connected ||
-      // opencode counts as connected via either an API key (env) or an opencode account (OAuth).
-      (conns?.opencode?.envs?.length ?? 0) > 0 ||
-      !!conns?.opencode?.oauth
-    ),
+    // Any kind a tenant may name completes the step, judged by the registry's own launch
+    // predicate: a tenant that names Cursor must not leave its members stuck after connecting it.
+    agentOk: MEMBER_DEFAULT_AGENTS.some((k) => AGENTS[k].available({ conns }) && !loginExpired(k, conns)),
     conns,
     startWs,
     openStart,
@@ -125,26 +115,23 @@ function StepRow({ s, next }: { s: Step; next: boolean }) {
   );
 }
 
-// The checklist body, shared between the first-run overlay and the getting-started
-// guide modal. `onNavigate` fires after a CTA that opens another surface
-// (settings / new-session modal / a chat draft) — the modal closes itself there;
-// the overlay just stays behind whatever opened.
+// The checklist body, shared between Home's setup card and the getting-started guide
+// modal. `onNavigate` fires after a CTA that opens another surface (settings / new-session
+// modal / a chat draft) — the modal closes itself there; Home just stays behind whatever
+// opened.
 function GuideBody({ g, onNavigate }: { g: GuideState; onNavigate?: () => void }) {
   const tr = useT();
-  const [track, setTrack] = useState<"dev" | null>(() => {
-    try {
-      return localStorage.getItem(TRACK_KEY) === "dev" ? "dev" : null;
-    } catch {
-      return null;
-    }
-  });
-  const chooseDev = (on: boolean) => {
-    try {
-      if (on) localStorage.setItem(TRACK_KEY, "dev");
-      else localStorage.removeItem(TRACK_KEY);
-    } catch {}
-    setTrack(on ? "dev" : null);
-  };
+  const onboarding = useUIStateStore((s) => s.state.onboarding);
+  const patchUIState = useUIStateStore((s) => s.patch);
+  // The tenant's default agent is named, not enforced: any connected agent completes the step,
+  // so a member who already uses another one is never stuck on it.
+  const defaultAgent = useUIStateStore((s) => s.state.defaults?.agent || "");
+  // agentOf falls back to claude for a kind it does not know; a default from a newer CP must not
+  // be named as claude, so an unknown one is simply not named.
+  const defaultLabel = defaultAgent && agentOf(defaultAgent).id === defaultAgent ? agentOf(defaultAgent).label : "";
+  const track = onboarding?.track === "dev" ? "dev" : null;
+  const chooseDev = (on: boolean) =>
+    void patchUIState({ onboarding: { dismissed: onboarding?.dismissed ?? false, track: on ? "dev" : "" } });
   const after = (fn: () => void) => () => {
     fn();
     onNavigate?.();
@@ -168,7 +155,7 @@ function GuideBody({ g, onNavigate }: { g: GuideState; onNavigate?: () => void }
     {
       done: g.agentOk,
       label: tr("onb.connect_agent"),
-      hint: tr("onb.connect_agent_hint"),
+      hint: defaultLabel ? tr("onb.connect_agent_hint_default", { agent: defaultLabel }) : tr("onb.connect_agent_hint"),
       // Connecting runs through the in-container Agent, so it needs the workspace up.
       cta: g.agentOk
         ? null
@@ -248,22 +235,27 @@ function GuideBody({ g, onNavigate }: { g: GuideState; onNavigate?: () => void }
   );
 }
 
-export function OnboardingCard() {
-  const tr = useT();
+export interface SetupState {
+  /** The card should be on screen: first run, nothing dismissed, probes settled. */
+  show: boolean;
+  g: GuideState;
+  dismiss(): void;
+}
+
+// useSetupState decides whether the first-run checklist shows. Home calls it once and hands the
+// result to SetupCard, so it can also leave out its own start buttons while the card's goal
+// tiles offer the same two actions.
+export function useSetupState(): SetupState {
   const sessions = useSessionsStore((s) => s.sessions);
   const chatTick = useChatStore((s) => s.listTick);
   const g = useGuideState();
-  const [dismissed, setDismissed] = useState(() => {
-    try {
-      return localStorage.getItem(DISMISS_KEY) === "1";
-    } catch {
-      return false;
-    }
-  });
-  // Started chats also count as "past first-run" (v2): a chat-only user completes
-  // onboarding without ever creating a session. The list lives in the workspace
-  // agent, so the probe fails while the workspace is down — treat that as 0 and
-  // re-probe when it comes up (and when a draft becomes a real thread: listTick).
+  const loaded = useUIStateStore((s) => s.loaded);
+  const onboarding = useUIStateStore((s) => s.state.onboarding);
+  const patchUIState = useUIStateStore((s) => s.patch);
+  // Started chats also count as "past first-run": a chat-only user completes onboarding
+  // without ever creating a session. The list lives in the workspace agent, so the probe
+  // fails while the workspace is down — treat that as 0 and re-probe when it comes up (and
+  // when a draft becomes a real thread: listTick).
   const [chats, setChats] = useState<number | null>(null); // null = still probing
   useEffect(() => {
     let alive = true;
@@ -275,34 +267,37 @@ export function OnboardingCard() {
     };
   }, [chatTick, g.running]);
 
-  if (dismissed || sessions.length > 0 || (chats ?? 0) > 0) return null;
-  // CP down (status unknown): the empty panes and failed probes look identical to first-run,
-  // but they aren't — don't show the welcome guide (its launch actions can't work anyway,
-  // and it misreads a transient outage as a fresh install). The pane keeps its neutral
-  // "no session attached" empty state; the WS bar already signals the unknown status.
-  if (g.cpDown) return null;
-  if (g.conns === null || chats === null) return null; // wait for the probes so checks don't flash wrong
+  const show =
+    !onboarding?.dismissed &&
+    sessions.length === 0 &&
+    (chats ?? 0) === 0 &&
+    // CP down (status unknown): failed probes look identical to first-run, but they aren't.
+    // The guide's launch actions could not work anyway, and a transient outage must not
+    // read as a fresh install.
+    !g.cpDown &&
+    // Wait for the probes so checks don't flash wrong, and for the CP's UI state so a "later"
+    // given on another device is not overruled by this browser's empty cache.
+    g.conns !== null &&
+    chats !== null &&
+    loaded;
+  const dismiss = () => void patchUIState({ onboarding: { dismissed: true, track: onboarding?.track ?? "" } });
+  return { show, g, dismiss };
+}
 
-  const dismiss = () => {
-    try {
-      localStorage.setItem(DISMISS_KEY, "1");
-    } catch {}
-    setDismissed(true);
-  };
-
+export function SetupCard({ setup }: { setup: SetupState }) {
+  const tr = useT();
+  if (!setup.show) return null;
   return (
-    <div className="onboard">
-      <div className="onboard-card">
-        <div className="onboard-title">{tr("onb.welcome")}</div>
-        <div className="onboard-sub">{tr("onb.welcome_sub")}</div>
-        <GuideBody g={g} />
-        <div className="onboard-foot">
-          <button className="ghost" onClick={dismiss}>
-            {tr("onb.later")}
-          </button>
-        </div>
+    <section className="onboard-scope onboard-card home-setup">
+      <div className="onboard-title">{tr("onb.welcome")}</div>
+      <div className="onboard-sub">{tr("onb.welcome_sub")}</div>
+      <GuideBody g={setup.g} />
+      <div className="onboard-foot">
+        <button className="ghost" onClick={setup.dismiss}>
+          {tr("onb.later")}
+        </button>
       </div>
-    </div>
+    </section>
   );
 }
 

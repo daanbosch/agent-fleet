@@ -10,6 +10,7 @@ import { useLayoutStore } from "../../layout/store.ts";
 import { activePane } from "../../layout/ops.ts";
 import { repoPanes, sessionPanes, paneCount } from "../../layout/badges.ts";
 import { useWorkspaceStore } from "../../core/store/workspace.ts";
+import { useTenantStore } from "../../core/store/tenant.ts";
 import { useSessionsStore } from "../sessions/store.ts";
 import { useSettingsUI } from "../settings/store.ts";
 import { setCachedConns } from "./connsCache.ts";
@@ -23,6 +24,9 @@ export interface RepoRailContext {
    *  not "nothing available", so pickers can say so instead of showing a bare box. */
   connsSettling: boolean;
   running: boolean;
+  /** Claude is connected but its login has expired: it stays launchable (/login in the pane
+   *  recovers), so this is a notice, not a gate. */
+  claudeExpired: boolean;
   /** The attached session's working copy → highlighted row (null = none). */
   activeRepo: string | null | undefined;
   /** The active SCM/changes/commit pane's repo → highlighted row. */
@@ -41,8 +45,8 @@ export interface RepoRailContext {
 // OtherSessionsSection / StartHost). A naive fetch would send the same query three times, so
 // the in-flight promise is shared at module level and concurrent mounts ride on one request
 // (dropped once it resolves — a later mount fetches again as before). Sharing is limited to
-// the same key: the key includes connTick (connect/disconnect in Settings) and the workspace's
-// running flag, so a disconnected agent cannot linger in the launch menu on a pre-change
+// the same key: the key includes the tenant, connTick (connect/disconnect in Settings) and the
+// workspace's running flag, so a disconnected agent cannot linger in the launch menu on a pre-change
 // snapshot. Failures collapse to null (the caller's settle contract).
 let connsInflight: { key: string; p: Promise<ConnectionsStatus | null> } | null = null;
 // Series generation. Once a newer key starts, retries from the old series are pointless and
@@ -79,6 +83,7 @@ export function useRepoRailContext(): RepoRailContext {
   const sessions = useSessionsStore((s) => s.sessions);
   const layout = useLayoutStore((s) => s.layout);
   const running = useWorkspaceStore((s) => s.state) === "running";
+  const tenant = useTenantStore((s) => s.tenant);
 
   const [conns, setConns] = useState<ConnectionsStatus | null>(null);
   // Whether the answer is in yet. This is NOT derivable from conns alone: a failed or
@@ -104,11 +109,13 @@ export function useRepoRailContext(): RepoRailContext {
       setConnsDone(true);
       setCachedConns(d); // warm the shared cache so leaves (HandoffModal) render instantly
     };
-    void fetchConns(`${connTick}:${running ? 1 : 0}`).then(settle);
+    // tenant: a switch between two running workspaces changes neither connTick nor running, and
+    // the other tenant's agents are connected differently.
+    void fetchConns(`${tenant}:${connTick}:${running ? 1 : 0}`).then(settle);
     return () => {
       alive = false;
     };
-  }, [connTick, running]);
+  }, [tenant, connTick, running]);
   // Gate on a KNOWN-available answer: until the fetch settles, and if it failed (conns
   // null — we cannot prove any agent is usable), the launch pickers stay empty rather
   // than offering agents that would fail on launch. connsSettling lets the pickers say
@@ -130,5 +137,6 @@ export function useRepoRailContext(): RepoRailContext {
   const ac = activePane(layout)?.content;
   const scmRepo = ac && (ac.kind === "scm" || ac.kind === "changes" || ac.kind === "commit") ? ac.scmRepo : null;
 
-  return { launchKinds, connsSettling, running, activeRepo, scmRepo, rPanes, sPanes, multiPane, activeSession: activeSessionName };
+  const claudeExpired = connsDone && !!conns?.claude?.expired;
+  return { launchKinds, connsSettling, running, claudeExpired, activeRepo, scmRepo, rPanes, sPanes, multiPane, activeSession: activeSessionName };
 }

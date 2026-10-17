@@ -10,7 +10,8 @@ import { useT } from "../../../lib/i18n/index.ts";
 import { CodeView, type LineMarks } from "../CodeView.tsx";
 import { DocPreview } from "../DocPreview.tsx";
 import { ImageView } from "../ImageView.tsx";
-import { MarkdownView } from "../MarkdownView.tsx";
+import { PathLinkMenuHost } from "../PathLinkMenu.tsx";
+import { FileMarkdownView } from "../FileMarkdownView.tsx";
 import { MarpView } from "../MarpView.tsx";
 import { PdfView } from "../PdfView.tsx";
 import type { FileSurfaces } from "../fileMode.ts";
@@ -19,6 +20,8 @@ import type { ScrollMemoryFactory } from "./useScrollMemory.ts";
 export interface FileViewerShellProps {
   hidden: boolean;
   filePath: string;
+  /** The file lives in a Git root nested inside its working copy: its repository is not the one the path names. */
+  nestedRepo: boolean;
   err: string;
   /** false = not read yet (renders the ellipsis placeholder). */
   loaded: boolean;
@@ -67,15 +70,19 @@ export function FileViewerShell(props: FileViewerShellProps) {
         // source of truth.
         <PdfView src={downloadURL(filePath)} onMeta={props.onPdfMeta} scrollMemory={props.scrollMemory("pdf")} />
       ) : isDoc ? (
-        <DocPreview
-          src={downloadURL(filePath)}
-          format={props.docFmt}
-          size={props.size}
-          basePath={filePath}
-          onOpenFile={props.onOpenFile}
-          onOpenDir={props.onOpenDir}
-          scrollMemory={props.scrollMemory("doc")}
-        />
+        // The host lives here, not in DocPreview: doc:check bundles DocPreview alone, and the
+        // menu's imports (settings.ts reads import.meta.env) do not exist in that bundle.
+        <PathLinkMenuHost>
+          <DocPreview
+            src={downloadURL(filePath)}
+            format={props.docFmt}
+            size={props.size}
+            basePath={filePath}
+            onOpenFile={props.onOpenFile}
+            onOpenDir={props.onOpenDir}
+            scrollMemory={props.scrollMemory("doc")}
+          />
+        </PathLinkMenuHost>
       ) : props.binary ? (
         <pre className="filebody muted">({tr("view.binary")}, {humanSize(props.size)})</pre>
       ) : props.huge ? (
@@ -84,7 +91,7 @@ export function FileViewerShell(props: FileViewerShellProps) {
         <MarpView source={props.previewSource} />
       ) : props.preview === "normal" ? (
         <div className="md-scroll" ref={props.scrollMemory("preview")}>
-          <MarkdownView source={props.previewSource} basePath={filePath} onOpenFile={props.onOpenFile} onOpenDir={props.onOpenDir} />
+          <FileMarkdownView source={props.previewSource} filePath={filePath} nestedRepo={props.nestedRepo} onOpenFile={props.onOpenFile} onOpenDir={props.onOpenDir} />
         </div>
       ) : (
         <CodeView

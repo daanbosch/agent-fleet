@@ -31,6 +31,9 @@ vi.mock("../core/api/client.ts", () => ({
 vi.mock("../features/notifications/NotificationCenter.tsx", () => ({
   NotificationCenter: () => null,
 }));
+// The inbox button (ADR 0111) is its own feature with its own tests; here it would only need
+// a ToastProvider and an inbox API.
+vi.mock("../features/inbox/InboxButton.tsx", () => ({ InboxButton: () => null }));
 // The native self-update row does not exist on ECS (the CP registers no route = null).
 vi.mock("../features/settings/hostUpdate.ts", () => ({ useHostUpdate: () => null }));
 

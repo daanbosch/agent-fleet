@@ -51,6 +51,13 @@ type handoffContext struct {
 	// it; it goes in Warning.
 	Blocked string `json:"blocked,omitempty"`
 	Warning string `json:"warning,omitempty"`
+	// PushRemote / PushCommits say what "push, then send" would publish (POST
+	// /sessions/{name}/handoff-push): the URL git would push to, credentials removed, and how
+	// many commits it does not have yet. Set only when Blocked is one a push can clear and the
+	// push would land where the offer points (handoffPushTargetOf), so an empty PushRemote
+	// also means the Console offers no push.
+	PushRemote  string `json:"pushRemote,omitempty"`
+	PushCommits int    `json:"pushCommits,omitempty"`
 }
 
 // handoffBlockUnpushed / handoffBlockNoUpstream / handoffBlockDetached / handoffWarnDirty
@@ -135,6 +142,12 @@ func buildHandoffContext(dir string) handoffContext {
 	}
 	if c.Dirty {
 		c.Warning = handoffWarnDirty
+	}
+	if handoffPushClears(c.Blocked) {
+		if t, err := handoffPushTargetOf(dir, c.Branch); err == nil {
+			c.PushRemote = sanitizeRemoteURL(t.url)
+			c.PushCommits = t.commits(dir, c.Ahead)
+		}
 	}
 	return c
 }

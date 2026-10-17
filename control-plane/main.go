@@ -7,7 +7,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"log"
@@ -107,6 +106,18 @@ func main() {
 		runEFSHomeOp()
 		return
 	}
+	// Subcommand: `control-plane rewrap-keys [--dry-run]` re-seals the values stored before the
+	// switch to the KMS custodian (rewrap_keys.go). It reads the CP's own environment.
+	if len(os.Args) > 1 && os.Args[1] == "rewrap-keys" {
+		runRewrapKeys(os.Args[2:])
+		return
+	}
+	// Subcommand: `control-plane home-dek-status` counts the homes on their own credential-store
+	// key (home_dek_status.go). Read-only.
+	if len(os.Args) > 1 && os.Args[1] == "home-dek-status" {
+		runHomeDEKStatus(os.Args[2:])
+		return
+	}
 
 	portBase, _ := strconv.Atoi(envx.Or("WS_AGENT_PORT", "7700"))
 	mgr := &manager{
@@ -139,8 +150,7 @@ func main() {
 	// subkeys are derived from its SHA-256 and injected as AF_SECRET_KEY. Unset
 	// => no encryption (dev: Agent stores secrets as plaintext JSON).
 	if mk := os.Getenv("AF_MASTER_KEY"); mk != "" {
-		sum := sha256.Sum256([]byte(mk))
-		mgr.master32 = sum[:]
+		mgr.master32 = masterDigest(mk)
 	}
 	// Envelope key custodian (ADR 0005): local by default, KMS on AWS. A misconfigured
 	// kms stops the CP here rather than starting one that cannot open what it stored.
@@ -153,6 +163,14 @@ func main() {
 		if c != nil {
 			mgr.custodian = c
 			log.Printf("key custodian: %s", kind)
+		}
+		random, err := homeDEKModeRandom(os.Getenv("AF_WORKSPACE_DEK"), kind)
+		if err != nil {
+			log.Fatalf("workspace DEK: %v", err)
+		}
+		mgr.homeDEKRandom = random && c != nil
+		if mgr.homeDEKRandom {
+			log.Printf("workspace DEK: random per home")
 		}
 	}
 	if mgr.plaintextSecrets() {
@@ -242,6 +260,9 @@ func main() {
 	}
 	mgr.rtFactory = rtFactory
 	mgr.nativeRuntime = rtProfile == "native" || rtProfile == "wsl"
+	if mgr.efsBackupMissing = efsBackupMissing(rtProfile, os.Getenv("AF_EFS_BACKUP")); mgr.efsBackupMissing {
+		log.Print(efsBackupMissingLog)
+	}
 
 	publicBaseURL := os.Getenv("PUBLIC_BASE_URL")
 	// Internal git provider: the clone host workspaces authenticate against is the
@@ -260,6 +281,7 @@ func main() {
 	// mistyped setting charitably beats having the whole feature go dead.
 	mgr.githubBuiltinOff = githubBuiltinOffFromEnv(os.Getenv("AF_GITHUB_BUILTIN_APPS"))
 	mgr.previewDomain = strings.ToLower(strings.Trim(strings.TrimSpace(os.Getenv("AF_PREVIEW_DOMAIN")), "."))
+	mgr.devIdPEnvOff = !envBool("AF_DEV_IDP", true)
 	cfg := config{
 		addr:          envx.Or("CP_ADDR", ":8080"),
 		consoleDir:    envx.Or("CONSOLE_DIR", "./console"),
@@ -346,6 +368,9 @@ func main() {
 	// still be running, and the step after it is owed. Not behind any switch either: an
 	// unfinished record keeps the workspace from starting until it is finished.
 	go mgr.runHomeOpReconciler(context.Background(), homeOpReconcileEvery)
+	// The member inbox's state-table system rows and purge (ADR 0111 decision 9). Not
+	// behind any switch: expired and orphaned bodies must go whether or not anyone reads them.
+	go mgr.runInboxUpkeep(context.Background())
 
 	// Golden snapshot auto-bake (ecs-ec2 only — ADR 0045 decision 9 / docs/log/64 §64.28).
 	// The CP already refuses a golden stamped with another image; this is the CP acting
@@ -540,6 +565,20 @@ func main() {
 		}
 		log.Printf("preview subdomains: *.%s (ports are per-workspace; default %v)", cfg.previewDomain, defaultPreviewPorts)
 	}
+	// Development OIDC IdP (ADR 0116): say plainly what this deployment serves, because an
+	// identity provider that mints tokens for any signed-in member must never be on by accident.
+	switch {
+	case mgr.devIdPEnvOff:
+		log.Printf("development OIDC IdP: locked off by AF_DEV_IDP=0 (the admin setting is ignored)")
+	case cfg.publicBaseURL == "":
+		log.Printf("WARNING: PUBLIC_BASE_URL is not set — the development OIDC IdP has no Console origin to live on and stays off")
+	default:
+		if iss := mgr.devIdPIssuer(context.Background()); iss != "" {
+			log.Printf("WARNING: serving a development OIDC IdP at %s until a super admin turns it off in the admin modal (workspaces opt in individually; never trust this issuer in production)", iss)
+		} else {
+			log.Printf("development OIDC IdP: turned off in the admin modal")
+		}
+	}
 	// withClientIP is OUTERMOST on purpose: it is the only place the forwarding
 	// headers are read, so nothing downstream can be tempted to trust a client's own
 	// claim about where it is calling from (docs/log/66 §66.6) — the preview dispatcher
@@ -620,13 +659,44 @@ func logRequests(next http.Handler) http.Handler {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w}
 		next.ServeHTTP(sw, r)
-		uri := r.URL.RequestURI()
-		// The query on an OAuth path carries the authorization code and similar secrets.
-		if r.URL.RawQuery != "" && strings.Contains(r.URL.Path, "oauth") {
-			uri = r.URL.Path + "?<redacted>"
-		}
-		log.Printf("%s %s %d %s", r.Method, uri, sw.code(), time.Since(start).Round(time.Millisecond))
+		log.Printf("%s %s %d %s", r.Method, loggedURI(r.URL), sw.code(), time.Since(start).Round(time.Millisecond))
 	})
+}
+
+// secretQueryKeys are query parameters that carry a credential wherever they appear: an
+// authorization code, a state, a client secret or a token. An app on a preview host receives
+// its OAuth callback (?code=…&state=…) on a path nobody here can predict, so the redaction is by
+// parameter name and not only by path.
+var secretQueryKeys = map[string]bool{
+	"code": true, "state": true, "client_secret": true, "client_assertion": true,
+	"access_token": true, "id_token": true, "refresh_token": true, "token": true, "t": true,
+	"code_verifier": true, "session_state": true,
+}
+
+// loggedURI is the request URI as the access log may record it. The whole query goes on an
+// OAuth or dev-IdP path; elsewhere only the credential-bearing parameters.
+func loggedURI(u *url.URL) string {
+	if u.RawQuery == "" {
+		return u.RequestURI()
+	}
+	if strings.Contains(u.Path, "oauth") || u.Path == devIdPPath || strings.HasPrefix(u.Path, devIdPPath+"/") {
+		return u.Path + "?<redacted>"
+	}
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return u.Path + "?<redacted>"
+	}
+	hit := false
+	for k := range q {
+		if secretQueryKeys[strings.ToLower(k)] {
+			q.Set(k, "<redacted>")
+			hit = true
+		}
+	}
+	if !hit {
+		return u.RequestURI()
+	}
+	return u.Path + "?" + q.Encode()
 }
 
 // statusWriter captures the response status for the access log.
@@ -681,3 +751,7 @@ func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	w.status = http.StatusSwitchingProtocols
 	return hj.Hijack()
 }
+
+// Unwrap lets http.NewResponseController reach the connection through this wrapper (read
+// deadlines, flushing); without it those calls answer ErrNotSupported.
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }

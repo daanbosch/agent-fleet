@@ -15,8 +15,11 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/sessionsearch"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/sessionx"
+	"io"
+	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -159,6 +162,11 @@ func trashSession(m session.Meta, stop bool) (string, string, error) {
 				_ = os.Remove(p)
 			}
 		}
+		// The Agent's backup of the log goes with the session; the archive above carries the
+		// conversation from here on (archiveSessionForDelete).
+		if err := claude.RemoveTranscriptBackup(session.UUID(m.Dir, m.Name)); err != nil {
+			log.Printf("trash %s: could not remove the transcript backup: %v", m.Name, err)
+		}
 	}
 	sessionx.ForgetRuntime(m)
 	sessionsearch.Forget(m.Name) // the trash bundle is now the only copy of its text (ADR 0110)
@@ -242,6 +250,44 @@ func removeSessionSideFiles(name string) {
 	}
 }
 
+// archiveAfterMatch is a test seam between listing the live logs and reading them, where claude's
+// sweep or the backup loop can change them. Nil in production.
+var archiveAfterMatch func(m session.Meta)
+
+// archiveLiveReadGate is a test seam between opening a live log and reading it. Nil in production.
+var archiveLiveReadGate func(path string)
+
+// readLiveLog reads p through one descriptor and reports the metadata of that same open file.
+// stable is false when the file changed during the read (descriptor size/mtime before and after
+// differ, or the path now names another file), in which case the pair is not a reliable
+// "this content has this age".
+func readLiveLog(p string) (data []byte, fi os.FileInfo, stable bool, err error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	defer f.Close()
+	fi, err = f.Stat()
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if archiveLiveReadGate != nil {
+		archiveLiveReadGate(p)
+	}
+	if data, err = io.ReadAll(f); err != nil {
+		return nil, nil, false, err
+	}
+	after, err := f.Stat()
+	if err != nil {
+		return nil, nil, false, err
+	}
+	at, perr := os.Stat(p)
+	stable = perr == nil && os.SameFile(at, fi) &&
+		after.Size() == fi.Size() && after.ModTime().Equal(fi.ModTime()) &&
+		int64(len(data)) == fi.Size()
+	return data, fi, stable, nil
+}
+
 // archiveSessionForDelete bundles a session's meta + jsonl(s) into a cleanup archive
 // and returns the archive id. Non-claude transcripts live in the agent's native store
 // (codex rollout / opencode sqlite), which we do not reclaim here — the meta is still
@@ -251,18 +297,65 @@ func archiveSessionForDelete(m session.Meta) (string, error) {
 	payloads := map[string][]byte{}
 	as := cleanupArchivedSession{Name: m.Name, Display: session.Display(m), Kind: m.Kind, Meta: metaJSON}
 	if m.Kind == session.KindClaude {
-		if _, _, matched := claude.TranscriptRead(session.UUID(m.Dir, m.Name)); len(matched) > 0 {
-			for i, p := range matched {
-				b, err := os.ReadFile(p)
-				if err != nil {
-					continue
-				}
-				entry := "sessions/" + idSlug(m.Name) + "/" + jsonlEntryName(i, p)
-				payloads[entry] = b
-				as.JSONLPaths = append(as.JSONLPaths, p)
-				as.JSONLNames = append(as.JSONLNames, entry)
-			}
+		// Deleting the session removes the Agent's backup of the log, so the archive always holds
+		// its bytes (read once, under the backup lock). Where a live log sits at the very path the
+		// backup would restore to, the read bytes of both decide who takes that path: the live
+		// one only when it is complete and newer, otherwise the backup does and the live file is
+		// kept beside it. Nothing is ever dropped on the strength of a check made earlier.
+		bk, bkMod, bkDest, hasBackup, err := claude.ArchiveBackup(m)
+		if err != nil {
+			return "", err
 		}
+		add := func(i int, src, dest string, b []byte) {
+			entry := "sessions/" + idSlug(m.Name) + "/" + jsonlEntryName(i, src)
+			payloads[entry] = b
+			as.JSONLPaths = append(as.JSONLPaths, dest)
+			as.JSONLNames = append(as.JSONLNames, entry)
+		}
+		off := 0
+		if hasBackup {
+			off = 1
+		}
+		liveWon := false
+		_, _, matched := claude.TranscriptRead(session.UUID(m.Dir, m.Name))
+		if archiveAfterMatch != nil {
+			archiveAfterMatch(m)
+		}
+		for i, p := range matched {
+			b, fi, stable, err := readLiveLog(p)
+			if errors.Is(err, os.ErrNotExist) {
+				continue // removed since it was listed (claude's sweep): the backup snapshot above is in
+			}
+			if err != nil {
+				return "", err // an unreadable log is not an absent one: refuse the delete
+			}
+			dest := p
+			if hasBackup && p == bkDest {
+				// The metadata and the bytes must describe one state of one file; a live log that
+				// changed while it was read never outranks the backup.
+				if stable && fi.ModTime().After(bkMod) && claude.CompleteBytes(b) {
+					liveWon = true
+				} else {
+					dest = p + ".superseded.archived"
+				}
+			}
+			add(i+off, p, dest, b)
+		}
+		if hasBackup {
+			dest := bkDest
+			if liveWon {
+				dest = bkDest + ".backup.archived"
+			}
+			add(0, bkDest, dest, bk)
+		}
+	}
+	// A move target's handover files are part of its conversation (ADR 0115 decision 9), and
+	// removeSessionSideFiles is about to delete their directory. They ride in the same payload
+	// lists as the jsonl: restore stages each one next to its destination and places it only
+	// where nothing exists, so a file that is there by then is kept, and a purge drops them with
+	// the tarball. Only handover-*.md travels; other throwaway files in the directory do not.
+	if err := addHandoverPayloads(m.Name, &as, payloads); err != nil {
+		return "", err
 	}
 	man := cleanupManifest{
 		ID: newCleanupID(nowUTC(), idSlug(m.Name)), At: nowUTC().Format(time.RFC3339),
@@ -272,6 +365,50 @@ func archiveSessionForDelete(m session.Meta) (string, error) {
 		return "", err
 	}
 	return man.ID, nil
+}
+
+// readHandoverBounded reads p, refusing a file a restore could not read back
+// (maxCleanupEntryBytes). It never allocates more than the limit plus one byte.
+func readHandoverBounded(p string) ([]byte, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxCleanupEntryBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxCleanupEntryBytes {
+		return nil, fmt.Errorf("%s is larger than the %d bytes a trash archive can hold; delete or shrink it first", p, maxCleanupEntryBytes)
+	}
+	return b, nil
+}
+
+// addHandoverPayloads adds the session's handover-*.md files to the archive with their
+// absolute destinations. A file that vanished since it was listed is skipped; one that cannot
+// be read is not, because the delete would then destroy the only copy.
+func addHandoverPayloads(name string, as *cleanupArchivedSession, payloads map[string][]byte) error {
+	names, err := sessionx.ListHandoverFiles(name)
+	if err != nil {
+		return err
+	}
+	dir := paths.SessionWorkDir(name)
+	for _, n := range names {
+		src := filepath.Join(dir, n)
+		b, err := readHandoverBounded(src)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		entry := "sessions/" + idSlug(name) + "/work/" + n
+		payloads[entry] = b
+		as.JSONLPaths = append(as.JSONLPaths, src)
+		as.JSONLNames = append(as.JSONLNames, entry)
+	}
+	return nil
 }
 
 // handleDeleteBranch (DELETE /repos/{name}/branch?branch=<name>[&remote=1]) deletes a

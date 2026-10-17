@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin/memberorigintest"
 )
 
 // memoryLiveOrEmpty returns the contents of the live memory file, or "" when there is none.
@@ -401,16 +402,32 @@ func TestMemoryImportAPI(t *testing.T) {
 	_, cfgB, _ := memoryTestEnv(t)
 	t.Setenv("AGENT_TOKEN", "smoke-token")
 	h := httpx.RequireToken(buildMux())
-	if w := smokeDo(t, h, "POST", "/agents/memory/snapshots", "smoke-token", ""); w.Code != http.StatusOK {
+	if w := markedDo(t, h, "POST", "/agents/memory/snapshots", ""); w.Code != http.StatusOK {
 		t.Fatalf("seed: %d %s", w.Code, w.Body.String())
 	}
 
 	body, ctype := memoryMultipart(t, "af-memory.bundle", bundle)
-	req := httptest.NewRequest("POST", "/agents/memory/import", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer smoke-token")
-	req.Header.Set("Content-Type", ctype)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
+	// Without the mark the upload is refused, whatever it holds.
+	signer := memberorigintest.Install(t)
+	send := func(sign []byte, payload []byte, ct string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", "/agents/memory/import", bytes.NewReader(payload))
+		r.Header.Set("Authorization", "Bearer smoke-token")
+		r.Header.Set("Content-Type", ct)
+		if sign != nil {
+			signer.Sign(r, sign)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	if w := send(nil, body, ctype); w.Code != http.StatusForbidden {
+		t.Fatalf("unmarked import: %d %s", w.Code, w.Body.String())
+	}
+	// A mark over other bytes (a different bundle) does not admit this one.
+	if w := send(append([]byte("x"), body...), body, ctype); w.Code != http.StatusForbidden {
+		t.Fatalf("import with a mark for other bytes: %d %s", w.Code, w.Body.String())
+	}
+	w := send(body, body, ctype)
 	if w.Code != http.StatusOK {
 		t.Fatalf("import: %d %s", w.Code, w.Body.String())
 	}
@@ -426,7 +443,7 @@ func TestMemoryImportAPI(t *testing.T) {
 		"importId": pv.ImportID,
 		"scope":    map[string]any{"projects": []string{slug}},
 	})
-	w = smokeDo(t, h, "POST", "/agents/memory/import/apply", "smoke-token", string(apply))
+	w = markedDo(t, h, "POST", "/agents/memory/import/apply", string(apply))
 	if w.Code != http.StatusOK {
 		t.Fatalf("apply: %d %s", w.Code, w.Body.String())
 	}
@@ -434,13 +451,19 @@ func TestMemoryImportAPI(t *testing.T) {
 		t.Fatalf("a.md after API import = %q", got)
 	}
 	// A malformed importId is a 400: the value becomes a ref name, so it is always validated.
-	if w := smokeDo(t, h, "POST", "/agents/memory/import/apply", "smoke-token", `{"importId":"x/../y","scope":{"all":true}}`); w.Code != http.StatusBadRequest {
+	if w := markedDo(t, h, "POST", "/agents/memory/import/apply", `{"importId":"x/../y","scope":{"all":true}}`); w.Code != http.StatusBadRequest {
 		t.Errorf("bad importId: %d %s", w.Code, w.Body.String())
 	}
-	// A request carrying no file is a 400.
-	if w := smokeDo(t, h, "POST", "/agents/memory/import", "smoke-token", ""); w.Code != http.StatusBadRequest {
+	// A marked request carrying no file is a 400.
+	signer = memberorigintest.Install(t) // markedDo above installed its own key
+	var eb bytes.Buffer
+	emw := multipart.NewWriter(&eb)
+	_ = emw.WriteField("note", "no file here")
+	_ = emw.Close()
+	if w := send(eb.Bytes(), eb.Bytes(), emw.FormDataContentType()); w.Code != http.StatusBadRequest {
 		t.Errorf("import without a file: %d %s", w.Code, w.Body.String())
 	}
+
 }
 
 // memoryTarEntry is one entry of the archive being assembled; a non-empty Link means a symlink.
@@ -499,4 +522,25 @@ func memoryMultipart(t *testing.T, name, path string) ([]byte, string) {
 		t.Fatal(err)
 	}
 	return buf.Bytes(), mw.FormDataContentType()
+}
+
+// A marked import/apply naming thousands of slugs is past the save limit but inside what the CP
+// signs, and must reach the handler (here: a 400 for the unknown import, never a 413).
+func TestImportApplyAcceptsALargeSelection(t *testing.T) {
+	h := buildMux()
+	slug := strings.Repeat("a", 255)
+	projects, _ := json.Marshal(func() []string {
+		out := make([]string, 5300)
+		for i := range out {
+			out[i] = slug
+		}
+		return out
+	}())
+	body := `{"importId":"x","scope":{"projects":` + string(projects) + `}}`
+	if len(body) <= MemberWriteMaxRequest {
+		t.Fatalf("body %d does not exceed the save limit", len(body))
+	}
+	if w := markedDo(t, h, "POST", "/agents/memory/import/apply", body); w.Code != http.StatusBadRequest || strings.Contains(w.Body.String(), "member_origin") {
+		t.Fatalf("large selection: %d %s, want the handler's 400", w.Code, w.Body)
+	}
 }

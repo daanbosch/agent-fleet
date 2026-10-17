@@ -6,6 +6,14 @@ import type { Memo } from "../../types/memo.ts";
 // Concatenate the selected memos directly, grouped by category, mirroring the server's
 // buildFlushMessage (memo.go) so an unedited send is byte-for-byte the server flush.
 // A lone memo skips the scaffolding (see below) — keep both sides in step.
+/** How a selection is sent (ADR 0111 decision 3): a memo taken in from the inbox goes in a
+ *  message of its own, with the origin line the server adds, never concatenated with the
+ *  member's own memos. `own` is composed and edited as before; each of `origins` is sent
+ *  alone. The server refuses a flush that mixes them, so this is the Console keeping to it. */
+export function splitForSend(memos: Memo[]): { own: Memo[]; origins: Memo[] } {
+  return { own: memos.filter((m) => !m.origin), origins: memos.filter((m) => !!m.origin) };
+}
+
 export function composeMemoMessage(memos: Memo[]): string {
   // One memo has nothing to group or count: the "## category" heading and the "1. "
   // prefix would only make the agent read past a list of one, and a multi-line note

@@ -184,3 +184,78 @@ func TestPreviewAuthCookieIsStrippedFromTheApp(t *testing.T) {
 		t.Fatal("af_pv must never be forwarded to the previewed app")
 	}
 }
+
+// A Host under the preview domain that is not a valid preview hostname is a preview
+// request that cannot be served, not a Console request: it answers the bare 404 of an
+// unknown slug before the mux, authGate, /healthz or the dev IdP can see it.
+func TestPreviewDispatchMalformedLabelUnderDomainIs404(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot) // marks "the normal mux was reached"
+	})
+	mgr := &manager{previewDomain: "pv.example.com", store: nil}
+	h := previewHostAPI{cfg: config{mgr: mgr}, mgr: mgr}.dispatch(inner)
+
+	paths := []string{"/", "/api/workspace", "/healthz", "/dev-idp/.well-known/openid-configuration", previewAuthCallbackPath}
+	hosts := []string{
+		"x-3000.pv.example.com",
+		"whatever.pv.example.com",
+		strings.Repeat("a", 19) + "-3000.pv.example.com",
+		strings.Repeat("a", 21) + "-3000.pv.example.com",
+		testSlug + "-0.pv.example.com",
+		testSlug + "-65536.pv.example.com",
+		testSlug + "-03000.pv.example.com",
+		testSlug + "-.pv.example.com",
+		"-3000.pv.example.com",
+		"a.b-3000.pv.example.com",
+		"pv.example.com",
+		"pv.example.com.",
+		"pv.example.com:443",
+		"PV.Example.COM",
+		"x-3000.pv.example.com.",
+		"x-3000.pv.example.com:8443",
+	}
+	for _, host := range hosts {
+		for _, path := range paths {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", "http://"+host+path, nil)
+			req.Host = host
+			h.ServeHTTP(rr, req)
+			if rr.Code != http.StatusNotFound {
+				t.Errorf("host %q path %q: code = %d, want 404", host, path, rr.Code)
+			}
+		}
+	}
+}
+
+// Hosts outside the preview namespace keep reaching the normal mux — in particular a host
+// that only ends with the domain string without a dot boundary — and with no preview
+// domain configured dispatch is the identity.
+func TestPreviewDispatchPassesThroughOutsideDomain(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusTeapot) })
+	mgr := &manager{previewDomain: "pv.example.com", store: nil}
+	h := previewHostAPI{cfg: config{mgr: mgr}, mgr: mgr}.dispatch(inner)
+	for _, host := range []string{
+		"af.example.com", "example.com", "10.20.1.5:8080", "10.20.1.5", "localhost:8080",
+		"evilpv.example.com", "xpv.example.com:443", "pv.example.com.evil.test", "x-3000.pv.example.org",
+	} {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "http://"+host+"/healthz", nil)
+		req.Host = host
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusTeapot {
+			t.Errorf("host %q: code = %d, want the inner handler (418)", host, rr.Code)
+		}
+	}
+
+	off := &manager{previewDomain: "", store: nil}
+	h = previewHostAPI{cfg: config{mgr: off}, mgr: off}.dispatch(inner)
+	for _, host := range []string{"x-3000.pv.example.com", "pv.example.com", "af.example.com"} {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "http://"+host+"/", nil)
+		req.Host = host
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusTeapot {
+			t.Errorf("no preview domain, host %q: code = %d, want 418", host, rr.Code)
+		}
+	}
+}

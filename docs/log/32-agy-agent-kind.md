@@ -770,6 +770,53 @@ kind 追加の影響が投入経路以外にも及ぶため、workspace `mcp_std
 agy セッション作成 → sessions 一覧に kind=agy で出現 → `sessions/usage` が
 cumulative 全 0（トークン情報なし）で返ることを確認。agent 384・CP 147 全緑。
 
+### lifecycle hooks を会話 ID と working/idle の第一信号にする（2026-10-15、#2156）
+
+agy 1.3.5 の `~/.gemini/config/hooks.json`（#1079 の実測で判明）を、Terminal（CLI）の agy の
+(a) 会話 UUID と (b) working/idle の第一信号に使う。従来の brain 差分・cwd マップ・DB と pane の
+判定はそのまま fallback に残す。実装は `internal/agents/agy/hooks.go`。
+
+**実測（実機の agy 1.3.5、隔離 HOME、数ターン）**
+
+- 書式は SessionStart / PreInvocation / Stop が **ハンドラの直接配列**
+  （`[{"type":"command","command":…,"timeout":N}]`）。`{matcher, hooks:[…]}` のグループ形で書くと
+  SessionStart / PreInvocation / Stop は **発火しない**（PreToolUse だけがグループ形）。
+- hook の子は agy の環境を継承する。pane に渡した `AF_SESSION_NAME` がそのまま見えた
+  （#2157 の「`ANTIGRAVITY_*` はこれだけ」は agy 側の変数の話）。これでスロットを推測なしで特定できる。
+- 1 ターン: SessionStart → PreInvocation(0) → … → Stop(`fullyIdle:true`, `terminationReason:NO_TOOL_CALL`)。
+  ツールを使うターンは PreInvocation(n) と PreToolUse（`stepIdx`, `toolCall`）が交互に来て、最後に Stop。
+- **Esc でキャンセルしたターンは PreInvocation の後に Stop が来ない**（8 秒待っても）。hook の working は
+  キャンセルで取り残されるので、pane の idle フッタと `staleAfter`（#1811）の上限を hook の working にも掛ける。
+- 未測定: PreToolUse が権限の応答前に来るか。DB の question / permission を hook より優先することで、
+  どちらでも permission カードが消えない形にした。
+
+**設計判断**
+
+- hook → agent: `workspace-agent agy-hook <Event>`（codex の `session-status` と同じ形）。`$AF_SESSION_NAME` →
+  `ReadMeta` → スロット sid で、`agy-hook/<sid>.json` に {会話 ID, state, at} を書く。env が無い（ユーザーが手で
+  起動した agy）・kind が agy でない場合は何もしない。stdout は常に `{}`、失敗でも exit 0。
+- hooks.json への書き込み: 名前 `agent-fleet` のエントリだけを持ち、他の名前は触らない（merge by name）。
+  起動のたびに `BuildLaunch` が再主張する（コマンドにこのバイナリのパスが入るため）。内容が同じなら書かない、
+  一時ファイル + rename、symlink は辿って実体に書く。JSON でないファイルは触らずログして fallback。
+- fallback の順序: 会話 ID は hook → cwd マップ → brain 差分。state は DB の question / permission →
+  hook（idle は信じる。working は 1 時間未満かつ pane の idle フッタが無いときだけ）→ 従来の DB 判定。
+  別会話の hook 記録（採用済み UUID と不一致）は無視する。起動時（`BuildLaunch`）に記録を消す。
+- 会話 ID の所有: 起動ごとに世代（`AF_AGY_LAUNCH`、pane の env 経由で hook に届く）を発行し、一致しない hook は無視する。
+  最初の SessionStart で会話を固定し、別の会話 ID（pane 内の `run_command` が起動した子 agy 等）や採用済み/resume の
+  UUID と異なるものは記録を上書きさせない。不正な stdin・会話 ID 無しは記録しない。
+- Stop の idle にも鮮度を付ける: Stop 時点の DB の最終 step idx を記録に持ち、猶予（10 秒）を過ぎた後に、それより後ろの
+  step が working なら idle を撤回して DB 判定に戻す（次の PreInvocation が欠落した場合）。猶予内や、Stop 直後に
+  落ち着く最終 step では撤回しない。世代は起動の先頭で更新し、記録にも世代を持たせて、現世代と違う記録は読まない。
+- Stop 後の新入力は status record の Rev で判定する（Stop が見た Rev と違う working なら新入力。秒精度の時刻では
+  同じ秒の入力を区別できない）。撤回すると DB 判定に戻り、turn_end_poll が新ターンを完了として消費しない。
+  Stop 時点の step idx が読めなかった場合は、猶予後に DB が working なら hook の idle を採らず DB 判定に任せる
+  （端末直入力は status record を残さない）。
+- hooks.json の書き込みはプロセス間 flock（agent の state 側のロック）＋専用 tmp ＋ rename 直前の内容再確認。
+  他名の entry は `json.RawMessage` のまま残す（数値が丸められない）。既存ファイルの mode を引き継ぎ、
+  実体の無い symlink は触らない。AF entry は af セッションの外では何もしない（`AF_SESSION_NAME` 無し）ので、
+  無効化経路は設けていない。
+- スコープ外: 権限・質問への応答、RPC。Managed 化は #2155。
+
 ### ミラーの ContextBar（context 充填率）MVP — `/context` スクレイプ（2026-07-20）
 
 agy の転写（`transcript_full.jsonl`）にも他の永続状態にも token 数が一切無い
@@ -820,6 +867,61 @@ when already false なので追加コストなし）。なお TUI `/config` の
 予告なく描画される要素で、ミラーの launch-seed 自動投入や PTY スクレイプ
 （画面テキストのパターンマッチ依存）とは共存させない方が安全なため。
 
+### `LiveState` の "working" に上限を付ける実測（2026-10-07、#1811）
+
+会話 DB が "working" のまま閉じない（agy が落ちる／API が固まる）と、本番で約 21 時間 Workspace を
+起こし続けた。隔離 tmux で実機 agy を動かして測った値（コードコメントは `agents/agy/stale.go`）:
+
+- フッターは生成・思考・run_command の間ずっと `esc to cancel`、ターン終了行（executor_metadata）が
+  入った同じ 2 秒サンプルで `? for shortcuts` に切り替わった。DB が working の間にアイドルフッターは
+  1 度も出なかった → 「アイドルフッターが静止している間は idle」を採用。
+- run_command は起動の約 2 秒後にバックグラウンドタスク化され、ターンはそこで終わる。`sleep 25` は
+  ステップ状態 2 のまま 25 秒プロセスが生存し、その間 DB は idle・フッターは
+  `? for shortcuts · 1 task(s)`。
+- そのタスクの間 DB / WAL は書かれない（`sleep 420` で mtime が 35 秒 → 177 秒と古くなる一方）。
+  長いビルドは DB だけ見ると古く見えるため、ツールプロセスの有無を併用する。
+- ペイン直下の常駐子は MCP サーバ 1 本（agy と同じセッション）。run_command は agy の直接の子 `bash` で
+  自分がセッションリーダー（sid == pid）。この違いでツールと常駐子を分ける（`procx` に /proc 読みを共通化）。
+
+方針: DB が working でも (1) フッターがアイドルで 45 秒静止なら idle、(2) DB/WAL が 1 時間無更新かつ
+ツールプロセス無しなら "" （idle ではない＝完了通知を出さず、Workspace を保持しない）。
+CP / Console 側の裏打ちは #1818 / #1819。
+
+### ローカル RPC で駆動できるかの実測（2026-10-15、#1079）
+
+Omnigent のように agy 内蔵の connect-RPC（trajectory のステップ状態・`requestedInteraction`・
+`HandleCascadeUserInteraction`・`CancelCascadeSteps`・`modelUsage`）で状態取得と承認回答を置き換えられるか、
+ピン版 1.3.5 で測った。**結論: AF の外から呼ぶ正規の手段は無い。DB/TUI 経路を続ける。**
+
+- **メソッドは存在する。** バイナリに `HandleCascadeUserInteraction` / `CancelCascadeSteps` /
+  `GetCascadeTrajectorySteps` / `SendUserCascadeMessage` / `RequestedInteraction` / `modelUsage` がある。
+- **TUI は起動直後から loopback で待ち受ける。** `127.0.0.1` に HTTPS(gRPC) と HTTP の 2 ポート。番号は
+  ログに `Language server listening on random port at N for HTTP` と出るので、`--log-file` を握れば発見はできる。
+- **全メソッドが CSRF トークン必須。** ヘッダ無しは `401 missing CSRF token`（HTTP・HTTPS 両ポート）。
+- **トークンは外から与えられない。** `ANTIGRAVITY_CSRF_TOKEN=<任意>` を付けて起動しても `401 invalid CSRF token`。
+  トークンは起動ごとにプロセス内で生成され、ファイルにも出ない。
+- **トークンを受け取る子プロセスに AF は入れない。**
+  - agy の MCP 子プロセス（AF の `workspace-agent mcp-stdio`）の環境に `ANTIGRAVITY_*` は無い。
+  - sidecar（`~/.gemini/config/sidecars/<id>/sidecar.json`）は文書上 `ANTIGRAVITY_LS_ADDRESS` と
+    `ANTIGRAVITY_CSRF_TOKEN` を受け取るが、CLI では起動しない。サーバ配信のフラグ `enable-sidecars` が CLI
+    サブクライアントで `null`、Unleash 上も devMode 限定で、置いても無反応だった。
+  - hooks（`~/.gemini/config/hooks.json`）の子に渡るのは `ANTIGRAVITY_CONVERSATION_ID` だけ。
+    `SessionStart` / `PreInvocation` / `Stop` を 1 ターン発火させて確認した。
+  - 文書上トークンを受け取るのはモデルが実行する `run_command` の子（`agy agentapi` 用）だけで、AF が使える経路ではない。
+- プロセスメモリからトークンを読む手は採らない。
+
+副産物として **hooks は使える構造化シグナル**だと分かった（プロンプト送信までは発火しない）。stdin の JSON
+（camelCase）は次のとおり。
+
+| イベント | stdin のキー |
+|---|---|
+| `SessionStart` | `conversationId`, `workspacePaths`, `transcriptPath`, `artifactDirectoryPath`, `modelName` |
+| `PreInvocation` | 上記 + `invocationNum`, `initialNumSteps` |
+| `Stop` | 上記 + `executionNum`, `fullyIdle`, `terminationReason`, `error` |
+
+会話 UUID の捕捉（いまは brain/ の差分）と working/idle の判定を置き換えられる見込みがある。
+stream-json による Managed 化の再検討は #2155、hooks による状態取得は #2156。
+
 ## ユーザーに依頼する事項（並行作業のブロッカー解消）
 
 1. **GCP プロジェクトの用意**（D1/M2 用）: 課金有効化済みプロジェクト ID を Connections 設定時に使える形で。
@@ -829,3 +931,178 @@ when already false なので追加コストなし）。なお TUI `/config` の
    契約後に `/usage` 表示の変化・実効クォータ・クレジット露出を再実測し、個人利用デプロイの
    常用可否を確定させる。
    — **状態（2026-07-20）: ✅ 承認・アップグレード・実測完了**（上記 D-4 実測結果）
+
+## stream-json での Managed 方式の再評価（2026-10-15、#2155）
+
+ADR 0008 は「Managed は agy の構造化出力待ち」としていたが、固定中の agy 1.3.5 には
+`--input-format stream-json --output-format stream-json` があり、画像生成（`imagegen/agy.go`）が既に使っている。
+チャットは stream-json ではなく `-p <prompt>` の plain text 実行（`agyChat.Send`）で、`chatAgyHome` は
+隔離 HOME と permission の組み立ての参考になるだけ（chat の既存デコーダは流用できない）。これで「プリセット権限・承認なし」の Managed
+方式が成り立つかを実測し、作るかどうかの判断材料にする。**実装はこの PR に含めない**。
+
+### 実測条件
+
+- agy 1.3.5、`OPENSSL_ia32cap='~0x4000000000000000' AGY_CLI_DISABLE_AUTO_UPDATE=true`。
+- `chatAgyHome` と同じ隔離 HOME（OAuth トークンだけ symlink、`settings.json` と `config/config.json` に
+  `permissions` と workspace trust）。ユーザーの実 `~/.gemini` には触れていない。
+- モデルは `gemini-3.8-flash-low`、プロンプトは短いものを計 9 ターン程度。入力は stdin に
+  `{"event":"user","message":{"content":"…"}}` を 1 行ずつ。**`-p` / `--print` は付けない**（`-p` は次の
+  フラグを値として食い、起動直後に exit 1）。stream-json 入力だけで print モードになる。
+
+### イベント語彙（stdout は NDJSON、各行 `{"event":…}`）
+
+| event | 中身 |
+|---|---|
+| `init` | `conversation_id`、`init.model`、`init.cwd`、`init.tools`（60 個、`ask_question` / `ask_permission` を含む）、`init.permission_mode`。**最初のメッセージを受けてから出る**（起動の約 4〜5 秒後）。プロセス 1 本につき 1 回 |
+| `step_update` | `step_index`、`state`（`ACTIVE` / `DONE` / `ERROR`）、`step_type`（`user_input` / `agent_response` / `tool` / `system_message` / `unknown`）。毎行 `conversation_id` 付き |
+| `step_update`（`agent_response`） | `text_delta` が `ACTIVE` で増分、`DONE` で末尾（`"\n"`）と `duration_seconds`、`usage`（`input_tokens` / `output_tokens` / `thinking_tokens` / `cache_read_tokens` / `total_tokens`）。ステップ単位の usage は正確 |
+| `step_update`（`tool`） | `tool_name`、`tool_info.parameters`（**引数は出る**: `view_file` の `AbsolutePath`、`run_command` の `CommandLine`）。完了時 `tool_info.output` は要約のみ（`"2 lines, 6 bytes"`）。失敗は `state:"ERROR"` と `tool_info.error.{type,message}` |
+| `result` | ターンごとに 1 回。`result.{conversation_id,status,response,duration_seconds,num_turns,usage,denied_actions?,error?}` |
+
+- 以前の記録「ストリームはツール引数を落とす」は **部分的にしか当たらない**。通常のツールは引数が出る。
+  落ちるのは `ask_question`（後述、`step_type:"unknown"` で中身なし）。
+- `result.usage` と `denied_actions` は **同一プロセス内で累積**する（2 ターン目の `total_tokens` は 1 ターン目の
+  合計を含む。`num_turns` も 2）。ターン単位の値は差分、またはステップ単位の usage の和で取る。
+- モデル名は `init` にしかなく、バージョン・コストは無い。会話 ID は `init` と全 `step_update` にあるので、
+  hooks の `RememberSid` 相当は不要（`init` で捕捉できる）。
+
+### マルチターン・再開
+
+- **1 プロセスで複数ターンを stdin に流せる**。ターンごとに `result` が出て、プロセスは生きたまま次の行を待つ。
+  2 ターン目は文脈を引き継ぐ（会話 ID 同一、`num_turns` 加算）。stdin を閉じると exit 0。
+- 別プロセスで `--conversation <id>` を付けると再開でき、文脈は保たれる（中断したターンの途中までの出力も
+  記憶していた）。再開側の `init` 到達は約 4 秒、1 ターン目の所要は約 7 秒（起動＋ターン）。
+
+### 権限の soft-deny
+
+`permissions.allow` に無い `run_command` を要求させた結果（deny ルールなし）:
+
+- ツールの `step_update` が `state:"ERROR"`、`tool_info.error.message` に
+  `permission check failed … user denied permission to run command … Proceed without performing this action.`
+  — モデルへはこの文面が返る。
+- `result.status` は **`SUCCESS`**（1.3.5 では `CANCELED` を再現できなかった）。`response` は空になり得て、
+  `result.denied_actions:[{"action":"command","display_name":"RunCommand"}]` が付く。stderr に
+  `jetski: no output produced — a tool required the "command" permission that headless mode cannot prompt for…`。
+- **プロセスは死なず、次のターンは普通に動く**（`denied_actions` は累積して残る）。text モードで「exit 0・
+  stdout 空・理由は stderr のみ」だった静かな終了と違い、stream-json では拒否が構造化されて見える。
+  → 検知の材料にはなるが、判定には累積と一般エラーの区別が要る（下の「soft-deny の扱い」）。
+- `deny` ルール（`write_file(/)`）に当たった場合は `Matches user-configured deny rule.` でステップが `ERROR`。
+  **`--dangerously-skip-permissions` でも deny ルールは効いた**（`permission_mode` は `always-proceed` になり、
+  `run_command` は通ったが `write_to_file` は deny で落ちた）。
+
+### ask_question
+
+`ask_question` を使うよう指示すると、ステップは `step_type:"unknown"`（`DONE`、約 0.1 秒、引数なし）で、
+モデルは「質問がスキップされたようです」と答えた。**質問は出ても答える経路が無く、自動でスキップされる**。
+カード化はできない。`ask_permission` も `init.tools` に載るが、権限は上記の soft-deny になる。
+
+### 中断
+
+- ターン中に **SIGINT** を送ると、そのターンは `result.status:"ERROR"`、`error:"interrupted"`、`response` に
+  それまでの出力（部分）で終わる。ただし **その後プロセスが exit 1 で終了**し、stdin に積んだ次のメッセージは
+  実行されなかった。「プロセスを生かしたままターンだけ止める」手段は無い。
+- `init` より前に SIGINT を送ると `error:"context canceled"`、`conversation_id:""`、`num_turns:0`。
+- 制御メッセージ（stdin の `{"event":…}` の他の種類）は試していない。ヘルプにも記述が無い。
+- 結論: 中断＝ SIGINT ＋ `--conversation` での再起動（約 4〜5 秒）。部分出力は保たれ、会話も続く。
+
+### `--mode` / `--dangerously-skip-permissions`
+
+| 指定 | `init.permission_mode` | 実測 |
+|---|---|---|
+| なし | `request-review` | allow に無い `command` は soft-deny |
+| `--mode accept-edits` | `request-review` | `permission_mode` は変わらず、`command` は soft-deny のまま。`write_to_file` は deny ルール下でしか測っておらず、編集への効果は**未確認** |
+| `--mode auto` | `request-review` | `warning: --mode auto is not available for this account; continuing in the default mode.` |
+| `--mode plan` | `request-review` | 起動し、`permission_mode` は変わらず（plan の挙動は未確認） |
+| `--dangerously-skip-permissions` | `always-proceed` | `command` は無確認で実行。deny ルールは引き続き有効 |
+
+観測できたのは `init.permission_mode` が `--mode` で変わらないことと、`command` の結果だけ。`accept-edits` /
+`plan` が実際の権限処理に影響するかは未確認。採用する `read-only` は `--mode` を権限境界として頼らず、
+`permissions.allow` / `permissions.deny` だけで境界を作る。
+
+### 提案: 作るなら何ができるか
+
+**できること**: プリセット権限の無人ターン。stdin に複数ターン、構造化された進捗（ツール名・引数・テキスト
+増分・ステップ単位の usage）、soft-deny の検知、`--conversation` による再開、会話 ID の `init` 捕捉。
+読み取り層（`agents/agy`）は既にあるが、現状は Agent の実 HOME 固定（`stateDir()` は `paths.GeminiHome()`、
+`conversationDBPath` / `transcriptPath` も同じ root。Transcript は DB ではなく
+`brain/<conv>/.system_generated/logs/transcript_full.jsonl` を読む）。子だけ隔離 HOME にすると、`init` で
+会話 ID を記録しても既存の読み取り層は子の履歴を見つけられない（下の実装の輪郭を参照）。
+
+**できないこと**: 承認（Interaction `approval`）、質問カード、ターンを止めつつプロセスを残す中断、steer
+（実行中ターンへの追加入力。stdin に積むと次ターンになる＝キューとしては使える）、動的なモデル／モード変更
+（`--model` は起動時のみ。変えるなら再起動）。承認と構造化 RPC は #1079 の領域で、これで代替しない。
+
+**使い道**: (a) スケジュール実行・無人実行、(b) Agent API 経由のタスク（承認 UI が無い呼び出し元）。
+どちらも「事前に許す範囲を決めて、外れたら失敗として返す」で足りる用途。対話での使用は Terminal (CLI) の
+ままが前提。
+
+**権限プリセット案**（セッション作成時に選ぶ。承認が無いことを UI 上で明示する）:
+
+1. `read-only`（既定）: `read_file(<作業ディレクトリ>)` と、**明示した読み取り専用ツールだけ**
+   （`af_read` 相当の固定集合。`mcp(<server>/*)` のサーバ単位 wildcard は出さない）を allow、
+   `command(*)` と `write_file(/)` を deny。`chatAgyHome` の組み立てを土台にするが、`agyChatAllowRules` は
+   `mcp(<server>/*)` を生成し `agyChatServers` は書き込み系（`ToolsAFWrite` や任意の接続サーバ）も載せ得る。
+   `command` / `write_file` の deny は MCP 経由の書き込み（`create_session`、更新・送信ツール等）を防がず、
+   隔離 HOME も MCP サーバには実 HOME を戻すのでその書き込みを隔離しない。よって wildcard grant は
+   read-only から外す。
+   `read_url(*)` は任意 URL への通信と、取得内容の URL 埋め込みによる持ち出しを許す。要件は 2 つに分ける:
+   「ファイル・外部状態を変更しない」は上の allow 集合で満たす。「ネットワーク／機密の隔離」が要るなら
+   `read_url` を URL allowlist にするか外す（preset の要件として #2158 で決める。なお本節の preset は前者のみを保証する）。
+2. `unattended`: `--dangerously-skip-permissions` ＋ deny ルール（最低でも `write_file` の作業ディレクトリ外）。
+   Claude の `--dangerously-skip-permissions` セッションに相当する。ブロックリスト方式なので、
+   deny の網羅性は保証できない点を UI で伝える。
+
+**soft-deny の扱い**: 黙って流さず、呼び出し元が機械判定できる形で返す。
+- `denied_actions` は同一プロセス内で累積する（重複を畳むか集合化するかは未測定）。差分で拒否を数える手は、
+  重複保持なら multiset／prefix の増分で足りるが、集合化されていると新規 action しか分からず、同じ command が
+  第 1・第 2 ターンの両方で拒否されても第 2 ターンの差分は空になる。よって**差分だけには頼らない**。
+- 当該ターンの権限拒否は、(a) `denied_actions` の差分と、(b) そのターンの `ERROR` ツールステップのうち
+  権限拒否文面（`user denied permission` / `Matches user-configured deny rule`）を持つもの、の**独立した 2 検出の
+  OR** とする。(b) はターン内のステップだけを見るので、既存履歴の拒否を現在ターンに誤帰属しない。一般の
+  `ERROR` ツール（存在しないファイル、MCP の通信失敗等）は文面で除外する。文面は 1.3.5 でしか見ていない。
+- baseline（差分の起点）は子の再起動ごとにリセットする。resume 後の最初の `result` の `usage` と
+  `denied_actions` が会話累積を含むかは未測定なので、実装時に確認する。確認するまでは resume 後の最初の
+  ターンは (b) だけで判定し、(a) は使わない。
+- 無人／API 用途の「範囲外は失敗として返す」と整合させるため、ターンの終端状態は `completed` のまま、
+  ターン結果に構造化フィールド（例: `permission_denied: [{action,…}]`）を持たせ、API 呼び出し元はそれで
+  拒否を機械判定する。Console は同じ値を警告として表示する（Interaction ではない。承認できないので、
+  操作者が許可範囲を見直して再実行する）。
+
+**実装の輪郭**（`managedDrivers` の契約、`agents.Driver` / `ThreadHandle`）:
+
+- `agents/agy` に `NewDriver()` を追加し `session.KindAgy` で登録。`ProcessModel:"per-session-child"`、
+  `Steer/Fork/DynamicModel/DynamicEffort/DynamicMode/Permissions/Questions/EventReplay/TUIAttach` は全て false。
+- `Resume(meta)`: セッションごとの HOME（`chatAgyHome` 方式でトークンだけ共有、preset を
+  `settings.json` と `config/config.json` に書く。ユーザーの実 `~/.gemini` は触らない）で子プロセスを起動し、
+  `ThreadHandle` を返す。会話 ID があれば `--conversation`。
+- **読み取り層の変更が要る**: `agents/agy` の `stateDir()` / `transcriptPath()` / `conversationDBPath()` /
+  Probe / Live / context 等を、`session.Meta` ごとに Managed の state root（隔離 HOME）を解決する形にする。
+  履歴（`transcript_full.jsonl`）と状態 DB の役割も分けて扱う。親 Agent の HOME を丸ごと変えて回避するのは、
+  他セッションに波及するため不可。
+- `Send`: NDJSON 1 行を stdin へ。走行中のターンがあれば driver 内キューへ（他の Managed と同じ
+  `queue` 実装を使い回す）。`init` で会話 ID を捕捉して meta に記録。
+- `Events`: `result` → `turn_state`（`SUCCESS` → completed、`ERROR` → failed、`interrupted` → cancelled、
+  プロセス死 → unknown/aborted）。`step_update` はミラー面（`mirror.go`）の更新に流す。
+- `Interrupt`: SIGINT → 子の終了を待つ → cancelled。キューは driver が持ち、ADR 0105 に従って最初の Stop の
+  後は保持済みのキューを次のターンとして自動継続する。pump が次のターンを取り出す時点で子が居なければ
+  `--conversation` 付きで自動 respawn する（新規入力を待たない）。2 度目の Stop／`DiscardQueue` は
+  キューを破棄し、respawn しない。終端の `result`（`interrupted` → cancelled）が子の exit 1 / EOF で
+  unknown に上書きされないよう、「受信済みの終端 result > プロセス終了」の優先順位にする。
+- `Snapshot`: 上記で Meta ごとに解決した state root の読み取り層。プロセスが死んでいたら unknown のまま §6 の手順へ。
+- 起動条件・自動停止（§7.1）: 子プロセスは per-session。アイドルが続いたら stdin を閉じて終了させる
+  （exit 0。次の `Send` で再開）。1 本のコストは小さいが、Workspace のメモリ上限内で同時数を絞る。
+- 先に確認すべき実装上の宿題: (1) `result` が来ないままプロセスが死ぬ経路（OOM 137 など）、
+  (2) `--print-timeout` を使うか、(3) 実 HOME ではなく隔離 HOME にした場合に MCP の af サーバが
+  セッション状態を引ける構成（`chatAgyHome` は `env.HOME` を実 HOME へ戻して解決済み）、
+  (4) `--mode accept-edits` の編集挙動（未確認）。
+
+**推奨**: 無人実行と Agent API の用途があるなら、`read-only` 既定で作る価値はある（実装は中規模で、
+`cursor` / `kiro` ドライバと同型）。承認が要る用途は作らず Terminal (CLI) に残す。
+### 決定（2026-10-15）
+
+**作る。権限プリセットは `read-only` のみ。** `unattended`（`--dangerously-skip-permissions` ＋ deny）は
+ブロックリスト方式で網羅性を保証できないため採用しない。実装は #2158（Follow-ups: #2158）。
+承認が要る用途は引き続き Terminal (CLI)、構造化 RPC は #1079。
+
+ADR 0008（日英両版）の「Managed は構造化出力待ち」の行は #2157 が訂正する担当。#2157 がマージされない場合は
+#2158 の実装 PR で訂正する（本 PR は log のみ）。

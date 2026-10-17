@@ -319,11 +319,19 @@ func (a Admin) ListMembers(w http.ResponseWriter, r *http.Request) {
 	add := func(list []store.MemberInfo, status string) {
 		for _, m := range list {
 			container, state := a.cp.WorkspaceStateByMembership(r.Context(), m.MembershipID)
+			wsRow, hasRow, wsErr := a.cp.Store().GetWorkspaceByMembership(r.Context(), m.MembershipID)
 			row := map[string]any{
 				"user_key": m.UserKey, "email": m.Email, "role": m.MemberRole,
 				"super_admin": m.IdentityRole == "super_admin",
 				"container":   container, "state": state,
 				"status": status,
+			}
+			// Row existence apart from the live state: state is "none" for a missing row but also
+			// when the runtime reports none (ecs-ec2 after Clean home, native when stopped), and
+			// DeleteMembership refuses on the row alone. Omitted when the lookup failed, so the
+			// Console falls back to offering both buttons.
+			if wsErr == nil {
+				row["has_workspace"] = hasRow
 			}
 			// Why the CP itself stopped it (#1384): the member was notified, but a notification
 			// never reaches the admin, who would otherwise see plain "stopped".
@@ -336,11 +344,22 @@ func (a Admin) ListMembers(w http.ResponseWriter, r *http.Request) {
 			// what the reaper actually looks at (presence, pins, background work),
 			// and the screen you go to in order to investigate would give a
 			// different answer. Only meaningful for a running workspace.
-			if wsRow, ok, _ := a.cp.Store().GetWorkspaceByMembership(r.Context(), m.MembershipID); ok {
+			if hasRow {
 				if f, has := a.cp.IdleForecastFor(wsRow.ID); has && state == "running" {
 					row["idle"] = f
 				}
 			}
+			// The class the member's next start lands on (user → tenant default →
+			// deployment default), for every row including those with no stored limits:
+			// the stored slot_class alone cannot show a member who follows the tenant
+			// default. "" when the deployment declares no classes.
+			row["slot_class_effective"], _ = a.cp.ResolveSlotClass(r.Context(),
+				store.Workspace{MembershipID: m.MembershipID, TenantID: t.ID})
+			// What "" (follow the tenant default) resolves to for this member, whatever is
+			// stored: with no membership there is no per-user value to find, so the chain
+			// answers with its fallback alone. The editor needs it to draw and warn about
+			// the "tenant default" choice, which the client cannot derive.
+			row["slot_class_default"], _ = a.cp.ResolveSlotClass(r.Context(), store.Workspace{TenantID: t.ID})
 			if ul, ok, _ := a.cp.Store().GetUserLimit(r.Context(), m.MembershipID); ok {
 				row["max_sessions"] = ul.MaxSessions
 				row["mem_limit"] = ul.MemLimit

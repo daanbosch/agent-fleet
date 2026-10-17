@@ -1,6 +1,7 @@
 package sessionx
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/status"
 )
@@ -259,5 +261,49 @@ func TestWireSessionCarriesDriver(t *testing.T) {
 	}
 	if m.DriverKind() != session.DriverTUI {
 		t.Fatalf("DriverKind() = %q, want tui", m.DriverKind())
+	}
+}
+
+// termResponder answers a Terminal slot's Interaction by id (agents.TerminalResponder).
+type termResponder struct {
+	agents.Driver
+	got agents.InteractionReply
+	err error
+}
+
+func (d *termResponder) RespondTerminal(_ session.Meta, r agents.InteractionReply) error {
+	d.got = r
+	return d.err
+}
+
+// A Terminal slot whose runtime can be answered by id (opencode 2 on the shared serve) goes through
+// the driver; a refusal from it falls back to the keys message, any other error is a conflict.
+func TestHandleSessionRespondTerminalResponder(t *testing.T) {
+	fakeTmux(t)
+	const name = "respond_tui_api"
+	session.WriteMeta(session.Meta{Name: name, Dir: t.TempDir(), Kind: session.KindOpencode, Driver: session.DriverTUI})
+	d := &termResponder{}
+	prev := managedDrivers[session.KindOpencode]
+	managedDrivers[session.KindOpencode] = d
+	t.Cleanup(func() { managedDrivers[session.KindOpencode] = prev })
+	respond := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/sessions/"+name+"/respond",
+			strings.NewReader(`{"id":"frm_1","decision":"answer","answers":[{"options":[1]}]}`))
+		req.SetPathValue("name", name)
+		rec := httptest.NewRecorder()
+		HandleSessionRespond(rec, req)
+		return rec
+	}
+
+	if rec := respond(); rec.Code != http.StatusOK || d.got.ID != "frm_1" || len(d.got.Answers) != 1 {
+		t.Fatalf("answered: %d %s, got %+v", rec.Code, rec.Body.String(), d.got)
+	}
+	d.err = agents.ErrTerminalRespond
+	if rec := respond(); rec.Code != http.StatusNotImplemented || !strings.Contains(rec.Body.String(), "respond_unsupported") {
+		t.Fatalf("not on the serve: %d %s", rec.Code, rec.Body.String())
+	}
+	d.err = errors.New("settled")
+	if rec := respond(); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "respond_failed") {
+		t.Fatalf("driver error: %d %s", rec.Code, rec.Body.String())
 	}
 }

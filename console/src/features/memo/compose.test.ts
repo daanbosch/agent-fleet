@@ -2,7 +2,7 @@
 // buildFlushMessage (control-plane/memo.go), so the two must stay in step — including the
 // single-memo case, where the list scaffolding is dropped entirely.
 import { describe, expect, it } from "vitest";
-import { composeMemoMessage } from "./compose.ts";
+import { composeMemoMessage, splitForSend } from "./compose.ts";
 import type { Memo } from "../../types/memo.ts";
 
 const aMemo = (over: Partial<Memo>): Memo => ({
@@ -49,5 +49,18 @@ describe("composeMemoMessage", () => {
       }),
     ]);
     expect(got).toBe("対象ファイル: ~/repos/a/Button.tsx\n余白を詰めて\n添付画像: paste-1.png");
+  });
+});
+
+// ADR 0111 decision 3: a memo taken in from the inbox is sent on its own.
+describe("splitForSend", () => {
+  it("keeps taken-in memos apart from the member's own", () => {
+    const own = aMemo({ id: "own" });
+    const taken = aMemo({ id: "taken", origin: { itemId: "i1", sender: "a" } });
+    const { own: o, origins } = splitForSend([own, taken]);
+    expect(o.map((m) => m.id)).toEqual(["own"]);
+    expect(origins.map((m) => m.id)).toEqual(["taken"]);
+    // The editable text is composed from the member's own memos only.
+    expect(composeMemoMessage(o)).not.toContain("taken");
   });
 });

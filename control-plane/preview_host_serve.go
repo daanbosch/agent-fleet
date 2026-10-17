@@ -72,9 +72,11 @@ type previewHostAPI struct {
 
 func newPreviewHostAPI(cfg config) previewHostAPI { return previewHostAPI{cfg: cfg, mgr: cfg.mgr} }
 
-// dispatch wraps the whole CP handler chain. A request whose Host does not parse as a
-// preview hostname passes through untouched — including the ALB health check (whose
-// Host is the task IP) and every Console request.
+// dispatch wraps the whole CP handler chain. A request whose Host is outside the preview
+// domain passes through untouched — including the ALB health check (whose Host is the
+// task IP) and every Console request. A Host under the domain that is not a valid preview
+// hostname gets the same bare 404 as an unknown slug: the wildcard DNS and certificate
+// send any label here, and letting one reach the mux would serve the CP API (decision 8).
 func (a previewHostAPI) dispatch(next http.Handler) http.Handler {
 	if a.mgr == nil || a.mgr.previewDomain == "" {
 		return next // host-mode preview not configured: nothing changes
@@ -82,6 +84,10 @@ func (a previewHostAPI) dispatch(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ph, ok := parsePreviewHost(r.Host, a.mgr.previewDomain)
 		if !ok {
+			if _, under := previewHostLabel(r.Host, a.mgr.previewDomain); under {
+				previewNotFound(w)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -109,9 +115,35 @@ func (a previewHostAPI) serve(w http.ResponseWriter, r *http.Request, ph preview
 		return
 	}
 	st := parseWSSettings(mustSettings(ctx, a.mgr, ws.ID))
-	if !previewPortAllowed(st, ph.port) {
-		previewNotFound(w) // a port off the allowlist "does not exist" (decision 6)
-		return
+	// A port off the list "does not exist" for everyone but the owner holding a live grant
+	// for it (decision 6, narrowed: preview_grant.go). Anyone else cannot tell it from a
+	// port that is not there, so there is no handshake redirect either.
+	var grant store.PreviewTempPort
+	var viewer string
+	temp := !previewPortAllowed(st, ph.port)
+	if temp {
+		var ok bool
+		if grant, ok = a.liveGrant(ctx, ws, ph.port); !ok {
+			previewNotFound(w)
+			return
+		}
+		// The owner's credential is checked FIRST, before the network check, the callback
+		// or a CORS preflight can answer anything: those answer differently for a port with
+		// a grant than for one without, so an anonymous caller would learn that a grant
+		// exists. Owner only, whatever the public and tenant-share settings say. A missing,
+		// invalid, foreign or other-port credential is a plain 404, never a handshake.
+		// (A preflight carries no credential, so a temporary port cannot be called
+		// cross-origin; list the port to do that.)
+		if r.URL.Path == previewAuthCallbackPath {
+			cl, ok := a.verifyClaims(r.URL.Query().Get("t"))
+			if !ok || cl.Slug != ph.slug || cl.Port != ph.port || cl.MembershipID != ws.MembershipID {
+				previewNotFound(w)
+				return
+			}
+		} else if viewer, ok = a.authorized(ctx, r, ph, ws, st); !ok || viewer != ws.MembershipID {
+			previewNotFound(w)
+			return
+		}
 	}
 	// The tenant's network restriction applies even in public mode (decision 12): if a
 	// tenant has narrowed its network, its previews are on the narrowed side too.
@@ -120,12 +152,12 @@ func (a previewHostAPI) serve(w http.ResponseWriter, r *http.Request, ph preview
 		return
 	}
 	if r.URL.Path == previewAuthCallbackPath {
-		a.acceptToken(w, r, ph, st)
+		a.acceptToken(w, r, ph, st, temp, ws)
 		return
 	}
 	// Calls from a sibling origin — the same slug on another port (docs/log/81 §2.4,
 	// decision 11). Only when opted in does the CP answer the preflight and add CORS.
-	allowOrigin := a.siblingOrigin(r, ph, st)
+	allowOrigin := a.siblingOrigin(ctx, r, ph, ws, st)
 	if allowOrigin != "" && r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
 		// Never pass the preflight through to the app. A plain dev server or Spring
 		// normally answers OPTIONS with 403 / 405, and failing there reads as "CORS is
@@ -139,8 +171,9 @@ func (a previewHostAPI) serve(w http.ResponseWriter, r *http.Request, ph preview
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	var viewer string
-	if !st.PreviewPublic {
+	if temp {
+		// Authenticated above.
+	} else if !st.PreviewPublic {
 		var ok bool
 		if viewer, ok = a.authorized(ctx, r, ph, ws, st); !ok {
 			a.startHandshake(w, r, ph)
@@ -155,7 +188,7 @@ func (a previewHostAPI) serve(w http.ResponseWriter, r *http.Request, ph preview
 		http.Error(w, "bad preview path", http.StatusBadRequest)
 		return
 	}
-	rt := a.mgr.runtimeFor(ws, "")
+	rt := a.mgr.runtimeFor(ws, noSecretKeys)
 	opts := previewRelayOptions{
 		port:           ph.port,
 		path:           r.URL.Path,
@@ -164,6 +197,12 @@ func (a previewHostAPI) serve(w http.ResponseWriter, r *http.Request, ph preview
 		public:         st.PreviewPublic,
 		identityHeader: a.mgr.emailHeader,
 		allowOrigin:    allowOrigin,
+	}
+	if temp {
+		opts.listener = grant.Inodes
+		opts.onListenerGone = func() {
+			_ = a.mgr.store.DeletePreviewTempPortIf(context.WithoutCancel(ctx), ws.ID, ph.port, grant.Inodes)
+		}
 	}
 	// Authorisation is decided once per request, and a WebSocket or SSE relay is one
 	// request for as long as it stays open: filing it under the viewer and the owner lets
@@ -263,10 +302,16 @@ func (a previewHostAPI) startHandshake(w http.ResponseWriter, r *http.Request, p
 
 // acceptToken is the preview-origin end of the handshake: verify the one-shot token,
 // mint the host-scoped cookie, and send the browser to where it was going.
-func (a previewHostAPI) acceptToken(w http.ResponseWriter, r *http.Request, ph previewHost, st wsSettings) {
+func (a previewHostAPI) acceptToken(w http.ResponseWriter, r *http.Request, ph previewHost, st wsSettings, temp bool, ws store.Workspace) {
 	cl, ok := a.verifyClaims(r.URL.Query().Get("t"))
 	if !ok || cl.Slug != ph.slug || cl.Port != ph.port {
 		http.Error(w, "preview sign-in expired — reload from the Console", http.StatusForbidden)
+		return
+	}
+	// On a temporary port the token has to be the owner's: the handshake only mints one for
+	// them, and this is the same rule from the other side.
+	if temp && cl.MembershipID != ws.MembershipID {
+		previewNotFound(w)
 		return
 	}
 	cl.Exp = time.Now().Add(previewSessionTTL).Unix()
@@ -301,7 +346,7 @@ func previewCookieSameSite(st wsSettings) http.SameSite {
 // Requiring the slug to match is what keeps another person's workspace preview from ever
 // getting through. The port allowlist is checked too, so that a port taken off the list
 // cannot still be usable "as a caller".
-func (a previewHostAPI) siblingOrigin(r *http.Request, ph previewHost, st wsSettings) string {
+func (a previewHostAPI) siblingOrigin(ctx context.Context, r *http.Request, ph previewHost, ws store.Workspace, st wsSettings) string {
 	if !st.PreviewCrossOrigin {
 		return ""
 	}
@@ -314,8 +359,18 @@ func (a previewHostAPI) siblingOrigin(r *http.Request, ph previewHost, st wsSett
 		return ""
 	}
 	other, ok := parsePreviewHost(u.Host, a.mgr.previewDomain)
-	if !ok || other.slug != ph.slug || !previewPortAllowed(st, other.port) {
+	if !ok || other.slug != ph.slug {
 		return ""
+	}
+	if !previewPortAllowed(st, other.port) {
+		// An unlisted sibling counts only while it holds a live grant AND this request is
+		// the owner's own (their cookie on this host): the grant is theirs alone.
+		if _, live := a.liveGrant(ctx, ws, other.port); !live {
+			return ""
+		}
+		if viewer, ok := a.authorized(ctx, r, ph, ws, st); !ok || viewer != ws.MembershipID {
+			return ""
+		}
 	}
 	return origin
 }
@@ -388,8 +443,12 @@ func (a previewHostAPI) handshake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !previewPortAllowed(st, port) {
-		previewNotFound(w)
-		return
+		// An unlisted port: the owner, with a live grant for it. Everyone else gets the
+		// 404 an unknown port gets.
+		if _, live := a.liveGrant(ctx, ws, port); !live || mv.MembershipID != ws.MembershipID {
+			previewNotFound(w)
+			return
+		}
 	}
 	// What gets baked in is the CALLER's own membership, never the owner's. A viewer's
 	// cookie says only "this person is opening this slug/port"; the permission is
@@ -490,6 +549,11 @@ type previewRelayOptions struct {
 	// which must never reach the previewed app. Passed in rather than read from a
 	// global so a handler built in a test strips exactly what the real one does.
 	identityHeader string
+	// listener is the comma-separated inode list of a temporary grant (preview_grant.go),
+	// or "" for a listed port. onListenerGone drops the grant when the Agent says the
+	// listener is gone.
+	listener       string
+	onListenerGone func()
 }
 
 // previewProxyTransport is the CP→Agent transport (Service Connect / Cloud Map aware),
@@ -503,7 +567,7 @@ var previewProxyTransport = newAgentTransport()
 func relayPreview(w http.ResponseWriter, r *http.Request, rt runtime.Runtime, o previewRelayOptions) {
 	target, err := url.Parse(rt.Endpoint())
 	if err != nil || target.Host == "" {
-		http.Error(w, "workspace agent unreachable (is the workspace running?)", http.StatusBadGateway)
+		writePreviewRelayError(w, r, previewWorkspaceUnreachable, o.port)
 		return
 	}
 	path := o.path
@@ -523,6 +587,12 @@ func relayPreview(w http.ResponseWriter, r *http.Request, rt runtime.Runtime, o 
 			pr.Out.URL.RawPath = ""
 			pr.Out.Host = target.Host
 			stripConsoleCredentials(pr.Out, r, o.identityHeader)
+			// Only the CP may name a listener: whatever the browser sent is dropped on both
+			// the host and the path form, then the grant's own value is set.
+			pr.Out.Header.Del(previewListenerHeader)
+			if o.listener != "" {
+				pr.Out.Header.Set(previewListenerHeader, o.listener)
+			}
 			if tok := rt.Token(); tok != "" {
 				pr.Out.Header.Set("Authorization", "Bearer "+tok) // CP↔Agent auth
 			}
@@ -541,6 +611,7 @@ func relayPreview(w http.ResponseWriter, r *http.Request, rt runtime.Runtime, o 
 			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
+			rewritePreviewAgentError(resp, r, o.port, o.onListenerGone)
 			stripAppLoginCookies(resp)
 			if o.allowOrigin != "" {
 				// Drop whatever the app set before overwriting: with two of them
@@ -560,8 +631,9 @@ func relayPreview(w http.ResponseWriter, r *http.Request, rt runtime.Runtime, o 
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Printf("preview relay (port=%d): %v", o.port, err)
-			http.Error(w, "nothing is listening on 127.0.0.1:"+strconv.Itoa(o.port)+
-				" inside the workspace (or the workspace is not running)", http.StatusBadGateway)
+			// Reaching here means the CP's own dial toward the Agent failed (an Agent that
+			// answered, even with an error, comes through ModifyResponse above).
+			writePreviewRelayError(w, r, previewWorkspaceUnreachable, o.port)
 		},
 	}
 	rp.ServeHTTP(w, r)
@@ -573,6 +645,8 @@ func relayPreview(w http.ResponseWriter, r *http.Request, rt runtime.Runtime, o 
 // caller's cookies still arrive here, and this is the one place both are cleaned.
 func stripConsoleCredentials(out *http.Request, in *http.Request, identityHeader string) {
 	out.Header.Del("Authorization")
+	// Only the CP makes this one (ADR 0113), and never for a preview.
+	out.Header.Del(memberOriginHeader)
 	for _, h := range []string{
 		"X-Forwarded-Email", "X-Forwarded-User", "X-Forwarded-Preferred-Username",
 		"X-Auth-Request-Email", "X-Auth-Request-User", "X-Auth-Request-Access-Token",

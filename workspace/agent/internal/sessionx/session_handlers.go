@@ -31,6 +31,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/gitx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/imagegen"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/limitsnap"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/mcpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
@@ -90,6 +91,29 @@ func managedBusy(m session.Meta) bool {
 		return lcpp.ManagedBusy(m.Name)
 	case session.KindMuse:
 		return muse.ManagedBusy(m.Name)
+	}
+	return false
+}
+
+// managedInFlight reports that a managed session's handle holds an entry it took from its queue
+// and has not settled (the drivers' ManagedInFlight). Unlike managedBusy, input still queued
+// does not count.
+func managedInFlight(m session.Meta) bool {
+	switch m.Kind {
+	case session.KindOpencode:
+		return opencode.ManagedInFlight(m.Name)
+	case session.KindCodex:
+		return codex.ManagedInFlight(m.Name)
+	case session.KindCopilot:
+		return copilot.ManagedInFlight(m.Name)
+	case session.KindCursor:
+		return cursor.ManagedInFlight(m.Name)
+	case session.KindKiro:
+		return kiro.ManagedInFlight(m.Name)
+	case session.KindLcpp:
+		return lcpp.ManagedInFlight(m.Name)
+	case session.KindMuse:
+		return muse.ManagedInFlight(m.Name)
 	}
 	return false
 }
@@ -297,16 +321,23 @@ func HandleListSessions(w http.ResponseWriter, r *http.Request) {
 	// deliberately does not count as activity, so without this idle-stop kills a running
 	// clone / checkout; the image queue dies with the container the same way.
 	// The reaper reads this list on every sweep, so it costs no extra request.
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"sessions": sessions, "repoJobs": repoJobsRunning(), "imageJobs": imageJobsActive(),
-	})
+	}
+	// The limit snapshot (ADR 0111 decision 6) rides the same response for the reaper, which
+	// asks for it. Other callers (the Console's list, through the CP) do not, and pay nothing.
+	if r.URL.Query().Get("limits") == "1" {
+		body["limits"] = limitsnap.Cached(time.Now())
+	}
+	httpx.WriteJSON(w, http.StatusOK, body)
 }
 
 // HandleSessionCatalog is the sharing inventory. Unlike the ordinary list it
-// includes archived rows, but only kinds with a structured transcript.
+// includes archived rows, but only kinds with a structured transcript. With ?since= it
+// answers only what changed after that cursor (catalog_delta.go).
 func HandleSessionCatalog(w http.ResponseWriter, r *http.Request) {
 	live := tmuxx.LiveSessionNames()
-	items := []session.Session{}
+	items := []session.CatalogEntry{}
 	for _, m := range session.ListMetas() {
 		if !AgentOf(m.Kind).Caps().CanTranscript {
 			continue
@@ -315,10 +346,28 @@ func HandleSessionCatalog(w http.ResponseWriter, r *http.Request) {
 		if m.DriverKind() == session.DriverManaged {
 			alive = ManagedAlive(m)
 		}
-		items = append(items, wireSession(m, alive))
+		items = append(items, catalogEntry(m, alive))
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt > items[j].CreatedAt })
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"sessions": items})
+	since, asked := r.URL.Query()["since"]
+	if !asked {
+		httpx.WriteJSON(w, http.StatusOK, session.CatalogResponse{Sessions: items})
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, catalogChanges.respond(items, since[0]))
+}
+
+// catalogEntry builds a catalog row. Only a live session pays for wireSession, whose State
+// (with the rate-limit reinterpretation) is the one field the catalog needs from it; a stopped
+// one, most of a long history, is read from its meta alone.
+func catalogEntry(m session.Meta, alive bool) session.CatalogEntry {
+	e := session.CatalogEntry{Name: m.Name, Kind: m.Kind, Dir: m.Dir, Repo: m.Repo,
+		WorkingCopyID: gitx.WorkingCopyID(m.Dir), Title: m.Title, Label: m.Label,
+		CreatedAt: m.CreatedAt, Alive: alive, Archived: m.Archived}
+	if alive {
+		e.State = wireSession(m, true).State
+	}
+	return e
 }
 
 type CreateReq struct {
@@ -335,6 +384,11 @@ type CreateReq struct {
 	// it points inside the FRESH worktree). The session's Dir keeps recording the
 	// working copy itself; only the launched process starts deeper (Meta.CWD).
 	Subdir string `json:"subdir"`
+	// AllowSharedWorkingCopy is a session-spawned create's explicit opt-in to run in its
+	// PARENT's own live working copy (ADR 0073 decision 7, amendment 2026-10-07). Honoured only
+	// with worktree=false and only for that one directory; everywhere else it changes nothing,
+	// so the spawn_working_copy_busy refusal stays the default.
+	AllowSharedWorkingCopy bool `json:"allow_shared_working_copy"`
 	// IdempotencyKey dedupes a retried/concurrent create so a client that times out
 	// (but whose request the backend actually completed) can't spawn a duplicate on
 	// retry. The stdio MCP create_session tool derives it deterministically from the
@@ -342,9 +396,13 @@ type CreateReq struct {
 	// same key. Empty => the server falls back to a report_to-scoped intent fingerprint
 	// (createIdempotencyKey); interactive Console launches send neither and aren't deduped.
 	IdempotencyKey string `json:"idempotency_key"`
-	Model          string `json:"model"`
-	Effort         string `json:"effort"`
-	Mode           string `json:"mode"` // "plan" | "normal"
+	// IdempotencyDurable keeps the key's outcome on disk until it is looked up or abandoned
+	// (session_idempotency.go): the Control Plane's launch from a handoff offer, whose outcome
+	// may be asked about days later (issue #2040). Ignored without IdempotencyKey.
+	IdempotencyDurable bool   `json:"idempotency_durable"`
+	Model              string `json:"model"`
+	Effort             string `json:"effort"`
+	Mode               string `json:"mode"` // "plan" | "normal"
 	// SkipPermissions asks whether to skip tool approvals (docs/log/76). It is three-valued:
 	// unset (null) means "follow the per-kind default in Settings > Agents", and the Console
 	// only sends it when the user touched the toggle. Folding unset into false would launch
@@ -394,6 +452,10 @@ type CreateReq struct {
 	// initial_prompt carrying its id (instr) (#1257). False on the Terminal route.
 	managed bool
 	instr   string
+	// name is the slug a move booked for its target before writing the handover file there
+	// (ADR 0115 decision 9). Unexported, so no client can name a session: every other create
+	// allocates a fresh slug.
+	name string
 	// Origin / OriginConv record who STARTED this session (docs/log/46 §2-c, ADR 0029 §6) —
 	// a different axis from Source (which attributes one injected prompt). The MCP
 	// create_session sends "operator" plus its own conversation slug; the Console sends
@@ -457,6 +519,13 @@ type CreateReq struct {
 	SSORegion    string `json:"sso_region"`
 	SSOAccountID string `json:"sso_account_id"`
 	SSORoleName  string `json:"sso_role_name"`
+	// Role chaining (issue #1109): when SSMRoleARN is set, the sso_* fields above describe
+	// the source profile SSMSourceProfile and SSMProfile assumes the role from it.
+	SSMSourceProfile   string `json:"ssm_source_profile"`
+	SSMRoleARN         string `json:"ssm_role_arn"`
+	SSMExternalID      string `json:"ssm_external_id"`
+	SSMRoleSessionName string `json:"ssm_role_session_name"`
+	SSMDurationSeconds int    `json:"ssm_duration_seconds"`
 	// SSMForceLogin: drop this profile's cached login and run `aws sso login` at launch
 	// (skip the cached-token short-circuit) so the user re-authenticates. One-shot.
 	SSMForceLogin bool `json:"ssm_force_login"`
@@ -694,6 +763,12 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSON(w, r, &req) {
 		return
 	}
+	createSession(w, r, req)
+}
+
+// createSession is the create after its body is decoded, so a move can create its target
+// in-process with the name it booked (CreateReq.name).
+func createSession(w http.ResponseWriter, r *http.Request, req CreateReq) {
 	// A create raised by another SESSION (ADR 0073) carries the parent's name, and the whole
 	// spawn regime hangs off it. Resolved here; the refusals run further down.
 	spawnParent := ""
@@ -710,13 +785,27 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 	idemKey := createIdempotencyKey(&req)
 	committed := false
 	if idemKey != "" {
-		if prev, dup := createLedger.begin(idemKey); dup {
-			if prev.state == createDone {
+		durable := req.IdempotencyDurable && strings.TrimSpace(req.IdempotencyKey) != ""
+		if prev, dup := createLedger.begin(idemKey, durable); dup {
+			switch prev.state {
+			case createDone:
 				// The identical create already succeeded — replay that session verbatim.
 				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set(createKeyHeader, idemKey)
+				w.Header().Set(createOutcomeHeader, "created")
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write(prev.body)
-			} else {
+			case createAbandoned:
+				// The caller gave this key up (abandon) and may have started over.
+				httpx.WriteErr(w, http.StatusConflict, "create_abandoned", "this create was abandoned by its caller")
+			case createRefused:
+				// A refused durable key stays refused, so this answer is as true as the first.
+				w.Header().Set(createKeyHeader, idemKey)
+				w.Header().Set(createOutcomeHeader, "refused")
+				httpx.WriteErr(w, http.StatusConflict, "create_refused", "a create under this key was refused; start over under a new key")
+			case createUnknown:
+				httpx.WriteErr(w, http.StatusServiceUnavailable, "create_outcome_unknown", "the outcome of an earlier create under this key is unknown")
+			default:
 				// The first create is still launching (the timed-out client's retry, or a
 				// genuine double-fire). Refuse with a distinct code the MCP tool reconciles
 				// into the eventual session rather than surfacing as a retryable failure.
@@ -725,6 +814,9 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		// This request owns the key, so its answer is the outcome under it: say so in headers
+		// a proxy in between would not write (createOutcomeWriter).
+		w = &createOutcomeWriter{ResponseWriter: w, key: idemKey}
 		// We own the inflight entry: clear it on any non-committed exit so a real failure
 		// doesn't wedge the key (a completed entry is kept for replay by ledger.fail).
 		defer func() {
@@ -980,7 +1072,20 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 					fmt.Sprintf("a remote branch %q already exists; rename it or work on the existing branch", nb))
 				return
 			}
-			dir, err = gitx.EnsureWorktree(parent, req.Branch, nb, folderSeg)
+			var start string
+			start, err = gitx.NewWorktreeStartPoint(parent, req.Branch) // base pushed since our last fetch => fetch once
+			if err == nil && strings.TrimSpace(req.NewBranch) != "" {
+				// The fetch above may have just brought in a same-named remote branch the
+				// check before it could not see; ask again (local refs only, no network).
+				if _, remote := gitx.BranchNameStatus(parent, nb); remote {
+					httpx.WriteErr(w, http.StatusConflict, "branch_exists_remote",
+						fmt.Sprintf("a remote branch %q already exists; rename it or work on the existing branch", nb))
+					return
+				}
+			}
+			if err == nil {
+				dir, err = gitx.EnsureWorktree(parent, start, nb, folderSeg)
+			}
 			if err == nil {
 				// Start at origin's tip, the same intent as fastForwardWorktree on the
 				// existing-branch path. An empty base means the parent's HEAD is the start
@@ -1029,9 +1134,17 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 	// A worktree launch has replaced req.Dir with the fresh worktree by now and cannot collide,
 	// which is why the check is scoped to the non-worktree case rather than the raw flag.
 	if spawnParent != "" && !req.Worktree {
-		if ref := spawnWorkingCopyRefusal(req.Dir); ref != nil {
+		ref, sharedDir := spawnWorkingCopyCheck(req.Dir, spawnParent, req.AllowSharedWorkingCopy)
+		if ref != nil {
 			httpx.WriteErr(w, ref.Status, ref.Code, ref.Message)
 			return
+		}
+		if sharedDir != "" {
+			// Launch through the canonical spelling so Meta.Dir matches what the delete and
+			// checkout guards compare, and tell the child it is not alone in the checkout. Taken
+			// from the check's own answer: a second liveness read could disagree.
+			req.Dir = sharedDir
+			req.InitialPrompt = SharedWorkingCopyWarning(spawnParent, req.InitialPrompt)
 		}
 	}
 	// Subdir (optional): the CWD narrows to a folder beneath the resolved working copy.
@@ -1052,7 +1165,31 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 	// Identity is a freshly allocated random slug — NOT the client's name. It (and the
 	// sid it derives) can't collide with an archived/pruned session's jsonl, so a new
 	// session never accidentally --resumes a past conversation.
-	name := allocSessionName(req.Dir)
+	name := req.name
+	if name == "" {
+		name = allocSessionName(req.Dir)
+	} else if _, taken := session.ReadMeta(name); taken {
+		// A move's booked name is held against every allocation; a meta under it anyway is
+		// another session, which a create must never overwrite.
+		httpx.WriteErr(w, http.StatusConflict, "name_taken", "a session named "+name+" already exists")
+		return
+	}
+	// publish writes the meta. A move's target is written checked: the move commits, and stops
+	// its source, on the strength of that meta, and a target running without one is listed
+	// nowhere. Its first prompt follows the write, so a failed write leaves a target that has
+	// not been told to work.
+	publish := func(m session.Meta) bool {
+		if req.name == "" {
+			slot.publish(m)
+			return true
+		}
+		if err := writeMoveTargetMeta(m); err != nil {
+			log.Printf("move target %s: writing its meta: %v", name, err)
+			httpx.WriteErr(w, http.StatusInternalServerError, errCodeMetaWriteFailed, "the session started but its meta could not be written: "+err.Error())
+			return false
+		}
+		return true
+	}
 
 	kind := NormalizeKind(req.Kind)
 	// An SSM session with no client title defaults to "{host alias} @MMDD-HHMM" — a
@@ -1074,6 +1211,8 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 			Profile: req.SSMProfile, Target: req.SSMTarget, Document: req.SSMDocument,
 			Region: req.SSMRegion, StartURL: req.SSOStartURL, SSORegion: req.SSORegion,
 			AccountID: req.SSOAccountID, RoleName: req.SSORoleName,
+			RoleARN: req.SSMRoleARN, SourceProfile: req.SSMSourceProfile, ExternalID: req.SSMExternalID,
+			RoleSessionName: req.SSMRoleSessionName, DurationSeconds: req.SSMDurationSeconds,
 		}
 		if ssm.Region == "" {
 			ssm.Region = ssm.SSORegion
@@ -1144,7 +1283,9 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 			writeRuntimeErr(w, err)
 			return
 		}
-		slot.publish(meta)
+		if !publish(meta) {
+			return
+		}
 		recordFleetGraphBirth(meta)
 		req.managed = true
 		noteCreateOrigin(name, &req, spawnParent, origin)
@@ -1169,7 +1310,9 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusInternalServerError, "tmux_failed", err.Error())
 		return
 	}
-	slot.publish(meta)
+	if !publish(meta) {
+		return
+	}
 	recordFleetGraphBirth(meta)
 
 	// BEFORE the delivery below, not after: the record is what the mirror matches the turn
@@ -1269,19 +1412,105 @@ func noteCreateOrigin(name string, req *CreateReq, spawnParent, origin string) {
 // 200 + the created session once done, 202 while still launching, or 404 if no such
 // create is (or is still) on record. The stdio MCP create_session tool polls this to
 // reconcile a timed-out POST instead of retrying it. GET /sessions-idempotency/{key}.
+//
+// A durable key (session_idempotency.go) is also answered from its record on disk: 404
+// not_created once it was abandoned or refused, 503 create_outcome_unknown when the record
+// cannot be read or its create was cut off by a restart. A plain miss, or a key only reserved,
+// stays not_found, which proves nothing: a create may not have begun yet. Only abandon turns a
+// reserved key into a guarantee.
 func HandleIdempotencyLookup(w http.ResponseWriter, r *http.Request) {
-	e, ok := createLedger.lookup(r.PathValue("key"))
-	if !ok {
+	key := r.PathValue("key")
+	e, ok := createLedger.lookup(key)
+	if !ok || e.state == createReserved {
 		httpx.WriteErr(w, http.StatusNotFound, "not_found", "no create on record for this key")
 		return
 	}
-	if e.state == createDone {
+	writeCreateState(w, key, e)
+}
+
+// HandleIdempotencyReserve records a durable key before its create is sent (issue #2040), so
+// that abandon may later answer "not created" for it. The answer names the key, which is how
+// the caller tells this Agent from one without the route.
+// POST /sessions-idempotency/{key}/reserve.
+func HandleIdempotencyReserve(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("key")
+	if strings.TrimSpace(key) == "" {
+		httpx.WriteErr(w, http.StatusBadRequest, "bad_key", "an idempotency key is required")
+		return
+	}
+	if err := createLedger.reserve(key); err != nil {
+		httpx.WriteErr(w, http.StatusServiceUnavailable, "create_outcome_unknown", "the key could not be recorded")
+		return
+	}
+	w.Header().Set(createKeyHeader, key)
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"status": "reserved"})
+}
+
+// HandleIdempotencyAbandon is the lookup that settles a reserved key (issue #2040): when no
+// create under it began, it records the key as abandoned, so a create under it that arrives
+// later is refused (create_abandoned) and the 404 not_created it answers is a guarantee. A
+// create that already began is reported as the lookup would; a key with no record at all is
+// unknown (503), since an Agent that kept no record may have created under it.
+// POST /sessions-idempotency/{key}/abandon.
+func HandleIdempotencyAbandon(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("key")
+	if strings.TrimSpace(key) == "" {
+		httpx.WriteErr(w, http.StatusBadRequest, "bad_key", "an idempotency key is required")
+		return
+	}
+	writeCreateState(w, key, createLedger.abandon(key))
+}
+
+func writeCreateState(w http.ResponseWriter, key string, e createLedgerEntry) {
+	w.Header().Set(createKeyHeader, key)
+	switch e.state {
+	case createDone:
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(e.body)
-		return
+	case createInflight:
+		httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"status": "creating"})
+	case createAbandoned, createRefused:
+		httpx.WriteErr(w, http.StatusNotFound, "not_created", "no session was or will be created under this key")
+	default:
+		httpx.WriteErr(w, http.StatusServiceUnavailable, "create_outcome_unknown", "the outcome of the create under this key is unknown")
 	}
-	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"status": "creating"})
+}
+
+// createKeyHeader and createOutcomeHeader are how a create's own answer names its key and
+// outcome. A gateway or proxy between the caller and the Agent answers errors of its own
+// (a 504 with a JSON body, say), and those must not read as "nothing was created".
+const (
+	createKeyHeader     = "X-AF-Create-Key"
+	createOutcomeHeader = "X-AF-Create-Outcome"
+)
+
+// createOutcomeWriter stamps the answer of a create that owns its key: created for a 2xx,
+// refused for anything else — the handler wrote an error and the ledger drops the key.
+type createOutcomeWriter struct {
+	http.ResponseWriter
+	key   string
+	wrote bool
+}
+
+func (c *createOutcomeWriter) WriteHeader(status int) {
+	if !c.wrote {
+		c.wrote = true
+		outcome := "refused"
+		if status >= 200 && status < 300 {
+			outcome = "created"
+		}
+		c.Header().Set(createKeyHeader, c.key)
+		c.Header().Set(createOutcomeHeader, outcome)
+	}
+	c.ResponseWriter.WriteHeader(status)
+}
+
+func (c *createOutcomeWriter) Write(b []byte) (int, error) {
+	if !c.wrote {
+		c.WriteHeader(http.StatusOK)
+	}
+	return c.ResponseWriter.Write(b)
 }
 
 // HandleForkSession forks a session's conversation into a NEW session of the same
@@ -1728,12 +1957,13 @@ func RestoreSession(name string) (session.Meta, bool) {
 	return m, true
 }
 
-// HandleListArchived returns archived sessions (for the restore modal).
+// HandleListArchived returns archived sessions (for the restore modal) as slim rows built from
+// the meta (wireArchivedRow), not the full live wire.
 func HandleListArchived(w http.ResponseWriter, r *http.Request) {
 	sessions := []session.Session{}
 	for _, m := range session.ListMetas() {
 		if m.Archived {
-			sessions = append(sessions, wireSession(m, false))
+			sessions = append(sessions, wireArchivedRow(m))
 		}
 	}
 	sort.Slice(sessions, func(i, j int) bool { return sessions[i].CreatedAt > sessions[j].CreatedAt })
@@ -1755,6 +1985,11 @@ func HandleRecreateSession(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_name", "invalid session name")
 		return
 	}
+	lease, ok := enterSessionGate(w, r, name)
+	if !ok {
+		return
+	}
+	defer lease.Release()
 	m, ok := session.ReadMeta(name)
 	if !ok {
 		httpx.WriteErr(w, http.StatusNotFound, "not_found", "no such session: "+name)

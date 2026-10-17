@@ -81,8 +81,9 @@ export function NotificationCenter() {
     const r = await openNotificationTarget(n, split);
     // "not in the list" is about a session, so it must not appear when the conversation was the
     // thing that vanished — openNotificationTarget already toasted that reason — nor when the
-    // notification never targeted a session at all (noDestination; arch-residue is one).
-    if (!r.opened && !r.noDestination && r.missingConversation === undefined) toast(tr("noti.session_not_in_list"), { kind: "warn" });
+    // notification never targeted a session at all (noDestination; arch-residue is one), nor
+    // for a handoff that is no longer pending (handoffClosed, also already toasted).
+    if (!r.opened && !r.noDestination && !r.handoffClosed && r.missingConversation === undefined) toast(tr("noti.session_not_in_list"), { kind: "warn" });
     if (r.opened) setOpen(false);
     void useNotificationStore.getState().markSeen(undefined, [n.id]);
   };

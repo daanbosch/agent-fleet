@@ -6,12 +6,13 @@
 //   openNewSession               → features/sessions/store (tick signal)
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactElement } from "react";
 import { createPortal } from "react-dom";
-import { api, previewURL } from "../core/api/client.ts";
+import { api } from "../core/api/client.ts";
 import { onPush, pushHealthy } from "../core/push/events.ts";
 import { useTenantStore } from "../core/store/tenant.ts";
 import { useWorkspaceStore, wsBusy, wsPowerStops, wsStartBusy } from "../core/store/workspace.ts";
 import { useLayoutStore } from "../layout/store.ts";
 import { openSessionsOverview } from "../features/overview/open.ts";
+import { openHome } from "../features/home/open.ts";
 import { openImagegen } from "../features/imagegen/open.ts";
 import { useImagegenAvailable } from "../features/imagegen/available.ts";
 import { isBlankPane, MAX_TAB_COLS } from "../layout/ops.ts";
@@ -22,7 +23,7 @@ import { Icon } from "../ui/Icon.tsx";
 import { Sparkline } from "../ui/Sparkline.tsx";
 import { useConfirm } from "../ui/ConfirmProvider.tsx";
 import { useIsMobile } from "../lib/device.ts";
-import { useWsBarFold } from "./wsBarFold.ts";
+import { useWsBarFold, useWsBarPhoneFold } from "./wsBarFold.ts";
 import { machineSummary, type WsMachine } from "../lib/machine.ts";
 import { useDismiss } from "../lib/useDismiss.ts";
 import { listBrowserAttachments } from "../features/browser/attachmentService.ts";
@@ -36,10 +37,12 @@ import { t, tCount, useT } from "../lib/i18n/index.ts";
 import type { MsgKey } from "../lib/i18n/index.ts";
 import { fmtGiB as fg } from "../lib/bytes.ts";
 import { useUsageResetNotify } from "./usageResetNotify.ts";
+import { pickNearCap } from "./usageNearCap.ts";
 import { AUTO_INLINE, noteSessionKinds, planUsageChips, readKindStamps, type KindStamps } from "./usageChipPlan.ts";
 import { setSettings, useSettings } from "../lib/settings.ts";
 import { useSettingsUI } from "../features/settings/store.ts";
-import { browserTarget } from "../features/browser/target.ts";
+import { PortOpen, useDefaultPortOpen } from "../features/preview/PortOpen.tsx";
+import { useCurrentPreviewInfo, usePreviewStore } from "../features/preview/previewState.ts";
 import { useBrowserUnavailable } from "../features/browser/availability.ts";
 import { AwsProfilesChip } from "../features/awslogin/AwsProfilesChip.tsx";
 import { GcpProfilesChip } from "../features/gcplogin/GcpProfilesChip.tsx";
@@ -82,13 +85,20 @@ interface UsageWindow {
   resetsAt: string;
   // The window rolled over after the capture, so the % is an estimate assuming zero use
   // since. It is not an observation, so chip and row show "—" rather than asserting 0%,
-  // which would be indistinguishable from a dead capture. Only claude returns this.
+  // which would be indistinguishable from a dead capture. claude and codex return this.
   stale?: boolean;
+  // derived: codex's flag for the same rolled window (ADR 0111 decision 6).
+  derived?: boolean;
 }
 interface UsageReading {
   ok?: boolean;
   authed?: boolean;
   ageSec?: number;
+  // The provider's own observation time and the opaque login epoch, for the limit board's
+  // browser fallback (usageResetNotify.ts). claude and codex only.
+  observedAt?: string;
+  limitEpoch?: string;
+  limitEpochSince?: string;
   user?: string;
   plan?: string;
   planType?: string;
@@ -101,7 +111,9 @@ interface UsageReading {
     label: string;
     remainingPct: number;
     resetsAt?: string;
-    fiveHour?: { remainingPct: number; resetsAt?: string };
+    // stale: the reset passed since the scrape, so the remaining % is unknown (see UsageWindow.stale).
+    stale?: boolean;
+    fiveHour?: { remainingPct: number; resetsAt?: string; stale?: boolean };
   }[];
   // copilot: a quota per pool plus one shared monthly reset.
   quotas?: { id: string; remainingPct: number }[];
@@ -389,12 +401,6 @@ function resetChipText(iso: string) {
   return sameDay ? fmtDateTime(d, TIME_HM) : fmtDateTime(d);
 }
 
-// Near-cap threshold: at or above this utilization the chip switches from "N% / M%" to
-// that window's reset time, because once you are about to be blocked (or already are)
-// "when does it clear" is the more useful answer. Kept in step with the dropdown's crit
-// coloring boundary (95%).
-const NEAR_MAX_PCT = 95;
-
 // A usage source = one agent's subscription-limit chip (Claude / Codex). Both endpoints
 // return the same {ok, fiveHour, sevenDay, ageSec} shape (codex reads its rate_limits
 // straight from the rollout — no network), so one chip component renders either.
@@ -459,6 +465,7 @@ export const USAGE_SOURCES: UsageSource[] = [
     weekLabelKey: "wsbar.usage.muse.week",
     live: false,
     noteKey: "wsbar.usage.muse.note",
+    manageURL: "https://dev.meta.ai/usage",
   },
 ];
 
@@ -573,6 +580,9 @@ function UsageChipPlace({ kind }: { kind: string }) {
 // UsageChip: a compact per-agent limit chip (glyph + the two window percentages) that
 // opens a dropdown with each window's bar + reset + a reload. Renders null until the
 // agent's endpoint answers with data, so it self-hides for agents the user doesn't use.
+// A stable empty list: a selector returning a fresh [] each time re-renders forever.
+const NO_PORTS: number[] = [];
+
 export function UsageChip({ src, tenant }: { src: UsageSource; tenant: string | null }) {
   const tr = useT();
   const fiveLabel = tr(src.fiveLabelKey);
@@ -607,18 +617,13 @@ export function UsageChip({ src, tenant }: { src: UsageSource; tenant: string | 
     .sort((a, b) => new Date(a.expiresAt).getTime() - new Date(b.expiresAt).getTime());
   const unavailable = !uh && !uw && !resetCount;
 
-  // If any window is near its cap (utilization >= NEAR_MAX_PCT), show when it clears
-  // instead of the %. Only near-cap windows are candidates, and exactly one is shown: the
-  // earliest to reset, i.e. the first relief. With both near the cap that is usually the
-  // 5-hour window. Which window, its % and the relative form go in the tooltip.
-  const nearMax: { label: string; pct: number; resetsAt: string }[] = [];
-  if (usage?.fiveHour && usage.fiveHour.pct >= NEAR_MAX_PCT && usage.fiveHour.resetsAt)
-    nearMax.push({ label: fiveLabel, ...usage.fiveHour });
-  if (usage?.sevenDay && usage.sevenDay.pct >= NEAR_MAX_PCT && usage.sevenDay.resetsAt)
-    nearMax.push({ label: weekLabel, ...usage.sevenDay });
-  const bind = nearMax.length
-    ? nearMax.reduce((a, b) => (new Date(a.resetsAt).getTime() <= new Date(b.resetsAt).getTime() ? a : b))
-    : null;
+  // Near the cap, the chip shows when the block lifts instead of the %: the latest reset among
+  // the live capped windows (see pickNearCap). The window, its % and the relative form go in
+  // the tooltip.
+  const bind = pickNearCap([
+    ...(usage?.fiveHour ? [{ label: fiveLabel, ...usage.fiveHour }] : []),
+    ...(usage?.sevenDay ? [{ label: weekLabel, ...usage.sevenDay }] : []),
+  ]);
 
   // Computed before the early return below, because useChipSlot is a hook: a chip with
   // nothing to show has to say so rather than skip its turn. `bind` moved above the return
@@ -745,24 +750,21 @@ export function AgyUsageChip({ tenant }: { tenant: string | null }) {
 
   // Flatten groups into rows: per group the weekly window, then the 5h one.
   const used = (remainingPct: number) => Math.round(Math.min(100, Math.max(0, 100 - remainingPct)));
-  const wins: { label: string; pct: number; resetsAt?: string }[] = [];
+  const wins: { label: string; pct: number; resetsAt?: string; stale?: boolean }[] = [];
   for (const g of (usage?.ok && Array.isArray(usage.groups) && usage.groups) || []) {
-    wins.push({ label: tr("wsbar.usage.agy.week_row", { group: g.label }), pct: used(g.remainingPct), resetsAt: g.resetsAt });
+    wins.push({ label: tr("wsbar.usage.agy.week_row", { group: g.label }), pct: used(g.remainingPct), resetsAt: g.resetsAt, stale: !!g.stale });
     if (g.fiveHour)
       wins.push({
         label: tr("wsbar.usage.agy.five_row", { group: g.label }),
         pct: used(g.fiveHour.remainingPct),
         resetsAt: g.fiveHour.resetsAt,
+        stale: !!g.fiveHour.stale,
       });
   }
   const unavailable = wins.length === 0;
 
-  // Near the cap: any window >= NEAR_MAX_PCT switches the chip to the earliest reset time
-  // among the constrained windows (same rule as UsageChip).
-  const nearMax = wins.filter((w) => w.pct >= NEAR_MAX_PCT && w.resetsAt);
-  const bind = nearMax.length
-    ? nearMax.reduce((a, b) => (new Date(a.resetsAt!).getTime() <= new Date(b.resetsAt!).getTime() ? a : b))
-    : null;
+  // Near the cap: the latest live capped reset (same rule as UsageChip).
+  const bind = pickNearCap(wins);
 
   // Report before the early return (see useChipSlot), same as the generic chip.
   const visible = !(unavailable && !usage?.authed);
@@ -772,7 +774,10 @@ export function AgyUsageChip({ tenant }: { tenant: string | null }) {
     ? "—"
     : bind
       ? resetChipText(bind.resetsAt!)
-      : [g0?.fiveHour && `${used(g0.fiveHour.remainingPct)}%`, g0 && `${used(g0.remainingPct)}%`]
+      : [
+          g0?.fiveHour && (g0.fiveHour.stale ? "—" : `${used(g0.fiveHour.remainingPct)}%`),
+          g0 && (g0.stale ? "—" : `${used(g0.remainingPct)}%`),
+        ]
           .filter(Boolean)
           .join(" / ");
   const { slot, host, reveal } = useChipSlot("agy", visible, !!bind, label, open, closePop);
@@ -817,7 +822,12 @@ export function AgyUsageChip({ tenant }: { tenant: string | null }) {
               <UsageRow
                 key={w.label}
                 label={w.label}
-                w={{ pct: w.pct, until: w.resetsAt ? untilText(w.resetsAt) : "", when: w.resetsAt ? whenText(w.resetsAt) : "" }}
+                w={{
+                  pct: w.pct,
+                  until: w.resetsAt ? untilText(w.resetsAt) : "",
+                  when: w.resetsAt ? whenText(w.resetsAt) : "",
+                  stale: w.stale,
+                }}
               />
             ))
           )}
@@ -871,10 +881,7 @@ export function CopilotUsageChip({ tenant }: { tenant: string | null }) {
   const wins = quotas.map((q) => ({ label: poolLabel(q.id), pct: used(q.remainingPct), resetsAt }));
   const unavailable = wins.length === 0;
 
-  const nearMax = wins.filter((w) => w.pct >= NEAR_MAX_PCT && w.resetsAt);
-  const bind = nearMax.length
-    ? nearMax.reduce((a, b) => (new Date(a.resetsAt!).getTime() <= new Date(b.resetsAt!).getTime() ? a : b))
-    : null;
+  const bind = pickNearCap(wins);
 
   // Report before the early return (see useChipSlot), same as the generic chip.
   const visible = !(unavailable && !usage?.authed);
@@ -1176,7 +1183,6 @@ export function WsBar() {
   const splitRight = useLayoutStore((s) => s.splitRight);
   const splitDown = useLayoutStore((s) => s.splitDown);
   const resetToTerminal = useLayoutStore((s) => s.resetToTerminal);
-  const openPaneTarget = useLayoutStore((s) => s.openTarget);
   const activePaneId = layout.activeCellId;
   const openStart = useSessionsStore((s) => s.openStart);
   const askConfirm = useConfirm();
@@ -1185,6 +1191,9 @@ export function WsBar() {
   const isMobile = useIsMobile();
   const barRef = useRef<HTMLDivElement>(null);
   const { foldUsage, foldMore, noteUsageLayout } = useWsBarFold(barRef, !isMobile);
+  const phoneFold = useWsBarPhoneFold(barRef, isMobile);
+  // Unlisted ports the owner has open right now (control-plane/preview_grant.go).
+  const tempPorts = useCurrentPreviewInfo()?.tempPorts ?? NO_PORTS;
   const [port, setPort] = useState("");
   const [previewPath, setPreviewPath] = useState("/");
   const [pvOpen, setPvOpen] = useState(false); // desktop port-preview popover
@@ -1334,23 +1343,10 @@ export function WsBar() {
     if (ok) void restartWs();
   };
 
-  // Open a service the user started inside the container (e.g. a Spring Boot app
-  // on :8080) in a new tab, proxied through the CP /preview/{port}.
-  const openPreview = () => {
-    const p = port.trim();
-    if (!running || !browserTarget(Number(p), "/")) return;
-    window.open(previewURL(p, previewPath.trim()), "_blank", "noopener");
-    setPvOpen(false);
-    setMoreOpen(false);
-  };
-
-  const openBrowserPane = () => {
-    // Enter in the port field still opens something useful where the pane cannot.
-    if (browserUnavailable) return openPreview();
-    if (!running) return;
-    const target = browserTarget(Number(port.trim()), previewPath.trim());
-    if (!target) return;
-    openPaneTarget({ content: { kind: "browser", ...target } });
+  // Enter in the port field does what a plain click on the primary button does: the default
+  // target (subdomain, else browser pane, else lightweight preview — features/preview).
+  const openDefaultPort = useDefaultPortOpen(Number(port.trim()), running, previewPath.trim() || "/");
+  const closePortPops = () => {
     setPvOpen(false);
     setMoreOpen(false);
   };
@@ -1373,6 +1369,7 @@ export function WsBar() {
         (list) => !cancelled && setAttachments(list),
         () => !cancelled && setAttachments((prev) => (prev.length ? [] : prev)),
       );
+    void usePreviewStore.getState().refresh({ force: true });
     void api("api/env/ws-settings").then(
       (res: any) => {
         if (cancelled) return;
@@ -1568,35 +1565,33 @@ export function WsBar() {
             placeholder={tr("wsbar.preview.port_ph")}
             value={port}
             onChange={(e) => setPort(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && openBrowserPane()}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              openDefaultPort();
+              closePortPops();
+            }}
             title={tr("wsbar.preview.port_hint")}
           />
           <input
             className="preview-path"
             value={previewPath}
             onChange={(e) => setPreviewPath(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && openBrowserPane()}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              openDefaultPort();
+              closePortPops();
+            }}
             aria-label={tr("browser.path")}
             title={tr("wsbar.preview.path_hint")}
           />
         </div>
-        <div className="pv-row pv-actions">
-          {/* Disabled rather than hidden where the runtime has no browser features, so the
-              tooltip and the hint below can say why the button everyone else has is off. */}
-          <Button
-            onClick={openBrowserPane}
-            disabled={!!browserUnavailable || !running || !browserTarget(Number(port.trim()), previewPath.trim())}
-            title={browserUnavailable ? tr("browser.unavailable.short", { runtime: browserUnavailable }) : undefined}
-          >
-            {tr("wsbar.preview.open_pane")}
-          </Button>
-          {/* Disabled by the same browserTarget check openPreview uses, so an out-of-range
-              or 7700 port cannot leave a clickable button that does nothing (same shape as
-              the open-in-pane button). */}
-          <Button onClick={openPreview} disabled={!running || !browserTarget(Number(port.trim()), "/")}>
-            {tr("wsbar.preview.open_light")}
-          </Button>
-        </div>
+        <PortOpen
+          variant="buttons"
+          port={Number(port.trim())}
+          path={previewPath.trim() || "/"}
+          running={!!running}
+          onOpened={closePortPops}
+        />
         <div className="pv-hint">
           {browserUnavailable
             ? tr("wsbar.preview.hint_unavailable", { runtime: browserUnavailable })
@@ -1651,6 +1646,19 @@ export function WsBar() {
               </div>
             ))}
           <div className="pv-hint">{tr("wsbar.preview.hosts_hint")}</div>
+        </div>
+      )}
+      {/* Unlisted ports the owner has opened for this start. They are the owner's alone and
+          end with the listener, so they are listed apart from the issued URLs above. */}
+      {tempPorts.length > 0 && (
+        <div className="pv-section">
+          <label className="pv-label">{tr("portopen.temp_badge")}</label>
+          <div className="pv-row pv-actions">
+            {tempPorts.map((p) => (
+              <PortOpen key={p} variant="pill" port={p} running={!!running} />
+            ))}
+          </div>
+          <div className="pv-hint">{tr("portopen.temp_hint")}</div>
         </div>
       )}
       {/* Previews shared by other people in the same tenant (docs/log/81 §14.6). What opens
@@ -1712,6 +1720,71 @@ export function WsBar() {
         </div>
       )}
     </>
+  );
+
+  // The pane buttons that fold into ⋯ on a narrow phone (wsBarFold.ts, useWsBarPhoneFold) are
+  // rendered from these in both places, so the bar's copy and the popover's copy cannot drift.
+  const splitDownBtn = (
+    <Button
+      variant="ghost"
+      className="ws-split"
+      title={tr("wsbar.split_down_title") + hintSuffix("pane.splitDown")}
+      aria-label={tr("wsbar.split_down")}
+      disabled={!canSplitDown}
+      onClick={() => activePaneId && splitDown(activePaneId)}
+    >
+      <Icon name="split-vertical" />
+      <span className="lbl">{tr("wsbar.split_down")}</span>
+    </Button>
+  );
+  const closeAllBtn = (
+    <Button
+      variant="ghost"
+      className="ws-closeall"
+      title={tr("wsbar.close_all_title") + hintSuffix("pane.closeAll")}
+      aria-label={tr("wsbar.close_all")}
+      disabled={!canCloseAll}
+      onClick={() => resetToTerminal()}
+    >
+      <Icon name="close-all" />
+      <span className="lbl">{tr("wsbar.close_all")}</span>
+    </Button>
+  );
+  const homeBtn = (
+    <Button
+      variant="ghost"
+      className="ws-split ws-home"
+      title={tr("wsbar.home_title") + hintSuffix("open.home")}
+      aria-label={tr("wsbar.home")}
+      onClick={() => openHome()}
+    >
+      <Icon name="home" />
+      <span className="lbl">{tr("wsbar.home")}</span>
+    </Button>
+  );
+  const overviewBtn = (
+    <Button
+      variant="ghost"
+      className="ws-split ws-overview"
+      title={tr("wsbar.overview_title") + hintSuffix("open.sessions")}
+      aria-label={tr("wsbar.overview")}
+      onClick={() => openSessionsOverview()}
+    >
+      <Icon name="dashboard" />
+      <span className="lbl">{tr("wsbar.overview")}</span>
+    </Button>
+  );
+  const imagegenBtn = imagegenAvailable && (
+    <Button
+      variant="ghost"
+      className="ws-split ws-imagegen"
+      title={tr("wsbar.imagegen_title") + hintSuffix("open.imagegen")}
+      aria-label={tr("wsbar.imagegen")}
+      onClick={() => void openImagegen()}
+    >
+      <Icon name="wand" />
+      <span className="lbl">{tr("wsbar.imagegen")}</span>
+    </Button>
   );
 
   return (
@@ -1848,58 +1921,20 @@ export function WsBar() {
           <span className="lbl">{tr("wsbar.split_right")}</span>
         </Button>
       )}
-      <Button
-        variant="ghost"
-        className="ws-split"
-        title={tr("wsbar.split_down_title") + hintSuffix("pane.splitDown")}
-        aria-label={tr("wsbar.split_down")}
-        disabled={!canSplitDown}
-        onClick={() => activePaneId && splitDown(activePaneId)}
-      >
-        <Icon name="split-vertical" />
-        <span className="lbl">{tr("wsbar.split_down")}</span>
-      </Button>
-      <Button
-        variant="ghost"
-        className="ws-closeall"
-        title={tr("wsbar.close_all_title") + hintSuffix("pane.closeAll")}
-        aria-label={tr("wsbar.close_all")}
-        disabled={!canCloseAll}
-        onClick={() => resetToTerminal()}
-      >
-        <Icon name="close-all" />
-        <span className="lbl">{tr("wsbar.close_all")}</span>
-      </Button>
+      {splitDownBtn}
+      {closeAllBtn}
       {/* The sessions overview (ADR 0078). It sits with the pane buttons because it IS a
           pane; the rail's layout map has the same button, but that map hides itself while
-          there is a single pane — which is exactly when someone reaches for the overview. */}
-      <Button
-        variant="ghost"
-        className="ws-split ws-overview"
-        title={tr("wsbar.overview_title") + hintSuffix("open.sessions")}
-        aria-label={tr("wsbar.overview")}
-        onClick={() => openSessionsOverview()}
-      >
-        <Icon name="dashboard" />
-        <span className="lbl">{tr("wsbar.overview")}</span>
-      </Button>
+          there is a single pane — which is exactly when someone reaches for the overview.
+          Home (#2028) goes first: it is the way back to "what is next" from anywhere. */}
+      {homeBtn}
+      {overviewBtn}
       {/* The image-generation studio (ADR 0081), beside the overview for the same reason:
           it is a pane, and the layout map's copy of this button hides itself while there is
           only one pane. Shown only while the fleet has an image engine to offer (decision 1):
           a button that opens onto "the engine cannot be used" is a promise the bar cannot
           keep, and most fleets have no engine at all. */}
-      {imagegenAvailable && (
-        <Button
-          variant="ghost"
-          className="ws-split ws-imagegen"
-          title={tr("wsbar.imagegen_title") + hintSuffix("open.imagegen")}
-          aria-label={tr("wsbar.imagegen")}
-          onClick={() => void openImagegen()}
-        >
-          <Icon name="wand" />
-          <span className="lbl">{tr("wsbar.imagegen")}</span>
-        </Button>
-      )}
+      {imagegenBtn}
 
       <span className="ws-spacer" />
 
@@ -1915,6 +1950,28 @@ export function WsBar() {
           </Button>
           {moreOpen && (
             <div className="ws-more-pop">
+              {/* The pane buttons the bar had no room for (the phone fold); a tap runs the action
+                  and closes the popover. In bar order, so the popover reads like the bar did. */}
+              {phoneFold > 0 && (
+                <div
+                  className="ws-more-actions"
+                  onClick={(e) => {
+                    // Closing unmounts the focused button; hand focus back to the trigger so a
+                    // keyboard user is not dropped on <body>. Only when focus is still here: an
+                    // action that moved it elsewhere (a pane) keeps it.
+                    if (e.currentTarget.contains(document.activeElement)) {
+                      moreRef.current?.querySelector<HTMLElement>(".ws-more-btn")?.focus();
+                    }
+                    setMoreOpen(false);
+                  }}
+                >
+                  {phoneFold > 1 && splitDownBtn}
+                  {phoneFold > 1 && closeAllBtn}
+                  {homeBtn}
+                  {overviewBtn}
+                  {imagegenBtn}
+                </div>
+              )}
               {/* statsBlock is always a truthy Fragment (each chip hides itself by returning
                   null), so emptiness cannot be tested here; the padding of an empty block is
                   folded away by CSS :empty (wsbar.css). */}

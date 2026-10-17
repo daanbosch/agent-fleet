@@ -555,3 +555,140 @@ explicit token only when this variable is set, and `cloud.google.com/go/storage`
 Python's explicit `Credentials` does not read it (it takes `quota_project_id=`), so the notes keep that
 advice. A caller's own `GOOGLE_CLOUD_QUOTA_PROJECT` is still removed with every other `GOOGLE_*`
 variable before the wrapper sets its value; the child-environment test covers both.
+
+## Note — logging a profile out (2026-10-08)
+
+Issue #1850, decided by the user. Settings > Google Cloud and the WS bar badge gain **Log out** on a
+logged-in row, as AWS has (`POST /gcp-login/profiles/{name}/logout`, relayed and audited by the CP as
+`gcp.logout`). Because the store is per account (decision 1), a logout signs the Agent's store out of the
+account the profile selects, and every profile selecting that account with it; the confirmation names
+them first. Under the root's lock the Agent ends the login attempts of those profiles, deletes the
+account's rows from `credentials.db` and `access_tokens.db`, its `legacy_credentials/<account>` files
+(they hold the refresh token too) and its login mark, and clears a login-owned `core/account`; an account
+named in Settings stays, signed out all the same. Pending requests are left alone. The request names the
+account the member confirmed, and the Agent refuses (`account_changed`) when the profile selects another
+one by then: a login in between would otherwise sign out an account, and profiles, never shown.
+
+**Nothing is revoked at Google.** `gcloud auth revoke` calls Google first and removes nothing locally when
+that call fails (SDK 587.0.0, `store.Revoke`), and whether revoking one gcloud refresh token ends the
+grant of gcloud's OAuth client for the user — the member's gcloud on other machines — is not measured.
+That is different from the rejected revoke above, which was about undoing a wrong-account login. A token
+a command already received stays valid until it expires.
+
+## Note — a run at a member's terminal asks the Console too (2026-10-08)
+
+Issue #1512, following the ADR 0102 note of this date. In decision 3, a run at a terminal now asks the Console
+like an agent's run when it is inside a workspace, is at a terminal that is not an agent's, and has no `--login`
+or `--no-login`: it files the request, waits up to ten minutes, and Ctrl-C ends the wait with exit 3 and leaves the
+request. `--login` keeps the in-terminal sign-in (and is what the printed hint carries); outside a workspace, or
+when the request cannot be filed, the terminal sign-in runs as before. The paste rule is unchanged: the code
+field exists only in the Console window where the member pressed **Log in**.
+
+## Note — the token is renewed while the command runs (2026-10-08)
+
+Issue #1488. Decision 2's "It does not refresh during the command" no longer holds; the rest of the
+decision stands. Follow-up for what this cannot cover: #1879.
+
+- **The wrapper stays as the command's parent** instead of exec'ing into it, so that something can run
+  beside the command. It forwards SIGTERM, SIGHUP, SIGUSR1 and SIGUSR2, and SIGINT and SIGQUIT only when,
+  at the moment they arrive, it is not in the foreground group of a terminal (there the terminal already
+  delivers them, a second SIGINT makes Terraform abort, and `fg`/`bg` move the group). The command shares
+  the wrapper's process group and terminal. A command that stops itself (SIGSTOP) stops the wrapper too,
+  and SIGCONT to the wrapper continues it. The wrapper exits with the command's status, or dies of the
+  command's signal with the kernel's default action restored (Go's own default would turn SIGQUIT/SIGABRT
+  into a stack dump and SIGPIPE/SIGUSR1 into an ordinary exit). The guarantee is narrow: if the wrapper
+  dies of anything, SIGKILL included, the **direct child** is sent SIGTERM (`PR_SET_PDEATHSIG`), which
+  it may ignore; the child's own children are not reached, and a killed wrapper does not remove the token
+  file, which a later run sweeps. The renewer is a goroutine of the wrapper, so it cannot outlive it. The
+  token file is deleted when the command ends normally.
+- **What is renewed: the token file.** About eight minutes before the token ends the wrapper repeats the
+  run's own mint (`gcloud config config-helper --min-expiry 10m` under the root's lock, same
+  configuration, no `--lifetime`) and replaces the run directory's token file by rename (0600). A renewed
+  token therefore lives no longer and reaches no further than the first, and a renewal that signs in as a
+  different account than the run started with, or that lasts no longer than the token in use, is refused.
+  Measured on SDK 587.0.0 in this workspace: `gcloud config config-helper` with
+  `CLOUDSDK_AUTH_ACCESS_TOKEN_FILE` returns the file's current content on each start (a changed file gave
+  the new value on the next process). The GKE auth plugin asks that same gcloud. So processes started
+  after a renewal get the new token; a single gcloud process keeps the one it read (`store.py`
+  `_LoadAccessTokenCredsFromFile` copies the file's content into an `AccessTokenCredentials` whose refresh
+  is a no-op), and a `kubectl` watch depends on the plugin being run again (not measured). Not measured
+  either: any of this against Google (no real login here).
+- **What is not renewed: `GOOGLE_OAUTH_ACCESS_TOKEN`.** An environment variable cannot change in a running
+  process, and Terraform's Google provider reads it once, so a `terraform apply` still fails when its first
+  token ends. The option that would cover it (a per-run `authorized_user` credential whose `token_uri` is a
+  loopback endpoint of the wrapper, with a per-run secret) is not built; a metadata-server shim was
+  rejected as wider (anything on the loopback could ask it). Both are in #1879, with longer
+  impersonated lifetimes (`--lifetime`).
+- **A renewal that fails** prints one warning, tries again every 30 seconds until the token ends, and
+  then stops the command (SIGTERM, SIGKILL after 30 seconds) with exit 3 when a login is needed and 1
+  otherwise. The whole renewal, a hung gcloud and a Console wait included, is cut off at the token's end,
+  and the login that the earlier tries met stays the reported reason. When the run could ask the Console at
+  its start, it asks once more, waiting no longer than the token's remaining life, so a login finished
+  meanwhile carries the command on; otherwise (`--login`, `--no-login`, no Console) the message carries the
+  terminal command. Stopping the command at the token's end can end one that no longer needed the token; the
+  alternative, leaving it running on a dead token, hides the cause.
+
+## Note — a loopback `token_uri` for programs that read the token once: measured, not built (2026-10-09)
+
+Issue #1879. The decisions above are not changed, and nothing is built. This note records the
+measurement the issue asked for before any code, the trade-off, and the maintainer's decision (at the end).
+
+Setup: a fake token endpoint on `127.0.0.1` that logs each request and returns `fake-access-N`, a
+synthetic `authorized_user` file (`client_id`, `client_secret`, `refresh_token` all made up, `token_uri`
+pointing at the fake), and each program run in a network namespace with only loopback
+(`unshare -rn`, `lo` brought up). One early Python run was started outside the namespace and sent its
+synthetic refresh request to Google's real token endpoint (answered `invalid_client`; no real credential
+or user data was involved); every run below was inside the namespace.
+
+| Consumer (version) | Honours `token_uri` of an `authorized_user` file? |
+|---|---|
+| Go `golang.org/x/oauth2/google` 0.37.0 | **Yes.** `FindDefaultCredentials` then `Token()` posted `grant_type=refresh_token` with the file's client id, secret and refresh token to the fake. |
+| Go `cloud.google.com/go/auth` 0.24.0 | **No.** It attempted to POST to `https://oauth2.googleapis.com/token` (the dial failed in the namespace); the fake saw nothing. |
+| Python `google-auth` 2.61.0 | **No.** `Credentials.from_authorized_user_info` overwrites it (`token_uri=_GOOGLE_OAUTH2_TOKEN_ENDPOINT,  # always overrides`); the one run outside the namespace attempted `https://oauth2.googleapis.com/token` and got `invalid_client` from Google. |
+| Node `google-auth-library` 11.2.0 and 9.15.1 | **No.** The refresh client uses the fixed `oauth2TokenUrl`; the file's value is not read (11.2.0 failed resolving Google; 9.15.1 by source). 9.x is what `@google-cloud/storage` 8.2.0 bundles. |
+| Terraform Google provider 8.6.0 (Terraform 1.16.4) | **Yes, but not with the variable the wrapper sets.** With `GOOGLE_CREDENTIALS` naming the file and no `GOOGLE_OAUTH_ACCESS_TOKEN`, the provider logged "Authenticating using configured Google JSON 'credentials'" and refreshed through the fake once per expiry (`expires_in=1` gave six requests in 25 s). With `GOOGLE_APPLICATION_CREDENTIALS` alone it logged "Authenticating using DefaultClient" and also asked the fake. With `GOOGLE_OAUTH_ACCESS_TOKEN` set beside either, it logged "Authenticating using configured Google JSON 'access_token'" and never asked the fake. |
+
+The provider's own start-up also calls a fixed Google host (`openidconnect.googleapis.com/v1/userinfo`),
+which cannot succeed in the namespace, so a complete `plan` was not run; the evidence is the token
+requests and the authentication line, not an API call authorised end to end. What reached Google is only that one synthetic Python request; the Go and Node 11 attempts failed
+before sending, and Node 9.15.1 was read from source, not run. Where this note says a library "would send" the
+secret to Google, that is inferred from the fixed URL, and the Google error (`invalid_client` was observed
+only for Python) is expected, not measured, for the others.
+
+What follows:
+
+- Only two of the five consumers follow `token_uri`, and one of those only when the variable that carries
+  the static token is absent. Python, Node and `cloud.google.com/go/auth` ignore it, so a per-run file at
+  `GOOGLE_APPLICATION_CREDENTIALS` would not make them work; it would turn today's "file not found"
+  failure into a refresh request to Google carrying the per-run client secret and refresh token (random
+  and useless there, but sent). The fail-closed rule of the 2026-10-02 note would still hold for them in
+  effect, with a more confusing error.
+- Terraform is the consumer that motivated the issue, and it can be reached without touching
+  `GOOGLE_APPLICATION_CREDENTIALS`: the wrapper would set `GOOGLE_CREDENTIALS` (the provider's own
+  variable) to the file and leave `GOOGLE_OAUTH_ACCESS_TOKEN` out. That is opt-in by construction (only
+  the provider reads that variable), but it removes `GOOGLE_OAUTH_ACCESS_TOKEN` from the child's
+  environment, which the af-gcp notes document as part of what a command gets, and which a program that
+  reads it explicitly (the three client-library recipes in the 2026-10-02 note) relies on.
+- The loopback listener is the same trade-off the issue names: any process in the workspace can connect,
+  and the secret in the request body is the only gate. It would bind `127.0.0.1` only, compare in constant
+  time, close with the command, and keep the secret in a 0600 file in the run directory, never in argv or
+  environment.
+
+Decision (the maintainer, 2026-10-10): **do not build; split the work.** The three options were:
+
+- **The issue's option (a per-run `authorized_user` file at `GOOGLE_APPLICATION_CREDENTIALS`): rejected.**
+  Three of the five consumers (Python, Node, `cloud.google.com/go/auth`) ignore `token_uri` and would send
+  the per-run client secret and refresh token to Google. They are useless there, but they leave the
+  workspace, and the fail-closed error would become a Google error such as `invalid_client` (observed for Python only).
+- **(a) Terraform only (`GOOGLE_CREDENTIALS` plus the loopback listener): not taken for now.** Its cost is
+  that `GOOGLE_OAUTH_ACCESS_TOKEN` disappears from the child's environment, which the documented contract
+  and the client-library recipes rely on, and that a listener on the loopback is reachable by any process
+  of the workspace with a body secret as its only gate. Worth revisiting if split runs prove too costly.
+- **(c) Longer impersonated tokens (`--lifetime`): not taken.** It needs an organisation policy that
+  allows longer service-account token lifetimes, which the workspace cannot assume.
+
+Guidance for now: a `terraform apply` (or any program that reads `GOOGLE_OAUTH_ACCESS_TOKEN` once) must
+finish within the token's remaining life, which each run prints at its start ("the token is valid for N more
+minutes": at least ten, at most about an hour, and not necessarily a fresh hour); split longer work into
+commands shorter than that, each under its own `af-gcloud-exec` run. See
+[the guide](../../guide/member/10-integrations.md#running-commands-in-google-cloud-as-you-af-gcloud-exec). #1879 stays open for (a) and (c).

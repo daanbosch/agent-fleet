@@ -120,6 +120,26 @@
   border-color: var(--accent);
 }
 
+.mem-pins {
+  margin: 12px 0;
+}
+
+.mem-pin-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.mem-pin-row .mem-snap-what {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .mem-af-name {
   font-family: var(--mono);
   font-size: 12px;
@@ -139,7 +159,8 @@
   align-items: start;
 }
 
-.mem-list {
+.mem-list,
+.mem-pin-list {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -262,8 +283,146 @@
     }
 
   .mem-list,
+  .mem-pin-list,
   .mem-diff {
     max-height: 240px;
   }
 
+}
+
+/* Import from Claude Code (ADR 0108 decision 6). */
+.mem-ci {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.mem-ci h4 {
+  margin: 0 0 4px;
+}
+
+.mem-ci-group {
+  margin: 6px 0;
+}
+
+.mem-ci-items {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.mem-ci-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.mem-badge.ci-secret,
+.mem-badge.ci-invalid {
+  color: var(--err);
+  border-color: var(--err);
+}
+
+.mem-badge.ci-diverged {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.mem-badge.ci-update {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.mem-badge.ci-conflict,
+.mem-badge.ci-remove {
+  color: var(--warn, var(--err));
+  border-color: var(--warn, var(--err));
+}
+
+/* The memory browser (#1985). */
+.mem-browser {
+  margin: 12px 0;
+}
+
+.mem-br-bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.mem-br-bar input[type="search"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.mem-br-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.mem-br-row .mem-snap-what {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mem-br-detail,
+.mem-br-form {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mem-br-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.mem-br-body {
+  margin: 0;
+  padding: 8px;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.mem-br-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Move memories of a project that no longer exists (#1984). */
+.mem-pm-policy {
+  margin: 6px 0;
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mem-pm-suggest {
+  margin: 6px 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mem-badge.pm-collision {
+  color: var(--warn);
+  border-color: var(--warn);
 }

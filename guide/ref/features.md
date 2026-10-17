@@ -1,7 +1,7 @@
 ---
 audience: "everyone; the index the other tables hang off"
 source_of_truth: "this table for \"does it exist and who can use it\"; the linked page for how"
-updated: "2026-09"
+updated: "2026-10"
 ---
 
 # Features — the catalogue
@@ -27,6 +27,7 @@ If a feature ships and does not appear here, it is not done
 | Live terminal attached to a session | member | main area | [05 Terminal](../member/05-terminal.md) |
 | Terminal round-trip time (keystroke lag) | member | terminal pane header | [05 Terminal](../member/05-terminal.md) |
 | Resume a stopped session | member | left pane → the session | [02 Sessions](../member/02-sessions.md) |
+| Home — what waits for you, where you left off, and the first-run setup | member | the empty main area, action bar → Home, or leader `g h` | [01 First day](../member/01-first-day.md) |
 | Sessions overview — every running session as a card | member | action bar → Sessions, or leader `g s` | [02 Sessions](../member/02-sessions.md) |
 | Fleet graph — one lane per session, time left to right | member | sessions overview → Graph, or leader `g f` | [02 Sessions](../member/02-sessions.md#seeing-how-sessions-relate-over-time-the-fleet-graph) |
 | Stop every session under a working copy | member | repository / worktree right-click → Stop the sessions below | [02 Sessions](../member/02-sessions.md#stopping-and-tidying-up-sessions) |
@@ -74,6 +75,9 @@ If a feature ships and does not appear here, it is not done
 | Work-item inbox — issues, tickets, pull requests | member | Issue tracker | [02 Sessions](../member/02-sessions.md); [repos.md](repos.md) for what each provider contributes |
 | Scheduled (unattended) runs | member | Schedules | [08 Fleet operator](../member/08-organising.md) |
 | Notification centre | member | top bar | [12 Settings](../member/12-settings.md) |
+| Inbox — messages and requests between members, with claim, launch and PR links | member | top bar → inbox | [09 Working with others](../member/09-collaboration.md#asking-a-teammate-the-inbox) |
+| Inbox recipes — send a prompt with a suggested agent and repository, take it into your memos | member | inbox → New / a card | [09 Working with others](../member/09-collaboration.md#asking-a-teammate-the-inbox) |
+| Attach a session to an inbox message, sharing it with the recipients | member | inbox → New | [09 Working with others](../member/09-collaboration.md#asking-a-teammate-the-inbox) |
 | Red dot on a session with an unread notification | member | left pane, tabs | [02 Sessions](../member/02-sessions.md#reading-state-badges-and-notifications) |
 | Engine pills — is the chat / image engine up | member | top bar | [Icons, badges and menus](../member/badges-and-menus.md#the-engine-pills-in-the-top-bar) |
 | Assistant chat | member | Assistants | [07 Chat & memo](../member/07-chat-memo.md) |
@@ -100,6 +104,7 @@ explains them.
 | Integration servers and tokens | member | MCP servers / MCP tokens |
 | Issue-tracker connections | member | Issue tracker |
 | Usage | member | Agent usage |
+| Limit board: publish where you stand on usage limits, and see what teammates publish to you | member | Limit board |
 | Cloud cost | member | Cloud cost |
 | AI assistance (per-feature on/off, agent, model) | member | AI assistance |
 | Display, language and keys | member | Display / Keyboard |
@@ -120,6 +125,7 @@ Every row is under **Tenant settings**. [admin/](../admin/README.md) is the shel
 | Deleting a member's home backups (where the deployment keeps them) | tenant admin | Members → the member | [admin 01](../admin/01-members.md) |
 | Sessions across the tenant | tenant admin | Sessions | [admin 02](../admin/02-limits.md) |
 | Limits and idle auto-stop | tenant admin (read) | Limits & idle | [admin 02](../admin/02-limits.md) |
+| Limit board on / off for the tenant | tenant admin | Limit board | [admin 02](../admin/02-limits.md) |
 | Whether this tenant may use the llm / image engines | deployment admin (super_admin) | Tenant settings → Limits | [admin 02](../admin/02-limits.md) |
 | Workspace sizing | deployment admin | — | [deploy-targets.md](deploy-targets.md) |
 | Sign-in methods and login rules | tenant admin | Sign-in methods / Login rules | [operator 05](../operate/05-signin.md) |
@@ -136,10 +142,10 @@ Every row is under **Tenant settings**. [admin/](../admin/README.md) is the shel
 | Feature | Who | Where | Details |
 |---|---|---|---|
 | Deployment targets | deployment admin | before start | [deploy-targets.md](deploy-targets.md) |
-| Install, upgrade, back up, restore | deployment admin | a shell | [operator 01](../operate/02-install.md) / [02](../operate/03-run.md) |
-| Ingress, TLS and sign-in providers | deployment admin | a shell | [operator 03](../operate/04-secure.md) |
-| Audit log and egress control | deployment admin | Admin | [operator 03](../operate/04-secure.md) |
-| Monitoring integrations | deployment admin | Settings → Ops & monitoring | [member 10](../member/13-ops-tooling.md) |
+| Install, upgrade, back up, restore | deployment admin | a shell | [operator 02](../operate/02-install.md) / [03](../operate/03-run.md) |
+| Ingress, TLS and sign-in providers | deployment admin | a shell | [operator 04](../operate/04-secure.md) |
+| Audit log and egress control | deployment admin | Admin | [operator 04](../operate/04-secure.md) |
+| Monitoring integrations | deployment admin | Settings → Ops & monitoring | [member 13](../member/13-ops-tooling.md) |
 | Slot pool and instance classes | deployment admin | Admin | [deploy-targets.md](deploy-targets.md) |
 | The inference engines' GPU class | deployment admin (super_admin) | Admin → Inference engines | [admin 04](../admin/04-mcp-egress.md) |
 | Taking a model in — search, plan card, one press | deployment admin (super_admin), or a tenant admin who was allowed | Admin → Inference engine models | [admin 04](../admin/04-mcp-egress.md) |
@@ -154,7 +160,7 @@ Every row is under **Tenant settings**. [admin/](../admin/README.md) is the shel
 
 ## Rows with no Details yet
 
-A dash means the feature exists and works, but no reader-facing page covers it — the
+A dash means the feature exists and works, but no reader-facing page covers it; the
 old guide never caught up with it. Those gaps are the reason this catalogue exists,
 Phase P2 closed them all: highlights, changed files, reply suggestions, deletion lock,
 cleanup and the trash, and abort auto-resume are in

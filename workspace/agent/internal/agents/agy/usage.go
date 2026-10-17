@@ -18,6 +18,7 @@ import (
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/usagewin"
 )
 
 // The /usage panel is model-group based (ADR 0008, measured): two pools ("GEMINI
@@ -31,6 +32,10 @@ import (
 type UsageLimit struct {
 	RemainingPct float64 `json:"remainingPct"` // 0–100, remaining (not used)
 	ResetsAt     string  `json:"resetsAt,omitempty"`
+	// Stale: the reset has passed since the scrape, so RemainingPct describes the previous
+	// window and says nothing about this one. It is left as scraped (not zeroed: remaining
+	// 0 would claim the quota is spent, 100 that it is untouched) and the reader shows unknown.
+	Stale bool `json:"stale,omitempty"`
 }
 
 // UsageGroup is one model-group pool as shown by /usage. The flat fields carry
@@ -41,6 +46,7 @@ type UsageGroup struct {
 	Models       string      `json:"models,omitempty"` // "Gemini Flash, Gemini Pro"
 	RemainingPct float64     `json:"remainingPct"`     // weekly remaining
 	ResetsAt     string      `json:"resetsAt,omitempty"`
+	Stale        bool        `json:"stale,omitempty"` // the weekly limit; see UsageLimit.Stale
 	FiveHour     *UsageLimit `json:"fiveHour,omitempty"`
 }
 
@@ -96,7 +102,7 @@ func HandleUsage(w http.ResponseWriter, r *http.Request) {
 			// failure doesn't blank an already-shown gauge.
 			if usageCached != nil {
 				out["ok"] = true
-				out["account"], out["plan"], out["groups"] = usageCached.Account, usageCached.Plan, usageCached.Groups
+				out["account"], out["plan"], out["groups"] = usageCached.Account, usageCached.Plan, adjustGroups(usageCached.Groups, time.Now())
 				out["ageSec"] = int(time.Since(usageAt).Seconds())
 			}
 			httpx.WriteJSON(w, http.StatusOK, out)
@@ -109,9 +115,42 @@ func HandleUsage(w http.ResponseWriter, r *http.Request) {
 		"authed":  true,
 		"account": usageCached.Account,
 		"plan":    usageCached.Plan,
-		"groups":  usageCached.Groups,
+		"groups":  adjustGroups(usageCached.Groups, time.Now()),
 		"ageSec":  int(time.Since(usageAt).Seconds()),
 	})
+}
+
+// The windows' lengths, for rolling a stale reset forward (the panel only gives "Refreshes in").
+const (
+	fiveHourMins = 5 * 60
+	weeklyMins   = 7 * 24 * 60
+)
+
+// adjustGroups applies the shared stale-window rule (usagewin.Adjust) to a copy of the cached
+// groups. resetsAt is the scrape time plus "Refreshes in", so a cache served after a failed
+// scrape, or just a long TTL, can carry an instant that has since passed. A limit with no
+// reset ("Quota available") has nothing to expire.
+func adjustGroups(groups []UsageGroup, now time.Time) []UsageGroup {
+	out := make([]UsageGroup, len(groups))
+	for i, g := range groups {
+		g.ResetsAt, g.Stale = adjustReset(g.ResetsAt, weeklyMins, now)
+		if g.FiveHour != nil {
+			f := *g.FiveHour
+			f.ResetsAt, f.Stale = adjustReset(f.ResetsAt, fiveHourMins, now)
+			g.FiveHour = &f
+		}
+		out[i] = g
+	}
+	return out
+}
+
+func adjustReset(iso string, windowMins int, now time.Time) (string, bool) {
+	at, err := time.Parse(time.RFC3339, iso)
+	if err != nil {
+		return iso, false
+	}
+	_, reset, stale := usagewin.Adjust(0, windowMins, at, now)
+	return reset.UTC().Format(time.RFC3339), stale
 }
 
 var (

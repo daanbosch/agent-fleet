@@ -104,6 +104,7 @@ func (a wsSettingsAPI) get(w http.ResponseWriter, r *http.Request, res *resolved
 		"allowAgentUpdate": a.tenantAllowsAgentUpdate(r, res.ws),
 	}
 	a.addPreview(r, res, st, out)
+	a.addDevIdP(r, res, out)
 	// The upstream CLI release watcher's liveness (cli_release_watch.go). It is not a
 	// workspace setting at all — it is deployment-wide — but it rides here because this
 	// is the one CP-owned response the environment tab already reads, and it answers
@@ -133,6 +134,7 @@ func (a wsSettingsAPI) addPreview(r *http.Request, res *resolved, st wsSettings,
 	// them because it happens to be stopped right now removes the very property of being a
 	// link you can paste.
 	shareLinks := map[string]string{}
+	temp := []int{}
 	if domain != "" {
 		for _, p := range previewPortsOf(st) {
 			if link := previewOpenPathFor(res.ident.UserKey, p); link != "" {
@@ -143,8 +145,19 @@ func (a wsSettingsAPI) addPreview(r *http.Request, res *resolved, st wsSettings,
 			for _, p := range previewPortsOf(st) {
 				urls[strconv.Itoa(p)] = previewURLFor(ws.PreviewSlug, p, domain)
 			}
+			// Unlisted ports the owner has open right now (preview_grant.go): shown with a
+			// "temporary" badge. Whether the listener is still there is the Agent's to say
+			// on the next request; this is the list of grants, not a liveness claim.
+			if grants, err := a.mgr.store.ListPreviewTempPorts(r.Context(), ws.ID); err == nil {
+				for _, g := range grants {
+					if g.Slug == ws.PreviewSlug {
+						temp = append(temp, g.Port)
+					}
+				}
+			}
 		}
 	}
+	out["previewTempPorts"] = temp
 	// Left empty while stopped: never show a URL that has not been issued — a link that
 	// 404s when pressed comes back as a report that the feature is broken.
 	out["previewUrls"] = urls
@@ -315,6 +328,8 @@ func (a wsSettingsAPI) put(w http.ResponseWriter, r *http.Request, res *resolved
 		st.PreviewTenantShare = v
 		auditPreviewShare(r.Context(), a.mgr, res, v)
 	}
+	// "devIdp" (the removed per-workspace opt-in, ADR 0116) is accepted and ignored so an old
+	// client's PUT does not fail.
 	out, _ := json.Marshal(st)
 	if err := a.store.SetWorkspaceSettings(r.Context(), res.ws.ID, string(out)); err != nil {
 		http.Error(w, "save failed", http.StatusInternalServerError)
@@ -327,5 +342,6 @@ func (a wsSettingsAPI) put(w http.ResponseWriter, r *http.Request, res *resolved
 		"allowAgentUpdate": a.tenantAllowsAgentUpdate(r, res.ws),
 	}
 	a.addPreview(r, res, st, body2)
+	a.addDevIdP(r, res, body2)
 	writeJSON(w, http.StatusOK, body2)
 }

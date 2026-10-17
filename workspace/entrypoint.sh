@@ -91,7 +91,7 @@ if [ -n "$af_arch_now" ] && [ -n "$af_arch_was" ] && [ "$af_arch_was" != "$af_ar
     const fs = require("fs"), path = require("path");
     const root = process.argv[1];
     // Skip what boot-install restores itself (it would be installed twice).
-    const skip = new Set(["@anthropic-ai/claude-code", "opencode-ai", "@openai/codex", "@github/copilot"]);
+    const skip = new Set(["@anthropic-ai/claude-code", "opencode-ai", "@opencode/cli", "@openai/codex", "@github/copilot"]);
     const out = [];
     const add = (rel) => {
       try {
@@ -329,6 +329,57 @@ fi
 VJ=/usr/local/share/agent-fleet/versions.json
 vj_pin() { node -e 'try{process.stdout.write(String(require(process.argv[1])[process.argv[2]]||""))}catch{}' "$VJ" "$1" 2>/dev/null; }
 cli_present() { [ -x "/usr/local/bin/$1" ] || [ -e "$HOME/.local/bin/$1" ]; }
+# opencode's npm package follows the major of its pin: opencode-ai (1.x) or @opencode/cli (2.x).
+# Both claim the `opencode` bin, so they never coexist in one prefix (see the pair loop below).
+oc_pkg() { case "${1%%.*}" in ''|*[!0-9]*|0|1) echo opencode-ai ;; *) echo @opencode/cli ;; esac; }
+OC_PKG="$(oc_pkg "$(vj_pin opencode)")"
+OC_OTHER=@opencode/cli; [ "$OC_PKG" = opencode-ai ] || OC_OTHER=opencode-ai
+# oc_install_swap <prefix> <npm specs...> — `npm install -g` into <prefix>, with the other opencode
+# package (OC_OTHER) out of the way. Both packages claim the `opencode` bin, so npm exits EEXIST
+# while the other one is linked (a home that self-updated on the old pin; measured opencode-ai
+# 1.19.0 -> @opencode/cli 2.0.29), and the stale shadow then keeps winning on PATH. The other
+# package is moved aside rather than uninstalled: when the install fails (a registry error, another
+# CLI in the same command) it is moved back, so a lean home never ends up with no opencode at all.
+oc_swap_restore() { # oc_swap_restore <prefix>: put back whatever an interrupted or failed swap left aside
+  # Driven by what is in $bak, not by which package is "other" now: the image may have been
+  # re-pinned to the other major since the copy was moved aside. Packages and bins are restored
+  # independently (a stop between the two moves leaves only the bin), and $bak is removed only
+  # once every move succeeded.
+  local pfx="$1" bak="$1/.af-oc-swap" p b ok=1
+  [ -d "$bak" ] || return 0
+  for p in opencode-ai @opencode/cli; do
+    if [ -d "$bak/pkg/$p" ]; then
+      rm -rf "$pfx/lib/node_modules/$p"
+      mkdir -p "$pfx/lib/node_modules/$(dirname "$p")"
+      mv "$bak/pkg/$p" "$pfx/lib/node_modules/$p" || ok=0
+    fi
+  done
+  for b in opencode opencode2; do
+    if [ -L "$bak/bin/$b" ]; then
+      rm -f "$pfx/bin/$b"
+      mv "$bak/bin/$b" "$pfx/bin/$b" || ok=0
+    fi
+  done
+  [ "$ok" = 1 ] && rm -rf "$bak"
+  return 0
+}
+oc_install_swap() {
+  local pfx="$1" bak="$1/.af-oc-swap" b l; shift
+  # A start that stopped between moving the copy aside and finishing leaves it in $bak, and it is
+  # the only copy: put it back before anything else, never delete it.
+  oc_swap_restore "$pfx"
+  if [ -d "$pfx/lib/node_modules/$OC_OTHER" ]; then
+    mkdir -p "$bak/pkg/$(dirname "$OC_OTHER")" "$bak/bin"
+    mv "$pfx/lib/node_modules/$OC_OTHER" "$bak/pkg/$OC_OTHER"
+    for b in opencode opencode2; do
+      l="$pfx/bin/$b"
+      if [ -L "$l" ]; then case "$(readlink "$l")" in *"/$OC_OTHER/"*) mv "$l" "$bak/bin/$b" ;; esac; fi
+    done
+  fi
+  if npm install -g --prefix "$pfx" "$@" >/dev/null 2>&1; then rm -rf "$bak"; return 0; fi
+  oc_swap_restore "$pfx"
+  return 1
+}
 # agy_effective_version — the version of the agy that is actually installed now.
 #
 # The marker (.agy.version) is the version AF last installed, not the one present now. agy
@@ -396,11 +447,16 @@ if [ "$LEAN_CLIS" = 1 ]; then
     NPM_LS="$NPM_LS" node -e 'try{const d=JSON.parse(process.env.NPM_LS).dependencies||{};process.stdout.write(((d[process.argv[1]]||{}).version)||"")}catch{}' "$1" 2>/dev/null
   }
   NPM_BOOT=""
-  for pair in "claude=@anthropic-ai/claude-code" "opencode=opencode-ai" \
+  for pair in "claude=@anthropic-ai/claude-code" "opencode=$OC_PKG" \
               "codex=@openai/codex" "copilot=@github/copilot"; do
     cli="${pair%%=*}"; pkg="${pair#*=}"; ver="$(vj_pin "$cli")"
     [ -n "$ver" ] || continue
     if ! cli_present "$cli"; then
+      NPM_BOOT="$NPM_BOOT ${pkg}@${ver}"
+    elif [ "$cli" = opencode ] && [ "$REPIN" = 1 ] && [ -e "$HOME/.local/bin/opencode" ] \
+         && [ -z "$(npm_cur "$pkg")" ] && [ -n "$(npm_cur "$OC_OTHER")" ]; then
+      # The copy in ~/.local is the other major's package (the pin crossed 1 <-> 2). It owns
+      # the `opencode` bin, so npm would refuse to link the new one: oc_install_swap moves it aside.
       NPM_BOOT="$NPM_BOOT ${pkg}@${ver}"
     elif [ "$REPIN" = 1 ] && [ -e "$HOME/.local/bin/$cli" ]; then
       # Move a drifted copy back to the pin. Installs npm does not manage (no version) are left alone.
@@ -411,13 +467,14 @@ if [ "$LEAN_CLIS" = 1 ]; then
   if [ -n "$NPM_BOOT" ]; then
     echo "[entrypoint] boot-install (pinned):$NPM_BOOT ..."
     # shellcheck disable=SC2086
-    npm install -g --prefix "$HOME/.local" $NPM_BOOT >/dev/null 2>&1 \
+    oc_install_swap "$HOME/.local" $NPM_BOOT \
       && echo "[entrypoint] boot-install ok" \
       || echo "[entrypoint] WARN: npm boot-install failed (retrying next start)"
   else
     echo "[entrypoint] boot-install: npm CLIs already present in ~/.local (skip)"
   fi
-  # rtk: the pinned GitHub Releases build, checksum-verified (same path as the Dockerfile bake).
+  # rtk: the pinned GitHub Releases build of the Apache-2.0 edition (rtk-oss), checksum-verified
+  # (same path and assets as the Dockerfile bake, which says why oss).
   RTK_NEED=0
   if [ -n "$(vj_pin rtk)" ]; then
     if ! cli_present rtk; then
@@ -433,8 +490,8 @@ if [ "$LEAN_CLIS" = 1 ]; then
       rver="$(vj_pin rtk)"
       arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
       case "$arch" in
-        amd64 | x86_64) asset="rtk-x86_64-unknown-linux-musl.tar.gz" ;;
-        arm64 | aarch64) asset="rtk-aarch64-unknown-linux-gnu.tar.gz" ;;
+        amd64 | x86_64) asset="rtk-oss-x86_64-unknown-linux-musl.tar.gz" ;;
+        arm64 | aarch64) asset="rtk-oss-aarch64-unknown-linux-gnu.tar.gz" ;;
         *) echo "unsupported arch: $arch" >&2; exit 1 ;;
       esac
       base="https://github.com/rtk-ai/rtk/releases/download/v${rver}"
@@ -638,14 +695,14 @@ elif [ "${AF_AGENT_SELF_UPDATE_ALLOWED:-0}" = "1" ] && [ "${AF_AGENT_SELF_UPDATE
   # Skip when unchanged: if every package's installed version (in the effective PATH
   # prefix) equals the registry latest, skip the reinstall entirely (tarballs are fetched
   # only on a new release). When it cannot be decided, update.
-  NPM_NEED=$(NPM_PREFIX_DIR="$NPM_PREFIX_DIR" node -e '
+  NPM_NEED=$(NPM_PREFIX_DIR="$NPM_PREFIX_DIR" OC_PKG="$OC_PKG" node -e '
     const { execSync } = require("child_process");
     const pfx = process.env.NPM_PREFIX_DIR ? " --prefix " + process.env.NPM_PREFIX_DIR : "";
     const run = (c) => execSync(c, { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
     try {
       const ls = JSON.parse(run("npm ls -g --depth=0 --json" + pfx));
       let need = 0;
-      for (const p of ["@anthropic-ai/claude-code", "opencode-ai", "@openai/codex", "@github/copilot"]) {
+      for (const p of ["@anthropic-ai/claude-code", process.env.OC_PKG, "@openai/codex", "@github/copilot"]) {
         const cur = ((ls.dependencies || {})[p] || {}).version || "";
         const latest = run("npm view " + p + " version");
         if (!cur || !latest || cur !== latest) { need = 1; break; }
@@ -655,10 +712,14 @@ elif [ "${AF_AGENT_SELF_UPDATE_ALLOWED:-0}" = "1" ] && [ "${AF_AGENT_SELF_UPDATE
   ' 2>/dev/null || echo 1)
   if [ "$NPM_NEED" = "0" ]; then
     echo "[entrypoint] agent CLIs already latest; skip"
-  elif npm install -g $NPM_PREFIX_ARG @anthropic-ai/claude-code@latest opencode-ai@latest @openai/codex@latest @github/copilot@latest >/dev/null 2>&1; then
+  elif oc_install_swap "$NPM_PREFIX_DIR" @anthropic-ai/claude-code@latest "$OC_PKG@latest" @openai/codex@latest @github/copilot@latest; then
     echo "[entrypoint] agent CLIs updated${NPM_PREFIX_DIR:+ (~/.local)}: claude $(claude --version 2>/dev/null | head -1) | opencode $(opencode --version 2>/dev/null | head -1) | codex $(codex --version 2>/dev/null | head -1) | copilot $(copilot --version 2>/dev/null | head -1)"
   else
-    echo "[entrypoint] WARN: agent CLI update failed (using baked versions)"
+    if [ -x /usr/local/bin/opencode ]; then
+      echo "[entrypoint] WARN: agent CLI update failed (using baked versions)"
+    else
+      echo "[entrypoint] WARN: agent CLI update failed (kept the installed versions; a swapped opencode package was put back)"
+    fi
   fi
   # agy (Antigravity) follows the same opt-in to latest. It ships via Google's install.sh
   # rather than npm, and a baked copy (BAKE_AGENT_CLIS=1) is in root-owned /usr/local/bin,
@@ -707,8 +768,8 @@ elif [ "${AF_AGENT_SELF_UPDATE_ALLOWED:-0}" = "1" ] && [ "${AF_AGENT_SELF_UPDATE
     set -e
     arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
     case "$arch" in
-      amd64 | x86_64) asset="rtk-x86_64-unknown-linux-musl.tar.gz" ;;
-      arm64 | aarch64) asset="rtk-aarch64-unknown-linux-gnu.tar.gz" ;;
+      amd64 | x86_64) asset="rtk-oss-x86_64-unknown-linux-musl.tar.gz" ;;
+      arm64 | aarch64) asset="rtk-oss-aarch64-unknown-linux-gnu.tar.gz" ;;
       *) echo "unsupported arch: $arch" >&2; exit 1 ;;
     esac
     base="https://github.com/rtk-ai/rtk/releases/latest/download"
@@ -753,7 +814,7 @@ else
   # so PATH falls back to it at once (never in lean, where ~/.local is the pin itself).
   if [ -x /usr/local/bin/claude ]; then
     npm uninstall -g --prefix "$HOME/.local" \
-      @anthropic-ai/claude-code opencode-ai @openai/codex @github/copilot >/dev/null 2>&1 || true
+      @anthropic-ai/claude-code opencode-ai @opencode/cli @openai/codex @github/copilot >/dev/null 2>&1 || true
   fi
   if [ -x /usr/local/bin/rtk ]; then rm -f "$HOME/.local/bin/rtk"; fi
   if [ -x /usr/local/bin/agy ]; then rm -f "$HOME/.local/bin/agy" "$HOME/.local/bin/.agy.version"; fi
@@ -771,6 +832,14 @@ fi
 #   skipDangerousModePermissionPrompt … prevents an accidental exit on the bypass warning
 #   remoteControlAtStartup            … Remote Control at start is OFF by default (new workspaces only; the Console setting rules after that)
 #   agentPushNotifEnabled             … enables push notifications
+#   cleanupPeriodDays                 … 36500: claude deletes projects/**/*.jsonl older than this on
+#                                       every start (default 30), which silently erases the
+#                                       conversation of a session left stopped for a month. Agent
+#                                       Fleet's own lifecycle (archive -> delete -> cleanup) decides
+#                                       when a log goes. Never 0: in claude that disables transcript
+#                                       persistence. Seeded here, not in the per-launch --settings,
+#                                       so a claude the user starts in their own shell is covered
+#                                       too, and an explicit value of theirs is never overridden.
 #   hooks(PreToolUse/Bash → rtk hook claude) … seeded when rtk is in the container (saves tokens)
 SETTINGS="$CCD/settings.json"
 mkdir -p "$CCD"
@@ -782,6 +851,7 @@ if [ ! -f "$SETTINGS" ]; then
       skipDangerousModePermissionPrompt: true,
       remoteControlAtStartup: false,
       agentPushNotifEnabled: true,
+      cleanupPeriodDays: 36500,
     };
     if (rtk) s.hooks = { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "rtk hook claude" }] }] };
     fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\n");
@@ -789,16 +859,22 @@ if [ ! -f "$SETTINGS" ]; then
     && echo "[entrypoint] seeded default $SETTINGS (rtk=$RTK)" \
     || echo "[entrypoint] WARN: failed to seed $SETTINGS"
 else
-  # Existing workspace: if remoteControlAtStartup is unset, add false once to match the OFF
-  # default. If the key exists (the user set true/false in the Console), respect it. Once
-  # added, the key exists on later starts, so this happens only once.
+  # Existing workspace: add each default below only when its key is unset, once. A key that
+  # exists (the user set it in the Console or by hand, including a lower cleanupPeriodDays)
+  # is respected; once added the key exists on later starts. remoteControlAtStartup=false
+  # matches the OFF default; cleanupPeriodDays=36500 keeps stopped sessions' transcripts.
   node -e '
     const fs = require("fs"), p = process.argv[1];
     let s; try { s = JSON.parse(fs.readFileSync(p, "utf8")); } catch { process.exit(0); }
-    if (s && typeof s === "object" && !Array.isArray(s) && !("remoteControlAtStartup" in s)) {
-      s.remoteControlAtStartup = false;
-      fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\n");
-      console.log("[entrypoint] defaulted remoteControlAtStartup=false in existing " + p);
+    if (s && typeof s === "object" && !Array.isArray(s)) {
+      const added = [];
+      for (const [k, v] of [["remoteControlAtStartup", false], ["cleanupPeriodDays", 36500]]) {
+        if (!(k in s)) { s[k] = v; added.push(k + "=" + v); }
+      }
+      if (added.length) {
+        fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\n");
+        console.log("[entrypoint] defaulted " + added.join(", ") + " in existing " + p);
+      }
     }
   ' "$SETTINGS" 2>/dev/null || true
 fi
@@ -807,8 +883,9 @@ fi
 # dir (home, persists): agent-fleet-status.js reports session working/idle state back
 # to the agent — the opencode analog of claude's settings.json hooks — and
 # agent-fleet-caller.js stamps the calling session on af's MCP tools (#989). Refreshed
-# each start so they track the image version. opencode auto-loads
-# ~/.config/opencode/plugin/*.js. (rtk.ts is the agent's to seed or remove.)
+# each start so they track the image version. opencode 1 and 2 both auto-load
+# ~/.config/opencode/plugin/*.js (measured on 1.19.0 and 2.0.28); each file is one module
+# serving both majors. (rtk.ts is the agent's to seed or remove.)
 OC_PLUG_SRC="/usr/local/share/agent-fleet/opencode-plugin"
 OC_PLUG_DST="$HOME/.config/opencode/plugin"
 if [ -d "$OC_PLUG_SRC" ]; then
@@ -816,6 +893,18 @@ if [ -d "$OC_PLUG_SRC" ]; then
   cp -f "$OC_PLUG_SRC"/*.js "$OC_PLUG_DST"/ 2>/dev/null \
     && echo "[entrypoint] seeded opencode status plugin" \
     || echo "[entrypoint] WARN: failed to seed opencode plugin"
+  # opencode 2's TUI plugin (agent-fleet-tui/): a directory with a package.json whose ./tui
+  # export is loaded from ~/.config/opencode/plugins/<dir>/ (measured on 2.0.28). It keeps the
+  # sessions a shared-server Terminal pane creates apart from the other panes' (#2120); opencode 1
+  # never reads this directory. Replaced as a whole so a removed file does not outlive the image.
+  if [ -d "$OC_PLUG_SRC/agent-fleet-tui" ]; then
+    OC_TUI_DST="$HOME/.config/opencode/plugins/agent-fleet-tui"
+    mkdir -p "$HOME/.config/opencode/plugins" \
+      && rm -rf "$OC_TUI_DST" \
+      && cp -r "$OC_PLUG_SRC/agent-fleet-tui" "$OC_TUI_DST" \
+      && echo "[entrypoint] seeded opencode TUI plugin" \
+      || echo "[entrypoint] WARN: failed to seed opencode TUI plugin"
+  fi
 fi
 
 # opencode permission config: run fully unattended like claude/codex (the container IS
@@ -827,7 +916,10 @@ fi
 # Best-effort: skips if the file isn't plain JSON (e.g. the user added comments).
 OC_CFG="$HOME/.config/opencode/opencode.jsonc"
 mkdir -p "$HOME/.config/opencode"
-python3 - "$OC_CFG" <<'PY' && echo "[entrypoint] set opencode permission=allow" || echo "[entrypoint] WARN: skipped opencode permission config"
+# opencode 2 (@opencode/cli) prints "opencode v2.0.28", opencode-ai 1.x "1.19.0": the leading
+# integer is the major. Anything unreadable counts as 1, the pinned default.
+OC_MAJOR="$(opencode --version 2>/dev/null | head -1 | sed -nE 's/^[^0-9]*([0-9]+)\..*/\1/p')"
+python3 - "$OC_CFG" "${OC_MAJOR:-1}" <<'PY' && echo "[entrypoint] set opencode permission=allow" || echo "[entrypoint] WARN: skipped opencode permission config"
 import json, os, sys
 p = sys.argv[1]
 cfg = {}
@@ -846,6 +938,10 @@ if not isinstance(perm, dict):
 for k in ("edit", "bash", "webfetch", "doom_loop", "external_directory"):
     perm[k] = "allow"
 cfg["permission"] = perm
+# v2 turns its auto-updater off through config (`update`); v1 keeps the
+# OPENCODE_DISABLE_AUTOUPDATE env from the Dockerfile and does not know the key.
+if sys.argv[2].isdigit() and int(sys.argv[2]) >= 2:
+    cfg["update"] = "disable"
 tmp = p + ".af-tmp"
 with open(tmp, "w") as f:
     json.dump(cfg, f, indent=2)

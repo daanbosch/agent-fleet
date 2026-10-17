@@ -22,12 +22,19 @@ const STATE_KEYS: Record<string, { label: MsgKey; title: MsgKey }> = {
   signed_in: { label: "ssm.state_signed_in", title: "ssm.state_signed_in_title" },
   renew: { label: "ssm.state_renew", title: "ssm.state_renew_title" },
   none: { label: "ssm.state_none", title: "ssm.state_none_title" },
+  source_unavailable: { label: "wsbar.aws.state_no_source", title: "wsbar.aws.state_no_source_title" },
 };
 const STATE_ORDER: Record<string, number> = { signed_in: 0, renew: 1 };
 
 // "renew" counts: the CLI renews it on the next use while the portal session lasts, and the
 // Agent cannot tell from the cache whether it still does.
 export const isActive = (p: AwsProfileState) => p.state === "signed_in" || p.state === "renew";
+
+// What the badge counts is logins: a role-chaining profile has none of its own and follows its
+// source's, so it adds nothing to either side of "n/m" — the source row already counts that
+// login once, however many chains hang off it. A chain whose source is unavailable is not a
+// missing login either (signing in cannot fix it); its row says so.
+export const ownsLogin = (p: AwsProfileState) => !p.source;
 
 export function sortProfiles(list: AwsProfileState[]): AwsProfileState[] {
   return [...list].sort(
@@ -86,14 +93,15 @@ export function AwsProfilesChip({ hidden = false, passive = false }: { hidden?: 
 
   if (!shown || !profiles) return null;
 
-  const active = profiles.filter(isActive);
+  const counted = profiles.filter(ownsLogin);
+  const active = counted.filter(isActive);
   const expiring = profiles.some((p) => p.expiring);
   const tone = expiring ? " warn" : active.length === 0 ? " muted" : " ok";
   // One signed-in profile is named, since "which one" is the question; more get a count.
-  const label = active.length === 1 ? active[0].label || active[0].name : `${active.length}/${profiles.length}`;
+  const label = active.length === 1 ? active[0].label || active[0].name : `${active.length}/${counted.length}`;
   const title = expiring
     ? tr("wsbar.aws.chip_expiring")
-    : tr("wsbar.aws.chip_title", { active: active.length, total: profiles.length });
+    : tr("wsbar.aws.chip_title", { active: active.length, total: counted.length });
 
   return (
     <div className="ws-usage-wrap ws-aws" ref={ref}>
@@ -117,6 +125,9 @@ export function AwsProfilesChip({ hidden = false, passive = false }: { hidden?: 
           <ul className="ws-aws-list">
             {sortProfiles(profiles).map((p) => {
               const st = STATE_KEYS[p.state];
+              // A chain's sign-in is its source's: the button and the modal are the source's.
+              const src = p.source ? profiles.find((x) => x.name === p.source && ownsLogin(x)) : undefined;
+              const loginTarget = src ?? p;
               const end = p.expiresAt && Date.parse(p.expiresAt) > Date.now() ? p.expiresAt : "";
               return (
                 <li key={p.name} className="ws-aws-row">
@@ -133,7 +144,12 @@ export function AwsProfilesChip({ hidden = false, passive = false }: { hidden?: 
                   <div className="ws-aws-meta muted">
                     {[p.label && p.label !== p.name ? p.name : "", p.accountId, p.roleName].filter(Boolean).join(" · ")}
                   </div>
-                  {(end || p.state !== "signed_in" || isActive(p)) && (
+                  {p.source && (
+                    <div className="ws-aws-meta muted ws-aws-follows">
+                      {tr("wsbar.aws.follows", { source: src ? src.label || src.name : p.source })}
+                    </div>
+                  )}
+                  {(end || (p.state !== "signed_in" && p.state !== "source_unavailable") || isActive(p)) && (
                     <div className="ws-aws-foot">
                       {end ? (
                         <span className={p.expiring ? "warn" : "muted"}>
@@ -143,19 +159,19 @@ export function AwsProfilesChip({ hidden = false, passive = false }: { hidden?: 
                         <span />
                       )}
                       <span className="ws-aws-actions">
-                        {(p.state !== "signed_in" || p.expiring) && (
+                        {((p.state !== "signed_in" && p.state !== "source_unavailable") || p.expiring) && (
                           <Button
                             variant="ghost"
                             className="ws-aws-login"
                             onClick={() => {
                               setOpen(false);
-                              showProfile(p);
+                              showProfile(loginTarget);
                             }}
                           >
                             {tr("wsbar.aws.login")}
                           </Button>
                         )}
-                        {isActive(p) && (
+                        {isActive(p) && ownsLogin(p) && (
                           <Button
                             variant="ghost"
                             className="ws-aws-logout"

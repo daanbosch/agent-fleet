@@ -71,8 +71,23 @@ case "$2" in
   opencode-ai)               name=opencode ;;
   @openai/codex)             name=codex ;;
   @github/copilot)           name=copilot ;;
+  # @opencode/cli is the opencode row's package once the pin is 2.x. Under a 1.x pin it is
+  # the informational "2.x line" instead: STUB_OC2 asks for that reading (and STUB_FAIL
+  # opencode2 refuses it); without STUB_OC2 it answers as the row does, from the pin file,
+  # with STUB_DRIFT / STUB_FAIL naming `opencode` and STUB_OCCLI overriding the answer.
+  @opencode/cli)             echo "$2" >> "$STUB_NPM_LOG"
+                             if [ -n "${STUB_OC2:-}" ]; then
+                               case ",${STUB_FAIL:-}," in *",opencode2,"*) exit 1 ;; esac
+                               echo "$STUB_OC2"; exit 0
+                             fi
+                             [ -z "${STUB_OCCLI:-}" ] || { echo "$STUB_OCCLI"; exit 0; }
+                             case ",${STUB_FAIL:-}," in *",opencode,"*) exit 1 ;; esac
+                             case ",${STUB_DRIFT:-}," in *",opencode,"*) echo "9.9.9"; exit 0 ;; esac
+                             cat "$STUB_PINS/opencode"; echo; exit 0 ;;
   *) exit 1 ;;
 esac
+echo "$2" >> "$STUB_NPM_LOG"
+[ "$name" != opencode ] || [ -z "${STUB_OCAI:-}" ] || { echo "$STUB_OCAI"; exit 0; }
 case ",${STUB_FAIL:-}," in *",$name,"*) exit 1 ;; esac
 case ",${STUB_DRIFT:-}," in *",$name,"*) echo "9.9.9"; exit 0 ;; esac
 cat "$STUB_PINS/$name"; echo
@@ -120,7 +135,8 @@ case "$name" in
 esac
 FAKE
 chmod +x "$STUB"/npm "$STUB"/curl
-export PATH="$STUB:$PATH" STUB_PINS="$PINS"
+export PATH="$STUB:$PATH" STUB_PINS="$PINS" STUB_NPM_LOG="$WORK/npm.log"
+: > "$WORK/npm.log"
 
 # --- cli-drift-check.sh --------------------------------------------------------------
 
@@ -201,6 +217,83 @@ out_has '^failed=cursor$'
 out_has '^latest_cursor=$'
 says "Could not read: cursor"
 
+# The checker resolves workspace/Dockerfile from its own location. The real tree pins 2.x
+# (since the cut-over), so the 1.x cases run a copy of the tree whose pin is a 1.x one, which
+# is also what a rollback re-pin looks like.
+TREE1="$WORK/tree1"
+mkdir -p "$TREE1/deploy/local" "$TREE1/workspace"
+cp "$CHECK" "$TREE1/deploy/local/cli-drift-check.sh"
+sed 's/^ARG OPENCODE_VERSION=.*/ARG OPENCODE_VERSION=1.19.0/' "$ROOT/workspace/Dockerfile" > "$TREE1/workspace/Dockerfile"
+cp "$PINS/opencode" "$WORK/opencode.pin.keep"
+use_pin1() { printf '1.19.0' > "$PINS/opencode"; SCRIPT_UNDER_TEST="$TREE1/deploy/local/cli-drift-check.sh"; }
+use_pin2() { cp "$WORK/opencode.pin.keep" "$PINS/opencode"; SCRIPT_UNDER_TEST="$CHECK"; }
+
+echo "== case 5b: while the pin is 1.x the 2.x line is reported, and only reported =="
+use_pin1
+STUB_FAIL="" STUB_DRIFT="" STUB_OC2=2.0.29 run_check
+code_is 0                         # a new major is not drift
+says "opencode2"
+says "new major, not tracked as drift"
+out_has '^latest_opencode2=2\.0\.29$'
+out_has '^failed=$'
+sum_has "2.x line"
+# It is not a row: a registry that does not answer for it is skipped without a word, and
+# `failed=` stays empty (case 5's rule would otherwise have to name it).
+STUB_FAIL="opencode2" STUB_DRIFT="" STUB_OC2=2.0.29 run_check
+code_is 0
+out_has '^failed=$'
+out_hasnt '^latest_opencode2='
+saysnt "opencode2"
+# ...and with every real row failing it is not a row that saves the run from exit 2.
+STUB_FAIL="claude,opencode,codex,copilot,agy,cursor,kiro,muse,rtk" STUB_DRIFT="" STUB_OC2=2.0.29 run_check
+code_is 2
+# A single-row check of another CLI does not print it.
+STUB_FAIL="" STUB_DRIFT="" STUB_OC2=2.0.29 run_check claude
+saysnt "opencode2"
+use_pin2
+
+echo "== case 5c: the opencode row follows the package of the pin's major =="
+# Positive control first -- the 1.x tree must ask for opencode-ai.
+use_pin1
+: > "$WORK/npm.log"
+STUB_FAIL="" STUB_DRIFT="" run_check opencode
+grep -qxF "opencode-ai" "$WORK/npm.log" || fail "1.x pin: opencode-ai was not asked for"
+use_pin2
+: > "$WORK/npm.log"
+STUB_FAIL="" STUB_DRIFT="" run_check opencode
+code_is 0
+grep -qxF "@opencode/cli" "$WORK/npm.log" || fail "2.x pin: @opencode/cli was not asked for"
+grep -qxF "opencode-ai" "$WORK/npm.log" && fail "2.x pin: opencode-ai must not be asked for" || true
+out_has "^pin_opencode=$(cat "$PINS/opencode" | sed 's/\./\\./g')\$"
+in_sync opencode
+saysnt "opencode2"                # already on 2.x: nothing to announce
+STUB_FAIL="" STUB_DRIFT="" STUB_OCCLI=2.99.0 run_check opencode
+code_is 1
+out_has '^latest_opencode=2\.99\.0$'
+says "DRIFT"
+
+echo "== case 5d: the pin's package publishing another major is flagged, not offered as a plain bump =="
+use_pin1
+STUB_FAIL="" STUB_DRIFT="" STUB_OCAI=2.0.0 run_check opencode
+code_is 1
+out_has '^latest_opencode=2\.0\.0$'
+says "MAJOR"
+sum_has "other major"
+STUB_FAIL="" STUB_DRIFT="" STUB_OCAI=1.99.0 run_check opencode
+code_is 1
+says "DRIFT"                      # same major: an ordinary edge
+saysnt "MAJOR"
+use_pin2
+# The same two directions on the 2.x pin the tree has now.
+STUB_FAIL="" STUB_DRIFT="" STUB_OCCLI=3.0.0 run_check opencode
+code_is 1
+out_has '^latest_opencode=3\.0\.0$'
+says "MAJOR"
+STUB_FAIL="" STUB_DRIFT="" STUB_OCCLI=2.99.0 run_check opencode
+code_is 1
+says "DRIFT"
+saysnt "MAJOR"
+
 echo "== case 6: a single named row -- reads clean, or is 'every row failed' =="
 STUB_FAIL="rtk" STUB_DRIFT="" run_check claude
 code_is 0
@@ -272,7 +365,7 @@ out_has '^count=1$'
 out_has '^skipped=kiro$'
 out_hasnt '^kiro=true$'
 out_has '^watcher_failed=kiro$'
-sum_has 'its `seen` / `tested` update are skipped'
+sum_has 'its `tested` update are skipped'
 
 echo "== case 9b: a muse build-id edge is a dispatch like any other =="
 # muse's versions carry a build id (1.3.0-R3401.1 -> 1.3.0-R3402.1), and the decision compares
@@ -301,6 +394,40 @@ out_has '^watcher_ok=2026-09-11T05:30:12Z$'
 out_has '^watcher_failed=none$'
 sum_has "No public version changed"
 sum_hasnt "could not be read"
+
+echo "== case 11b: a red marker for latest holds the dispatch back, and only that kind =="
+# The brake: at a 2-hour cadence a version whose contract is red would otherwise be
+# re-dispatched ~12 times a day. codex has a real edge here, so it must still go out.
+run_edges RED_CLAUDE=2.1.267 LATEST_CLAUDE=2.1.267 LATEST_CODEX=0.146.0
+out_hasnt '^claude=true$'
+out_has '^codex=true$'
+out_has '^count=1$'
+out_has '^red=claude=2.1.267$'
+sum_has "contract already failed"
+
+echo "== case 11c: POSITIVE CONTROL -- without the marker the same edge dispatches =="
+run_edges LATEST_CLAUDE=2.1.267
+out_has '^claude=true$'
+out_has '^red=$'
+
+echo "== case 11d: a new latest clears the brake =="
+run_edges RED_CLAUDE=2.1.267 LATEST_CLAUDE=2.1.268
+out_has '^claude=true$'
+out_has '^red=$'
+
+echo "== case 11e: tested == latest wins over a stale red marker =="
+# A manual dispatch that passed records tested; the marker must not make the kind look held.
+run_edges RED_CLAUDE=2.1.267 LATEST_CLAUDE=2.1.267 TESTED_CLAUDE=2.1.267
+out_hasnt '^claude=true$'
+out_has '^red=$'
+out_has '^count=0$'
+
+echo "== case 11f: cursor and kiro keep their behaviour: a red marker does not hold them =="
+run_edges RED_CURSOR=1.1.0 LATEST_CURSOR=1.1.0 RED_KIRO=0.2.0 LATEST_KIRO=0.2.0
+out_has '^cursor=true$'
+out_has '^kiro=true$'
+out_has '^count=2$'
+out_has '^red=$'
 
 # --- cli-release-state.sh, watcher namespace -----------------------------------------
 #
@@ -382,5 +509,433 @@ rc=$?
 set -e
 [ "$rc" = 2 ] || fail "expected exit 2 for a watcher value containing a space, got $rc"
 err_has "invalid value"
+
+# --- cli-contract-report.sh ----------------------------------------------------------
+#
+# The state issue (7) and one update issue per CLI (100, 101, … as they are created). Each
+# issue is a directory holding title, body, state and comments; the stub picks the CLI's
+# issue out of `issue list --label cli-drift` by the title prefix the script's --jq asks for.
+REPORT="$HERE/cli-contract-report.sh"
+export STUB_ISSUES="$WORK/issues" STUB_RUNS="$WORK/runs" STUB_PRS="$WORK/prs.json"
+mkdir -p "$STUB_ISSUES" "$STUB_RUNS"
+ln -s "$STUB_ISSUE" "$STUB_ISSUES/7"
+echo '[]' > "$STUB_PRS"
+cat > "$STUB/gh" <<'FAKE'
+#!/usr/bin/env bash
+echo "gh $*" >> "$STUB_LOG"
+arg_after() { local want="$1"; shift; local prev="" a; for a in "$@"; do [ "$prev" = "$want" ] && { printf '%s' "$a"; return; }; prev="$a"; done; }
+I="$STUB_ISSUES"
+case "$1 $2" in
+  "issue list")
+    case "$*" in
+      *"--label cli-drift"*)
+        kind="$(printf '%s' "$*" | sed -n 's/.*startswith("\([a-z0-9-]*\) CLI: ").*/\1/p')"
+        # The search index has not caught up with a new issue yet: the kind has none.
+        [ ! -e "$STUB_RUNS/nolist-$kind" ] || exit 0
+        if [ -e "$STUB_RUNS/race-$kind" ]; then
+          # Another writer opens the kind's issue just after this lookup answered "none".
+          rm "$STUB_RUNS/race-$kind"
+          n=100; while [ -e "$I/$n" ]; do n=$((n + 1)); done
+          mkdir "$I/$n"; printf '%s CLI: opened elsewhere' "$kind" > "$I/$n/title"; echo open > "$I/$n/state"
+          : > "$I/$n/comments"; echo 'placeholder' > "$I/$n/body"
+          exit 0
+        fi
+        for d in "$I"/1[0-9][0-9]; do
+          [ -d "$d" ] && [ "$(cat "$d/state")" = open ] || continue
+          case "$(cat "$d/title")" in "$kind CLI: "*) basename "$d"; break ;; esac
+        done ;;
+      *) [ -s "$I/7/body" ] && echo 7 ;;
+    esac ;;
+  "issue create")
+    title="$(arg_after --title "$@")"
+    if [ "$title" = "CLI release watcher state" ]; then
+      printf '%s\n' "$(arg_after --body "$@")" > "$I/7/body"; echo "https://github.com/k-k1/agent-fleet/issues/7"; exit 0
+    fi
+    n=100; while [ -e "$I/$n" ]; do n=$((n + 1)); done
+    mkdir "$I/$n"; printf '%s' "$title" > "$I/$n/title"; echo open > "$I/$n/state"; : > "$I/$n/comments"
+    cp "$(arg_after --body-file "$@")" "$I/$n/body"
+    echo "https://github.com/k-k1/agent-fleet/issues/$n" ;;
+  "issue view")
+    case "$*" in
+      *"body,comments"*) cat "$I/$3/body" "$I/$3/comments" 2>/dev/null ;;
+      *"--json title"*)  cat "$I/$3/title"; echo ;;
+      *) cat "$I/$3/body" ;;
+    esac ;;
+  "issue edit")
+    if [ -e "$STUB_RUNS/clobber" ]; then
+      # A concurrent writer holding a stale copy overwrites this edit with the old body.
+      rm -f "$STUB_RUNS/clobber"
+    else
+      t="$(arg_after --title "$@")"; [ -z "$t" ] || printf '%s' "$t" > "$I/$3/title"
+      f="$(arg_after --body-file "$@")"; [ -z "$f" ] || cp "$f" "$I/$3/body"
+    fi ;;
+  "issue comment")
+    printf '%s\n' "$(arg_after --body "$@")" >> "$I/$3/comments" ;;
+  "issue close")
+    echo closed > "$I/$3/state"; printf '%s\n' "$(arg_after --comment "$@")" >> "$I/$3/comments" ;;
+  "pr list")
+    cat "$STUB_PRS" ;;
+  "api repos/k-k1/agent-fleet/actions/runs/555/jobs?per_page=100")
+    cat "$STUB_RUNS/steps" ;;
+  "run list")
+    cat "$STUB_RUNS/$(arg_after --workflow "$@" | sed 's/\.yml$//').json" ;;
+esac
+exit 0
+FAKE
+chmod +x "$STUB/gh"
+# Every report case below runs without the follow-up sync; the sync cases further down
+# drive it directly.
+export SYNC=true
+: > "$STUB_ISSUE/comments"
+issue_of()  { "$HERE/cli-update-issues.sh" number "$1"; }
+body_of()   { local n; n="$(issue_of "$1")"; [ -n "$n" ] || fail "no open issue for $1"; cat "$STUB_ISSUES/$n/body"; }
+title_of()  { local n; n="$(issue_of "$1")"; [ -n "$n" ] || fail "no open issue for $1"; cat "$STUB_ISSUES/$n/title"; }
+has()       { body_of "$1" | grep -qF -- "$2" || fail "$1 issue missing: $2"; }
+hasnt()     { local n; n="$(issue_of "$1")"; [ -z "$n" ] && return 0; if grep -qF -- "$2" "$STUB_ISSUES/$n/body"; then fail "$1 issue must not contain: $2"; fi; }
+no_issue()  { [ -z "$(issue_of "$1")" ] || fail "$1 must have no open issue, has #$(issue_of "$1"): $(title_of "$1")"; }
+export GITHUB_SERVER_URL=https://github.com GITHUB_REPOSITORY=k-k1/agent-fleet GITHUB_RUN_ID=555
+
+# What the jobs API says, already reduced by the --jq in the script: one failed step name per
+# line, with a duplicate (a matrix repeats the same step name per leg).
+printf '%s\n' 'real TUI pane drift contract' 'real models catalog drift contract' 'real TUI pane drift contract' > "$STUB_RUNS/steps"
+
+echo "== case 16: a red contract with no issue creates that CLI's issue with the section =="
+"$REPORT" failure codex 0.146.0
+has codex 'Red contracts'
+has codex '`codex` `0.146.0`'
+has codex 'failing step: `real TUI pane drift contract`, `real models catalog drift contract`'
+has codex 'actions/runs/555'
+[ "$(title_of codex)" = "codex CLI: contract failed" ] || fail "unexpected title: $(title_of codex)"
+n="$(body_of codex | grep -o 'real TUI pane drift contract' | wc -l)"
+[ "$n" = 1 ] || fail "a repeated step name must be listed once, got $n"
+state_is red codex 0.146.0
+
+echo "== case 16b: the list lookup stays empty after creation; the number comes from the create URL =="
+touch "$STUB_RUNS/nolist-agy"
+"$REPORT" failure agy 1.0.0 || fail "failure must survive a lagging issue lookup (exit $?)"
+rm "$STUB_RUNS/nolist-agy"
+has agy '`agy` `1.0.0`'
+state_is red agy 1.0.0
+echo closed > "$STUB_ISSUES/$(issue_of agy)/state"   # later cases expect no open agy issue
+
+echo "== case 17: another CLI gets its own issue; the same kind replaces its own row =="
+"$REPORT" failure claude 2.1.270
+: > "$STUB_RUNS/steps"
+"$REPORT" failure codex 0.146.0
+[ "$(issue_of claude)" != "$(issue_of codex)" ] || fail "claude and codex share an issue"
+n="$(body_of codex | grep -c '<!-- cli-contract-failure ')"
+[ "$n" = 1 ] || fail "expected 1 failure row in the codex issue, got $n"
+has codex 'failing step not captured'   # codex's replaced row
+body_of codex | grep -F '<!-- cli-contract-failure codex -->' | grep -qF 'real TUI pane' && fail "codex kept its old row's steps"
+hasnt codex '`claude`'
+has claude '`claude` `2.1.270`'
+state_is red claude 2.1.270
+
+echo "== case 18: cursor is reported but gets no red marker =="
+"$REPORT" failure cursor 1.2.0
+has cursor '`cursor` `1.2.0`'
+state_is red cursor ""
+
+echo "== case 19: a body rewrite keeps the section (carry) =="
+printf 'fresh next step\n' > "$WORK/newbody.md"
+"$REPORT" carry "$(issue_of claude)" "$WORK/newbody.md"
+grep -qF 'fresh next step' "$WORK/newbody.md" || fail "carry dropped the new body"
+grep -qF '`claude` `2.1.270`' "$WORK/newbody.md" || fail "carry dropped the section"
+"$REPORT" active claude || fail "active must be true while rows exist"
+
+echo "== case 20: success removes only its own row; prune drops a superseded version =="
+"$REPORT" success cursor
+hasnt cursor '`cursor` `1.2.0`'
+LATEST_CLAUDE=2.1.271 LATEST_CODEX=0.146.0 "$REPORT" prune
+hasnt claude '`claude` `2.1.270`'
+has codex '`codex` `0.146.0`'
+LATEST_CODEX= "$REPORT" prune   # an unread latest keeps the row
+has codex '`codex` `0.146.0`'
+"$REPORT" success codex
+hasnt codex 'Red contracts'
+if "$REPORT" active codex; then fail "active must be false once the section is empty"; fi
+
+echo "== case 21: N=2 red runs in a row flags the workflow in its CLI's issue; a newer green clears it =="
+NOWISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+OLDISO="$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+cat > "$STUB_RUNS/codex-contract.json" <<J
+[{"conclusion":"failure","url":"https://x/run/3","createdAt":"$NOWISO"},{"conclusion":"failure","url":"https://x/run/2","createdAt":"$NOWISO"},{"conclusion":"success","url":"https://x/run/1","createdAt":"$NOWISO"}]
+J
+"$REPORT" streak codex-contract 2
+has codex '`codex-contract` failed its last 2 runs'
+has codex 'https://x/run/3'
+cat > "$STUB_RUNS/codex-contract.json" <<J
+[{"conclusion":"failure","url":"https://x/run/4","createdAt":"$NOWISO"},{"conclusion":"success","url":"https://x/run/3","createdAt":"$NOWISO"},{"conclusion":"failure","url":"https://x/run/2","createdAt":"$NOWISO"}]
+J
+"$REPORT" streak codex-contract 2
+hasnt codex 'Red contracts'
+
+echo "== case 22: fewer than N finished runs is not a streak; claude-tui-contract maps to claude =="
+echo '[{"conclusion":"failure","url":"https://x/run/9","createdAt":"'"$NOWISO"'"}]' > "$STUB_RUNS/claude-tui-contract.json"
+"$REPORT" streak claude-tui-contract 2
+hasnt claude 'claude-tui-contract'
+echo '[{"conclusion":"failure","url":"https://x/run/9","createdAt":"'"$NOWISO"'"},{"conclusion":"failure","url":"https://x/run/8","createdAt":"'"$NOWISO"'"}]' > "$STUB_RUNS/claude-tui-contract.json"
+"$REPORT" streak claude-tui-contract 2
+has claude '`claude-tui-contract` failed its last 2 runs'   # control: the mapping is live
+echo '[{"conclusion":"success","url":"https://x/run/10","createdAt":"'"$NOWISO"'"}]' > "$STUB_RUNS/claude-tui-contract.json"
+"$REPORT" streak claude-tui-contract 2
+
+echo "== case 22b: a red streak whose newest run is 30 days old is history, and is dropped =="
+cat > "$STUB_RUNS/agy-contract.json" <<J
+[{"conclusion":"failure","url":"https://x/run/8","createdAt":"$NOWISO"},{"conclusion":"failure","url":"https://x/run/7","createdAt":"$NOWISO"}]
+J
+"$REPORT" streak agy-contract 2
+has agy '`agy-contract` failed its last 2 runs'   # control: fresh -> flagged
+[ "$(title_of agy)" = "agy CLI: contract fails on develop" ] || fail "unexpected streak title: $(title_of agy)"
+cat > "$STUB_RUNS/agy-contract.json" <<J
+[{"conclusion":"failure","url":"https://x/run/8","createdAt":"$OLDISO"},{"conclusion":"failure","url":"https://x/run/7","createdAt":"$OLDISO"}]
+J
+"$REPORT" streak agy-contract 2
+hasnt agy 'agy-contract'
+
+echo "== case 23: a write overwritten by a stale concurrent writer is re-applied =="
+"$REPORT" failure kiro 0.3.0
+cat > "$STUB_RUNS/kiro-contract.json" <<J
+[{"conclusion":"failure","url":"https://x/run/6","createdAt":"$NOWISO"},{"conclusion":"failure","url":"https://x/run/5","createdAt":"$NOWISO"}]
+J
+touch "$STUB_RUNS/clobber"
+"$REPORT" streak kiro-contract 2
+[ ! -e "$STUB_RUNS/clobber" ] || fail "the clobber hook never fired; the case proves nothing"
+has kiro '`kiro-contract` failed its last 2 runs'
+has kiro '`kiro` `0.3.0`'
+
+echo "== case 23b: a failure whose version is unknown never opens an issue, but lands in an open one =="
+"$REPORT" failure copilot unknown
+no_issue copilot
+"$REPORT" failure copilot 1.0.97      # control: a real version does open it
+"$REPORT" failure copilot unknown
+has copilot '`copilot` `unknown`'
+"$REPORT" success copilot
+
+echo "== case 24: success clears the red marker as well as the row =="
+"$REPORT" failure opencode 1.2.0
+state_is red opencode 1.2.0
+"$REPORT" success opencode
+state_is red opencode none
+hasnt opencode '`opencode` `1.2.0`'
+
+echo "== case 24b: a fragments row is its own row: no red marker, kept by success, replaced, pruned, cleared =="
+red_before="$("$STATE" get red claude)"
+"$REPORT" fragments claude 2.1.300 'run /login' 'Esc to cancel'
+has claude '`claude` `2.1.300` — upstream message fragments gone from the package: `run /login`, `Esc to cancel`'
+has claude '<!-- cli-contract-fragments claude -->'
+state_is red claude "$red_before"
+"$REPORT" failure claude 2.1.300
+"$REPORT" success claude
+has claude '<!-- cli-contract-fragments claude -->'   # a passing contract does not vouch for wording
+hasnt claude '<!-- cli-contract-failure claude -->'
+"$REPORT" fragments claude 2.1.300 'Enter to confirm'
+n="$(body_of claude | grep -c '<!-- cli-contract-fragments ')"
+[ "$n" = 1 ] || fail "expected 1 fragments row, got $n"
+hasnt claude 'run /login'
+has claude '`Enter to confirm`'
+"$REPORT" fragments-clear agy   # clearing where there is nothing to clear is not an error
+LATEST_CLAUDE=2.1.301 "$REPORT" prune
+hasnt claude 'cli-contract-fragments'
+"$REPORT" fragments claude 2.1.301 'Enter to confirm'
+"$REPORT" fragments-clear claude
+hasnt claude 'cli-contract-fragments'
+if "$REPORT" fragments claude 2.1.301 'a`b' 2>/dev/null; then fail "a backtick in a fragment must be refused"; fi
+if "$REPORT" fragments claude 2.1.301 2>/dev/null; then fail "fragments without any fragment must be refused"; fi
+
+# --- cli-update-issues.sh ------------------------------------------------------------
+#
+# The per-CLI issues themselves. The release sources and the `tested` state are stubbed
+# as files; the red-contract rows are the real ones from cli-contract-report.sh.
+SYNC_SH="$HERE/cli-update-issues.sh"
+# Start from no open update issue: close whatever the report cases left behind.
+for d in "$STUB_ISSUES"/1[0-9][0-9]; do echo closed > "$d/state"; done
+export STUB_LATEST="$WORK/latest.out" STUB_TESTED="$WORK/tested"
+mkdir -p "$STUB_TESTED"
+cat > "$STUB/drift-check" <<'FAKE'
+#!/usr/bin/env bash
+cat "$STUB_LATEST" >> "$GITHUB_OUTPUT"
+exit 1
+FAKE
+cat > "$STUB/release-state" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  get)      cat "$STUB_TESTED/$2-$3" 2>/dev/null || true ;;
+  evidence) echo "https://x/run/tested-$3" ;;
+esac
+FAKE
+chmod +x "$STUB/drift-check" "$STUB/release-state"
+export DRIFT_CHECK="$STUB/drift-check" RELEASE_STATE="$STUB/release-state"
+# latest <kind>=<pin>:<latest> ... ; failed=<csv>
+releases() {
+  : > "$STUB_LATEST"
+  local kv
+  for kv in "$@"; do
+    case "$kv" in
+      failed=*) printf '%s\n' "$kv" >> "$STUB_LATEST" ;;
+      *) printf 'pin_%s=%s\nlatest_%s=%s\n' "${kv%%=*}" "$(sed 's/=.*//; s/:.*//' <<< "${kv#*=}")" "${kv%%=*}" "${kv##*:}" >> "$STUB_LATEST" ;;
+    esac
+  done
+}
+tested() { printf '%s' "$2" > "$STUB_TESTED/tested-$1"; }
+sync_ok() { "$SYNC_SH" sync "$@" > "$WORK/out" 2> "$WORK/err" || fail "sync $* exited non-zero"; }
+title_is() { [ "$(title_of "$1")" = "$2" ] || fail "$1 title: expected '$2', got '$(title_of "$1")'"; }
+
+echo "== case 25: kiro behind with an old tested -> an issue whose title and command are the next step =="
+releases kiro=2.29.1:2.30.0
+tested kiro 2.29.1
+sync_ok kiro
+title_is kiro "kiro CLI: run the contract on 2.30.0"
+has kiro 'gh workflow run kiro-contract.yml --ref develop -f cli_version=latest'
+has kiro '<!-- cli-update kind=kiro -->'
+kiro_num="$(issue_of kiro)"
+
+echo "== case 26: an unattended kind behind its latest opens nothing; without its secret it does =="
+releases claude=2.1.300:2.1.301
+sync_ok claude
+no_issue claude
+CRED_CLAUDE=false sync_ok claude   # positive control: the same drift, now a person's job
+title_is claude "claude CLI: verify 2.1.301 (no CI credential)"
+has claude 'E2E_CLAUDE_OAUTH_TOKEN'
+has claude 'reaches the TUI'
+
+echo "== case 27: once latest passes, the same issue says to merge the bump PR it links =="
+releases kiro=2.29.1:2.30.0
+tested kiro 2.30.0
+cat > "$STUB_PRS" <<'J'
+[{"number":2086,"body":"| CLI | Pin | Evidence | Checksums |\n|---|---|---|---|\n| kiro | `2.29.1` → `2.30.0` | x | y |\n"}]
+J
+sync_ok kiro
+[ "$(issue_of kiro)" = "$kiro_num" ] || fail "the kiro issue was replaced instead of updated"
+title_is kiro "kiro CLI: merge the pin bump to 2.30.0"
+has kiro 'merge #2086'
+has kiro 'https://x/run/tested-kiro'
+
+echo "== case 28: a PR that carries another version is not linked =="
+echo '[{"number":2087,"body":"| kiro | `2.29.1` → `2.29.9` | x | y |"}]' > "$STUB_PRS"
+sync_ok kiro
+hasnt kiro '#2087'
+has kiro 'opens the PR that bumps the pin'
+echo '[]' > "$STUB_PRS"
+
+echo "== case 29: a kind that passed but has no issue gets none (the PR is the whole interaction) =="
+releases codex=0.162.1:0.163.0
+tested codex 0.163.0
+sync_ok codex
+no_issue codex
+
+echo "== case 30: rtk has no contract -> a hand bump =="
+releases rtk=0.51.0:0.52.0
+sync_ok rtk
+title_is rtk "rtk CLI: bump the pin to 0.52.0"
+has rtk 'RTK_VERSION'
+
+echo "== case 31: a red row for latest names the fix, keeps the section, and the dispatch fits the kind =="
+releases muse=1.4.4:1.4.7 codex=0.162.1:0.163.1
+tested muse 1.4.4
+tested codex 0.162.1
+"$REPORT" failure muse 1.4.7
+"$REPORT" failure codex 0.163.1
+sync_ok muse codex
+title_is muse "muse CLI: contract failed on 1.4.7"
+has muse 'gh workflow run muse-contract.yml --ref develop -f version=latest'
+has muse '`muse` `1.4.7`'
+has muse 'Red contracts'
+title_is codex "codex CLI: contract failed on 0.163.1"
+has codex 'gh workflow run codex-contract.yml --ref develop'
+hasnt codex 'cli_version'
+
+echo "== case 32: a newer release replaces the red one on an unattended kind -> the issue closes =="
+codex_num="$(issue_of codex)"
+releases codex=0.162.1:0.163.2
+sync_ok codex
+no_issue codex
+[ "$(cat "$STUB_ISSUES/$codex_num/state")" = closed ] || fail "codex issue not closed"
+grep -qF 'Nothing left to do here' "$STUB_ISSUES/$codex_num/comments" || fail "closed without saying why"
+
+echo "== case 33: the pin caught up -> the issue closes; an unreadable source leaves an issue alone =="
+releases rtk=0.52.0:0.52.0 kiro=2.29.1:2.30.0 failed=kiro
+sync_ok rtk kiro
+no_issue rtk
+[ "$(issue_of kiro)" = "$kiro_num" ] || fail "an unreadable kiro source touched its issue"
+grep -qF 'kiro: release source unreadable' "$WORK/out" || fail "the unreadable row was not reported"
+releases kiro=2.30.0:2.30.0
+sync_ok kiro
+no_issue kiro
+
+echo "== case 33b: a red marker with no row (recorded before the issue existed) still opens it =="
+releases muse=1.4.4:1.4.8
+printf '1.4.8' > "$STUB_TESTED/red-muse"
+for d in "$STUB_ISSUES"/1[0-9][0-9]; do echo closed > "$d/state"; done
+sync_ok muse
+title_is muse "muse CLI: contract failed on 1.4.8"
+"$REPORT" failure muse unknown    # replaces the row in the open issue; the marker must still count
+sync_ok muse
+title_is muse "muse CLI: contract failed on 1.4.8"
+rm "$STUB_TESTED/red-muse"
+for d in "$STUB_ISSUES"/1[0-9][0-9]; do echo closed > "$d/state"; done
+sync_ok muse   # control: the same release without the marker is the watcher's to run
+no_issue muse
+
+echo "== case 33c: a writer that opened the issue between lookup and create is reused, not doubled =="
+for d in "$STUB_ISSUES"/1[0-9][0-9]; do echo closed > "$d/state"; done
+releases rtk=0.51.0:0.52.0
+touch "$STUB_RUNS/race-rtk"
+sync_ok rtk
+[ ! -e "$STUB_RUNS/race-rtk" ] || fail "the race hook never fired; the case proves nothing"
+n=0; for d in "$STUB_ISSUES"/1[0-9][0-9]; do
+  [ "$(cat "$d/state")" = open ] && case "$(cat "$d/title")" in "rtk CLI: "*) n=$((n + 1)) ;; esac
+done
+[ "$n" = 1 ] || fail "expected 1 open rtk issue, got $n"
+title_is rtk "rtk CLI: bump the pin to 0.52.0"
+
+echo "== case 33d: a sync with nothing new does not edit the issue =="
+grep -q "^gh issue edit $(issue_of rtk) " "$STUB_LOG" || fail "control: case 33c never edited the issue"
+: > "$STUB_LOG"
+sync_ok rtk
+grep -qF 'unchanged' "$WORK/out" || fail "the unchanged issue was not reported as such"
+if grep -q '^gh issue edit' "$STUB_LOG"; then fail "an unchanged issue was edited"; fi
+
+echo "== case 34: a streak keeps the issue open even when the pin is current =="
+releases agy=1.3.4:1.3.4
+cat > "$STUB_RUNS/agy-contract.json" <<J
+[{"conclusion":"failure","url":"https://x/run/8","createdAt":"$NOWISO"},{"conclusion":"failure","url":"https://x/run/7","createdAt":"$NOWISO"}]
+J
+"$REPORT" streak agy-contract 2
+sync_ok agy
+title_is agy "agy CLI: contract fails on develop"
+has agy 'gh workflow run agy-contract.yml --ref develop -f cli_version=latest'
+
+echo "== case 35: the list lookup stays empty through the real sync -> still one issue, with the row and the marker =="
+for d in "$STUB_ISSUES"/1[0-9][0-9]; do echo closed > "$d/state"; done
+releases muse=1.0.0:1.1.0
+touch "$STUB_RUNS/nolist-muse"
+SYNC="$SYNC_SH" "$REPORT" failure muse 1.1.0 || fail "failure with a lagging lookup exited $?"
+rm "$STUB_RUNS/nolist-muse"
+n=0
+for d in "$STUB_ISSUES"/1[0-9][0-9]; do
+  [ "$(cat "$d/state")" = open ] && case "$(cat "$d/title")" in "muse CLI: "*) n=$((n + 1)) ;; esac
+done
+[ "$n" = 1 ] || fail "expected one muse issue after report + sync, got $n"
+has muse '`muse` `1.1.0`'
+title_is muse "muse CLI: contract failed on 1.1.0"
+
+echo "== case 30: a gone fragment keeps an issue open on a kind the watcher handles; clearing it lets it close =="
+for d in "$STUB_ISSUES"/1[0-9][0-9]; do case "$(cat "$d/title")" in "agy CLI: "*) echo closed > "$d/state" ;; esac; done
+releases agy=1.0.0:1.0.1
+sync_ok agy
+no_issue agy   # control: the same drift with no row opens nothing
+"$REPORT" fragments agy 1.0.1 'Esc to cancel'
+sync_ok agy
+title_is agy "agy CLI: upstream message fragments gone in 1.0.1"
+has agy '`Esc to cancel`'
+has agy 'This is a place to look, not proof of a break'
+tested agy 1.0.1                       # the contract passed: still not "just merge"
+sync_ok agy
+title_is agy "agy CLI: upstream message fragments gone in 1.0.1"
+releases agy=1.0.0:1.0.2               # a newer release replaced the one the row was about
+sync_ok agy
+no_issue agy
+"$REPORT" fragments-clear agy
 
 echo "OK: one unreadable release source no longer stops the watcher"

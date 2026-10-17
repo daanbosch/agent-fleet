@@ -428,6 +428,19 @@ type chatSendReq struct {
 	// in the composer — today only the session-handoff first turn ("handoff"). It is stored
 	// on the user message (ChatMessage.Source) so the composer's ↑ history skips it.
 	Source string `json:"source,omitempty"`
+	// Retry re-runs a turn that failed after its user message was stored (an expired login the
+	// member has since renewed). When the conversation still ends in that same user message it is
+	// reused; appending it again would show one utterance twice, permanently.
+	Retry bool `json:"retry,omitempty"`
+}
+
+// reusesFailedUserTurn reports whether a retry request should run on the existing last message.
+func reusesFailedUserTurn(c *ChatConversation, req chatSendReq, content string) bool {
+	if !req.Retry || len(c.Messages) == 0 {
+		return false
+	}
+	last := c.Messages[len(c.Messages)-1]
+	return last.Role == "user" && strings.TrimSpace(last.Content) == content
 }
 
 // SourceHandoff is the Console's auto-sent session-handoff request (useSessionActions).
@@ -549,7 +562,9 @@ func HandleChatStream(w http.ResponseWriter, r *http.Request) {
 	prov := ChatProviderFor(c) // pinned agent, or the available fallback (claude-less WS)
 	actualAgent := ChatProviderKind(c, prov)
 
-	c.Messages = append(c.Messages, ChatMessage{Role: "user", Content: content, TS: NowMs(), Source: sendSource(req.Source)})
+	if !reusesFailedUserTurn(c, req, content) {
+		c.Messages = append(c.Messages, ChatMessage{Role: "user", Content: content, TS: NowMs(), Source: sendSource(req.Source)})
+	}
 	c.AutoTurns, c.AutoPausedNotified = 0, false
 
 	// From here the response is an SSE stream; per-frame errors ride the stream body.

@@ -391,3 +391,69 @@ whether a refresh is allowed, and a refresh just before it yields an access toke
    press), and polls once a minute only while such a toast is up. A notification opens the modal only for a
    profile the list shows as expiring; once open, the modal is a snapshot that a passing end does not close. No CP
    change.
+
+## Note — logout renews an expired access token first (2026-10-05)
+
+The per-profile logout used to send the cached access token to the portal's Logout call as is. That token lives
+about an hour and the CLI renews it only on use, so a logout long after the last use got `401` and left the portal
+session running (#1689). The Agent now renews an expired token (or one the portal answers 401) in memory through
+SSO OIDC `CreateToken` (`grant_type=refresh_token`), when the cache holds the refresh token, client id and secret
+and an unexpired registration, and revokes with the fresh token. Nothing is written back to the cache. If AWS
+answers the renewal with `invalid_grant` or `expired_token` (400/401) the portal session is already over: the
+answer carries `alreadyEnded: true` and the Console shows the normal "logged out" toast. Other refusals
+(`invalid_client`, `invalid_request`, `slow_down`, an unreadable body) say nothing about the session and keep the
+warning. Redirects from the AWS endpoints are not followed. The "AWS could not be told" warning stays for network failures, 5xx
+and a renewal that is impossible. The decision above is unchanged.
+
+## Note — a run at a member's terminal asks the Console too (2026-10-08)
+
+Issue #1512. Decision 6 kept the in-terminal login for a run with a terminal and gave no reason beyond leaving
+existing behaviour alone; inside a workspace nearly every terminal is a Console pane, so the member got two login
+flows depending on who ran the command. Decision 6's first bullet is amended; decisions 1 to 5 stand.
+
+- **Inside a workspace** (`AF_CP_BASE_URL` set), a run **at a terminal** with the default `--login` mode and a
+  Console-eligible profile (decision 1: a Settings profile, no `source_profile` chain) files the request, says so,
+  and waits like an agent's run. Everything else at a terminal is as before: `--login` runs the device-code login
+  in the terminal, `--no-login` never asks, a profile the Console cannot vouch for, and a run outside a workspace,
+  keep the in-terminal login.
+- **Whose terminal.** Only a terminal that is not an agent's: the session behind `AF_SESSION_NAME` is a shell or
+  ssm session, or there is none. A run with a terminal inside an agent session (a pty-backed tool) keeps its
+  in-terminal login and its per-kind wait, so what an agent does is unchanged.
+- **Wait.** Ten minutes (`consoleLoginTerminalWait`), about the device-code lifetime; a person is at the keyboard
+  and no agent tool times the command out. A run that ends without approval exits 3 with the request still
+  pending, as decision 5 has it. **Ctrl-C** (SIGINT or SIGTERM, caught only during the wait) ends the wait with
+  exit 3 and leaves the request for the Console or the next run. A Ctrl-C that arrives while a credential check is
+  running wins over that check's outcome (even a success), and the waits for the request directory's lock and the
+  gcloud root's lock end with the Ctrl-C or the wait budget instead of with the lock's holder. The check's
+  `aws` / `gcloud` child runs under a context that ends with the Ctrl-C (SIGTERM included) or the budget: it is
+  killed and the check returns only after it exited, so nothing outlives the wait. The wait for the cached-login lock, which a logout holds across its network call, ends with the same context. A lock or child that runs
+  out the budget ends the run as a timeout (exit 3, request pending), never as a Console that could not be
+  asked, so no terminal login follows it.
+- **Console cannot be asked** (the request cannot be filed): a terminal run falls back to the in-terminal login
+  instead of exit 3. Whether a Console is open to show the toast cannot be known; `--login` and Ctrl-C are the way
+  out, and the message names both.
+- **Concurrency.** Unchanged: one request per sso-session; an agent's run and a terminal run for the same profile
+  join the same request and both continue when it resolves. The terminal run only files and polls; the device
+  code, URL and approval stay behind the Console's routes and the member's own press, so a terminal run cannot
+  approve anyone's login.
+
+`af-gcloud-exec` follows the same rule (ADR 0107 note of this date).
+
+## Note — a role assumed from a Settings profile (2026-10-08)
+
+Settings > AWS profiles/SSM gained a profile kind `assume_role` (issue #1109): no portal of its own, it
+assumes a role from the login of another Settings SSO profile. Decisions 1 to 5 stand; what this note
+settles is where the Console login lands for such a profile.
+
+- **The login is the source's.** A chained profile has no sso-session. `af-aws-exec` that needs a login for it
+  files the request under the *source* profile's name and `af-<source>` sso-session, the same request the
+  source's own row and runs would join, and the member approves the source in the Console as before. The check
+  that the cache now works is the chain's credential export, so a login that lands but cannot assume the role
+  ends the run as a failure, not as a login still needed.
+- **Eligibility is the source's.** The Console is asked only when the source is a complete Settings profile
+  that the files define as Settings does (decision 1's rule, applied to the source). Otherwise the run behaves as
+  an own-`~/.aws` chain does: exit 3 with the `aws sso login --profile <source>` command.
+- **Rows.** The chained row's "Log in" opens the login for its source, its state follows the source's, and the
+  Agent refuses a login or logout addressed to the chained name (`chained_profile`, naming the source).
+- **Export.** A chained profile is exported only when its source is in the same managed block, because a
+  `source_profile` naming a profile the member defined themselves would start the chain from whatever that holds.
