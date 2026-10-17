@@ -69,6 +69,12 @@ CLI は通常 §10.2.2 が自動で開く版上げ PR で上がる。下の手�
    どちらも既定 false。`e2e.yml` の `live` は L4（headless の claude ターン）、`codex-contract.yml`
    の `live` は Tier 2（ワークフローの記載で 1 回およそ 45k tokens・実測）。どちらも TUI を
    描かないので、状態検出を見るのは contract ワークフローの仕事で L4 ではない。
+   cursor / copilot / kiro の contract は最後に `caps drift probes` ステップを持つ。割り込み・
+   発言時点からの分岐・モデル指定の 3 つのプローブ（`workspace/agent/caps_probe.go`）が、各 kind の
+   宣言 `Caps` を実 CLI の挙動と突き合わせる。期待値は `Caps()` から導き、食い違えば（宣言どおり動かない
+   場合も、`false` 宣言なのに動く場合も）`DRIFT` として落ちる。報告は他の赤い contract と同じ
+   `cli-contract-report.sh failure` の行として kind の更新 issue に載る。cap を `false` にするのは、
+   プローブが失敗を観測してからにする。
 6. **ホストに反映**: `run-dev.sh`。ビルド直後にイメージスモーク（L1）が走る。既定の lean
    イメージでは `versions.json` が新しいピンを持ち、CLI が焼かれていないことを確かめる。
    `BAKE_AGENT_CLIS=1` なら導入された版も確かめる。

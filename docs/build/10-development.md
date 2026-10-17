@@ -74,6 +74,13 @@ manifest `versions.json` on the default lean image — is
    is L4, a headless claude turn. On `codex-contract.yml`, it is Tier 2 (the workflow
    records roughly 45k tokens per run, measured). Neither draws the TUI, so state
    detection is the contract workflows' job, not L4's.
+   The cursor, copilot and kiro contracts also end with a `caps drift probes` step: the
+   interrupt, fork-at and model-override probes (`workspace/agent/caps_probe.go`) hold each
+   kind's declared `Caps` against what the real CLI does. They derive the expectation from
+   `Caps()` and fail as `DRIFT` in either direction (declared but broken, or declared
+   `false` but working); the failure reaches the kind's update issue through the same
+   `cli-contract-report.sh failure` row as any red contract. Declare a cap `false` only
+   after a probe has seen it fail.
 6. **Reflect it on the host** with `run-dev.sh`. The image smoke test (L1) runs right
    after the build. On the default lean image it checks that `versions.json` carries
    the new pins and that no CLI is baked in; with `BAKE_AGENT_CLIS=1` it also checks
