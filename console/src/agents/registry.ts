@@ -138,7 +138,7 @@ export interface AgentDescriptor {
   // Read from the kind catalog (managedDefault), not declared here; see kindCatalog.ts.
   readonly managedDriver: boolean;
   // Whether this kind can ever run in a Terminal (CLI) pane: false for a managed-only kind
-  // (lcpp, muse; ADR 0093 決定 2 — no CLI program to put in a pane, BuildLaunch always errors).
+  // (lcpp, muse; ADR 0093 decision 2 — no CLI program to put in a pane, BuildLaunch always errors).
   // Read by the driver toggle in LaunchModal and the driver-switch item in SessionMenu, so a
   // managed-only kind never offers a choice that can only fail. From the catalog (managedOnly).
   readonly terminalDriver?: boolean;
@@ -594,7 +594,7 @@ const PRESENTATION: Record<SessionKind, Presentation> = {
     defaultModeLabel: "",
     skillTrigger: "",
     // Managed-only, the same shape as lcpp (the catalog says so): BuildLaunch refuses
-    // unconditionally (決定 2).
+    // unconditionally (decision 2).
     tuiMemoryCost: "",
     caps: caps({
       // Live-verified 2026-09-22 (ADR 0095 P2-17), one subscription turn: the driver reads the

@@ -306,6 +306,40 @@ describe("loadKindCatalog", () => {
     await vi.waitFor(() => expect(AGENTS.claude.managedDriver).toBe(false));
   });
 
+  it("drops the retry backoff of tenant A when the tenant becomes B, and B starts again at 3 s", async () => {
+    vi.useFakeTimers();
+    tenant = "a";
+    apiMock.mockResolvedValue({ error: { code: "http_502", status: 502 } });
+    await loadKindCatalog(); // A fails: a 3 s retry is pending
+    expect(apiMock).toHaveBeenCalledTimes(1);
+    tenant = "b";
+    syncKindCatalogTenant();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(apiMock).toHaveBeenCalledTimes(2); // B asked at once; A's timer was cancelled
+    await vi.advanceTimersByTimeAsync(2_900);
+    expect(apiMock).toHaveBeenCalledTimes(2); // A's old 3 s timer does not fire
+    await vi.advanceTimersByTimeAsync(200); // B's own first backoff is 3 s
+    expect(apiMock).toHaveBeenCalledTimes(3);
+    resetKindCatalog();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(apiMock).toHaveBeenCalledTimes(3); // nothing survives the reset
+  });
+
+  it("does not start a second retry chain when load is called again during a backoff", async () => {
+    vi.useFakeTimers();
+    apiMock.mockResolvedValue({ error: { code: "http_502", status: 502 } });
+    await loadKindCatalog(); // fails: 3 s backoff pending
+    syncKindCatalogTenant(); // e.g. booted flips while waiting
+    await loadKindCatalog();
+    await vi.advanceTimersByTimeAsync(2_900);
+    expect(apiMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(apiMock).toHaveBeenCalledTimes(2);
+    resetKindCatalog();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(apiMock).toHaveBeenCalledTimes(2); // one chain, so one reset ends it
+  });
+
   it("keeps the catalog when the tenant has not changed", async () => {
     tenant = "a";
     apiMock.mockResolvedValue(body([row("claude", { managedDefault: true })]));

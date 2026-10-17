@@ -15,7 +15,7 @@ let inflight: Promise<void> | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let attempt = 0;
 let epoch = 0;
-let loadedFor: string | null = null; // the tenant the installed catalog was fetched for
+let owner: string | null = null; // the tenant the catalog, the request or the pending retry belongs to
 
 // A failure that asking again cannot fix: the login has expired, or the request itself was
 // refused (4xx other than the "slow down / try later" pair). Network errors, 5xx, an
@@ -29,8 +29,10 @@ function isTerminal(body: unknown): boolean {
 export function loadKindCatalog(): Promise<void> {
   if (hasKindCatalog()) return Promise.resolve();
   if (inflight) return inflight;
+  if (retryTimer) return Promise.resolve(); // a backoff is already pending: a second chain would double every retry
   const mine = epoch;
   const tenant = getTenant();
+  owner = tenant;
   const p: Promise<void> = Promise.resolve()
     .then(() => api("api/agents/kinds")) // relative: the Console may be served under a sub-path
     .catch(() => null)
@@ -45,7 +47,6 @@ export function loadKindCatalog(): Promise<void> {
       const cat = parseKindCatalog(raw);
       if (cat) {
         attempt = 0;
-        loadedFor = tenant;
         setKindCatalog(cat);
         return;
       }
@@ -60,12 +61,13 @@ export function loadKindCatalog(): Promise<void> {
   return p;
 }
 
-/** Makes the catalog belong to the current tenant: drops one fetched for another and loads again.
+/** Makes the catalog belong to the current tenant: drops one fetched for another (or a request or
+ *  retry backoff running for another) and loads again.
  *  Called from an effect keyed on the tenant, because the tenant can change at any moment of
  *  boot (a retried whoami picking the ?tenant= hint late) and no ordering of one-shot calls
  *  covers that. Does nothing before the first load has been asked for. */
 export function syncKindCatalogTenant(): void {
-  if (hasKindCatalog() && loadedFor !== getTenant()) resetKindCatalog();
+  if (owner !== null && owner !== getTenant()) resetKindCatalog(); // answer, request or retry alike
   void loadKindCatalog();
 }
 
@@ -79,7 +81,7 @@ export async function loadKindCatalogAfter(ready: Promise<unknown>, alive: () =>
 /** Forgets the catalog and any pending retry; the next loadKindCatalog() asks again. */
 export function resetKindCatalog(): void {
   epoch++;
-  loadedFor = null;
+  owner = null;
   inflight = null;
   attempt = 0;
   if (retryTimer) clearTimeout(retryTimer);
