@@ -368,9 +368,9 @@ art as it serves it.
   codex, cursor, copilot, kiro and opencode only a pane repaint does (a spinner or elapsed-time
   counter counts), so a silent tool under a pane that stays static for an hour can lapse, while a
   stuck session whose spinner keeps animating keeps holding. Use the "do not auto-stop" pin for
-  long silent work on those kinds. A Managed cursor, kiro, codex or opencode session is bounded the same way, on the runtime's own sign of life: its last message for that session, or a running tool (a tool process under the runtime for
-  cursor and kiro, a tool call still open for opencode 2.x). Managed muse, lcpp and copilot, and Terminal muse, lcpp, shell and ssm,
-  are not yet bounded this way, and background
+  long silent work on those kinds. A Managed cursor, kiro, codex or opencode session is bounded the same way, on the runtime's own sign of life: its last message for that session, or a running tool (an open tool call or item, or for cursor and kiro a tool process under the runtime). It was measured on cursor-agent 2026.10.16, kiro-cli 2.31.0, codex 0.163.0 and opencode 2.0.32 with a local shell tool;
+  whenever the Agent cannot tell what is running (a restart, a reconnect, a failed process-table read) the session keeps holding. opencode 1.x, Managed muse, lcpp and copilot, and Terminal muse, lcpp, shell and ssm,
+  are not bounded this way (see ADR 0055, 2026-10-17 addendum), and background
   work and the "do not auto-stop" pin are never subject to it.
 - **force-stop (brute force)**: `docker compose down` **does not stop user Workspaces** (they
   are outside compose management). To stop a specific Workspace for sure, a super_admin

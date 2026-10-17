@@ -464,7 +464,7 @@ type threadHandle struct {
 	act agents.Activity
 	// tools holds the tool calls the runtime reported started and not finished: a silent tool
 	// sends nothing while it runs, so this is the only trace of it (progress_managed.go).
-	tools toolSet
+	tools agents.InFlight
 }
 
 // tq returns the handle's queue, creating it on first use. Caller holds h.mu.
@@ -523,6 +523,7 @@ func (h *threadHandle) currentState() agents.TurnState {
 // blocked turn call (if any) unblocks with a transport error and keeps unknown until
 // reconcile resolves it.
 func (h *threadHandle) runtimeLost() {
+	h.tools.Unknown()
 	h.mu.Lock()
 	h.alive = false
 	h.compacting = false

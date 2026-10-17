@@ -2,7 +2,6 @@ package opencode
 
 import (
 	"encoding/json"
-	"sync"
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
@@ -23,40 +22,7 @@ func (managedDriver) ManagedProgress(m session.Meta) (time.Time, bool) {
 	if h == nil {
 		return time.Time{}, false
 	}
-	return h.act.Progress(time.Now(), h.tools.any)
-}
-
-// toolSet is the ids of the tool calls in flight.
-type toolSet struct {
-	mu  sync.Mutex
-	ids map[string]struct{}
-}
-
-func (s *toolSet) add(id string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.ids == nil {
-		s.ids = map[string]struct{}{}
-	}
-	s.ids[id] = struct{}{}
-}
-
-func (s *toolSet) done(id string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.ids, id)
-}
-
-func (s *toolSet) clear() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.ids = nil
-}
-
-func (s *toolSet) any() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.ids) > 0
+	return h.act.Progress(time.Now(), h.tools.State)
 }
 
 // noteProgress stamps the owning handle for an event that names its session and keeps the set of
@@ -79,13 +45,15 @@ func noteProgress(typ string, props json.RawMessage) {
 	}
 	h.act.Touch()
 	switch typ {
-	case "session.tool.called":
-		if p.ID != "" {
-			h.tools.add(p.ID)
-		}
+	case "session.tool.called", "session.tool.progress":
+		// progress restates a running call, so one whose called event fell into a gap in the
+		// stream is restored by the next event it sends.
+		h.tools.Add(p.ID)
 	case "session.tool.success", "session.tool.failed", "session.tool.error":
-		h.tools.done(p.ID)
-	case "session.step.ended", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.idle":
-		h.tools.clear()
+		h.tools.Done(p.ID)
+	case "session.execution.started", "session.step.ended", "session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.idle":
+		// A turn boundary seen on a live stream: nothing from before it is still running, and
+		// the set is trustworthy again.
+		h.tools.Reset()
 	}
 }

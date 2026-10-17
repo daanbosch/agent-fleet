@@ -775,6 +775,11 @@ func (s *Supervisor) streamEvents(addr string, gen int) error {
 	if res.StatusCode != http.StatusOK {
 		return fmt.Errorf("event stream: HTTP %d", res.StatusCode) // a 401 must not read as a clean EOF
 	}
+	// Events are not replayed across a reconnect, so a tool call announced during the gap is
+	// invisible: the in-flight sets are unknown until a turn boundary shows up on this stream.
+	for _, h := range liveHandles() {
+		h.tools.Unknown()
+	}
 	sc := bufio.NewScanner(res.Body)
 	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for sc.Scan() {

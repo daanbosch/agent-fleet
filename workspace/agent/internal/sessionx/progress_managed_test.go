@@ -1,6 +1,7 @@
 package sessionx
 
 import (
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
 	"testing"
 	"time"
 
@@ -112,3 +113,39 @@ func TestManagedProgressWithoutHandleKeepsHolding(t *testing.T) {
 		}
 	}
 }
+
+type fakeReporter struct {
+	agents.Driver
+	at time.Time
+	ok bool
+}
+
+func (f fakeReporter) ManagedProgress(session.Meta) (time.Time, bool) { return f.at, f.ok }
+
+// managedProgressAt must hand the driver's answer through untouched, and progressOf must carry
+// it to the wire: stale stays stale, fresh stays fresh, "cannot tell" stays unknown.
+func TestManagedProgressAtPassesTheDriverAnswerThrough(t *testing.T) {
+	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	old := managedDrivers[session.KindCursor]
+	t.Cleanup(func() { managedDrivers[session.KindCursor] = old })
+	m := managedMeta(session.KindCursor)
+	for _, tc := range []struct {
+		name string
+		f    fakeReporter
+		want *time.Time
+	}{
+		{"fresh", fakeReporter{at: now, ok: true}, &now},
+		{"stale", fakeReporter{at: now.Add(-3 * time.Hour), ok: true}, ptr(now.Add(-3 * time.Hour))},
+		{"unknown", fakeReporter{}, nil},
+	} {
+		managedDrivers[session.KindCursor] = tc.f
+		p := managedFixture{}.probes(now, "")
+		p.managedAt = managedProgressAt
+		got, ok := progressOf(m, "working", p)
+		if (tc.want == nil) == ok || (ok && !got.Equal(*tc.want)) {
+			t.Errorf("%s: progressOf = %v, %v; want %v", tc.name, got, ok, tc.want)
+		}
+	}
+}
+
+func ptr(t time.Time) *time.Time { return &t }
