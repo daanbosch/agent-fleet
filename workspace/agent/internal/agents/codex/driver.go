@@ -632,6 +632,10 @@ type threadHandle struct {
 	// it as a synthetic trailing error turn until clearLastError runs at the next turn start.
 
 	bg bgCache // the thread's background terminals, for BackgroundWork (background.go)
+
+	// act stamps every message the runtime sends for this handle, for the busy-row progress bound
+	// (ManagedProgress).
+	act agents.Activity
 }
 
 // tq returns the handle's queue, creating it on first use. Caller holds h.mu.
@@ -1389,6 +1393,16 @@ func deliverUserInputRequest(c *appClient, reqID json.RawMessage, p userInputReq
 // appclient.go's readLoop). This is where the turn state machine (§4) is decided; the
 // pump receives the terminal state through turnEnd.
 func dispatchNotification(msg rpcMsg) {
+	// Any notification naming a thread is a sign of life for its handle. The account-wide ones
+	// (rate limits, MCP startup) name none and must not keep every session looking alive.
+	var named struct {
+		ThreadID string `json:"threadId"`
+	}
+	if json.Unmarshal(msg.Params, &named) == nil {
+		if h := handleByTid(named.ThreadID); h != nil {
+			h.act.Touch()
+		}
+	}
 	switch msg.Method {
 	case "turn/started":
 		var p struct {

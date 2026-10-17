@@ -256,3 +256,34 @@ measured per kind. Measured on the CLIs baked into the Workspace image (codex 0.
   static for an hour can lapse, and a stuck session whose spinner keeps animating is held
   indefinitely (the safe side). The pane must also be captured successfully on the current poll; a
   failed capture gives no answer rather than a stale age.
+
+## Addendum (2026-10-17): the bound reaches Managed cursor, kiro, codex and opencode (#1942)
+
+A Managed session has no pane, so the signals of the two addenda above do not exist for it. The
+runtimes were driven through the Agent's own Managed drivers (the real spawn / Resume / Send path,
+a throwaway HOME where the CLI allows it, the model asked to run a silent `sleep 120`), sampling
+once every 5 s:
+
+| Kind (version) | Does the runtime message stay fresh? | Signal that does | Observed |
+|---|---|---|---|
+| cursor (cursor-agent 2026.10.16) | no: 22 ACP notifications at t=5 s, the next at t=125 s | a tool process under the ACP child, a session leader of its own (`procx.ToolProcessIn`) | present in all 24 samples from t=5 s to t=120 s, absent before and after |
+| kiro (kiro-cli 2.31.0) | no: 3 notifications in total, the last 112 s before the tool ended | a process under the runtime in the runtime's own process group, not a session leader (`procx.GroupToolIn`); the leader rule reads false throughout | present in all 24 samples during the sleep, absent before and after |
+| codex (0.163.0) | yes: the model polls the running command, so a thread item started / completed pair arrives every 30-35 s | the last notification that names the session's thread | no gap above 40 s |
+| opencode (2.0.32) | no: nothing for the whole 120 s, the server-wide stream included (it has no heartbeat) | the pair `session.tool.called` ... `session.tool.success`, keyed by call id | the call is open for the whole sleep |
+
+- Decision: Managed cursor, kiro, codex and opencode now report `progressAgeSec`. The Agent takes the
+  newest of the status file's mtime and the driver's own sign (`agents.ManagedProgressReporter`): the
+  last message from the runtime for this session, or "now" while the signal above says a tool
+  runs. No live handle, or a runtime never heard from, gives no answer and keeps holding. The
+  one-hour lapse and the CP side are unchanged.
+- codex and opencode share one daemon across sessions, so a tool process cannot be attributed from
+  the process table; they use the event stream instead. opencode's signal exists on 2.x only: 1.x
+  is not stamped and keeps holding. A tool call whose end event is lost is dropped when its step
+  or execution ends, so it cannot pin a row beyond the turn.
+- Not bounded, because no signal was measured: Managed muse (not logged in on the measuring
+  Workspace), lcpp (in-process engine, no runtime to message) and copilot (no Copilot login). They
+  keep holding. Terminal muse / lcpp / shell / ssm stay with #1943. #1942 stays open for them.
+- Caveats: one model and one CLI version per kind. codex's stream is model-driven (a turn that waits
+  on a command without polling would go quiet and lapse after an hour), and a hung tool is
+  indistinguishable from a long one for cursor, kiro and opencode, so it holds for as long as it
+  lives (the safe side). Re-measure when bumping a CLI version.

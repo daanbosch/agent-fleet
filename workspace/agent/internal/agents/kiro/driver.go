@@ -466,6 +466,10 @@ type threadHandle struct {
 	ctxPct    float64 // latest contextUsagePercentage (0–100)
 	credits   float64 // accumulated meteringUsage (in-memory, for this handle's lifetime)
 	hasUsage  bool    // whether metadata arrived at least once (no context shown until it does)
+
+	// act stamps every message the runtime sends for this handle, for the busy-row progress bound
+	// (ManagedProgress).
+	act agents.Activity
 }
 
 // bypassNow reports the resolved "skip permission confirmation" choice (docs/log/76). Resume
@@ -1214,6 +1218,7 @@ func (h *threadHandle) Snapshot() (agents.ThreadSnapshot, error) {
 // (metadata / subagent / commands / retry_warning) arrive here too, but v1 A2 does not use
 // them (wiring live usage into the UI is a later track — see the top of driver.go).
 func (h *threadHandle) onNotify(method string, params json.RawMessage) {
+	h.act.Touch()
 	if method == "_kiro.dev/metadata" {
 		h.onMetadata(params) // Track D: live context% / credits
 		return
@@ -1358,6 +1363,7 @@ func toolOutput(raw json.RawMessage) string {
 // Respond → cl.respond. It does not happen under --trust-all-tools, but a plan launch can
 // reach it.
 func (h *threadHandle) onServerRequest(cl *acpClient, id json.RawMessage, method string, params json.RawMessage) {
+	h.act.Touch()
 	if method != "session/request_permission" {
 		// An unanswered server-initiated request wedges the turn, so reply with an error.
 		_ = cl.write(map[string]any{

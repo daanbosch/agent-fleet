@@ -338,7 +338,9 @@ Control Plane が配信時に同梱の画像を塗り替えるので、環境ご
   無い時間」の上限です。claude と agy は実行中のツールプロセスも生存とみなしますが、codex・cursor・
   copilot・kiro・opencode はペインの再描画だけが生存信号です（スピナーや経過時間の更新も含む）。
   そのため、ペインが 1 時間静止したままの無出力ツールは失効し得て、逆にスピナーが動き続ける固まった
-  セッションは抱え続けます。これらの kind で長い無出力作業をするときは「自動停止しない」ピンを使ってください。managed セッションと他の kind（muse・lcpp・shell・ssm）はまだこの上限の対象外で、
+  セッションは抱え続けます。これらの kind で長い無出力作業をするときは「自動停止しない」ピンを使ってください。managed の cursor・kiro・codex・opencode セッションも、ランタイム自身の生存信号（そのセッションに関する最後のメッセージ、
+  または実行中のツール。cursor と kiro はランタイムの下のツールプロセス、opencode 2.x は終わっていないツール呼び出し）で同じように上限がかかります。
+  managed の muse・lcpp・copilot と、ターミナルの muse・lcpp・shell・ssm はまだこの上限の対象外で、
   バックグラウンド作業と「自動停止しない」ピンは常に対象外です。
 - **force-stop（力業）**: `docker compose down` では**ユーザーの Workspace は止まりません**（compose
   管理外）。特定の Workspace を確実に止めたいときは、super_admin が Console の Admin パネルから

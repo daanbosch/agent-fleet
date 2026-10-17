@@ -444,6 +444,13 @@ type threadHandle struct {
 	// client's turn, which a retry status must never be attributed to.
 	turnSent bool
 	events   chan agents.Event
+
+	// act stamps every message the runtime sends for this handle, for the busy-row progress bound
+	// (ManagedProgress).
+	act agents.Activity
+	// tools holds the tool calls the runtime reported started and not finished: a silent tool
+	// sends nothing while it runs, so this is the only trace of it (progress_managed.go).
+	tools toolSet
 }
 
 // tq returns the handle's queue, creating it on first use. Caller holds h.mu.
@@ -1382,6 +1389,7 @@ func handleServeEvent(data []byte) {
 		}
 		ev.Type, ev.Properties = inner.Type, inner.Properties
 	}
+	noteProgress(ev.Type, ev.Properties)
 	switch ev.Type {
 	case "question.asked":
 		var q serveQuestion

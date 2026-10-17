@@ -371,6 +371,9 @@ type threadHandle struct {
 	events       chan agents.Event
 
 	buf transcriptBuf // transcript built from ACP session/update (guarded by its own lock)
+
+	// act stamps every message the child sends, for the busy-row progress bound (progress.go).
+	act agents.Activity
 }
 
 // bypassNow reports the resolved "skip permission prompts" choice (docs/log/76). Resume writes
@@ -1056,6 +1059,7 @@ func (h *threadHandle) Snapshot() (agents.ThreadSnapshot, error) {
 // MUST be fast (no RPC, no h.mu) — it only appends to the transcript buffer (tmu)
 // and, for current_mode_update, records the mode under h.mu.
 func (h *threadHandle) onNotify(method string, params json.RawMessage) {
+	h.act.Touch()
 	if method != "session/update" {
 		return
 	}
@@ -1208,6 +1212,7 @@ func toolOutput(raw json.RawMessage) string {
 // MUST NOT block: record the Interaction and return; the answer goes back later via
 // Respond -> cl.respond. It does not happen under --force, but plan mode can reach it.
 func (h *threadHandle) onServerRequest(cl *acpClient, id json.RawMessage, method string, params json.RawMessage) {
+	h.act.Touch()
 	if method != "session/request_permission" {
 		// An unknown server-initiated request wedges the turn if it goes unanswered, so
 		// return an error.
