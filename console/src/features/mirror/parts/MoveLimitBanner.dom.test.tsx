@@ -9,7 +9,11 @@ import { createRoot, type Root } from "react-dom/client";
 let routes: Record<string, unknown> = {};
 vi.mock("../../../core/api/client.ts", async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
-  api: async (path: string) => routes[`GET ${path}`] ?? { error: { code: "unrouted" } },
+  // A function route runs per call: it may throw (a rejected fetch) or never settle.
+  api: async (path: string) => {
+    const r = routes[`GET ${path}`];
+    return typeof r === "function" ? (r as () => unknown)() : (r ?? { error: { code: "unrouted" } });
+  },
 }));
 
 const { MoveLimitBanner } = await import("./MoveLimitBanner.tsx");
@@ -131,6 +135,35 @@ describe("MoveLimitBanner", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("drops a usage reading when the re-read rejects", async () => {
+    vi.useFakeTimers();
+    try {
+      routes["GET api/codex/usage"] = { ok: true, fiveHour: { pct: 100 } };
+      routes[PREVIEW] = preview({ targets: [{ kind: "codex", eligible: true }] });
+      await render(src());
+      expect(banner()).toBeNull();
+      routes["GET api/codex/usage"] = () => {
+        throw new Error("offline");
+      };
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(61_000);
+      });
+      // unknown, not full: the band offers the kind again, unmarked.
+      expect(banner()?.textContent).toContain(t("mirror.move_limit"));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not let the previous source's preview speak for the next one", async () => {
+    await render(src());
+    expect(banner()).not.toBeNull();
+    routes["GET api/sessions/s2/move/preview"] = () => new Promise(() => {});
+    await act(async () => root!.render(<MoveLimitBanner session={src({ name: "s2" })} state="limited" running />));
+    for (let i = 0; i < 6; i++) await act(async () => await Promise.resolve());
+    expect(banner()).toBeNull();
   });
 
   it("names the kinds with quota left, and still offers when no kind can be judged", async () => {

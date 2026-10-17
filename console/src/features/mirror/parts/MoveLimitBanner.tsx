@@ -27,8 +27,9 @@ export function MoveLimitBanner({ session, state, running }: { session?: Session
   // A moving or moved source refuses every start; its dialog (retry, cancel, resume anyway) is
   // reached from the row, not from a limit it is no longer waiting on.
   const open = !!session && isLimitState(state) && running && agentOf(session.kind).caps.transcript && !session.moving && !session.movedTo;
-  // Split so that the reads (preview, connections, usage) exist only while a limit is showing.
-  return open ? <LimitBand session={session} /> : null;
+  // Keyed by the source: switching to another limited session starts from nothing, so the
+  // previous one's preview and usage never speak for it. Split so that the reads (preview, connections, usage) exist only while a limit is showing.
+  return open ? <LimitBand key={session.name} session={session} /> : null;
 }
 
 function LimitBand({ session }: { session: Session }) {

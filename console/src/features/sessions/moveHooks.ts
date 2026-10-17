@@ -38,18 +38,18 @@ export function useMoveUsage(kinds: SessionKind[], tick = 0): Partial<Record<Ses
     for (const k of kinds) {
       const ep = MOVE_USAGE_ENDPOINTS[k];
       if (!ep) continue;
+      // A failed or empty re-read (an error body or a rejected fetch alike) drops the kind back to
+      // "unknown" rather than keep a number that may have rolled over.
+      const settle = (u: MoveUsage | null) => {
+        if (!alive) return;
+        setOut((o) => {
+          const { [k]: _old, ...rest } = o;
+          return u ? { ...rest, [k]: u } : rest;
+        });
+      };
       api(ep)
-        .then((d) => {
-          const u = readMoveUsage(d);
-          // A failed or empty re-read drops the kind back to "unknown" rather than keep a number
-          // that may have rolled over.
-          if (!alive) return;
-          setOut((o) => {
-            const { [k]: _old, ...rest } = o;
-            return u ? { ...rest, [k]: u } : rest;
-          });
-        })
-        .catch(() => {});
+        .then((d) => settle(readMoveUsage(d)))
+        .catch(() => settle(null));
     }
     return () => {
       alive = false;
