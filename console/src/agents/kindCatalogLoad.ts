@@ -15,6 +15,7 @@ let inflight: Promise<void> | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let attempt = 0;
 let epoch = 0;
+let loadedFor: string | null = null; // the tenant the installed catalog was fetched for
 
 // A failure that asking again cannot fix: the login has expired, or the request itself was
 // refused (4xx other than the "slow down / try later" pair). Network errors, 5xx, an
@@ -44,6 +45,7 @@ export function loadKindCatalog(): Promise<void> {
       const cat = parseKindCatalog(raw);
       if (cat) {
         attempt = 0;
+        loadedFor = tenant;
         setKindCatalog(cat);
         return;
       }
@@ -58,6 +60,15 @@ export function loadKindCatalog(): Promise<void> {
   return p;
 }
 
+/** Makes the catalog belong to the current tenant: drops one fetched for another and loads again.
+ *  Called from an effect keyed on the tenant, because the tenant can change at any moment of
+ *  boot (a retried whoami picking the ?tenant= hint late) and no ordering of one-shot calls
+ *  covers that. Does nothing before the first load has been asked for. */
+export function syncKindCatalogTenant(): void {
+  if (hasKindCatalog() && loadedFor !== getTenant()) resetKindCatalog();
+  void loadKindCatalog();
+}
+
 /** Loads once `ready` (the tenant settling) resolves, unless the caller has been torn down by
  *  then: a cleanup's reset must not be followed by a load from the effect it belonged to. */
 export async function loadKindCatalogAfter(ready: Promise<unknown>, alive: () => boolean): Promise<void> {
@@ -68,6 +79,7 @@ export async function loadKindCatalogAfter(ready: Promise<unknown>, alive: () =>
 /** Forgets the catalog and any pending retry; the next loadKindCatalog() asks again. */
 export function resetKindCatalog(): void {
   epoch++;
+  loadedFor = null;
   inflight = null;
   attempt = 0;
   if (retryTimer) clearTimeout(retryTimer);

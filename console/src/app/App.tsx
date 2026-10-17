@@ -30,7 +30,7 @@ import { AwsLoginHost } from "../features/awslogin/AwsLoginHost.tsx";
 import { useAwsLoginStore } from "../features/awslogin/store.ts";
 import { useGcpLoginStore } from "../features/gcplogin/store.ts";
 import { clearCachedConns } from "../features/repos/connsCache.ts";
-import { loadKindCatalog, loadKindCatalogAfter, resetKindCatalog } from "../agents/kindCatalogLoad.ts";
+import { loadKindCatalogAfter, resetKindCatalog, syncKindCatalogTenant } from "../agents/kindCatalogLoad.ts";
 import { GcpLoginHost } from "../features/gcplogin/GcpLoginHost.tsx";
 import { AuthExpiredModal } from "../features/auth/AuthExpiredModal.tsx";
 import { ProviderRequiredModal } from "../features/auth/ProviderRequiredModal.tsx";
@@ -372,6 +372,12 @@ export function App() {
     };
   }, []);
 
+  // The kind catalog follows the tenant on its own: this must not share the effect below, which
+  // skips its first run after boot and so misses a tenant that settled late during boot.
+  useEffect(() => {
+    if (booted) syncKindCatalogTenant();
+  }, [booted, tenant]);
+
   // Per-tenant sync: on boot completion AND on tenant switch — restore that
   // tenant's saved layout and refetch tenant-scoped data.
   useEffect(() => {
@@ -390,8 +396,6 @@ export function App() {
       // jobs, cloud logins, the chat list) are not keyed on the tenant, so drop and re-ask. The
       // FILES tree, the connection hook and the chat rail reload on the tenant themselves.
       clearCachedConns();
-      resetKindCatalog();
-      void loadKindCatalog();
       useRepoJobsStore.getState().reset();
       void useRepoJobsStore.getState().refresh();
       useChatStore.getState().resetConvs();

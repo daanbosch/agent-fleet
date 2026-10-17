@@ -9,7 +9,7 @@ vi.mock("../core/api/client.ts", () => ({ api: (...a: unknown[]) => apiMock(...a
 
 const { AGENTS, agentOf, availableKinds, repoLaunchKinds } = await import("./registry.ts");
 const { FALLBACK_KIND_FACTS, catalogKinds, kindFacts, parseKindCatalog, setKindCatalog } = await import("./kindCatalog.ts");
-const { loadKindCatalog, loadKindCatalogAfter, resetKindCatalog } = await import("./kindCatalogLoad.ts");
+const { loadKindCatalog, loadKindCatalogAfter, resetKindCatalog, syncKindCatalogTenant } = await import("./kindCatalogLoad.ts");
 const { MCP_KINDS, mcpKinds } = await import("../features/settings/mcp/mcpWire.ts");
 const { SESSION_KINDS } = await import("../types/session.ts");
 
@@ -292,6 +292,27 @@ describe("loadKindCatalog", () => {
     apiMock.mockResolvedValue(body([row("claude", { managedDefault: true })]));
     await loadKindCatalogAfter(Promise.resolve(), () => true);
     await vi.waitFor(() => expect(AGENTS.claude.managedDriver).toBe(true));
+  });
+
+  it("replaces a catalog that succeeded for tenant A once the tenant is B (late change during boot)", async () => {
+    tenant = "a";
+    apiMock.mockResolvedValueOnce(body([row("claude", { managedDefault: true })]));
+    await loadKindCatalog(); // A's answer lands before anything notices the tenant moved
+    expect(AGENTS.claude.managedDriver).toBe(true);
+    tenant = "b";
+    apiMock.mockResolvedValueOnce(body([row("claude", { managedDefault: false })]));
+    syncKindCatalogTenant();
+    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(AGENTS.claude.managedDriver).toBe(false));
+  });
+
+  it("keeps the catalog when the tenant has not changed", async () => {
+    tenant = "a";
+    apiMock.mockResolvedValue(body([row("claude", { managedDefault: true })]));
+    await loadKindCatalog();
+    syncKindCatalogTenant();
+    expect(apiMock).toHaveBeenCalledTimes(1);
+    expect(AGENTS.claude.managedDriver).toBe(true);
   });
 
   it("reset forgets the catalog and cancels the retry", async () => {
