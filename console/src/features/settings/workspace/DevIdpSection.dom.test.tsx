@@ -103,7 +103,7 @@ describe("DevIdpSection", () => {
     await mount();
     await click(tab("Auth.js"));
     const copies = [...host!.querySelectorAll(".dip-code .dip-copy")];
-    expect(copies.length).toBe(3); // auth.ts, .env.local, next.config.ts
+    expect(copies.length).toBe(3); // auth.ts, .env.local (AUTH_TRUST_HOST), next.config.ts
     const pres = [...host!.querySelectorAll(".dip-pre")];
     for (let i = 0; i < copies.length; i++) {
       await click(copies[i]);
@@ -128,10 +128,8 @@ describe("DevIdpSection", () => {
     expect(code()).toContain("AF_PREVIEW_URL_3000");
     const sel = host!.querySelector<HTMLSelectElement>(".dip-opts label select")!;
     await setSelect(sel, "8080");
-    expect(code()).toContain("AUTH_URL=${AF_PREVIEW_URL_8080}");
+    expect(code()).toContain("if (process.env.AF_PREVIEW_URL_8080) process.env.AUTH_URL = process.env.AF_PREVIEW_URL_8080");
     expect(code()).not.toContain("AF_PREVIEW_URL_3000");
-    await click([...host!.querySelectorAll(".seg-btn")].find((b) => b.textContent === t("env.devidp_values_fill"))!);
-    expect(code()).toContain("AUTH_URL=https://slug-8080.example.invalid");
   });
 
   it("include preview settings adds and removes the marked lines", async () => {

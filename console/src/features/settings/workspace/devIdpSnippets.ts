@@ -114,13 +114,21 @@ function springEnv(c: SnippetCtx): SnippetLine[] {
 
 // ---- Auth.js -----------------------------------------------------------------------------
 
-function authjsPreviewEnv(c: SnippetCtx, v5: boolean): SnippetLine[] {
-  const url = previewRef(c, "shell");
+// AUTH_URL / NEXTAUTH_URL are set in code, not in .env.local: Next's dotenv-expand turns an unset
+// ${AF_PREVIEW_URL_<port>} into an empty string, and Auth.js then reads the empty AUTH_URL as
+// "set" and refuses the host (UntrustedHost) on a machine outside the workspace.
+function authjsPreviewCode(c: SnippetCtx, v5: boolean): SnippetLine[] {
+  const name = `AF_PREVIEW_URL_${c.port}`;
+  const target = v5 ? "AUTH_URL" : "NEXTAUTH_URL";
   return [
-    L("# Preview: the URL Auth.js builds callbacks from", "preview"),
-    L(`${v5 ? "AUTH_URL" : "NEXTAUTH_URL"}=${url}`, "preview"),
-    ...(v5 ? [L("AUTH_TRUST_HOST=true", "preview")] : []),
+    L("// Preview: callbacks are built from the public preview host (unset outside the workspace)", "preview"),
+    L(`if (process.env.${name}) process.env.${target} = process.env.${name}`, "preview"),
+    L("", "preview"),
   ];
+}
+
+function authjsPreviewEnv(v5: boolean): SnippetLine[] {
+  return v5 ? [L("# Preview: trust the relayed host", "preview"), L("AUTH_TRUST_HOST=true", "preview")] : [];
 }
 
 function nextConfig(c: SnippetCtx): SnippetFile {
@@ -165,6 +173,7 @@ function authjsV5(c: SnippetCtx): SnippetFile[] {
         L('import NextAuth from "next-auth"'),
         L('import Google from "next-auth/providers/google"'),
         L(""),
+        ...authjsPreviewCode(c, true),
         L("export const { handlers, auth } = NextAuth({"),
         L("  providers: ["),
         ...body,
@@ -172,7 +181,7 @@ function authjsV5(c: SnippetCtx): SnippetFile[] {
         L("})"),
       ],
     },
-    { file: ".env.local", activate: { key: "env.devidp_act_next_env" }, lines: authjsPreviewEnv(c, true) },
+    { file: ".env.local", activate: { key: "env.devidp_act_next_env" }, lines: authjsPreviewEnv(true) },
     nextConfig(c),
   ];
 }
@@ -190,6 +199,7 @@ function authjsV4(c: SnippetCtx): SnippetFile[] {
             L('import NextAuth from "next-auth"'),
             L('import GoogleProvider from "next-auth/providers/google"'),
             L(""),
+            ...authjsPreviewCode(c, false),
             L("export default NextAuth({"),
             L("  providers: ["),
             L("    GoogleProvider({"),
@@ -202,6 +212,7 @@ function authjsV4(c: SnippetCtx): SnippetFile[] {
             L('import NextAuth from "next-auth"'),
             L('import GoogleProvider from "next-auth/providers/google"'),
             L(""),
+            ...authjsPreviewCode(c, false),
             L("const dev = process.env.AF_DEV_IDP_WELL_KNOWN"),
             L("  ? {"),
             ...dev.map((l) => L("    " + l.text)),
@@ -218,7 +229,7 @@ function authjsV4(c: SnippetCtx): SnippetFile[] {
             L("})"),
           ],
     },
-    { file: ".env.local", activate: { key: "env.devidp_act_next_env" }, lines: authjsPreviewEnv(c, false) },
+    { file: ".env.local", activate: { key: "env.devidp_act_next_env" }, lines: authjsPreviewEnv(false) },
     nextConfig(c),
   ];
 }
