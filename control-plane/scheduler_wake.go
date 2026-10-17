@@ -71,6 +71,14 @@ func newWakeFirer(mgr *manager, settle, readyTimeout time.Duration) *wakeFirer {
 }
 
 func (f *wakeFirer) fire(ctx context.Context, sch store.Schedule, slot time.Time) (string, string, error) {
+	// A kind the Agent does not register is refused before the Workspace is woken for it. A row
+	// saved before create/update validated agent_kind can still carry one; it used to launch
+	// claude silently. An assistant fire ignores agent_kind.
+	if sch.SessionMode != "assistant" {
+		if err := agentkinds.CheckCreateKind(scheduleInjectKind(sch.AgentKind)); err != nil {
+			return "", "", fmt.Errorf("schedule agent_kind: %w", err)
+		}
+	}
 	// 1. membership -> resolved (no gateway headers; the MCP/memo-bridge path).
 	identityID, ok, err := f.mgr.store.IdentityIDForMembership(ctx, sch.MembershipID)
 	if err != nil {

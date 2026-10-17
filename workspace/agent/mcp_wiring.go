@@ -53,6 +53,7 @@ func init() {
 		SessionIsShell:    sessionx.SessionIsShell,
 
 		ManagedDefaultKind: sessionx.ManagedDefaultKind,
+		ValidateCreateKind: sessionx.ValidateCreateKind,
 
 		ReadUIPrefs:                uiprefs.Read,
 		EnsureClaudeSettingsWiring: sessionx.EnsureClaudeSettingsWiring,
