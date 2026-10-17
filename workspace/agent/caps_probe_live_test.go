@@ -142,13 +142,16 @@ func (e *liveProbeEnv) ModelOverride(model string) probeObservation {
 		return probeObservation{Err: err}
 	}
 	// Read the CLI's own record with the request cleared, so a store that only echoes the
-	// meta cannot answer for itself (see observeModelOverride).
-	recaller, haveRecaller := e.spec.agent.(agents.SettingsRecaller)
-	var recalled agents.RecalledSettings
-	if haveRecaller {
-		asked := meta
-		asked.Model = ""
-		recalled = recaller.RecallSettings(asked)
+	// meta cannot answer for itself (see observeModelOverride). A kind that exposes the raw
+	// stored id is preferred: RecallSettings maps through the catalog and may answer "".
+	asked := meta
+	asked.Model = ""
+	var recorded string
+	haveRecorder := false
+	if raw, ok := e.spec.agent.(interface{ RecordedModel(session.Meta) string }); ok {
+		recorded, haveRecorder = raw.RecordedModel(asked), true
+	} else if recaller, ok := e.spec.agent.(agents.SettingsRecaller); ok {
+		recorded, haveRecorder = recaller.RecallSettings(asked).Model, true
 	}
-	return observeModelOverride(td.Turns, recalled, haveRecaller, model)
+	return observeModelOverride(td.Turns, recorded, haveRecorder, model)
 }

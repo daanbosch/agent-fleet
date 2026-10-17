@@ -249,23 +249,39 @@ func modelMatches(reported, want string) bool {
 	return r == w || strings.HasSuffix(r, "/"+w) || strings.HasSuffix(w, "/"+r)
 }
 
-// recalledModelMatches compares the model the CLI's own store recorded with the one asked
-// for. Some stores keep the base id without the catalog's parameter suffix (cursor:
-// "gemini-x" for the listed "gemini-x-high"), so a base id that prefixes the request counts.
-func recalledModelMatches(recalled, want string) bool {
-	if modelMatches(recalled, want) {
+// cursorParamTokens are the parameter words a cursor catalog id appends to the base id its
+// store keeps ("gemini-x" -> "gemini-x-high"). Anything else after the base is a different
+// model, not a parameter ("gpt-5" is not "gpt-5-mini").
+var cursorParamTokens = map[string]bool{
+	"minimal": true, "low": true, "medium": true, "high": true, "xhigh": true, "max": true,
+	"thinking": true, "fast": true, "none": true,
+}
+
+// recordedModelMatches compares the model the CLI's own store recorded with the one asked
+// for: equal, or the recorded value is the base of a requested id whose remainder is only
+// parameter words.
+func recordedModelMatches(recorded, want string) bool {
+	if modelMatches(recorded, want) {
 		return true
 	}
-	r, w := strings.ToLower(strings.TrimSpace(recalled)), strings.ToLower(strings.TrimSpace(want))
-	return r != "" && strings.HasPrefix(w, r+"-")
+	r, w := strings.ToLower(strings.TrimSpace(recorded)), strings.ToLower(strings.TrimSpace(want))
+	if r == "" || !strings.HasPrefix(w, r+"-") {
+		return false
+	}
+	for _, tok := range strings.Split(strings.TrimPrefix(w, r+"-"), "-") {
+		if !cursorParamTokens[tok] {
+			return false
+		}
+	}
+	return true
 }
 
 // observeModelOverride checks that a session started with `want` ended up on it. The
-// evidence is recalled: what the CLI itself recorded (agents.SettingsRecaller, read with an
-// empty meta.Model). The transcript is NOT evidence: cursor and kiro stamp meta.Model onto
-// every assistant turn, so the probe's own request would come back and match even when the
-// CLI ignored the flag. No independent record is PROBE-ERROR, never a pass.
-func observeModelOverride(turns []transcript.Turn, recalled agents.RecalledSettings, haveRecaller bool, want string) probeObservation {
+// evidence is recorded: the model the CLI itself kept (read with an empty meta.Model).
+// The transcript is NOT evidence: cursor and kiro stamp meta.Model onto every assistant
+// turn, so the probe's own request would come back and match even when the CLI ignored the
+// flag. No independent record is PROBE-ERROR, never a pass.
+func observeModelOverride(turns []transcript.Turn, recorded string, haveRecorder bool, want string) probeObservation {
 	reported := false
 	for _, t := range turns {
 		if t.Role == "assistant" && t.Model != "" {
@@ -276,14 +292,14 @@ func observeModelOverride(turns []transcript.Turn, recalled agents.RecalledSetti
 	switch {
 	case !reported:
 		return probeObservation{Err: fmt.Errorf("started with %q but no assistant turn reports a model", want)}
-	case !haveRecaller:
+	case !haveRecorder:
 		return probeObservation{Err: errors.New("the agent records no settings of its own to check the model against")}
-	case recalled.Model == "":
+	case recorded == "":
 		return probeObservation{Err: errors.New("the CLI's own store recorded no model for the session")}
-	case recalledModelMatches(recalled.Model, want):
-		return probeObservation{Worked: true, Detail: "the CLI recorded " + recalled.Model}
+	case recordedModelMatches(recorded, want):
+		return probeObservation{Worked: true, Detail: "the CLI recorded " + recorded}
 	default:
-		return probeObservation{Detail: fmt.Sprintf("started with %q but the CLI recorded %s", want, recalled.Model)}
+		return probeObservation{Detail: fmt.Sprintf("started with %q but the CLI recorded %s", want, recorded)}
 	}
 }
 

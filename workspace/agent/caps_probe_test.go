@@ -224,11 +224,11 @@ func TestObserveForkAt(t *testing.T) {
 
 func TestObserveModelOverride(t *testing.T) {
 	stamped := []transcript.Turn{{Role: "user"}, {Role: "assistant", Model: "want"}}
-	rec := func(m string) agents.RecalledSettings { return agents.RecalledSettings{Model: m} }
+	rec := func(m string) string { return m }
 	for _, c := range []struct {
 		name     string
 		turns    []transcript.Turn
-		recalled agents.RecalledSettings
+		recalled string
 		have     bool
 		want     string
 		worked   bool
@@ -238,9 +238,12 @@ func TestObserveModelOverride(t *testing.T) {
 		{"case and provider prefix", stamped, rec("Anthropic/Claude-X"), true, "claude-x", true, false},
 		{"store keeps the base id", stamped, rec("gemini-x"), true, "gemini-x-high", true, false},
 		{"store disagrees although the transcript echoes the request", stamped, rec("other"), true, "want", false, false},
+		{"recorded base of a different model than requested", stamped, rec("gpt-5"), true, "gpt-5-mini", false, false},
+		{"base plus a non-parameter word", stamped, rec("gemini-x"), true, "gemini-x-pro", false, false},
+		{"base plus two parameter words", stamped, rec("claude-x"), true, "claude-x-thinking-high", true, false},
 		{"prefix of a different model", stamped, rec("gpt-5-mini"), true, "gpt-5", false, false},
-		{"transcript alone is no evidence", stamped, agents.RecalledSettings{}, true, "want", false, true},
-		{"agent has no recorder", stamped, agents.RecalledSettings{}, false, "want", false, true},
+		{"transcript alone is no evidence", stamped, "", true, "want", false, true},
+		{"agent has no recorder", stamped, "", false, "want", false, true},
 		{"no assistant model at all", []transcript.Turn{{Role: "user", Model: "want"}, {Role: "assistant"}}, rec("want"), true, "want", false, true},
 	} {
 		o := observeModelOverride(c.turns, c.recalled, c.have, c.want)
