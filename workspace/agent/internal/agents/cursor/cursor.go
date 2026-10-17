@@ -42,7 +42,7 @@ func (agentImpl) Kind() string { return session.KindCursor }
 // supported: transcript.go reads the Claude Code-compatible JSONL, which cursor
 // appends live in the TUI/-p routes.
 func (agentImpl) Caps() agents.Caps {
-	return agents.Caps{CanTranscript: true, PermissionChoice: true}
+	return agents.Caps{CanTranscript: true, PermissionChoice: true, ManagedDefault: true, MCPClient: agents.TriYes}
 }
 
 func (agentImpl) BuildLaunch(m session.Meta, _ agents.LaunchOpts) (agents.LaunchPlan, error) {
