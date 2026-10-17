@@ -7,7 +7,7 @@ import { useToast } from "../../../ui/ToastProvider.tsx";
 import { useT } from "../../../lib/i18n/index.ts";
 import { Button } from "../../../ui/Button.tsx";
 import { Icon } from "../../../ui/Icon.tsx";
-import { useSettingsUI } from "../store.ts";
+import { openGuidePage } from "../../../lib/guideDocs.ts";
 import {
   FRAMEWORKS,
   fileText,
@@ -91,7 +91,6 @@ function Examples({
   copy: (text: string) => void;
 }) {
   const tr = useT();
-  const openGuide = useSettingsUI((st) => st.openGuide);
   const uid = useId();
   const [fwId, setFwId] = useState<FrameworkId>("spring");
   const [variantByFw, setVariantByFw] = useState<Record<string, string>>({});
@@ -229,7 +228,7 @@ function Examples({
           <Icon name="device-desktop" />
           <span>
             {tr("env.devidp_note_local")}{" "}
-            <button type="button" className="dip-link" onClick={openGuide}>
+            <button type="button" className="dip-link" onClick={() => openGuidePage("member/10-integrations")}>
               {tr("env.devidp_note_local_link")}
             </button>
           </span>
