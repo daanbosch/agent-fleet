@@ -1113,8 +1113,23 @@ func TestTerminalRedeliveryNeedsEvidence(t *testing.T) {
 	outcome := make(chan string, 1)
 	typed := make(chan string, 1)
 	prev := typeMoveDelivery
-	typeMoveDelivery = func(name, prompt string) string { typed <- prompt; return <-outcome }
-	t.Cleanup(func() { moveDeliverInflight.Wait(); typeMoveDelivery = prev })
+	// quit lets a failed test release a stub still waiting for its outcome, so the cleanup's join
+	// cannot wait on it forever.
+	quit := make(chan struct{})
+	typeMoveDelivery = func(name, prompt string) string {
+		select {
+		case typed <- prompt:
+		case <-quit:
+			return session.InitialPromptFailed
+		}
+		select {
+		case o := <-outcome:
+			return o
+		case <-quit:
+			return session.InitialPromptFailed
+		}
+	}
+	t.Cleanup(func() { close(quit); moveDeliverInflight.Wait(); typeMoveDelivery = prev })
 	settled := func() string {
 		t.Helper()
 		deadline := time.Now().Add(moveGuard)
