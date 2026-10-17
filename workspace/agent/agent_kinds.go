@@ -61,7 +61,7 @@ func buildKindCatalog(live bool) kindCatalogWire {
 		e := kindEntryWire{
 			Kind:           k,
 			ManagedOnly:    c.ManagedOnly,
-			ManagedDefault: c.ManagedOnly || c.ManagedDefault,
+			ManagedDefault: sessionx.ManagedDefaultKind(k),
 			MCPClient:      c.MCPClient.Wire(),
 			Instructions:   instrSupport(k).Wire(),
 			Caps: kindCapsWire{

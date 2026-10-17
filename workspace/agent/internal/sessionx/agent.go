@@ -79,6 +79,21 @@ func NormalizeKind(kind string) string {
 	return session.KindClaude
 }
 
+// ManagedDefaultKind reports whether a caller that cannot drive a pane (MCP create_session,
+// the scheduler) should ask for the managed driver when it names none: the registry's
+// Caps().ManagedDefault, plus every ManagedOnly kind, which has nothing else. The match is
+// exact and never goes through NormalizeKind — an alternate spelling ("Codex", "kiro-cli")
+// is not a registered kind and gets no driver, exactly like the hand list this replaced.
+// It feeds the kind catalog's managedDefault and the in-container create_session.
+func ManagedDefaultKind(kind string) bool {
+	a, ok := agentRegistry[kind]
+	if !ok {
+		return false
+	}
+	c := a.Caps()
+	return c.ManagedOnly || c.ManagedDefault
+}
+
 // --- shared live-state helpers -------------------------------------------------
 
 // SessionAlive is the driver-aware liveness test: tui = the tmux session exists,

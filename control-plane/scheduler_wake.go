@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/k-k1/agent-fleet/control-plane/internal/agentkinds"
 	"github.com/k-k1/agent-fleet/control-plane/internal/runtime"
 	"github.com/k-k1/agent-fleet/control-plane/internal/store"
 )
@@ -274,16 +275,18 @@ func scheduleInjectKind(kind string) string {
 	return kind
 }
 
-// injectDriver mirrors the Agent-side rule: managed-driver kinds run paneless. lcpp and
-// muse are absent on purpose: they have no tui route (Caps().ManagedOnly), and the Agent's
-// create handler defaults an empty driver to managed for them.
+// managedDefaultKinds are the kinds a scheduled launch asks the managed driver for, derived
+// from the kind catalog snapshot. lcpp and muse (managed-only) are in it: the Agent defaults
+// them to managed anyway, so naming it changes nothing about the launch.
+var managedDefaultKinds = agentkinds.ManagedDefaultKinds()
+
+// injectDriver mirrors the Agent-side rule: managed-driver kinds run paneless. The match is
+// exact, so an alternate spelling gets no driver (the Agent falls it back to claude).
 func injectDriver(kind string) string {
-	switch kind {
-	case "codex", "opencode", "copilot", "cursor", "kiro":
+	if managedDefaultKinds[kind] {
 		return "managed"
-	default:
-		return ""
 	}
+	return ""
 }
 
 // scheduleSource is the injection-origin tag stamped on every prompt this scheduler
