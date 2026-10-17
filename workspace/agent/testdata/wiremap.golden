@@ -175,7 +175,7 @@ internal/sessionx/session_handlers.go HandleStopSession x1 {stopped}
 internal/sessionx/session_handlers.go writeCreateState x1 {status}
 internal/sessionx/session_handoff_proposal.go HandleSessionHandoffProposal x1 {proposals}
 internal/sessionx/session_handoff_proposal.go HandleSessionHandoffProposal x2 {proposal}
-internal/sessionx/session_io.go HandleSessionInput x1 {held,sent} cond{held}
+internal/sessionx/session_io.go HandleSessionInput x1 {held,held_reason,sent} cond{held,held_reason}
 internal/sessionx/session_io.go HandleSessionInput x1 {queued}
 internal/sessionx/session_io.go HandleSessionInput x2 {sent}
 internal/sessionx/session_io.go HandleSessionOutput x1 {alive,clipped,cursor,name,output,status}
