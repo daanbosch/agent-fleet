@@ -1171,3 +1171,27 @@ func TestDeliveryRecordSurvivesBeforeTheTargetExists(t *testing.T) {
 		t.Fatal("a record for a target that will never exist stayed")
 	}
 }
+
+// The row reads a move's two states off the list (ADR 0115 decision 11.7, #2254): a moved
+// source says where its conversation went, and a pending one offers retry and cancel. A field
+// the meta holds and the wire drops is one the Console can never show.
+func TestMoveStatesRideTheSessionWire(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AF_SESSIONS_DIR", t.TempDir())
+	m := session.Meta{Name: "mvwire", Dir: t.TempDir(), Kind: session.KindClaude, Moving: "mvwire-t1", MovedTo: "mvwire-t0"}
+	raw, _ := json.Marshal(wireSession(m, false))
+	var out map[string]any
+	_ = json.Unmarshal(raw, &out)
+	if out["moving"] != "mvwire-t1" || out["movedTo"] != "mvwire-t0" {
+		t.Fatalf("moving / movedTo are not on the wire: %s", raw)
+	}
+	raw, _ = json.Marshal(wireSession(session.Meta{Name: "mvwire2", Kind: session.KindClaude}, false))
+	out = nil
+	_ = json.Unmarshal(raw, &out)
+	if _, ok := out["moving"]; ok {
+		t.Fatalf("a session that never moved carries moving: %s", raw)
+	}
+	if _, ok := out["movedTo"]; ok {
+		t.Fatalf("a session that never moved carries movedTo: %s", raw)
+	}
+}

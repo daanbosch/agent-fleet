@@ -202,6 +202,11 @@ type Session struct {
 	Repo               string `json:"repo"` // working dir basename (display)
 	WorkingCopyID      string `json:"workingCopyId,omitempty"`
 	Title              string `json:"title"` // user-supplied display title (optional, any kind)
+	// Moving / MovedTo mirror Meta's (ADR 0115 decision 11.7): the row of a source whose move
+	// is under way or pending offers retry and cancel, and a moved one says where the
+	// conversation went. The Control Plane's sessionWire has to carry them too.
+	Moving  string `json:"moving,omitempty"`
+	MovedTo string `json:"movedTo,omitempty"`
 	// TitleSetBy mirrors Meta.TitleSetBy ("user" | "parent" | ""): who last set Title. It
 	// rides the wire so a reader outside this process can tell a name the user chose from one
 	// a parent wrote — the same reason Origin / OriginSession are here. Display-only for now;

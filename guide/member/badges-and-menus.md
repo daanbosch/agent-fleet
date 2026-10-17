@@ -143,7 +143,8 @@ connection. Not this deployment's engine."** together with the model the last ch
 ### Sessions
 
 Depending on state and kind you'll see resume, re-login to SSM, stop, open the remote session, copy the ID,
-rename, rename the branch, hand the conversation off, **Share…**, **set / clear the delete lock**,
+rename, rename the branch, hand the conversation off, **move it to another agent**
+([02](02-sessions.md#moving-a-session-to-another-agent-move)), **Share…**, **set / clear the delete lock**,
 archive / delete, and recreate. For a session that doesn't belong to a repository, **assignment to a working
 set** appears here too (an item shown ticked but unclickable is one that follows its repository or conversation
 automatically).

@@ -424,3 +424,19 @@ it is not yet.
 - **Not built here:** archiving the handover files with a trashed target, and putting them back
   on restore (P2a step 3b). Also not built: the Console dialog, and `moving` / `movedTo` on the
   session row (#2254).
+
+## Addendum (2026-10-17) — the Console dialog and the session row (P2a step 4, #2182, #2254)
+
+- **The row wire** carries `moving` and `movedTo` on the Agent's `session.Session` and the CP's
+  `sessionWire`. They have no DB-mirror column: retry, cancel, reopen and the resend all need the
+  running Agent, so a stopped Workspace's mirrored list does not show them.
+- **The menu** offers "Move to another agent…" right after the handoff, for the same sessions
+  (a transcript, a folder, a running Workspace). On a moving or moved source the ordinary resume
+  is not offered, since the Agent refuses it with `session_moved`; the same dialog then holds
+  retry and cancel (decision 11.4), or the target, the first prompt's resend and "resume here
+  anyway" (decision 11.6). The row's second line says where the conversation went, or that the
+  move is unfinished.
+- **The picker** offers the preview's eligible kinds, minus those the connection check reports
+  as not connected, and lists every other kind with its reason. It shows usage only for the kinds
+  the Console already reads it for (the WS bar's claude, codex and muse sources), read once when
+  the dialog opens. Model and driver default as the new-session dialog does for the working copy.
