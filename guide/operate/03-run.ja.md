@@ -342,7 +342,8 @@ Control Plane が配信時に同梱の画像を塗り替えるので、環境ご
   または実行中のツール。未完了のツール呼び出し／item、cursor と kiro はランタイムの下のツールプロセスも）で同じように上限がかかります。
   実測は cursor-agent 2026.10.16・kiro-cli 2.31.0・codex 0.163.0・opencode 2.0.32 のローカル shell ツールです。
   Agent が何が動いているか判断できないとき（再起動・再接続・プロセス表の読み取り失敗）は抱え続けます。
-  opencode 1.x、managed の muse・lcpp・copilot、ターミナルの muse・lcpp・shell・ssm はこの上限の対象外で（ADR 0055 の 2026-10-17 追記を参照）、
+  opencode 1.x と managed の muse・lcpp・copilot はこの上限の対象外です（ADR 0055 の 2026-10-17 追記を参照）。
+  shell と ssm は「作業中」にならず、muse と lcpp にはターミナル方式が無いので、これらの kind に上限をかける対象はありません。
   バックグラウンド作業と「自動停止しない」ピンは常に対象外です。
 - **force-stop（力業）**: `docker compose down` では**ユーザーの Workspace は止まりません**（compose
   管理外）。特定の Workspace を確実に止めたいときは、super_admin が Console の Admin パネルから
