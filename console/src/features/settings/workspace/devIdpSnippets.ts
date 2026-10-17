@@ -65,11 +65,10 @@ const fill = (c: SnippetCtx) => c.values === "fill";
 
 // The preview URL as an expression in the host language: the issued URL (fill mode, when there
 // is one) or a reference to AF_PREVIEW_URL_<port>.
-function previewRef(c: SnippetCtx, style: "shell" | "ts" | "go"): string {
+function previewRef(c: SnippetCtx, style: "shell" | "ts"): string {
   const name = `AF_PREVIEW_URL_${c.port}`;
-  if (fill(c) && c.previewUrl) return style === "ts" || style === "go" ? JSON.stringify(c.previewUrl) : c.previewUrl;
+  if (fill(c) && c.previewUrl) return style === "ts" ? JSON.stringify(c.previewUrl) : c.previewUrl;
   if (style === "ts") return `process.env.${name}`;
-  if (style === "go") return `os.Getenv("${name}")`;
   return `\${${name}}`;
 }
 
@@ -180,8 +179,8 @@ function authjsV5(c: SnippetCtx): SnippetFile[] {
 
 function authjsV4(c: SnippetCtx): SnippetFile[] {
   const devWell = fill(c) ? JSON.stringify(c.discovery) : "process.env.AF_DEV_IDP_WELL_KNOWN";
-  const devId = fill(c) ? JSON.stringify(c.clientId) : "process.env.AF_DEV_IDP_CLIENT_ID";
-  const dev = [L(`  wellKnown: ${devWell},`), L(`  clientId: ${devId},`), L(`  clientSecret: process.env.${SECRET_ENV},`)];
+  const devId = fill(c) ? JSON.stringify(c.clientId) : "process.env.AF_DEV_IDP_CLIENT_ID!";
+  const dev = [L(`  wellKnown: ${devWell},`), L(`  clientId: ${devId},`), L(`  clientSecret: process.env.${SECRET_ENV}!,`)];
   return [
     {
       file: "pages/api/auth/[...nextauth].ts",
@@ -226,11 +225,32 @@ function authjsV4(c: SnippetCtx): SnippetFile[] {
 
 // ---- Go ----------------------------------------------------------------------------------
 
+// getenv with a fallback: the preview URL is empty outside the workspace (and the IdP only
+// accepts a redirect on the current preview URL or localhost), so the callback base falls back
+// to http://localhost:<port> there.
+function goGetenv(): SnippetLine[] {
+  const T = "\t";
+  return [
+    L("// getenv returns the variable, or the fallback when it is unset or empty."),
+    L("func getenv(key, fallback string) string {"),
+    L(`${T}if v := os.Getenv(key); v != "" {`),
+    L(`${T}${T}return v`),
+    L(`${T}}`),
+    L(`${T}return fallback`),
+    L("}"),
+    L(""),
+  ];
+}
+
+function goPreviewBase(c: SnippetCtx): string {
+  return `getenv("AF_PREVIEW_URL_${c.port}", "http://localhost:${c.port}")`;
+}
+
 function goOidc(c: SnippetCtx): SnippetFile[] {
   const T = "\t";
   const redirect = (path: string) => [
     L(`${T}${T}RedirectURL:  "http://localhost:${c.port}${path}",`, "plain"),
-    L(`${T}${T}RedirectURL:  ${previewRef(c, "go")} + "${path}",`, "preview"),
+    L(`${T}${T}RedirectURL:  ${goPreviewBase(c)} + "${path}",`, "preview"),
   ];
   const creds = fill(c)
     ? [
@@ -242,18 +262,6 @@ function goOidc(c: SnippetCtx): SnippetFile[] {
         L(`${T}issuer := getenv("AF_DEV_IDP_ISSUER", "${GOOGLE}")`),
         L(`${T}clientID := getenv("AF_DEV_IDP_CLIENT_ID", os.Getenv("GOOGLE_CLIENT_ID"))`),
         L(`${T}clientSecret := getenv("${SECRET_ENV}", os.Getenv("GOOGLE_CLIENT_SECRET"))`),
-      ];
-  const helper = fill(c)
-    ? []
-    : [
-        L("// getenv returns the variable, or the fallback when it is unset or empty."),
-        L("func getenv(key, fallback string) string {"),
-        L(`${T}if v := os.Getenv(key); v != "" {`),
-        L(`${T}${T}return v`),
-        L(`${T}}`),
-        L(`${T}return fallback`),
-        L("}"),
-        L(""),
       ];
   return [
     {
@@ -270,7 +278,7 @@ function goOidc(c: SnippetCtx): SnippetFile[] {
         L(`${T}"golang.org/x/oauth2"`),
         L(")"),
         L(""),
-        ...helper,
+        ...goGetenv(),
         L("func newOIDC(ctx context.Context) (*oauth2.Config, *oidc.IDTokenVerifier, error) {"),
         ...creds,
         L(`${T}provider, err := oidc.NewProvider(ctx, issuer)`),
@@ -311,12 +319,13 @@ function goGoth(c: SnippetCtx): SnippetFile[] {
         L(`${T}"github.com/markbates/goth/providers/openidConnect"`),
         L(")"),
         L(""),
+        ...goGetenv(),
         L("func setupGoth() {"),
         L(`${T}provider, err := openidConnect.New(`),
         L(`${T}${T}${id},`),
         L(`${T}${T}os.Getenv("${SECRET_ENV}"),`),
         L(`${T}${T}"http://localhost:${c.port}${cb}",`, "plain"),
-        L(`${T}${T}${previewRef(c, "go")}+"${cb}",`, "preview"),
+        L(`${T}${T}${goPreviewBase(c)}+"${cb}",`, "preview"),
         L(`${T}${T}${well},`),
         L(`${T}${T}"openid", "email", "profile",`),
         L(`${T})`),

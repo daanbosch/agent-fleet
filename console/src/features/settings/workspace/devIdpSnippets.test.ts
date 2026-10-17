@@ -47,8 +47,12 @@ describe("dev IdP snippets", () => {
       expect(t).not.toContain("afdev_abc");
       expect(t).not.toContain("af.example.invalid");
     }
-    for (const k of combos.filter((x) => x.c.values === "fill" && x.v.id !== "profile" && x.name.startsWith("spring/profile"))) {
-      expect(all(k)).toContain("afdev_abc");
+    const fills = combos.filter((x) => x.c.values === "fill");
+    expect(fills).toHaveLength(FRAMEWORKS.flatMap((f) => f.variants).length * 2);
+    for (const k of fills) {
+      const t = all(k);
+      expect(t, k.name).toContain("afdev_abc");
+      expect(t.includes(base.issuer) || t.includes(base.discovery), k.name).toBe(true);
     }
     const fillSpring = combos.find((x) => x.name === "spring/profile/fill/plain")!;
     expect(all(fillSpring)).toContain("issuer-uri: https://af.example.invalid/dev-idp");
@@ -64,8 +68,12 @@ describe("dev IdP snippets", () => {
         expect(b).not.toContain("AF_PREVIEW_URL_8080");
       }
     }
-    const goFill = combos.find((x) => x.name === "go/oidc/fill/preview")!;
-    expect(all(goFill)).toContain("https://slug-8080.example.invalid");
+    // Go falls back to localhost when the variable is empty (a machine outside the workspace).
+    for (const n of ["go/oidc/env/preview", "go/oidc/fill/preview", "go/goth/env/preview", "go/goth/fill/preview"]) {
+      const k = combos.find((x) => x.name === n)!;
+      expect(all(k), n).toContain('getenv("AF_PREVIEW_URL_8080", "http://localhost:8080")');
+      expect(all({ ...k, c: { ...k.c, port: 3000 } }), n).toContain('getenv("AF_PREVIEW_URL_3000", "http://localhost:3000")');
+    }
   });
 
   it("include preview settings adds or removes the marked lines", () => {
