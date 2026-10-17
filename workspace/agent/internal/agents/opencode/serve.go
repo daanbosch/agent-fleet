@@ -762,6 +762,17 @@ var sseClient = &http.Client{Transport: authTransport{}}
 
 // streamEvents reads one SSE connection until it breaks. Returns the read error.
 func (s *Supervisor) streamEvents(addr string, gen int) error {
+	// Whatever ends this stream (EOF, a failed or refused reconnect, a hang) leaves a window
+	// in which the daemon can start a tool nobody hears about, so the in-flight sets stop being
+	// trusted the moment the stream is gone, not when the next one connects. A superseded
+	// generation's monitor must not touch the handles of the current one.
+	defer func() {
+		if s.Generation() == gen {
+			for _, h := range liveHandles() {
+				h.tools.Unknown()
+			}
+		}
+	}()
 	req, err := http.NewRequest("GET", eventURL(addr), nil)
 	if err != nil {
 		return err

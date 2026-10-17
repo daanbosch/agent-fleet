@@ -2,6 +2,9 @@ package opencode
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -129,5 +132,41 @@ func TestV1StreamIsNotStamped(t *testing.T) {
 	feed("session.tool.called", "call_1")
 	if _, ok := (managedDriver{}).ManagedProgress(m); ok {
 		t.Fatal("a v1 daemon reported progress")
+	}
+}
+
+// A real SSE stream that delivers a turn boundary and then ends: the sets must be unknown as
+// soon as streamEvents returns, before any reconnect succeeds.
+func TestStreamEndInvalidatesTheInFlightSets(t *testing.T) {
+	h, m := progressTestHandle(t, true)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"type\":\"session.execution.started\",\"data\":{\"sessionID\":\"ses_p\"}}\n\n")
+	}))
+	t.Cleanup(srv.Close)
+	s := &Supervisor{}
+	gen := s.Generation()
+
+	_ = s.streamEvents(srv.URL, gen) // returns at EOF
+	stale(h)
+	if got, ok := (managedDriver{}).ManagedProgress(m); ok {
+		t.Fatalf("answered %v after the event stream ended", got)
+	}
+
+	// A refused connection is an exit too.
+	h.tools.Reset()
+	srv.Close()
+	_ = s.streamEvents(srv.URL, gen)
+	stale(h)
+	if got, ok := (managedDriver{}).ManagedProgress(m); ok {
+		t.Fatalf("answered %v after a failed reconnect", got)
+	}
+
+	// A superseded generation's monitor leaves the current generation's known state alone.
+	h.tools.Reset()
+	_ = s.streamEvents(srv.URL, gen+1)
+	stale(h)
+	if _, ok := (managedDriver{}).ManagedProgress(m); !ok {
+		t.Fatal("a stale generation's stream end cleared the current generation's state")
 	}
 }
