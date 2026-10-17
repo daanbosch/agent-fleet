@@ -75,12 +75,14 @@ is the secret and nothing else; a process cannot be refused by address or by uid
 
 - Another process of the same uid. It can read the 0600 file (same uid), and `/proc/<child>/environ`, which holds
   the file's path. It then asks the listener. But the token file in the same directory, and `GOOGLE_OAUTH_ACCESS_TOKEN`
-  in the child's environment, are readable the same way today. The listener adds no reader that the token does not
-  already have; what it adds is **duration**: a token copied from the file dies in at most an hour, while the secret
-  keeps minting renewed tokens until the command ends.
+  in the child's environment, are readable the same way today. A same-uid reader with continuing access already has
+  the run's whole lifetime of tokens: the wrapper keeps replacing that token file, and re-reading it yields each
+  renewed token. The listener adds no reader and no reach for such a process. The only difference is a narrower
+  case: someone who copies the secret **once** (a leaked file, a log) and can reach the loopback port afterwards
+  keeps minting tokens until the command ends, while a single copied access token dies in at most an hour.
 - The renewed tokens are what the wrapper's renewer already makes (same account, same reach, no longer-lived), so
-  the extra reach is time, not scope. The ADR's rules for a renewal (refuse a different account, refuse a token that
-  lasts no longer) would have to apply to the listener's replies too.
+  the extra reach is time in that single-leak case, not scope. The ADR's rules for a renewal (refuse a different
+  account, refuse a token that lasts no longer) would have to apply to the listener's replies too.
 - A hostile process that can bind the port first. The port is chosen by the wrapper (bind 0) and written to the
   file before the child starts, so it cannot be pre-empted; but a program that sends the secret to a port it did not
   expect would give the secret away. Not measured.
@@ -90,15 +92,21 @@ is the secret and nothing else; a process cannot be refused by address or by uid
   outside the namespace) in place of today's local "file not found". Nothing was sent to Google in this re-measurement.
 
 **Compared with a metadata-server shim.** Go, Python and Node libraries find a metadata server through
-`GCE_METADATA_HOST` (measured with a mock in the 2026-10-02 note). A shim needs no secret by design: the libraries
-ask with a header (`Metadata-Flavor: Google`) and no body secret, so any process in the workspace that can send a
-GET gets a token, and that includes the SSRF case above, which is exactly what the secret closes. It would also
+`GCE_METADATA_HOST` (measured with a mock in the 2026-10-02 note). A shim carries no secret by design: the libraries
+ask with a public header (`Metadata-Flavor: Google`), which a real metadata server also requires and rejects the
+request without. Assuming the shim checks that header (a shim that does not would be open to any GET), a caller that
+can send a GET with that header, such as an SSRF that controls headers or any local process, gets a token without
+holding anything secret. An SSRF that controls only the URL and the method cannot add the header, so against it the
+two designs are not distinguished by this measurement. Against an HTTP-only caller that cannot read the secret file,
+the `token_uri` endpoint is the narrower one, because it needs a secret that caller never sees. A shim would also
 make every library that works today with `GOOGLE_APPLICATION_CREDENTIALS` unset find a credential, taking away the
-fail-closed rule. So the shim is strictly wider; the loopback `token_uri` is acceptable only where the secret is
-carried by the request, which is only `authorized_user`.
+fail-closed rule. The loopback `token_uri` is the only one of the two whose request carries a secret, and it applies
+only to `authorized_user`.
 
-Assessment: the loopback listener is no more exposed than the token file against same-uid readers, and tighter
-than the shim against everything else. The cost is not the listener's exposure; it is the next section.
+Assessment: against a same-uid reader the loopback listener adds nothing the token file does not already give
+(the file is renewed during the run); it extends a single leaked secret past a single leaked token. Against an
+HTTP-only caller without file access it is narrower than the shim. The cost is not the listener's exposure; it is
+the next section.
 
 ## 131.4 Recommendation: do not build
 
