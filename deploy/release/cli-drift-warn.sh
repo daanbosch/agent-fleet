@@ -19,6 +19,14 @@ SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
 # smuggle in a second command.
 esc() { local s="$1"; s="${s//'%'/%25}"; s="${s//$'\r'/%0D}"; s="${s//$'\n'/%0A}"; printf '%s' "$s"; }
 
+# Issue titles are free text going into Markdown: <!-- would hide the lines after it, and
+# [x](url), images and backticks would render as markup. Make them literal.
+md() {
+  local s="$1"
+  s="$(printf '%s' "$s" | sed -e 's/[][\\`*_~#|()!]/\\&/g' -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"
+  printf '%s' "$s"
+}
+
 if ! rows="$(gh issue list --state open --label "$LABEL" --limit 100 \
       --json number,title,url --jq '.[] | [.number, .title, .url] | @tsv' 2>&1)"; then
   echo "::warning::could not list open $LABEL issues, so upstream CLI drift was not checked: $(esc "$rows")"
@@ -41,6 +49,6 @@ fi
 while IFS=$'\t' read -r num title url; do
   [ -n "$num" ] || continue
   echo "::warning::open $LABEL issue #$num: $(esc "$title") ($url)"
-  echo "- [#$num]($url) $title" >> "$SUMMARY"
+  echo "- [#$num]($url) $(md "$title")" >> "$SUMMARY"
 done <<< "$rows"
 exit 0

@@ -29,7 +29,7 @@ args=" $* "
 case "$args" in *" issue list "*) ;; *) echo "unexpected gh call: $*" >&2; exit 1 ;; esac
 case "$args" in *" --state open "*) ;; *) echo "not asking for open issues: $*" >&2; exit 1 ;; esac
 case "$args" in *" --label cli-drift "*) ;; *) echo "not asking for the label: $*" >&2; exit 1 ;; esac
-[ -z "${STUB_FAIL:-}" ] || { echo "HTTP 403: Resource not accessible by integration" >&2; exit 1; }
+[ -z "${STUB_FAIL:-}" ] || { printf '%s\n' "${STUB_ERR:-HTTP 403: Resource not accessible by integration}" >&2; exit 1; }
 [ -z "${STUB_ROWS:-}" ] || printf '%s\n' "$STUB_ROWS"
 FAKE
 chmod +x "$STUB/gh"
@@ -62,8 +62,23 @@ STUB_ROWS="" STUB_FAIL=1 run "gh failing"
 [ "$(count '^::warning::could not list open cli-drift issues' "$WORK/out")" = 1 ] || fail "gh failing: want the could-not-check warning"
 grep -q 'Not checked' "$WORK/summary" || fail "gh failing: summary must say not checked"
 
-# 4. a title cannot inject a second workflow command
-STUB_ROWS="3${tab}x%0A::error::boom${tab}https://github.com/o/r/issues/3" STUB_FAIL="" run "escaping"
+# 4. workflow-command escaping, exact. gh's @tsv turns a real newline in a title into the
+# two characters \n, so a title never carries a raw CR/LF; the error text does.
+STUB_ROWS="3${tab}100% ::sure:: \\n::error::boom${tab}https://github.com/o/r/issues/3" STUB_FAIL="" run "escaping"
 [ "$(count '^::error::' "$WORK/out")" = 0 ] || fail "escaping: title injected a command"
+[ "$(cat "$WORK/out")" = '::warning::open cli-drift issue #3: 100%25 ::sure:: \n::error::boom (https://github.com/o/r/issues/3)' ] \
+  || fail "escaping: % must become %25 and :: stay as is"
+STUB_ROWS="" STUB_FAIL="" STUB_ERR=$'line1\r\nline2 50%' STUB_FAIL=1 run "multi-line gh error"
+[ "$(wc -l < "$WORK/out")" = 1 ] || fail "multi-line error must stay one workflow command"
+[ "$(cat "$WORK/out")" = '::warning::could not list open cli-drift issues, so upstream CLI drift was not checked: line1%0D%0Aline2 50%25' ] \
+  || fail "multi-line error: CR/LF/% must be %0D/%0A/%25"
+
+# 5. titles are literal in the summary Markdown
+STUB_ROWS="3${tab}<!-- [a](http://e) \`c\` ![i](u) *b* & x${tab}https://github.com/o/r/issues/3
+4${tab}actual drift${tab}https://github.com/o/r/issues/4" STUB_FAIL="" run "markdown"
+# shellcheck disable=SC2016  # the backticks are literal expected text
+grep -qF -- '- [#3](https://github.com/o/r/issues/3) &lt;\!-- \[a\]\(http://e\) \`c\` \!\[i\]\(u\) \*b\* &amp; x' "$WORK/summary" || fail "markdown: title not made literal"
+grep -qF -- '- [#4](https://github.com/o/r/issues/4) actual drift' "$WORK/summary" || fail "markdown: next issue lost"
+[ "$(grep -c '<' "$WORK/summary")" = 0 ] || fail "markdown: raw < left in the summary"
 
 echo "OK: cli-drift-warn"
