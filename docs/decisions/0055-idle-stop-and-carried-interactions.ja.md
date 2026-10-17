@@ -233,3 +233,23 @@ opencode 1.18）を tmux ペインで動かし、無出力のツール `sleep 12
   実行中のツールプロセスは生存信号に数えない。ペインが 1 時間静止したままの無出力ツールは失効し得て、
   スピナーが動き続ける固まったセッションは無期限に抱える（安全側）。また現在の poll でペインを取得
   できなかった場合は古い経過秒ではなく「回答なし」を返す。
+
+## 注記（2026-10-17）: muse・lcpp・shell・ssm には上限をかけるべき Terminal 行が無い（#1943）
+
+2026-10-09 の追記では Terminal の muse・lcpp・shell・ssm が未計測のままだった。コードを読むと、
+どれも busy な Terminal 行になり得ないため、計測すべきペイン・ツールの信号自体が存在しない。
+
+- shell と ssm: `shellAgent.WireLive` / `ssmAgent.WireLive`（`sessionx/agent_shell_ssm.go`）は
+  `LiveInfo{Resumable: true}` を返すので、一覧の `State` は常に空。`/input` が書く楽観的な
+  「working」印（`markSessionWorking`、kind で絞っていない）はこの 2 kind では読み戻されない。
+  busy になれない行は busy 経路で Workspace を抱えない。
+- muse と lcpp: `Caps.ManagedOnly` と `BuildLaunch` の無条件拒否（ADR 0093 決定 2、ADR 0095）。
+  作成は既定で Managed、Terminal への切替は拒否される（`session_handlers.go`、`session_driver.go`）。
+  Managed 行としてしか存在せず、それは #1942 の範囲。計測はしていない（lcpp はローカル LLM が必要、
+  muse には再描画するペインが無い）。
+
+`progressTrusted` は変更せず、4 kind とも false のまま（従来の安全側の挙動）。前提はテストで固定した
+（`progress_untrusted_kinds_test.go`）: shell/ssm は「working」印が保存されていても busy を一覧に
+出さない、muse/lcpp は managed 専用のまま、4 kind とも全信号が古く長い無出力ツールがある行は
+進捗の回答を返さない。いずれかに Terminal 経路や busy 状態が加わったら、この注記を開き直して
+個別に計測すること。
