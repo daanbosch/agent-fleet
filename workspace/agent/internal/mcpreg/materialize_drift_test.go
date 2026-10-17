@@ -26,10 +26,12 @@ package mcpreg
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -317,15 +319,16 @@ func TestDriftOpencodeMatchesMCPAdd(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cliHome := t.TempDir()
+			cliEnv := opencodeSandboxEnv(cliHome)
+			cliDir := t.TempDir()
 			// opencode 2.x writes the PROJECT config (./opencode.json) unless told --global, so the
 			// CLI runs in a throwaway directory: without it the file lands in the repo checkout and
 			// the global one this test reads is never created.
 			add := tc.add
-			if opencodeHasGlobalFlag(t, bin) {
+			if opencodeHasGlobalFlag(t, bin, cliDir, cliEnv) {
 				add = append([]string{add[0], add[1], "--global"}, add[2:]...)
 			}
-			runCLIIn(t, t.TempDir(), []string{"HOME=" + cliHome, "XDG_CONFIG_HOME=" + filepath.Join(cliHome, ".config")},
-				bin, add...)
+			runCLIIn(t, cliDir, cliEnv, bin, add...)
 			want := opencodeCLIEntry(t, filepath.Join(cliHome, ".config", "opencode"), "afdrift")
 
 			afHome := t.TempDir()
@@ -337,16 +340,97 @@ func TestDriftOpencodeMatchesMCPAdd(t *testing.T) {
 
 			// "enabled" is just af spelling out opencode's own default (true).
 			requireSameKeys(t, "opencode", got, want, "enabled")
+
+			// The raw comparison above only proves the entries look alike. What production relies
+			// on is that the CLI READS af's layout (flat mcp.<name>, which 2.x accepts only as a
+			// compatibility path), so have the CLI resolve both files and compare what it sees. A
+			// CLI that stops reading af's file turns this red even when the raw entries still match.
+			wantSeen := opencodeResolvedEntry(t, bin, cliHome, "afdrift")
+			gotSeen := opencodeResolvedEntry(t, bin, afHome, "afdrift")
+			// "enabled" resolves to "disabled": false (2.x) or stays "enabled" (1.x); either is af
+			// spelling out the default.
+			requireSameKeys(t, "opencode (as resolved by `debug config`)", gotSeen, wantSeen, "enabled", "disabled")
 		})
 	}
 }
 
+// opencodeSandboxEnv confines everything the CLI writes (config, data and its log, cache,
+// state) to home. HOME alone is not enough: an XDG_* variable set in the caller's
+// environment wins over it and points the CLI at the real user's directories.
+func opencodeSandboxEnv(home string) []string {
+	return []string{
+		"HOME=" + home,
+		"XDG_CONFIG_HOME=" + filepath.Join(home, ".config"),
+		"XDG_DATA_HOME=" + filepath.Join(home, ".local", "share"),
+		"XDG_CACHE_HOME=" + filepath.Join(home, ".cache"),
+		"XDG_STATE_HOME=" + filepath.Join(home, ".local", "state"),
+	}
+}
+
 // opencodeHasGlobalFlag reports whether `mcp add` knows --global (2.x). 1.x has no project
-// scope and writes the global file unconditionally.
-func opencodeHasGlobalFlag(t *testing.T, bin string) bool {
+// scope and writes the global file unconditionally. It runs sandboxed like the add itself.
+func opencodeHasGlobalFlag(t *testing.T, bin, dir string, env []string) bool {
 	t.Helper()
-	out, _ := exec.Command(bin, "mcp", "add", "--help").CombinedOutput()
-	return strings.Contains(string(out), "--global")
+	return strings.Contains(string(runCLIIn(t, dir, env, bin, "mcp", "add", "--help")), "--global")
+}
+
+// opencodeResolvedEntry has the CLI itself read home's global config (`debug config`) and
+// returns the named server as the CLI resolved it. 2.x reports a list of config sources whose
+// documents carry the normalised mcp.servers.<name>; 1.x prints the merged config with
+// mcp.<name>. 2.x answers through a background service, which is pinned to a free port inside
+// the sandbox and stopped on cleanup so neither another session's service nor a leftover one
+// is involved.
+func opencodeResolvedEntry(t *testing.T, bin, home, name string) map[string]any {
+	t.Helper()
+	env := opencodeSandboxEnv(home)
+	dir := t.TempDir()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	cmd := exec.Command(bin, "service", "set", "port", strconv.Itoa(port))
+	cmd.Dir, cmd.Env = dir, append(os.Environ(), env...)
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Cleanup(func() {
+			stop := exec.Command(bin, "service", "stop")
+			stop.Dir, stop.Env = dir, append(os.Environ(), env...)
+			_ = stop.Run()
+		})
+	} else {
+		t.Logf("opencode service set port (1.x has none): %v\n%s", err, out)
+	}
+	out := runCLIIn(t, dir, env, bin, "debug", "config")
+
+	var docs []struct {
+		Info struct {
+			MCP map[string]any `json:"mcp"`
+		} `json:"info"`
+	}
+	var merged struct {
+		MCP map[string]any `json:"mcp"`
+	}
+	var mcps []map[string]any
+	if json.Unmarshal(out, &docs) == nil {
+		for _, d := range docs {
+			mcps = append(mcps, d.Info.MCP)
+		}
+	} else if err := json.Unmarshal(out, &merged); err == nil {
+		mcps = append(mcps, merged.MCP)
+	} else {
+		t.Fatalf("opencode debug config: unparsable output: %v\n%s", err, out)
+	}
+	for _, mcp := range mcps {
+		if servers, ok := mcp["servers"].(map[string]any); ok {
+			mcp = servers
+		}
+		if e, ok := mcp[name].(map[string]any); ok {
+			return e
+		}
+	}
+	t.Fatalf("opencode did not resolve %q from %s:\n%s", name, home, out)
+	return nil
 }
 
 // opencodeCLIEntry reads one server out of the global config directory, whichever of the
