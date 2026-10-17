@@ -198,7 +198,24 @@ the interactive TUI. They do not help Managed (ACP) sessions, and `stop` was not
   accounting, whether input includes cache reads, hooks under Managed.
 - Cursor hooks wired through the global `~/.cursor/hooks.json` (the project-level file was used).
 
-## 4. Addendum (2026-10-17, #2286): the multi-step and cache questions of §2.3
+## 4. Note (2026-10-17): Kiro recorder implementation on 2.31.0 and 2.32.0 (#2285)
+
+The Terminal approval path now reads `KIRO_ACP_RECORD_PATH`
+(`workspace/agent/internal/agents/kiro/recorder.go`). The pin `KIRO_VERSION=2.32.0` was
+re-measured separately (#2285 comment): same recorder behaviour as 2.31.0 on every point (live
+`request_permission` with a string id, `selected` `allow_once`/`reject_once`, Esc ->
+`session/cancel` + `cancelled`, a killed pane leaves the request unanswered, ~121 KB at boot).
+Additions to §1.4: `allow_always` opens a trust-option panel and its response carries
+`optionId:"allow_always"` plus a trust option in `_meta`, still keyed by the request id; and
+after a Kiro upgrade the first start shows a blank pane for >20 s with no recorder file, so a
+missing file is never read as "recorder unsupported".
+
+The parser was written from the 2.31.0 lines of §1.3 (fixtures in
+`internal/agents/kiro/testdata/`). The recorder only adds to the pane scrape: an unrecognised or
+absent line falls back to it. Still not measured: aarch64, the V3 engine / the fleet's
+`--agent-engine v2 --trust-all-tools` flags, two simultaneous pending requests, long sessions.
+
+## 5. Addendum (2026-10-17, #2286): the multi-step and cache questions of §2.3
 
 Run for the gate of #2286 on the same pin (cursor-agent `2026.10.16-e3cb207`, already logged in, no
 login flow), in tmux sessions of its own (`af2286_cursor_*`, `af2286_cursor2_*`, both killed by

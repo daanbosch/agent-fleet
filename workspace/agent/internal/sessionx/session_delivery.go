@@ -46,6 +46,11 @@ const (
 	// deliveryRetryWindow is the evidence wait after the one self-heal attempt.
 	deliveryRetryWindow = 12 * time.Second
 	deliveryPoll        = 500 * time.Millisecond
+	// deliveryQueuedGrace is how long a prompt claude has only enqueued may still turn into a
+	// started turn before it is reported held. An idle claude can write the enqueue and the
+	// user line back to back; a busy one holds it for minutes, and waiting out the whole
+	// window for that would only delay the sender.
+	deliveryQueuedGrace = 2 * time.Second
 )
 
 // deliverySnapshot is the pre-typing evidence baseline. logs == nil means this kind has no
@@ -76,46 +81,65 @@ func deliveryBaseline(m session.Meta) deliverySnapshot {
 	}
 }
 
-// deliveryEvidenced reports whether the prompt provably reached the session. The jsonl
-// half also catches a turn that already FINISHED between polls (the user line persists)
-// and the queued case (typed mid-turn: claude holds the prompt and replays it later).
+// deliveryEvidenced reports how far the prompt provably got. The jsonl half also catches
+// a turn that already FINISHED between polls (the user line persists). The queued case
+// (typed mid-turn: claude holds the prompt in memory and replays it later) is PromptQueued:
+// received, but not started, and lost if the pane is killed before the replay.
 //
 // The spinner is kept only as insurance against a delayed jsonl flush, and does not count
 // when the baseline was already busy: that rotation has nothing to do with our prompt.
 // Measured: the spinner on screen was a background subagent's, and an instruction that never
 // reached the main conversation was judged delivered.
-func deliveryEvidenced(m session.Meta, base deliverySnapshot, prompt string) bool {
-	if claude.PromptAcceptedSince(session.UUID(m.Dir, m.Name), base.logs, prompt) {
-		return true
+func deliveryEvidenced(m session.Meta, base deliverySnapshot, prompt string) claude.PromptState {
+	st := claude.PromptStateSince(session.UUID(m.Dir, m.Name), base.logs, prompt)
+	if st == claude.PromptAbsent && !base.paneBusy && tmuxx.IsBusy(m.Name) {
+		return claude.PromptStarted
 	}
-	return !base.paneBusy && tmuxx.IsBusy(m.Name)
+	return st
 }
 
-func awaitDeliveryEvidence(m session.Meta, base deliverySnapshot, prompt string, window time.Duration) bool {
+// awaitDeliveryEvidence polls until the prompt started a turn (PromptStarted), or is only
+// queued once deliveryQueuedGrace has passed (PromptQueued), or the window ends with no
+// evidence (PromptAbsent).
+func awaitDeliveryEvidence(m session.Meta, base deliverySnapshot, prompt string, window time.Duration) claude.PromptState {
 	deadline := time.Now().Add(window)
+	var queuedUntil time.Time
 	for {
-		if deliveryEvidenced(m, base, prompt) {
-			return true
+		switch st := deliveryEvidenced(m, base, prompt); st {
+		case claude.PromptStarted:
+			return st
+		case claude.PromptQueued:
+			if queuedUntil.IsZero() {
+				queuedUntil = time.Now().Add(deliveryQueuedGrace)
+			}
+			if time.Now().After(queuedUntil) {
+				return st
+			}
 		}
 		if time.Now().After(deadline) {
-			return false
+			if queuedUntil.IsZero() {
+				return claude.PromptAbsent
+			}
+			return claude.PromptQueued
 		}
 		time.Sleep(deliveryPoll)
 	}
 }
 
 // confirmPromptDelivery blocks until the just-typed prompt provably started a turn,
-// self-healing once if it did not. nil = confirmed (or unverifiable kind).
-func confirmPromptDelivery(m session.Meta, pane, prompt string, base deliverySnapshot) error {
+// self-healing once if it did not. nil = confirmed (or unverifiable kind). held reports a
+// prompt claude has only queued behind a running turn: received, no turn yet, never retyped
+// (a retype would queue it twice).
+func confirmPromptDelivery(m session.Meta, pane, prompt string, base deliverySnapshot) (held bool, err error) {
 	if base.logs == nil {
-		return nil
+		return false, nil
 	}
 	// Compare what was actually typed: typePromptText quotes claude's image paths, which is
 	// what the transcript and the composer then hold. Retyping it is safe because the
 	// quoting is idempotent.
 	prompt = claude.QuoteImagePaths(prompt)
-	if awaitDeliveryEvidence(m, base, prompt, deliveryConfirmWindow) {
-		return nil
+	if st := awaitDeliveryEvidence(m, base, prompt, deliveryConfirmWindow); st != claude.PromptAbsent {
+		return st == claude.PromptQueued, nil
 	}
 	// Misdelivery: if the prompt landed in a background agent's transcript, the pane's input
 	// box was bound to that agent rather than to the main conversation (the agents view).
@@ -124,7 +148,7 @@ func confirmPromptDelivery(m session.Meta, pane, prompt string, base deliverySna
 	// this; the check here is the last line of defence when a changed rail rendering lets the
 	// guard through.
 	if claude.SubagentReceivedSince(session.UUID(m.Dir, m.Name), base.subagents, prompt) {
-		return fmt.Errorf("prompt was delivered to a background agent, not the session " +
+		return false, fmt.Errorf("prompt was delivered to a background agent, not the session " +
 			"(the pane's input box was bound to an agent); return the pane to the main conversation and resend")
 	}
 	// Self-healing. The draft still in the composer means only the submit was lost, so
@@ -139,13 +163,13 @@ func confirmPromptDelivery(m session.Meta, pane, prompt string, base deliverySna
 	} else {
 		log.Printf("delivery: %s prompt vanished without a turn — retyping", m.Name)
 		if err := typeLineAndSubmit(m.Name, pane, prompt); err != nil {
-			return fmt.Errorf("delivery retry: %v", err)
+			return false, fmt.Errorf("delivery retry: %v", err)
 		}
 	}
-	if awaitDeliveryEvidence(m, base, prompt, deliveryRetryWindow) {
-		return nil
+	if st := awaitDeliveryEvidence(m, base, prompt, deliveryRetryWindow); st != claude.PromptAbsent {
+		return st == claude.PromptQueued, nil
 	}
-	return fmt.Errorf("prompt did not become a turn (no user turn appended, pane not working)")
+	return false, fmt.Errorf("prompt did not become a turn (no user turn appended, pane not working)")
 }
 
 // promptDraftVisible reports whether the captured pane still shows the typed prompt as

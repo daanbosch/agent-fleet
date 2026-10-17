@@ -5,7 +5,7 @@ package cursor
 // launching pane's environment (measured on 2026.10.16: AF_SESSION_NAME arrives, so the slot is
 // named by the env af set at launch). Its `stop` payload carries `input_tokens`,
 // `output_tokens`, `cache_read_tokens` and `cache_write_tokens` for a `completed` turn
-// (docs/log/132 §2, §4). Nothing else in the cursor CLI reports tokens on the live path.
+// (docs/log/132 §2, §5). Nothing else in the cursor CLI reports tokens on the live path.
 //
 // Invariants:
 //   - The command never blocks or fails the CLI: every error is swallowed, nothing is printed,
@@ -100,7 +100,7 @@ func recordStop(name string, in stopInput, now time.Time) {
 		return
 	}
 	cread, cwrite := intOr0(in.CacheReadTokens), intOr0(in.CacheWriteToken)
-	// input_tokens already includes cache_read_tokens (docs/log/132 §4); the ledger's In is
+	// input_tokens already includes cache_read_tokens (docs/log/132 §5); the ledger's In is
 	// the fresh part, so spend and the price estimate do not count the cached prefix twice.
 	// cache_write_tokens was 0 in every measured turn, so it is kept as ccreate and not
 	// subtracted from input.
