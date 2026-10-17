@@ -46,7 +46,7 @@ tab=$'\t'
 # 1. nothing open
 STUB_ROWS="" STUB_FAIL="" run "no issues"
 [ "$(count '^::warning::' "$WORK/out")" = 0 ] || fail "no issues: unexpected warning"
-grep -q 'No open `cli-drift` issues' "$WORK/summary" || fail "no issues: summary lacks the all-clear"
+grep -qF "No open \`cli-drift\` issues" "$WORK/summary" || fail "no issues: summary lacks the all-clear"
 
 # 2. two open
 STUB_ROWS="12${tab}codex CLI: run the contract on 0.9.0${tab}https://github.com/o/r/issues/12
