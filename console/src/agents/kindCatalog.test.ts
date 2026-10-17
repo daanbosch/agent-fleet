@@ -2,7 +2,10 @@ import { readFileSync, existsSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMock = vi.fn();
-vi.mock("../core/api/client.ts", () => ({ api: (...a: unknown[]) => apiMock(...a) }));
+let tenant = "";
+let expired = false; // the real latch cannot be reset, so stand it in
+vi.mock("../core/auth/authExpired.ts", () => ({ isAuthExpired: () => expired }));
+vi.mock("../core/api/client.ts", () => ({ api: (...a: unknown[]) => apiMock(...a), getTenant: () => tenant }));
 
 const { AGENTS, agentOf, availableKinds, repoLaunchKinds } = await import("./registry.ts");
 const { FALLBACK_KIND_FACTS, catalogKinds, kindFacts, parseKindCatalog, setKindCatalog } = await import("./kindCatalog.ts");
@@ -45,6 +48,8 @@ describe.skipIf(!haveSnapshot)("static kind lists against the catalog snapshot",
 });
 
 beforeEach(() => {
+  tenant = "";
+  expired = false;
   apiMock.mockReset();
   resetKindCatalog();
 });
@@ -54,6 +59,7 @@ afterEach(() => {
 });
 
 const body = (kinds: unknown[]) => ({ kinds });
+const row = (kind: string, o: Record<string, unknown> = {}) => ({ kind, managedOnly: false, managedDefault: false, mcpClient: "yes", ...o });
 
 describe("descriptors without a catalog (fallback)", () => {
   it("answer the driver facts the hand-kept fields used to", () => {
@@ -70,14 +76,14 @@ describe("descriptors without a catalog (fallback)", () => {
 
 describe("a loaded catalog", () => {
   it("overrides the fallback per kind, and falls back for a kind it omits", () => {
-    setKindCatalog(parseKindCatalog(body([{ kind: "claude", managedOnly: false, managedDefault: true, mcpClient: "yes" }])));
+    setKindCatalog(parseKindCatalog(body([row("claude", { managedDefault: true })])));
     expect(AGENTS.claude.managedDriver).toBe(true);
     expect(AGENTS.codex.managedDriver).toBe(true); // omitted: the fallback answers
     expect(AGENTS.lcpp.terminalDriver).toBe(false);
   });
 
   it("treats managedOnly as managed-default even if the entry forgets the flag", () => {
-    setKindCatalog(parseKindCatalog(body([{ kind: "claude", managedOnly: true, managedDefault: false, mcpClient: "yes" }])));
+    setKindCatalog(parseKindCatalog(body([row("claude", { managedOnly: true })])));
     expect(AGENTS.claude.managedDriver).toBe(true);
     expect(AGENTS.claude.terminalDriver).toBe(false);
   });
@@ -87,12 +93,26 @@ describe("a loaded catalog", () => {
     expect(parseKindCatalog({})).toBeNull();
     expect(parseKindCatalog(body([]))).toBeNull();
     expect(parseKindCatalog(body([null, { kind: 3 }, { kind: "" }]))).toBeNull();
-    expect(parseKindCatalog(body([{ kind: "x" }, null]))?.get("x")).toEqual({ managedOnly: false, managedDefault: false, mcpClient: "unverified" });
+    expect(parseKindCatalog(body([row("x"), null]))?.get("x")).toEqual({ managedOnly: false, managedDefault: false, mcpClient: "yes" });
+  });
+});
+
+describe("a malformed row", () => {
+  it.each([
+    ["no flags", { kind: "muse" }],
+    ["managedOnly missing", { kind: "muse", managedDefault: false, mcpClient: "yes" }],
+    ["managedDefault a string", { kind: "muse", managedOnly: false, managedDefault: "no", mcpClient: "yes" }],
+    ["mcpClient unknown word", { kind: "muse", managedOnly: false, managedDefault: false, mcpClient: "maybe" }],
+  ])("is dropped, so the kind keeps its fallback facts (%s)", (_n, bad) => {
+    expect(parseKindCatalog(body([bad]))).toBeNull(); // nothing usable: counts as no catalog
+    setKindCatalog(parseKindCatalog(body([bad, row("claude")])));
+    expect(AGENTS.muse.managedDriver).toBe(true);
+    expect(AGENTS.muse.terminalDriver).toBe(false);
   });
 });
 
 describe("a kind the Console has no presentation for", () => {
-  const entry = { kind: "newcli", managedOnly: false, managedDefault: true, mcpClient: "yes" };
+  const entry = row("newcli", { managedDefault: true });
 
   it("renders generically, claims no capability, and is not launchable", () => {
     setKindCatalog(parseKindCatalog(body([entry])));
@@ -124,7 +144,7 @@ describe("alternate spellings behave as before", () => {
 
   it.each(spellings)("%j resolves to claude and has no facts", (s) => {
     for (const cat of [false, true]) {
-      if (cat) setKindCatalog(parseKindCatalog(body(snapshot.kinds.length ? snapshot.kinds : [{ kind: "claude" }])));
+      if (cat) setKindCatalog(parseKindCatalog(body(snapshot.kinds.length ? snapshot.kinds : [row("claude")])));
       expect(agentOf(s)).toBe(AGENTS.claude);
       expect(kindFacts(s)).toBeUndefined();
       expect(mcpKinds()).not.toContain(s);
@@ -141,10 +161,10 @@ describe("mcpKinds", () => {
     setKindCatalog(
       parseKindCatalog(
         body([
-          { kind: "codex", mcpClient: "no" },
-          { kind: "kiro", mcpClient: "unverified" },
-          { kind: "zeta", mcpClient: "yes" },
-          { kind: "alpha", mcpClient: "yes" },
+          row("codex", { mcpClient: "no" }),
+          row("kiro", { mcpClient: "unverified" }),
+          row("zeta"),
+          row("alpha"),
         ]),
       ),
     );
@@ -159,18 +179,21 @@ describe("mcpKinds", () => {
 
 describe("loadKindCatalog", () => {
   it("installs a good answer once and does not ask again", async () => {
-    apiMock.mockResolvedValue(body([{ kind: "claude", managedOnly: false, managedDefault: true, mcpClient: "yes" }]));
+    apiMock.mockResolvedValue(body([row("claude", { managedDefault: true })]));
     await loadKindCatalog();
     await loadKindCatalog();
     expect(apiMock).toHaveBeenCalledTimes(1);
-    expect(apiMock).toHaveBeenCalledWith("/api/agents/kinds");
+    // No leading slash: a Console served under a sub-path (rel() resolves against document.baseURI)
+    // must not be sent to the host root.
+    expect(apiMock).toHaveBeenCalledWith("api/agents/kinds");
+    expect(new URL("api/agents/kinds", "https://example.invalid/agent-fleet/").pathname).toBe("/agent-fleet/api/agents/kinds");
     expect(AGENTS.claude.managedDriver).toBe(true);
   });
 
   it("keeps the fallback on a failure and retries later with a growing delay", async () => {
     vi.useFakeTimers();
     apiMock.mockRejectedValueOnce(new Error("502")).mockResolvedValueOnce({ nope: 1 }).mockResolvedValue(
-      body([{ kind: "claude", managedOnly: false, managedDefault: true, mcpClient: "yes" }]),
+      body([row("claude", { managedDefault: true })]),
     );
     await loadKindCatalog();
     expect(AGENTS.claude.managedDriver).toBe(false);
@@ -189,12 +212,60 @@ describe("loadKindCatalog", () => {
     expect(apiMock).toHaveBeenCalledTimes(3); // success stops the retries
   });
 
+  it.each([
+    ["401", { error: { code: "unauthorized", status: 401 } }],
+    ["403", { error: { code: "forbidden", status: 403 } }],
+  ])("stops retrying on a terminal %s", async (_n, answer) => {
+    vi.useFakeTimers();
+    apiMock.mockResolvedValue(answer);
+    await loadKindCatalog();
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(apiMock).toHaveBeenCalledTimes(1);
+    expect(AGENTS.codex.managedDriver).toBe(true); // still on the fallback
+  });
+
+  it("stops retrying once the login-expired latch has fired", async () => {
+    vi.useFakeTimers();
+    apiMock.mockResolvedValue({ error: { code: "http_502", status: 502 } });
+    await loadKindCatalog();
+    expired = true;
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(apiMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["5xx", { error: { code: "internal", status: 502 } }],
+    ["429", { error: { code: "rate", status: 429 } }],
+    ["an empty catalog", { kinds: [] }],
+  ])("keeps retrying on %s", async (_n, answer) => {
+    vi.useFakeTimers();
+    apiMock.mockResolvedValueOnce(answer).mockResolvedValue(body([row("claude", { managedDefault: true })]));
+    await loadKindCatalog();
+    await vi.advanceTimersByTimeAsync(3_100);
+    expect(apiMock).toHaveBeenCalledTimes(2);
+    expect(AGENTS.claude.managedDriver).toBe(true);
+  });
+
+  it("does not keep a catalog fetched for tenant A once boot settled on tenant B", async () => {
+    tenant = "a";
+    let resolveA!: (v: unknown) => void;
+    apiMock.mockReturnValueOnce(new Promise((r) => (resolveA = r)));
+    apiMock.mockResolvedValueOnce(body([row("claude", { managedDefault: false }), row("codex", { managedDefault: false })]));
+    const p = loadKindCatalog();
+    tenant = "b"; // tenant.init() picked b (?tenant=b) with no reset
+    resolveA(body([row("claude", { managedDefault: true })]));
+    await p;
+    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(AGENTS.codex.managedDriver).toBe(false)); // B's answer, not A's
+    expect(AGENTS.claude.managedDriver).toBe(false);
+  });
+
   it("drops an answer that was in flight when the tenant changed", async () => {
     let resolve!: (v: unknown) => void;
     apiMock.mockReturnValueOnce(new Promise((r) => (resolve = r)));
     const p = loadKindCatalog();
     resetKindCatalog();
-    resolve(body([{ kind: "claude", managedOnly: false, managedDefault: true, mcpClient: "yes" }]));
+    resolve(body([row("claude", { managedDefault: true })]));
     await p;
     expect(AGENTS.claude.managedDriver).toBe(false);
   });

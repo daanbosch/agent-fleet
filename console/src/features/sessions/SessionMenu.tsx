@@ -22,6 +22,7 @@ import { useReposStore } from "../repos/store.ts";
 import { useT } from "../../lib/i18n/index.ts";
 import { displayName, remainingShort, KEEP_AWAKE_HOURS } from "../../lib/sessionview.ts";
 import { agentOf } from "../../agents/registry.ts";
+import { useKindCatalogVersion } from "../../agents/kindCatalog.ts";
 import { openSessionTerminal, openSessionChat, openSessionByName } from "./open.ts";
 import { openGallery } from "../gallery/open.ts";
 import { openRepoMenuInRail } from "../repos/reveal.ts";
@@ -65,6 +66,7 @@ interface MenuSection {
 }
 
 export function SessionMenu({ s, actions, running, open, place, keepOpenRefs, onClose }: SessionMenuProps) {
+  useKindCatalogVersion(); // the driver-switch item reads the catalog's driver facts
   const openRename = useSessionUI((u) => u.openRename);
   const openBranchRename = useSessionUI((u) => u.openBranchRename);
   const openSsmResume = useSessionUI((u) => u.openSsmResume);

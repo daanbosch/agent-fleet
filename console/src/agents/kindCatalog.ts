@@ -52,8 +52,6 @@ function publish(next: ReadonlyMap<string, KindFacts> | null): void {
   for (const fn of subs) fn();
 }
 
-const tri = (v: unknown): Tri => (v === "yes" || v === "no" ? v : "unverified");
-
 /** Reads the response defensively: a malformed entry is dropped, never thrown on. An answer
  *  with no usable entry is null, which callers treat as "no catalog". */
 export function parseKindCatalog(body: unknown): Map<string, KindFacts> | null {
@@ -61,12 +59,15 @@ export function parseKindCatalog(body: unknown): Map<string, KindFacts> | null {
   if (!Array.isArray(list)) return null;
   const out = new Map<string, KindFacts>();
   for (const e of list) {
+    // The Go wire requires all three; a row that lacks one is dropped rather than read as
+    // "false", so the kind keeps its fallback facts.
     if (!e || typeof e !== "object" || typeof e.kind !== "string" || !e.kind) continue;
-    const managedOnly = e.managedOnly === true;
+    if (typeof e.managedOnly !== "boolean" || typeof e.managedDefault !== "boolean") continue;
+    if (e.mcpClient !== "yes" && e.mcpClient !== "no" && e.mcpClient !== "unverified") continue;
     out.set(e.kind, {
-      managedOnly,
-      managedDefault: managedOnly || e.managedDefault === true,
-      mcpClient: tri(e.mcpClient),
+      managedOnly: e.managedOnly,
+      managedDefault: e.managedOnly || e.managedDefault,
+      mcpClient: e.mcpClient,
     });
   }
   return out.size ? out : null;

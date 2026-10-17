@@ -50,7 +50,7 @@ describe("ServerForm kind checkboxes", () => {
 
   it("re-renders when a catalog arrives and drops a kind that no longer takes MCP servers", () => {
     mount();
-    act(() => setKindCatalog(parseKindCatalog({ kinds: [{ kind: "codex", mcpClient: "no" }] })));
+    act(() => setKindCatalog(parseKindCatalog({ kinds: [{ kind: "codex", managedOnly: false, managedDefault: true, mcpClient: "no" }] })));
     expect(kindBoxes()).toEqual(MCP_KINDS.filter((k) => k !== "codex").map((k) => agentOf(k).label));
   });
 });

@@ -321,9 +321,6 @@ export function App() {
     const stopWsPoll = startWorkspacePolling();
     const stopSessPoll = startSessionsPolling();
     const stopReposPoll = startReposPolling();
-    // Kind facts (managed-only, managed default, MCP client). Never awaited: the static fallback
-    // answers until it lands, and a failure retries on its own.
-    void loadKindCatalog();
     // Import jobs (docs/log/78): polls fast only while one is running. The work continues
     // with the browser closed, so this also restores the rows after a reload.
     const stopRepoJobsPoll = startRepoJobsPolling();
@@ -332,6 +329,9 @@ export function App() {
     const unNotificationRead = wireNotificationReadOnVisibleSessions();
     void (async () => {
       await useTenantStore.getState().init();
+      // Kind facts (managed-only, managed default, MCP client), asked once the tenant is settled.
+      // Never awaited: the static fallback answers until it lands, and a failure retries itself.
+      void loadKindCatalog();
       // The local settings copy records whose server copy it was merged with; until whoami has
       // answered the user is "", which ui-prefs treats as an unknown owner.
       setPrefsOwnerSource(() => (getUser() ? `${getTenant()}|${getUser()}` : ""));
