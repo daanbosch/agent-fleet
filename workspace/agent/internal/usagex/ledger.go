@@ -125,6 +125,11 @@ type Record struct {
 	// Absent on every other feature — never write a 0 to mean "no images".
 	Images int `json:"images,omitempty"`
 	Pixels int `json:"pixels,omitempty"`
+	// TokensOnly marks a row that adds tokens to a turn another row already counts as a call
+	// (cursor's stop hook beside the transcript fold's row for the same turn). The aggregation
+	// sums its tokens and never counts it as a call, so the two writers cannot double the call
+	// count.
+	TokensOnly bool `json:"tokens_only,omitempty"`
 }
 
 // Spend is the headline metric. cache_read is excluded to match the definition

@@ -129,6 +129,7 @@ var Entries = []string{
 	"agy-hook",
 	"agy-launch",
 	"agy-hooks.lock",
+	"cursor-hooks.lock",
 	"codex-msgledger",
 	"opencode-msgledger",
 	"copilot-msgledger",
