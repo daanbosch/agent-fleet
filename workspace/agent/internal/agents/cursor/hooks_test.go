@@ -1,0 +1,277 @@
+package cursor
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/usagex"
+)
+
+const hookChat = "33cf6d19-0000-4000-8000-000000000001"
+
+// hookFixture isolates HOME and the ledger and registers a cursor session.
+func hookFixture(t *testing.T, mutate func(*session.Meta)) session.Meta {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AF_USAGE_DIR", t.TempDir())
+	m := session.Meta{Dir: "/home/dev/repos/proj", Name: "slot-a", Kind: session.KindCursor}
+	if mutate != nil {
+		mutate(&m)
+	}
+	session.WriteMeta(m)
+	return m
+}
+
+func stopFixture(t *testing.T, file string) stopInput {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "hooks", file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var in stopInput
+	if err := json.Unmarshal(b, &in); err != nil {
+		t.Fatal(err)
+	}
+	return in
+}
+
+func TestRecordStopWritesACompletedTurn(t *testing.T) {
+	m := hookFixture(t, nil)
+	recordStop(m.Name, stopFixture(t, "stop_completed_multistep.json"), time.Now())
+	rows := usagex.ReadRows()
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1: %+v", len(rows), rows)
+	}
+	r := rows[0]
+	if r.Feature != usagex.FeatureSession || r.Kind != session.KindCursor || r.Ref != m.Name {
+		t.Fatalf("identity wrong: %+v", r)
+	}
+	// input_tokens includes the cached prefix: In is the fresh part, so spend does not count it.
+	if r.In != 639 || r.Out != 196 || r.CacheRead != 63296 || r.CacheCreate != 0 || r.Spend != 835 {
+		t.Fatalf("tokens wrong: %+v", r)
+	}
+	if r.Key != "cursor-stop:8f432487-0000-4000-8000-000000000002" {
+		t.Fatalf("key = %q", r.Key)
+	}
+	if r.Measured != usagex.MeasuredPartial || !r.TokensOnly || !r.OK {
+		t.Fatalf("measured/flags wrong: %+v", r)
+	}
+	// The raw selector survives; Auto is not turned into a model, and nothing is priced.
+	if r.ModelRaw != "default" || r.Model != "" || r.ModelSrc != usagex.ModelUnknown || r.CostUSD != 0 {
+		t.Fatalf("model/cost wrong: %+v", r)
+	}
+}
+
+func TestRecordStopKeepsAnExplicitModel(t *testing.T) {
+	m := hookFixture(t, nil)
+	in := stopFixture(t, "stop_completed_plain.json")
+	in.Model = "gpt-5.3-codex-low-fast"
+	recordStop(m.Name, in, time.Now())
+	r := usagex.ReadRows()[0]
+	if r.Model != in.Model || r.ModelRaw != in.Model || r.ModelReq != in.Model || r.ModelSrc != usagex.ModelRequest {
+		t.Fatalf("model wrong: %+v", r)
+	}
+	if r.In != 10312 || r.CacheRead != 0 {
+		t.Fatalf("tokens wrong: %+v", r)
+	}
+}
+
+func TestRecordStopIgnoresTurnsWithoutTokens(t *testing.T) {
+	m := hookFixture(t, nil)
+	// An interrupted turn fires stop twice with one generation id, neither carrying tokens.
+	recordStop(m.Name, stopFixture(t, "stop_aborted.json"), time.Now())
+	recordStop(m.Name, stopFixture(t, "stop_error.json"), time.Now())
+	// A completed payload with no counts is not a zero-token turn either.
+	in := stopFixture(t, "stop_completed_plain.json")
+	in.InputTokens, in.OutputTokens = nil, nil
+	recordStop(m.Name, in, time.Now())
+	// ... and neither is a status other than completed that does carry counts.
+	in = stopFixture(t, "stop_completed_plain.json")
+	in.Status = "error"
+	recordStop(m.Name, in, time.Now())
+	if rows := usagex.ReadRows(); len(rows) != 0 {
+		t.Fatalf("wrote rows for turns without tokens: %+v", rows)
+	}
+}
+
+func TestRecordStopOnlyForATerminalCursorSlot(t *testing.T) {
+	in := stopFixture(t, "stop_completed_plain.json")
+	for name, mutate := range map[string]func(*session.Meta){
+		"claude":  func(m *session.Meta) { m.Kind = session.KindClaude },
+		"managed": func(m *session.Meta) { m.Driver = session.DriverManaged },
+	} {
+		m := hookFixture(t, mutate)
+		recordStop(m.Name, in, time.Now())
+		if rows := usagex.ReadRows(); len(rows) != 0 {
+			t.Fatalf("%s session recorded %+v", name, rows)
+		}
+	}
+	m := hookFixture(t, nil)
+	recordStop("", in, time.Now())             // a cursor-agent run by hand: no AF_SESSION_NAME
+	recordStop("no-such-slot", in, time.Now()) // a name with no session
+	other := in
+	other.GenerationID = ""
+	recordStop(m.Name, other, time.Now()) // nothing to dedup on
+	// A cursor-agent the pane's command started: same env, another conversation.
+	sids.Write(session.UUID(m.Dir, m.Name), "11111111-0000-4000-8000-000000000009")
+	recordStop(m.Name, in, time.Now())
+	if rows := usagex.ReadRows(); len(rows) != 0 {
+		t.Fatalf("unattributable stops recorded %+v", rows)
+	}
+	sids.Write(session.UUID(m.Dir, m.Name), hookChat)
+	recordStop(m.Name, in, time.Now())
+	if rows := usagex.ReadRows(); len(rows) != 1 {
+		t.Fatalf("the slot's own conversation was not recorded: %+v", rows)
+	}
+}
+
+func TestRecordStopRespectsTheLedgerSwitch(t *testing.T) {
+	m := hookFixture(t, nil)
+	t.Setenv("AF_USAGE_RECORD", "0")
+	recordStop(m.Name, stopFixture(t, "stop_completed_plain.json"), time.Now())
+	if rows := usagex.ReadRows(); len(rows) != 0 {
+		t.Fatalf("AF_USAGE_RECORD=0 still wrote %+v", rows)
+	}
+}
+
+const userHooks = `{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [{"command": "./audit.sh"}],
+    "stop": [{"command": "./mine.sh", "timeout": 3}]
+  }
+}`
+
+func readJSON(t *testing.T, path string) map[string]any {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v map[string]any
+	if err := json.Unmarshal(b, &v); err != nil {
+		t.Fatalf("%s is not JSON: %v\n%s", path, err, b)
+	}
+	return v
+}
+
+func stopEntries(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, e := range readJSON(t, path)["hooks"].(map[string]any)["stop"].([]any) {
+		out = append(out, e.(map[string]any))
+	}
+	return out
+}
+
+func TestEnsureHooksCreatesTheFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := hooksPath()
+	if err := ensureHooksAt(path, "/opt/af/workspace-agent"); err != nil {
+		t.Fatal(err)
+	}
+	if v := readJSON(t, path)["version"]; v != float64(1) {
+		t.Fatalf("version = %v", v)
+	}
+	es := stopEntries(t, path)
+	if len(es) != 1 || es[0]["command"] != "'/opt/af/workspace-agent' cursor-hook stop" {
+		t.Fatalf("entries = %+v", es)
+	}
+}
+
+func TestEnsureHooksKeepsTheUsersHooks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := hooksPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(userHooks), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureHooksAt(path, "/opt/af/a"); err != nil {
+		t.Fatal(err)
+	}
+	// The binary moved: our entry is replaced where it stands, the user's stay as written.
+	if err := ensureHooksAt(path, "/opt/af/b"); err != nil {
+		t.Fatal(err)
+	}
+	es := stopEntries(t, path)
+	if len(es) != 2 || es[0]["command"] != "./mine.sh" || es[0]["timeout"] != float64(3) ||
+		!strings.Contains(es[1]["command"].(string), "/opt/af/b") {
+		t.Fatalf("stop entries = %+v", es)
+	}
+	hooks := readJSON(t, path)["hooks"].(map[string]any)
+	if _, ok := hooks["beforeShellExecution"]; !ok {
+		t.Fatalf("the user's other event was dropped: %+v", hooks)
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o640 {
+		t.Fatalf("mode = %v, want the user's 0640", fi.Mode().Perm())
+	}
+	// Current already: no rewrite at all.
+	before, _ := os.ReadFile(path)
+	if err := ensureHooksAt(path, "/opt/af/b"); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Fatal("an up-to-date file was rewritten")
+	}
+}
+
+func TestEnsureHooksFailsClosed(t *testing.T) {
+	for name, content := range map[string]string{
+		"not json":         `{"version":1,`,
+		"not an object":    `[1]`,
+		"null":             `null`,
+		"other version":    `{"version":2,"hooks":{}}`,
+		"hooks not object": `{"version":1,"hooks":[]}`,
+		"hooks null":       `{"version":1,"hooks":null}`,
+		"stop not array":   `{"version":1,"hooks":{"stop":{"command":"x"}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			path := hooksPath()
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := ensureHooksAt(path, "/opt/af/a"); err == nil {
+				t.Fatal("expected an error")
+			}
+			if got, _ := os.ReadFile(path); string(got) != content {
+				t.Fatalf("the file was touched: %s", got)
+			}
+		})
+	}
+}
+
+func TestEnsureHooksWritesThroughASymlink(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	real := filepath.Join(t.TempDir(), "hooks.json")
+	if err := os.WriteFile(real, []byte(userHooks), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := hooksPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureHooksAt(path, "/opt/af/a"); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the symlink was replaced: %v %v", fi, err)
+	}
+	if len(stopEntries(t, real)) != 2 {
+		t.Fatal("the link target was not updated")
+	}
+}

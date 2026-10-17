@@ -10,6 +10,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/afmemory"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/agy"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/claude"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/cursor"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/opencode"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/browserx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/mcpx"
@@ -230,6 +231,12 @@ var subcommands = []subcommand{
 		summary: "agy hook: record the conversation id and working/idle state",
 		hidden:  true,
 		run:     agy.RunHook,
+	},
+	{
+		name:    cursor.HookSubcommand,
+		summary: "cursor hook: record a completed Terminal turn's token usage in the ledger",
+		hidden:  true,
+		run:     cursor.RunHook,
 	},
 	{
 		name:    claude.PushHookSubcommand,

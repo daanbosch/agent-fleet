@@ -197,3 +197,33 @@ the interactive TUI. They do not help Managed (ACP) sessions, and `stop` was not
 - Cursor: a successful turn with an explicit model, a multi-step (several tool calls) turn's token
   accounting, whether input includes cache reads, hooks under Managed.
 - Cursor hooks wired through the global `~/.cursor/hooks.json` (the project-level file was used).
+
+## 4. Addendum (2026-10-17, #2286): the multi-step and cache questions of §2.3
+
+Run for the gate of #2286 on the same pin (cursor-agent `2026.10.16-e3cb207`, already logged in, no
+login flow), in tmux sessions of its own (`af2286_cursor_*`, `af2286_cursor2_*`, both killed by
+this run), with a project-level `.cursor/hooks.json` in a throwaway directory under `$AF_WORK_DIR`
+(`stop`, `beforeSubmitPrompt`, `afterAgentResponse`, `afterShellExecution`, `postToolUse`; the capture
+script kept ids, status, model and token counts only). The global `~/.cursor/hooks.json` was not
+touched, so a global-file hook is **still not measured**.
+
+| Turn | Model steps | `stop` payload (`input / output / cache_read / cache_write`) |
+|---|---|---|
+| `Reply with just: pong` | 1 | `10312 / 35 / 0 / 0`, `status: completed` |
+| five shell calls, one per tool call, then `done` | 6 (5 `postToolUse` + the final answer) | `63935 / 196 / 63296 / 0`, `status: completed`, one `stop` |
+
+- **Multi-step turns report the SUM of all steps, not the last step.** The first step of this
+  conversation costs ~10.3k input (the plain turn). Six steps re-send a growing context each time:
+  `63935 ≈ 6 × 10.6k`. The last step alone would be ~11k. The one-tool turn of §2.2 fits the same
+  rule (`20958 ≈ 2 × 10.4k`, which §2.3 could not explain). `output_tokens` grows with the step
+  count too (35 → 196).
+- **`input_tokens` includes `cache_read_tokens`.** `63296` of `63935` input is cache read; if input
+  excluded it, a six-step turn would report only the ~640 fresh tokens. So the fresh part is
+  `input_tokens - cache_read_tokens`. This is inferred from the magnitudes, not from a priced-model
+  comparison, and `cache_write_tokens` was `0` on every turn, so whether it is part of `input_tokens`
+  too is **not measured**.
+- **The hook child inherits the pane's environment** (an `-e` variable set on the tmux session was
+  visible in `stop`, `beforeSubmitPrompt` and `afterAgentResponse`), and its cwd is the project. A
+  global hook can therefore tell an AF-launched session (`AF_SESSION_NAME`) from a hand-run one.
+- Still not measured: a priced-model turn (USD), `cache_write_tokens > 0`, a global-file hook, other
+  cursor versions, hooks under Managed. Follow-ups are on #2286.
