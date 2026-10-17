@@ -277,7 +277,9 @@ func scheduleInjectKind(kind string) string {
 
 // managedDefaultKinds are the kinds a scheduled launch asks the managed driver for, derived
 // from the kind catalog snapshot. lcpp and muse (managed-only) are in it: the Agent defaults
-// them to managed anyway, so naming it changes nothing about the launch.
+// them to managed anyway, so naming it changes nothing there. An older Agent that does not
+// register them folds the kind to claude: an empty driver would have launched a claude TUI,
+// managed is refused (driver_unsupported) — a refusal is the right answer to a kind it cannot run.
 var managedDefaultKinds = agentkinds.ManagedDefaultKinds()
 
 // injectDriver mirrors the Agent-side rule: managed-driver kinds run paneless. The match is
