@@ -317,21 +317,63 @@ func TestDriftOpencodeMatchesMCPAdd(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cliHome := t.TempDir()
-			runCLI(t, []string{"HOME=" + cliHome, "XDG_CONFIG_HOME=" + filepath.Join(cliHome, ".config")},
-				bin, tc.add...)
-			want := serverEntry(t, filepath.Join(cliHome, ".config", "opencode", "opencode.jsonc"), "mcp", "afdrift")
+			// opencode 2.x writes the PROJECT config (./opencode.json) unless told --global, so the
+			// CLI runs in a throwaway directory: without it the file lands in the repo checkout and
+			// the global one this test reads is never created.
+			add := tc.add
+			if opencodeHasGlobalFlag(t, bin) {
+				add = append([]string{add[0], add[1], "--global"}, add[2:]...)
+			}
+			runCLIIn(t, t.TempDir(), []string{"HOME=" + cliHome, "XDG_CONFIG_HOME=" + filepath.Join(cliHome, ".config")},
+				bin, add...)
+			want := opencodeCLIEntry(t, filepath.Join(cliHome, ".config", "opencode"), "afdrift")
 
 			afHome := t.TempDir()
 			t.Setenv("HOME", afHome)
 			if _, _, _, err := materializeOpencode([]ServerDef{tc.def}, nil); err != nil {
 				t.Fatalf("materializeOpencode: %v", err)
 			}
-			got := serverEntry(t, opencodeConfigPath(), "mcp", "afdrift")
+			got := opencodeCLIEntry(t, filepath.Dir(opencodeConfigPath()), "afdrift")
 
 			// "enabled" is just af spelling out opencode's own default (true).
 			requireSameKeys(t, "opencode", got, want, "enabled")
 		})
 	}
+}
+
+// opencodeHasGlobalFlag reports whether `mcp add` knows --global (2.x). 1.x has no project
+// scope and writes the global file unconditionally.
+func opencodeHasGlobalFlag(t *testing.T, bin string) bool {
+	t.Helper()
+	out, _ := exec.Command(bin, "mcp", "add", "--help").CombinedOutput()
+	return strings.Contains(string(out), "--global")
+}
+
+// opencodeCLIEntry reads one server out of the global config directory, whichever of the
+// two merged file names holds it and in whichever layout: 1.x writes mcp.<name>, 2.x writes
+// mcp.servers.<name> (and normalises the former to the latter when it reads). The entry
+// itself has the same shape in both, which is what is compared.
+func opencodeCLIEntry(t *testing.T, dir, name string) map[string]any {
+	t.Helper()
+	for _, file := range opencodeConfigNames {
+		b, err := os.ReadFile(filepath.Join(dir, file))
+		if err != nil {
+			continue
+		}
+		root := map[string]any{}
+		if err := json.Unmarshal(b, &root); err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		mcp, _ := root["mcp"].(map[string]any)
+		if servers, ok := mcp["servers"].(map[string]any); ok {
+			mcp = servers
+		}
+		if e, ok := mcp[name].(map[string]any); ok {
+			return e
+		}
+	}
+	t.Fatalf("no %q under mcp in any of %v in %s", name, opencodeConfigNames, dir)
+	return nil
 }
 
 // --- copilot: mcpServers.<name> in $COPILOT_HOME/mcp-config.json -----------------
