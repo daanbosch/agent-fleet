@@ -60,7 +60,7 @@ func TestDevIdPIsServedOnAFreshDeployment(t *testing.T) {
 	a.get(rec, httptest.NewRequest(http.MethodGet, "/api/admin/dev-idp", nil), store.Identity{ID: "u1"})
 	var s devIdPAdminStatus
 	_ = json.Unmarshal(rec.Body.Bytes(), &s)
-	if !s.Enabled || !s.Setting || s.Locked || s.MissingBaseURL || s.OptedIn != 1 || s.Issuer != "https://af.example.com/dev-idp" {
+	if !s.Enabled || !s.Setting || s.Locked || s.MissingBaseURL || s.Clients != 1 || s.Issuer != "https://af.example.com/dev-idp" {
 		t.Errorf("status = %+v", s)
 	}
 }
@@ -80,7 +80,7 @@ func TestDevIdPToggleIsFollowedEverywhereAndKeepsTheOptIns(t *testing.T) {
 	if rec.Code != http.StatusOK || s.Enabled || s.Setting {
 		t.Fatalf("PUT off = %d %+v", rec.Code, s)
 	}
-	if s.OptedIn != 1 {
+	if s.Clients != 1 {
 		t.Errorf("turning it off dropped the opt-in count: %+v", s)
 	}
 	for _, p := range []string{devIdPDiscoveryPath, devIdPJWKSPath, devIdPAuthorizePath, devIdPTokenPath, devIdPUserinfoPath} {
@@ -88,31 +88,20 @@ func TestDevIdPToggleIsFollowedEverywhereAndKeepsTheOptIns(t *testing.T) {
 			t.Errorf("%s right after PUT off = %d, want 404", p, got)
 		}
 	}
-	st := parseWSSettings(mustSettings(ctx, d.mgr, d.ws.ID))
-	if !st.DevIdP {
-		t.Error("the workspace's opt-in was cleared")
-	}
-	if env := d.mgr.devIdPEnv(ctx, d.ws, st); len(env) != 0 {
+	if env := d.mgr.devIdPEnv(ctx, d.ws); len(env) != 0 {
 		t.Errorf("env still injected while off: %v", env)
 	}
-	// ws-settings reports it unavailable, and storing an opt-in is the same 409 as before.
+	// ws-settings reports it unavailable, and the removed per-workspace field is ignored.
 	wsGet := httptest.NewRecorder()
 	d.mux.ServeHTTP(wsGet, httptest.NewRequest(http.MethodGet, "https://af.example.com/api/env/ws-settings", nil))
 	if !strings.Contains(wsGet.Body.String(), `"devIdpAvailable":false`) {
 		t.Errorf("ws-settings while off: %s", wsGet.Body)
 	}
-	other := httptest.NewRecorder()
-	d.mux.ServeHTTP(other, httptest.NewRequest(http.MethodPut, "https://af.example.com/api/env/ws-settings",
-		strings.NewReader(`{"devIdp":false}`)))
-	// Turning the workspace off first so the on-request below is a real change.
-	if other.Code != http.StatusOK {
-		t.Fatalf("workspace opt-out while the deployment is off: %d %s", other.Code, other.Body)
-	}
-	on := httptest.NewRecorder()
-	d.mux.ServeHTTP(on, httptest.NewRequest(http.MethodPut, "https://af.example.com/api/env/ws-settings",
+	ign := httptest.NewRecorder()
+	d.mux.ServeHTTP(ign, httptest.NewRequest(http.MethodPut, "https://af.example.com/api/env/ws-settings",
 		strings.NewReader(`{"devIdp":true}`)))
-	if on.Code != http.StatusConflict {
-		t.Errorf("opt-in while the deployment is off = %d, want 409", on.Code)
+	if ign.Code != http.StatusOK {
+		t.Errorf("PUT devIdp while the deployment is off = %d, want 200 (ignored)", ign.Code)
 	}
 
 	// Back on: the registration that existed before is the one in force.
@@ -284,14 +273,6 @@ func TestDevIdPFailsClosedWhenTheSwitchCannotBeRead(t *testing.T) {
 	if iss := d.mgr.devIdPIssuer(context.Background()); iss != "" {
 		t.Errorf("issuer = %q", iss)
 	}
-	wsPut := httptest.NewRecorder()
-	d.mux.ServeHTTP(wsPut, httptest.NewRequest(http.MethodPut, "https://af.example.com/api/env/ws-settings", strings.NewReader(`{"devIdp":false}`)))
-	// Turning the workspace off is allowed; turning it on is a 409.
-	on := httptest.NewRecorder()
-	d.mux.ServeHTTP(on, httptest.NewRequest(http.MethodPut, "https://af.example.com/api/env/ws-settings", strings.NewReader(`{"devIdp":true}`)))
-	if on.Code != http.StatusConflict {
-		t.Errorf("opt-in with an unreadable switch = %d, want 409", on.Code)
-	}
 }
 
 // The deployment goes off after the gate let a valid code in: no token may come out.
@@ -427,18 +408,15 @@ func TestDevIdPAdminRoutesAreSuperAdminOnly(t *testing.T) {
 	}
 }
 
-// A deployment with no master key and no preview domain (a dev setup) starts workspaces from
-// the memoized runtime. The switch must still be read at every start, in both directions.
+// A deployment with no master key (a dev setup) starts workspaces from the memoized runtime. The switch must still be read at every start, in both directions.
 func TestStartFollowsTheDevIdPSwitchFromAMemoWithoutKeys(t *testing.T) {
 	ctx := context.Background()
 	f := &envRecordingFactory{}
 	st, mgr, victim, tn := destroyFixture(t, f)
 	mgr.publicBaseURL = "https://af.example.com"
+	mgr.previewDomain = "pv.example.com" // the IdP is offered only with preview subdomains
 	memID := membershipIDOf(t, st, victim, tn)
 	ws, _, _ := st.GetWorkspaceByMembership(ctx, memID)
-	if err := st.SetWorkspaceSettings(ctx, ws.ID, `{"devIdp":true}`); err != nil {
-		t.Fatal(err)
-	}
 	mv, _, _ := st.GetMembershipByID(ctx, memID)
 	api := newWorkspaceAPI(mgr, false)
 	started := func() string {
@@ -466,5 +444,58 @@ func TestStartFollowsTheDevIdPSwitchFromAMemoWithoutKeys(t *testing.T) {
 	setDevIdPDeployment(t, mgr, false)
 	if got := started(); strings.Contains(got, "AF_DEV_IDP_") {
 		t.Fatalf("switch turned off but the start still injects the IdP env: %q", got)
+	}
+}
+
+// The IdP is offered only with preview subdomains. Without a preview domain nothing is served
+// or injected, ws-settings says unavailable, rotate is the 409 no_preview_domain, and the admin
+// status says why; with one, everything works.
+func TestDevIdPNeedsAPreviewDomain(t *testing.T) {
+	d := newDevIdPTestEnv(t)
+	a := devIdPAdminAPI{memberAuth{d.mgr}}
+	wsGet := func() map[string]any {
+		rec := httptest.NewRecorder()
+		d.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "https://af.example.com/api/env/ws-settings", nil))
+		return idpJSON(t, rec)
+	}
+	adminGet := func() devIdPAdminStatus {
+		rec := httptest.NewRecorder()
+		a.get(rec, httptest.NewRequest(http.MethodGet, "/api/admin/dev-idp", nil), store.Identity{ID: "u1"})
+		var s devIdPAdminStatus
+		_ = json.Unmarshal(rec.Body.Bytes(), &s)
+		return s
+	}
+	if s := adminGet(); s.MissingPreviewDomain || !s.Enabled {
+		t.Errorf("admin status with a preview domain = %+v", s)
+	}
+	if b := wsGet(); b["devIdpAvailable"] != true || b["devIdpClientId"] == nil {
+		t.Fatalf("with a preview domain: %v", b)
+	}
+
+	domain := d.mgr.previewDomain
+	d.mgr.previewDomain = ""
+	if s := adminGet(); !s.MissingPreviewDomain || s.MissingBaseURL || s.Enabled || !s.Setting {
+		t.Errorf("admin status without a preview domain = %+v", s)
+	}
+	if b := wsGet(); b["devIdpAvailable"] != false {
+		t.Errorf("without a preview domain: %v", b)
+	}
+	if _, _, ok := envCreds(d); ok {
+		t.Error("env injected without a preview domain")
+	}
+	for _, p := range []string{devIdPDiscoveryPath, devIdPJWKSPath, devIdPAuthorizePath, devIdPTokenPath, devIdPUserinfoPath} {
+		if got := d.console(t, "https://af.example.com"+p).Code; got != http.StatusNotFound {
+			t.Errorf("%s without a preview domain = %d, want 404", p, got)
+		}
+	}
+	rec := httptest.NewRecorder()
+	d.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "https://af.example.com/api/env/ws-settings/dev-idp/rotate", nil))
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"no_preview_domain"`) {
+		t.Errorf("rotate without a preview domain = %d %s, want 409 no_preview_domain", rec.Code, rec.Body)
+	}
+
+	d.mgr.previewDomain = domain
+	if _, _, ok := envCreds(d); !ok {
+		t.Error("no env once the preview domain is back")
 	}
 }

@@ -8,8 +8,9 @@
 //
 // It never claims to be Google: the issuer is its own, every token carries `af_dev: true`, and
 // the audience is the one workspace's client id. Served while the deployment switch is on (on
-// unless a super admin turned it off or AF_DEV_IDP=0 locked it) and the workspace opts in; while
-// off, every route answers 404.
+// unless a super admin turned it off or AF_DEV_IDP=0 locked it) and the deployment has a preview
+// domain; every workspace's client is served, with no per-workspace opt-in. While not served, every
+// route answers 404.
 //
 // The preview host serves none of this (ADR 0062 decision 8): those hostnames are relayed to
 // the user's app, so this code is reachable on the Console origin only.
@@ -44,11 +45,13 @@ type devIdPAPI struct {
 	mgr  *manager
 	keys *devIdPKeyring
 	now  func() time.Time
+	// brand colours and labels the consent page; nil answers the shipped look.
+	brand *brandResolver
 }
 
 func newDevIdPAPI(cfg config) devIdPAPI {
 	m := cfg.mgr
-	return devIdPAPI{mgr: m, keys: newDevIdPKeyring(m.store, m, time.Now), now: time.Now}
+	return devIdPAPI{mgr: m, keys: newDevIdPKeyring(m.store, m, time.Now), now: time.Now, brand: cfg.brand}
 }
 
 // registerDevIdPRoutes mounts the endpoints. authorize is deliberately NOT exempt from
@@ -61,14 +64,23 @@ func (a devIdPAPI) mount(mux *http.ServeMux) {
 	exemptExact(devIdPDiscoveryPath, devIdPJWKSPath, devIdPTokenPath, devIdPUserinfoPath)
 	mux.HandleFunc(devIdPDiscoveryPath, a.gate(http.MethodGet, a.discovery))
 	mux.HandleFunc(devIdPJWKSPath, a.gate(http.MethodGet, a.jwks))
-	mux.HandleFunc(devIdPAuthorizePath, a.gate(http.MethodGet, a.authorize))
-	mux.HandleFunc(devIdPConsentPath, a.gate(http.MethodPost, a.consent))
+	mux.HandleFunc(devIdPAuthorizePath, a.gatePage(http.MethodGet, a.authorize))
+	mux.HandleFunc(devIdPConsentPath, a.gatePage(http.MethodPost, a.consent))
 	mux.HandleFunc(devIdPTokenPath, a.gate(http.MethodPost, a.token))
 	mux.HandleFunc(devIdPUserinfoPath, a.gate("GET, POST", a.userinfo))
 }
 
 // gate answers 404 while the deployment does not serve the IdP, then 405 for a wrong method.
 func (a devIdPAPI) gate(methods string, h http.HandlerFunc) http.HandlerFunc {
+	return a.gateWith(methods, false, h)
+}
+
+// gatePage is gate for the endpoints a browser navigates to, whose 405 is an error page.
+func (a devIdPAPI) gatePage(methods string, h http.HandlerFunc) http.HandlerFunc {
+	return a.gateWith(methods, true, h)
+}
+
+func (a devIdPAPI) gateWith(methods string, page bool, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if a.mgr.devIdPIssuer(r.Context()) == "" {
 			http.NotFound(w, r)
@@ -80,6 +92,10 @@ func (a devIdPAPI) gate(methods string, h http.HandlerFunc) http.HandlerFunc {
 		}
 		if !ok {
 			w.Header().Set("Allow", methods)
+			if page {
+				a.writeErrPage(w, r, http.StatusMethodNotAllowed, devIdPErrMethod, "")
+				return
+			}
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -149,7 +165,7 @@ type devIdPClientCtx struct {
 }
 
 // loadClient resolves a client id to its workspace. ok is false for an unknown client AND for
-// one whose workspace has not opted in (or no longer exists): callers do not tell them apart.
+// one whose workspace no longer exists: callers do not tell them apart.
 func (a devIdPAPI) loadClient(r *http.Request, clientID string) (devIdPClientCtx, bool) {
 	ctx := r.Context()
 	if clientID == "" {
@@ -164,19 +180,24 @@ func (a devIdPAPI) loadClient(r *http.Request, clientID string) (devIdPClientCtx
 		return devIdPClientCtx{}, false
 	}
 	st := parseWSSettings(mustSettings(ctx, a.mgr, ws.ID))
-	if !st.DevIdP {
-		return devIdPClientCtx{}, false
-	}
 	return devIdPClientCtx{row: row, ws: ws, st: st}, true
 }
 
-// authorizeRefuse is the answer for a request whose client or redirect_uri cannot be trusted:
+// authorizeRefuse is the answer for a request whose client or membership cannot be trusted:
 // shown to the person, never redirected (redirecting to an unvetted URI is the open redirect
-// this endpoint exists not to be). One message for every cause, so it confirms nothing.
-func authorizeRefuse(w http.ResponseWriter, why string) {
+// this endpoint exists not to be). The page is the same for an unknown client and a non-member,
+// so it confirms nothing; why goes to the log only.
+func (a devIdPAPI) authorizeRefuse(w http.ResponseWriter, r *http.Request, why string) {
 	log.Printf("dev idp: authorize refused: %s", why)
-	noStore(w)
-	http.Error(w, "dev-idp: this sign-in request was refused (unknown client, or a redirect_uri this client may not use)", http.StatusBadRequest)
+	a.writeErrPage(w, r, http.StatusBadRequest, devIdPErrRefused, "")
+}
+
+// authorizeRefuseRedirect is authorizeRefuse for a redirect_uri the client may not use. Only
+// reached for a caller who is already a member of the client's workspace, so naming the rejected
+// host (and only the host) tells them nothing about someone else's client.
+func (a devIdPAPI) authorizeRefuseRedirect(w http.ResponseWriter, r *http.Request, why, redirectURI string) {
+	log.Printf("dev idp: authorize refused: %s", why)
+	a.writeErrPage(w, r, http.StatusBadRequest, devIdPErrRedirect, callbackHost(redirectURI))
 }
 
 func (a devIdPAPI) authorize(w http.ResponseWriter, r *http.Request) {
@@ -184,7 +205,7 @@ func (a devIdPAPI) authorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	cc, ok := a.loadClient(r, q.Get("client_id"))
 	if !ok {
-		authorizeRefuse(w, "client")
+		a.authorizeRefuse(w, r, "client")
 		return
 	}
 	id := a.mgr.resolveIdentity(r)
@@ -196,12 +217,12 @@ func (a devIdPAPI) authorize(w http.ResponseWriter, r *http.Request) {
 	// network, through an allowed provider: the same resolver as every API call.
 	ident, mv, aerr := a.mgr.resolveMembership(ctx, id.key, id.email, cc.ws.TenantID)
 	if aerr != nil {
-		authorizeRefuse(w, "membership")
+		a.authorizeRefuse(w, r, "membership")
 		return
 	}
 	redirectURI := q.Get("redirect_uri")
 	if !a.mgr.devIdPRedirectAllowed(ctx, cc.ws, cc.st, mv.MembershipID, redirectURI) {
-		authorizeRefuse(w, "redirect_uri")
+		a.authorizeRefuseRedirect(w, r, "redirect_uri", redirectURI)
 		return
 	}
 	// From here the redirect target is trusted, so protocol errors go back to the app.
@@ -268,7 +289,7 @@ func (a devIdPAPI) authorize(w http.ResponseWriter, r *http.Request) {
 func (a devIdPAPI) redirectBack(w http.ResponseWriter, r *http.Request, redirectURI, state string, extra url.Values) {
 	u, err := url.Parse(redirectURI)
 	if err != nil {
-		authorizeRefuse(w, "redirect_uri unparsable")
+		a.authorizeRefuseRedirect(w, r, "redirect_uri unparsable", redirectURI)
 		return
 	}
 	q := u.Query()
@@ -548,7 +569,7 @@ func (a devIdPAPI) userinfo(w http.ResponseWriter, r *http.Request) {
 		deny()
 		return
 	}
-	// The client must still be registered and opted in.
+	// The client must still be registered.
 	if _, ok := a.loadClient(r, grant.ClientID); !ok {
 		deny()
 		return

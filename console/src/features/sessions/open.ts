@@ -115,3 +115,12 @@ export function rotateRunningSession(delta: number): RotateTarget | null {
 // by the CLI's startup screen. The Agent delivers it from the create request's
 // initial_prompt (or /input {when_ready} when there are attachments), with the wait, the
 // second Enter and a delivery check, and it runs with the Console closed (useStartWork.ts).
+
+// openSessionByName opens a session the caller knows only by name — a move's target, which the
+// list may not have caught up with yet. Every move target can read a transcript (ADR 0115
+// decision 9), so the mirror is right even before the list says what kind it is.
+export function openSessionByName(name: string): void {
+  const s = useSessionsStore.getState().sessions.find((x) => x.name === name);
+  if (s) openSessionFromList(s, false, true);
+  else openSessionChat(name);
+}

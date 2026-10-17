@@ -53,25 +53,14 @@ func newDevIdPTestEnv(t *testing.T) *devIdPTestEnv {
 	e.mgr.master32 = bytes.Repeat([]byte{7}, 32)
 	e.mgr.custodian = newLocalCustodian(e.mgr.master32)
 	d := &devIdPTestEnv{previewHostEnv: e, clock: time.Now()}
+	e.cfg.brand = newBrandResolver(brandConfig{}, nil) // tests set .env to brand the consent page
 	d.api = newDevIdPAPI(e.cfg)
 	d.api.now = d.now
 	d.api.keys = newDevIdPKeyring(e.mgr.store, e.mgr, d.now)
 	d.api.mount(e.mux)
 	d.slug = e.mintSlug(t)
-	d.setDevIdP(t, true)
 	d.clientID, d.secret = d.registration(t)
 	return d
-}
-
-func (d *devIdPTestEnv) setDevIdP(t *testing.T, on bool) {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPut, "https://af.example.com/api/env/ws-settings",
-		strings.NewReader(fmt.Sprintf(`{"devIdp":%v}`, on)))
-	d.mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("PUT devIdp=%v: %d %s", on, rec.Code, rec.Body)
-	}
 }
 
 func (d *devIdPTestEnv) registration(t *testing.T) (id, secret string) {
@@ -336,55 +325,57 @@ func TestDevIdPDisabledIsA404Everywhere(t *testing.T) {
 		}
 	}
 	// And no env reaches the container.
-	if env := d.mgr.devIdPEnv(context.Background(), d.ws, parseWSSettings(mustSettings(context.Background(), d.mgr, d.ws.ID))); len(env) != 0 {
+	if env := d.mgr.devIdPEnv(context.Background(), d.ws); len(env) != 0 {
 		t.Errorf("env injected while disabled: %v", env)
 	}
 }
 
-func TestDevIdPNeedsTheWorkspaceToOptIn(t *testing.T) {
+// There is no per-workspace switch: a workspace whose stored settings still say devIdp:false
+// signs in, and a PUT of the removed field is accepted, ignored and no longer reported.
+func TestDevIdPServesAWorkspaceWithoutAnOptIn(t *testing.T) {
 	d := newDevIdPTestEnv(t)
-	redirect := d.ownHost(3000) + "/cb"
-	code := codeFrom(t, d.authorizeAs(t, "preview-user", d.authQuery(redirect, "")))
-	d.setDevIdP(t, false)
-
-	if rec := d.authorizeAs(t, "preview-user", d.authQuery(redirect, "")); rec.Code != http.StatusBadRequest || rec.Header().Get("Location") != "" {
-		t.Errorf("authorize after opting out: %d loc=%q", rec.Code, rec.Header().Get("Location"))
+	ctx := context.Background()
+	if err := d.mgr.store.SetWorkspaceSettings(ctx, d.ws.ID, `{"devIdp":false}`); err != nil {
+		t.Fatal(err)
 	}
-	if rec := d.exchange(code, redirect, ""); rec.Code != http.StatusUnauthorized {
-		t.Errorf("token after opting out: %d %s, want 401 invalid_client", rec.Code, rec.Body)
+	if got := d.signInWith(t, d.clientID, d.secret); got != http.StatusOK {
+		t.Fatalf("sign-in for a workspace with devIdp:false = %d", got)
 	}
-	// Opting back in is a NEW registration: the old secret is gone.
-	oldID, oldSecret := d.clientID, d.secret
-	d.setDevIdP(t, true)
-	d.clientID, d.secret = d.registration(t)
-	if d.clientID == oldID || d.secret == oldSecret {
-		t.Errorf("re-enabling kept the old registration")
+	for _, body := range []string{`{"devIdp":true}`, `{"devIdp":false}`} {
+		rec := httptest.NewRecorder()
+		d.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "https://af.example.com/api/env/ws-settings", strings.NewReader(body)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PUT %s = %d %s", body, rec.Code, rec.Body)
+		}
+		if b := idpJSON(t, rec); b["devIdp"] != nil || b["devIdpAvailable"] != true {
+			t.Errorf("after PUT %s: %v", body, b)
+		}
+		if got := d.signInWith(t, d.clientID, d.secret); got != http.StatusOK {
+			t.Errorf("sign-in after PUT %s = %d", body, got)
+		}
 	}
 }
 
-func TestDevIdPOptInRefusedWhereTheDeploymentDoesNotServeIt(t *testing.T) {
-	for name, off := range map[string]func(*testing.T, *previewHostEnv){
-		"switched off": func(t *testing.T, e *previewHostEnv) { setDevIdPDeployment(t, e.mgr, false) },
-		"locked":       func(_ *testing.T, e *previewHostEnv) { e.mgr.devIdPEnvOff = true },
-		"no base URL":  func(_ *testing.T, e *previewHostEnv) { e.mgr.publicBaseURL = "" },
+func TestDevIdPNothingWhereTheDeploymentDoesNotServeIt(t *testing.T) {
+	for name, off := range map[string]func(*testing.T, *devIdPTestEnv){
+		"switched off": func(t *testing.T, e *devIdPTestEnv) { setDevIdPDeployment(t, e.mgr, false) },
+		"locked":       func(_ *testing.T, e *devIdPTestEnv) { e.mgr.devIdPEnvOff = true },
+		"no base URL":  func(_ *testing.T, e *devIdPTestEnv) { e.mgr.publicBaseURL = "" },
 	} {
-		e := newPreviewHostEnv(t, "http://127.0.0.1:1")
+		e := newDevIdPTestEnv(t)
 		off(t, e)
-		rec := httptest.NewRecorder()
-		e.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "https://af.example.com/api/env/ws-settings", strings.NewReader(`{"devIdp":true}`)))
-		if rec.Code != http.StatusConflict {
-			t.Fatalf("%s: PUT devIdp on a deployment that does not serve the IdP: %d %s, want 409", name, rec.Code, rec.Body)
+		if _, _, ok := envCreds(e); ok {
+			t.Errorf("%s: env injected", name)
 		}
-		raw, _ := e.mgr.store.GetWorkspaceSettings(context.Background(), e.ws.ID)
-		if parseWSSettings(raw).DevIdP {
-			t.Errorf("%s: the refused opt-in was stored", name)
+		if got := e.signInWith(t, e.clientID, e.secret); got == http.StatusOK {
+			t.Errorf("%s: sign-in worked", name)
 		}
 	}
 }
 
 func TestDevIdPEnvInjection(t *testing.T) {
 	d := newDevIdPTestEnv(t)
-	env := d.mgr.devIdPEnv(context.Background(), d.ws, wsSettings{DevIdP: true})
+	env := d.mgr.devIdPEnv(context.Background(), d.ws)
 	got := map[string]string{}
 	for _, kv := range env {
 		k, v, _ := strings.Cut(kv, "=")
@@ -395,17 +386,13 @@ func TestDevIdPEnvInjection(t *testing.T) {
 		got["AF_DEV_IDP_CLIENT_ID"] != d.clientID || got["AF_DEV_IDP_CLIENT_SECRET"] != d.secret {
 		t.Errorf("env = %v", got)
 	}
-	// A workspace that did not opt in gets nothing, even though a registration exists.
-	if env := d.mgr.devIdPEnv(context.Background(), d.ws, wsSettings{}); len(env) != 0 {
-		t.Errorf("env without opt-in: %v", env)
-	}
 	// The ws-settings answer names the client but never the secret.
 	rec := httptest.NewRecorder()
 	d.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "https://af.example.com/api/env/ws-settings", nil))
 	if strings.Contains(rec.Body.String(), d.secret) {
 		t.Error("ws-settings returned the client secret")
 	}
-	if b := idpJSON(t, rec); b["devIdpClientId"] != d.clientID || b["devIdp"] != true {
+	if b := idpJSON(t, rec); b["devIdpClientId"] != d.clientID {
 		t.Errorf("ws-settings = %v", b)
 	}
 }
@@ -590,7 +577,7 @@ func TestDevIdPCodeIsBoundToItsClient(t *testing.T) {
 	v := d.addViewer(t, "colleague")
 	ctx := context.Background()
 	vws, _, _ := d.mgr.store.GetWorkspaceByMembership(ctx, v.membershipID)
-	if err := d.mgr.store.SetWorkspaceSettings(ctx, vws.ID, `{"devIdp":true,"previewTenantShare":true}`); err != nil {
+	if err := d.mgr.store.SetWorkspaceSettings(ctx, vws.ID, `{"previewTenantShare":true}`); err != nil {
 		t.Fatal(err)
 	}
 	otherID, otherSecret, err := d.mgr.ensureDevIdPClient(ctx, vws)
@@ -1000,6 +987,7 @@ func TestDevIdPReplayDuringTheFirstRedemptionLeavesNoLiveToken(t *testing.T) {
 func TestDevIdPDisabledIsA404BehindTheAuthGateToo(t *testing.T) {
 	cfg := oauthTestConfig(t)
 	cfg.mgr.publicBaseURL = "https://af.example.com"
+	cfg.mgr.previewDomain = "pv.example.com" // the IdP is offered only with preview subdomains
 	cfg.mgr.store = brandTestStore(t)
 	setDevIdPDeployment(t, cfg.mgr, false)
 	mux := http.NewServeMux()

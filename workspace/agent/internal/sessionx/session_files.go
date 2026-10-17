@@ -96,7 +96,21 @@ func sessionFileTouches(name, dir, src, head string, n, stable int, edits func(f
 	if !e.ownSet || e.dir != dir || e.ownRoot != roots.repos {
 		e.dir, e.ownRoot, e.own, e.ownSet = dir, roots.repos, ownRepoOf(dir, roots.repos), true
 	}
-	own := e.own
+	return touchList(out, e.own, roots)
+}
+
+// foldAllFileEdits folds edits into a fresh list, outside the per-session cache: for a caller
+// that reads the whole conversation once (a move's handover) and must not reset the fold the
+// mirror's polls keep.
+func foldAllFileEdits(dir string, edits []transcript.FileEdit) []transcript.FileTouch {
+	roots := snapshotFileRoots()
+	e := &fileAggEntry{acc: map[string]*transcript.FileTouch{}}
+	foldFileEdits(e, edits, roots)
+	return touchList(e, ownRepoOf(dir, roots.repos), roots)
+}
+
+// touchList is e's rows with their scope, newest touch first.
+func touchList(out *fileAggEntry, own string, roots fileRoots) []transcript.FileTouch {
 	list := make([]transcript.FileTouch, 0, len(out.order))
 	for _, k := range out.order {
 		if t := out.acc[k]; t != nil {

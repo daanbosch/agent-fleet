@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base32"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/claude"
@@ -49,9 +50,36 @@ const slugLen = 7 // "s" + 6 base32 chars
 // draws random slugs until it finds one that is neither claimed by a meta / live tmux
 // session NOR maps (via dir) to an sid that already has a conversation on disk.
 func allocSessionName(dir string) string {
+	slugMu.Lock()
+	defer slugMu.Unlock()
+	return allocSessionNameLocked(dir)
+}
+
+// A move books its target's name long before the target's meta exists: the handover file is
+// written into that name's directory first, and a create that may have started a target can
+// leave the name pending for days (ADR 0115 decision 11.4). Every slug is therefore handed out
+// under slugMu, and a slug is free only when no meta or pane claims it, no move holds it (in
+// this process or in a pending move's record, which survives a restart), and it was not handed
+// to an ordinary create within slugHandedOutTTL, whose meta may still be on its way.
+var (
+	slugMu       sync.Mutex
+	slugBooked   = map[string]bool{}
+	slugHandedAt = map[string]time.Time{}
+)
+
+const slugHandedOutTTL = time.Hour
+
+func allocSessionNameLocked(dir string) string {
+	now := time.Now()
+	for s, at := range slugHandedAt {
+		if now.Sub(at) > slugHandedOutTTL {
+			delete(slugHandedAt, s)
+		}
+	}
+	pending := pendingMoveTargets()
 	for {
 		slug := randSlug()
-		if slugTaken(slug) {
+		if _, recent := slugHandedAt[slug]; recent || slugBooked[slug] || pending[slug] || slugTaken(slug) {
 			continue
 		}
 		// Never hand out a slug whose derived sid already has a jsonl (e.g. a lingering
@@ -61,8 +89,24 @@ func allocSessionName(dir string) string {
 		if claude.SessionJSONLExists(session.UUID(dir, slug)) {
 			continue
 		}
+		slugHandedAt[slug] = now
 		return slug
 	}
+}
+
+// bookMoveTarget allocates a name for a move's target and holds it until releaseMoveTarget.
+func bookMoveTarget(dir string) string {
+	slugMu.Lock()
+	defer slugMu.Unlock()
+	slug := allocSessionNameLocked(dir)
+	slugBooked[slug] = true
+	return slug
+}
+
+func releaseMoveTarget(slug string) {
+	slugMu.Lock()
+	defer slugMu.Unlock()
+	delete(slugBooked, slug)
 }
 
 // slugTaken reports whether a slug is already claimed by a meta or a live tmux session.
@@ -76,8 +120,8 @@ func slugTaken(slug string) bool {
 // randSlug returns a random slug: an "s" prefix (visual marker; keeps it non-numeric)
 // followed by 6 lowercase base32 chars (a-z2-7, ~30 bits). Matches session.ValidName. Panics only
 // if crypto/rand fails, which it should not — the agent can't safely mint sessions
-// without a unique id.
-func randSlug() string {
+// without a unique id. A variable so a test can force a collision.
+var randSlug = func() string {
 	var b [5]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		panic("randSlug: " + err.Error())

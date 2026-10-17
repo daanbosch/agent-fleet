@@ -3,6 +3,7 @@
 English | [日本語](0115-move-session-to-another-agent.ja.md)
 
 - Status: **proposed** (2026-10-15). Nothing is implemented.
+  Follow-ups: #2236, #2252, #2254
 - Tracking: #2182. Builds on #2183 (the shared Markdown renderer, `transcript.Markdown`).
 - See also: [0039](0039-fork-at-message.md) (fork) /
   [0049](0049-session-changed-files.md) (the changed-files list) /
@@ -281,3 +282,173 @@ than write an empty file (decision 6).
   that needs a file the source read reads it again; the working copy is the same.
 - A moved source cannot be woken by anything but its user. That is stricter than any other
   stopped session, and it is what keeps one writer per working copy.
+
+## Notes
+
+- 2026-10-16: `MarkdownOptions.ToolOutput bool` no longer exists (commit 2518bab71); it is
+  `Tools ToolDetail`. Where decision 8 says `ToolOutput: true`, read `Tools: ToolsFull`: any
+  lesser level still drops compaction summaries, delegation prompts and results and option
+  previews. The builder is `sessionx.BuildHandover` / `RenderHandover` (#2182, P2a step 1).
+
+## Addendum (2026-10-16) — the source gate as built (P2a step 2, #2182)
+
+What decision 11 asks of the source is in place on the Agent; the `/move` endpoint that drives
+it is not yet.
+
+- **The gate** is `internal/lifegate`: one gate per session, with a shared `Lease` per input
+  operation and an exclusive `Lock` for the move. It prefers a waiting writer, so a steady
+  trickle of inputs cannot hold a move off, which is also what makes a nested take a deadlock.
+  The public entry takes the lease once; an inner step takes a `*lifegate.Lease` parameter and
+  checks it (`Check`), and a lease carried on a request's context is borrowed by `Enter`
+  (`deliverPendingPeer` → `/input`). The closed state is kept in memory as well as on the meta,
+  because a meta read that lands inside an unrelated rewrite of the file does not parse; a meta
+  that exists and still cannot be read after retrying refuses (`ErrMetaUnreadable`) rather than
+  admits, since after a restart it is the only record of a move. The cursor pump releases its
+  lease once `session/prompt` is on the child's stdin.
+- **Gated paths:** `/input` (every body form, peer messages included), `/turn` (every op: on
+  Managed each one resumes the runtime), `/start`, `/recreate`, `/driver`, `/respond`,
+  `/answer-question`, `/plan-respond`, `/carried-answer`, the chat bridge's inbound text and
+  button answers, the abort / auth auto-resumes (through `injectSessionPrompt`), the launch-task
+  delivery (`typeInitialPrompt`), `deliverPendingPeer` (the lease is taken before the message
+  leaves the spool), the usage-limit sweep, and the cursor queue pump. A refusal is `409
+  session_moved` with the target in `error.target`.
+- **Start states:** `stopped` is accepted next to idle, `limited` and `spendLimit`. A source
+  parked at a weekly limit is usually stopped by the idle reaper long before anyone moves it,
+  and a stopped session can start nothing either. A pending interaction is still refused, and
+  so is a stopped **Managed cursor** source, whose conversation lived only in its handle.
+- **The sweep** holds the session's lease for its whole step, not only around
+  `putRateLimitSchedule`: the episode file that records a booking is then written before a
+  move can close input, so a commit always finds the id to cancel.
+- **Cancellations** go through `cancelRateLimitSchedule`: the id is written to
+  `session-rate-limit-cleanup` before the CP is called and dropped only when the CP confirms (a
+  404 counts), retried at the start of every sweep, with no expiry. Commit records the id before
+  it closes the episode, and fails with nothing changed if the record cannot be written.
+- **A refused booking and a rollback** are ordered by one lock: a rollback repairs, clears
+  `moving` and reopens under it. A refusal that reaches its record after the rollback (the
+  request stalled in between) finds the source open and books the resume again itself. The
+  sweep's step takes the same per-session episode lock (after its lease), because shared leases
+  do not exclude each other and the repair holds none.
+- A confirmed cancellation stays in the record, marked done, while the session's episode still
+  names the id: a commit that recorded it and stopped leaves a moving source whose rollback must
+  still see that id as dead after the sweep cancelled it.
+- **Every transition is on disk before it returns**: `moving`, `movedTo` and their clearing go
+  through `session.WriteMetaChecked` (a temporary file renamed over the meta, every error
+  returned). The in-memory mirror changes, and the episode closes, only after that write
+  succeeded; a failed write leaves the move where it was.
+- **The move's primitives** are `beginSessionMove`, `rollback` and `commit` (sessionx,
+  `session_move_gate.go`) plus `reopenMovedSession` for decision 11.6. Commit changes the meta,
+  closes the episode and cancels its booking; stopping the source and taking its spooled peer
+  messages are left to the move, which owns their order.
+- Only the cursor pump takes a lease of its own; the other Managed drivers' pumps are a
+  follow-up.
+- A refused booking is recorded even when the meta cannot be read at that moment (it is read
+  under the meta lock first), and a sweep that finds a recorded refusal on an open session books
+  the resume again, so a record the rollback missed is not a dead id for good.
+- **Amendment to decision 11.2** (2026-10-16): the user accepted the start states above — a move
+  may also start from `stopped`, except a stopped Managed cursor source.
+
+## Addendum (2026-10-17) — every Managed pump takes its own lease (#2236)
+
+- Every Managed driver's queue pump now takes a lease of its own per entry, before the entry
+  leaves the queue, and releases it where the runtime holds the input:
+  - cursor, kiro, copilot: `session/prompt` is on the child's stdin.
+  - codex: `turn/start` is answered.
+  - opencode: the request carrying the input (`/message`, or `/prompt` on 2.x) is written to
+    serve. The lease spans `waitIdle`, so a move waits out another client's turn for at most the
+    60 s drain rather than snapshot an entry the pump is about to send.
+  - lcpp: the user turn is appended to the store, which is this kind's transcript.
+  - muse: `turn/start` is answered. A `queued` disposition means the host holds the input behind
+    a running turn, and a source with a running turn cannot be moved (11.2). `accept` no longer
+    runs the pump on the caller's goroutine, since the caller holds a lease and a second one
+    taken there would be a nested take.
+- Releasing the lease there is early for the state check: the runtime's own record (copilot's
+  `events.jsonl`, opencode's store, muse's `turn/started`) can still show the previous turn's idle
+  when the queue no longer holds the entry. So `beginSessionMove` also asks the Managed handle,
+  under the exclusive gate, whether it holds an entry it took and has not settled
+  (`ManagedInFlight`; entries still queued do not count), and refuses the source as `working`
+  if so.
+- A pump the gate refuses leaves its entry queued and starts again on `lifegate.Reopen`; a meta
+  it cannot read makes it look again after a second.
+- `POST /sessions/{name}/settings` holds the lease and refuses a moving or moved source with
+  `session_moved`: the change would land on a session whose conversation has gone. `GET` holds
+  the lease through `Resume` on an open session, and on a moving or moved one answers from the
+  meta's model, effort and mode without starting a runtime.
+
+## Addendum (2026-10-17) — the move endpoint as built (P2a step 3a, #2182)
+
+- **Routes** (Agent, and the same paths in the CP allow-list): `POST /sessions/{name}/move
+  {kind, model?, driver?}`, `GET …/move/preview`, `POST …/move/retry`, `POST …/move/cancel`,
+  and `POST …/move/reopen` for decision 11.6's "resume here anyway". The move and the retry
+  create a session, so the CP sends them through fork's quota check. All but the preview are
+  audited as `session.move[.retry|.cancel|.reopen]`.
+- **The target's name is booked before begin**, so that `moving` can name it and the file can be
+  written into `~/.af-work/<target>` before the create. The create runs in-process through the
+  same path as `POST /sessions`, with the booked name in an unexported field that no client can
+  set.
+- **Targets:** claude, codex, opencode, copilot, agy and muse. lcpp is left out (decision 9). cursor
+  and kiro stay off behind `moveUnmeasuredAllowed` until the decision 9 measurement is done
+  (#2252). A request for the source's own kind is refused with `move_same_kind`, and `canFork`
+  says whether to offer fork instead.
+- **Uncertain create:** a create is rolled back only when it answered and left nothing under the
+  target's name (no meta, no pane). An unknown outcome, or a failure after the target's meta was
+  written, keeps `moving` and the file. The move is recorded in the state dir (`session-move`)
+  with the request, the file and the spooled peer ids, so retry and cancel work after an Agent
+  restart. Retry commits when the target exists, and otherwise creates it again under the same
+  name from the same file. Cancel refuses while the target exists.
+- **The target's meta decides.** A move commits only once the target's meta is on disk: the move's
+  create writes it checked, before the first prompt is sent, and a 2xx without it leaves the move
+  pending. A target that runs under the name without a meta (an orphan pane or runtime) is not
+  created again by retry; cancel stops it. The booked name is held against every allocation, in
+  memory and through the pending move's record, until the move ends.
+- **A meta file that exists and does not read** is never taken for absent: retry and cancel
+  refuse it, and only a target with no meta file at all is stopped as an orphan. The source's
+  `moving` holds the target's name as well as the record does, so an Agent that stopped between
+  begin and the first record write does not hand the name out again.
+- **The first prompt is part of the move.** It is recorded by target (`session-move-delivery`)
+  before the create, and kept until the target's `InitialPromptState` says delivered. While it
+  does not, the move's answer and the source's preview report it, and
+  `POST /sessions/{target}/move/deliver` sends it again on the user's word. It is never resent
+  by itself, since an unknown delivery may have arrived. On a Terminal target the resend runs
+  the create's own delivery in the background (readiness wait, Enter nudge, evidence of a started
+  turn), and typed keys without evidence stay unknown. While the source's move has not created
+  the target, the record is kept and deliver is refused.
+- **After the commit**, the record stays, marked `committed`, until the spooled peer messages are
+  taken and the source is stopped. An Agent that stops in between finishes those steps at boot
+  (`RecoverMoves`), on retry, or before a reopen. Reopen runs under the move's operation lock.
+- **The preview is scrubbed** like the file, and the git reads are bounded in time and bytes, with
+  the cut stated.
+- **Decision 14's header:** each kind's project instruction files are a fixed table
+  (`projectInstructionFiles`). It lists only files a kind is known to load, so a target is never
+  wrongly assumed to have read one. The header names those of the source's files that exist in
+  the working folder and that the target's kind does not load.
+- **Not built here:** archiving the handover files with a trashed target, and putting them back
+  on restore (P2a step 3b). Also not built: the Console dialog, and `moving` / `movedTo` on the
+  session row (#2254).
+
+## Addendum (2026-10-17) — the Console dialog and the session row (P2a step 4, #2182, #2254)
+
+- **The row wire** carries `moving` and `movedTo` on the Agent's `session.Session` and the CP's
+  `sessionWire`. They have no DB-mirror column: retry, cancel, reopen and the resend all need the
+  running Agent, so a stopped Workspace's mirrored list does not show them.
+- **The menu** offers "Move to another agent…" right after the handoff, for the same sessions
+  (a transcript, a folder, a running Workspace). On a moving or moved source the ordinary resume
+  is not offered, since the Agent refuses it with `session_moved`; the same dialog then holds
+  retry and cancel (decision 11.4), or the target, the first prompt's resend and "resume here
+  anyway" (decision 11.6). The row's second line says where the conversation went, or that the
+  move is unfinished.
+- **The picker** offers the preview's eligible kinds, minus those the connection check reports
+  as not connected, and lists every other kind with its reason. It shows usage only for the kinds
+  the Console already reads it for (the WS bar's claude, codex and muse sources), read once when
+  the dialog opens. Model and driver default as the new-session dialog does for the working copy.
+
+## Addendum (2026-10-17) — the limit banner (P2b, #2182)
+
+- **There was no limit banner in the mirror to extend**, only the state chip, so P2b adds one band
+  (`MoveLimitBanner`) under the other mirror bands. It shows for `limited` and `spend_limit` on a
+  running Workspace, never for a moving or moved source, and only when the preview (no refusal)
+  leaves a connected target that is not the source's own kind and not already at its cap. Its
+  button opens the existing dialog flagged as coming from the limit.
+- **Quota ordering is display only.** From the banner the picker lists kinds with quota left first
+  (least used first), then kinds with no usage source or reading, then those at 100% in a window.
+  The first of them is the default until the user chooses. The usage is the same three sources as
+  the WS bar; a kind without one is judged neither way and stays selectable and unmarked.

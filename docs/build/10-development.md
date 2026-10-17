@@ -90,7 +90,7 @@ manifest `versions.json` on the default lean image — is
 
 Two notes:
 
-- **A nightly scheduled run** of `e2e.yml` (04:00 JST, against develop) catches
+- **A nightly scheduled run** of `e2e.yml` (04:00 JST, against main) catches
   upstream CLI and base-image breakage even when nothing in this repository changed. If
   it goes red, suspect upstream and use steps 4–5 to isolate.
 - To move a single member forward without rebuilding, there is an opt-in self-update: a
@@ -114,7 +114,7 @@ dispatched the contract, and nothing is being tested while it is down.
 
 ### 10.2.2 Automated agent-CLI bumps (`cli-pin-bump.yml`)
 
-`cli-pin-bump.yml` keeps **one** pull request against `develop`, on the fixed branch
+`cli-pin-bump.yml` keeps **one** pull request against `main`, on the fixed branch
 `automation/cli-pin-bump`, that raises every agent-CLI pin whose new version has already
 passed its contract. It runs when a contract workflow completes, every 2 hours (odd hours) as a
 backstop, and on dispatch. The decision and the edit are `deploy/local/cli-pin-bump.sh`;
@@ -179,7 +179,7 @@ above is the whole interaction. An issue opens only for:
 | `kiro CLI: run the contract on <v>` (cursor too) | the credential rotates, so the watcher never runs the contract; refresh the secret if it fails at sign-in | the bump PR that follows a pass |
 | `<kind> CLI: verify <v> (no CI credential)` | claude, copilot or agy with no contract secret: register it and run the contract, or probe the release by hand in Terminal (CLI) | the bump PR, or a hand bump |
 | `<kind> CLI: contract failed on <v>` | the contract is red on latest (its row and run are in the issue's `Red contracts` section; `deploy/local/cli-contract-report.sh`) | the bump PR once the fixed contract passes |
-| `<kind> CLI: contract fails on develop` | the contract failed its last 2 runs on `develop` whatever the version: the harness or its secret is broken | itself, once the contract passes and the pin is current |
+| `<kind> CLI: contract fails on main` | the contract failed its last 2 runs on `main` whatever the version: the harness or its secret is broken | itself, once the contract passes and the pin is current |
 | `<kind> CLI: upstream message fragments gone in <v>` | the new release no longer contains text Agent Fleet matches on (named in the `Red contracts` section); check the code that matches it, fix it and the registry | the bump PR, or a newer release |
 | `rtk CLI: bump the pin to <v>` | rtk has a release source but no contract, so no `tested` to gate on; bump it by hand (§10.2.1) | the hand-bump PR |
 
@@ -302,7 +302,7 @@ npm --prefix console run build
   hard gate**: `ci.yml` fails on a single unformatted file, even when `go build`,
   `go vet` and `go test` pass.
 
-- **CI** — `ci.yml` runs on every push to and PR against `main` and `develop`, in
+- **CI** — `ci.yml` runs on every push to and PR against `main`, in
   independent jobs:
 
   | Job | What it checks |
@@ -313,15 +313,15 @@ npm --prefix console run build
   | `secret-scan` | credential leaks over the whole history (below) |
   | `release-scan` | the forbidden-token gate over the tracked tree — the same scanner the pre-commit hook runs over staged content |
   | `model-id-lint` | no model-id-shaped string literal in either Go module outside `workspace/agent/internal/modelfallback`; `// model-id-lint:allow <reason>` marks one that chooses no model |
-  | `migration-versions` | sets the `migration-version` commit status on every open PR into `develop`: failure when a migration the PR adds takes a version `develop` already holds (compared as the runner reads it, so `95_x` and `0095_y` collide), shares its version with another new file of the same PR, or has no readable version. This job is the script's self-test; the status is posted by `migration-version.yml`, which has no cancel-in-progress, on the PR's own events (including a retarget to `develop`) and again for every open PR on each push to `develop`. `scripts/migration-versions.sh` |
+  | `migration-versions` | sets the `migration-version` commit status on every open PR into `main`: failure when a migration the PR adds takes a version `main` already holds (compared as the runner reads it, so `95_x` and `0095_y` collide), shares its version with another new file of the same PR, or has no readable version. This job is the script's self-test; the status is posted by `migration-version.yml`, which has no cancel-in-progress, on the PR's own events (including a retarget to `main`) and again for every open PR on each push to `main`. `scripts/migration-versions.sh` |
 
-  To make it a required check on `develop`, require the context **`migration-version`**
+  To make it a required check on `main`, require the context **`migration-version`**
   (the commit status, not the `migration-versions` job or the `migration-version.yml` workflow's `publish` job), source GitHub Actions. It judges
-  each PR against `develop` only, never against another open PR: two open PRs that take
+  each PR against `main` only, never against another open PR: two open PRs that take
   the same number both stay green until the first merges, and the push that merge makes
   turns the second red. A fork PR's token is read-only, so its PR is checked without a
-  status and stays unmergeable until the next push to `develop`, or until a maintainer runs
-  `gh workflow run migration-version.yml --ref develop`. The same manual run re-posts every open PR's
+  status and stays unmergeable until the next push to `main`, or until a maintainer runs
+  `gh workflow run migration-version.yml --ref main`. The same manual run re-posts every open PR's
   status after an outage or a broken job.
 
   On a pull request, the `changes` job skips `control-plane`, `workspace-agent`,
@@ -329,7 +329,7 @@ npm --prefix console run build
   (except the files a test reads: `guide/ref/agents{,.ja}.md` and
   `docs/decisions/0029-usage-accounting{,.ja}.md`), the top-level `*.md`
   files and the docs checker. The list and the reason are in `scripts/ci-changes.sh`.
-  Pushes to `main` / `develop` always run every job.
+  Pushes to `main` always run every job.
 
   `docs.yml` runs `scripts/docs-check.py` on the same triggers. The end-to-end
   workflow is separate because building images is heavy. Upstream CLI breakage is a
@@ -385,7 +385,7 @@ cd e2e && WS_IMAGE=agent-fleet/workspace:dev go test -v -tags e2e -timeout 15m .
 cd console-e2e && npm ci && npx playwright test
 ```
 
-- `e2e.yml` runs on PRs to main (relevant paths), a nightly cron against develop, and
+- `e2e.yml` runs on PRs to main (relevant paths), a nightly cron against main, and
   manual dispatch — **never on a push**. Its jobs are `e2e` (L1 → L2) and `ui-e2e`
   (L3, which uploads traces and the CP log on failure), in parallel, and `live-smoke`
   (L4), only on dispatch with `live`. Its image build passes no platform argument, so
@@ -453,7 +453,7 @@ cannot be written with the default token (`deploy/local/cli-release-state.sh`). 
 records `tested` only when the contract succeeds. A contract that finishes red for
 `latest` writes a `red` marker for that version (and a row in the `Red contracts` section
 of that CLI's update issue, which also flags a contract workflow that failed its last 2
-runs on `develop`; `deploy/local/cli-contract-report.sh`), and the watcher does not
+runs on `main`; `deploy/local/cli-contract-report.sh`), and the watcher does not
 dispatch that version again, so a failing release does not spend the contract's quota
 12 times a day. A new release, a passing run (`tested == latest` wins) or a manual dispatch
 releases it; a cancelled or timed-out run leaves no marker and is retried.
@@ -649,7 +649,7 @@ on NEW is the count (use the file for a term that ends that way).
 Worked example (ja; `既定 OFF。` → `既定ではオフです。`, `デフォルト` → `既定`):
 
 ```
-python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+python3 scripts/catalog-diff-check.py origin/main --allow-labels \
   --allow-term 'agents.note_x:OFF>オフ' --allow-term 'surface_color.default:デフォルト>既定'
 ```
 
@@ -670,8 +670,8 @@ rewritten automatically, because a citation cannot identify which key it means.
 Runs without a split or new flags retain their previous output.
 
 ```
-python3 scripts/catalog-diff-check.py origin/develop --list-citations
-python3 scripts/catalog-diff-check.py origin/develop --allow-labels --rewrite-guide
+python3 scripts/catalog-diff-check.py origin/main --list-citations
+python3 scripts/catalog-diff-check.py origin/main --allow-labels --rewrite-guide
 ```
 
 `--list-citations` is read-only and exits 0, including for a split. Its sections are
@@ -864,11 +864,11 @@ with an empty plan. In a Managed session where `AF_WORK_DIR` is unset, use
    or rewriting invocation:
 
    ```sh
-   python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+   python3 scripts/catalog-diff-check.py origin/main --allow-labels \
      --allow-terms-file "$AF_WORK_DIR/settings-applied.tsv"
-   python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+   python3 scripts/catalog-diff-check.py origin/main --allow-labels \
      --allow-terms-file "$AF_WORK_DIR/settings-applied.tsv" --list-citations
-   python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+   python3 scripts/catalog-diff-check.py origin/main --allow-labels \
      --allow-terms-file "$AF_WORK_DIR/settings-applied.tsv" --rewrite-guide
    ```
 
@@ -890,7 +890,7 @@ with an empty plan. In a Managed session where `AF_WORK_DIR` is unset, use
    precision (wrong proposals / all proposals), allowance rows, citation updates
    and manual decisions, exact verification commands and exit codes. Keep labels
    and sentence batches separate when required by the revision plan. Run the
-   pre-commit hook, commit, push and open the PR against `develop`.
+   pre-commit hook, commit, push and open the PR against `main`.
 
 The scratch settings acceptance run with R3 spacing cleanup inspected all
 30 changed values:
@@ -1055,11 +1055,11 @@ and the requested N remain exact. English counting is unchanged.
 **Apply and sync pipeline:** keep the emitted allowance in every guard invocation.
 
 ```sh
-python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+python3 scripts/catalog-diff-check.py origin/main --allow-labels \
   --allow-terms-file "$AF_WORK_DIR/term-allowances.tsv"
-python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+python3 scripts/catalog-diff-check.py origin/main --allow-labels \
   --allow-terms-file "$AF_WORK_DIR/term-allowances.tsv" --list-citations
-python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+python3 scripts/catalog-diff-check.py origin/main --allow-labels \
   --allow-terms-file "$AF_WORK_DIR/term-allowances.tsv" --rewrite-guide
 (cd console && npm test -- --maxWorkers=2)
 # From the repository root, after resolving manual citations:
@@ -1100,7 +1100,7 @@ includes verification-removal mutants and a real guard negative/positive pair.
    locale error ("Invalid collation character") is hidden by `2>/dev/null` and
    reads as "0 hits". `python3 scripts/ja-notation-normalize.py --all --lint-spaces`
    automates it: it lists half-width spaces between two Japanese characters that
-   `origin/develop` (or the ref given as its argument) did not have, and exits 1 on
+   `origin/main` (or the ref given as its argument) did not have, and exits 1 on
    any. Spaces already in the catalogue (menu paths such as 接続 > Git, ・ separators)
    are deliberate, so the lint reports only new ones.
 2. **A pass/fail claim without the real summary line is not evidence.** B1 batches
@@ -1111,10 +1111,10 @@ includes verification-removal mutants and a real guard negative/positive pair.
 3. **Parallel batches conflict on shared values.** Families overlap (measured: 10
    keys in F-login ∩ F-onoff, 9 in F-deploy ∩ F-login, 14 in F-deploy ∩ F-onoff,
    27 in F-default ∩ F-onoff), so whichever batch merges second conflicts.
-   Procedure: merge develop (merge only; never rebase or force-push). For a
-   conflicted catalogue file take develop's version and re-apply the plan after
+   Procedure: merge main (merge only; never rebase or force-push). For a
+   conflicted catalogue file take main's version and re-apply the plan after
    rebuilding the OLD values with `ja-term-candidates.py`. For a conflicted guide,
-   knowledge or test file take develop's version of the whole FILE and re-apply only
+   knowledge or test file take main's version of the whole FILE and re-apply only
    the term substitution (`--list-citations` / `--rewrite-guide` plus minimal manual
    edits). Never hand-merge hunks. Merge one PR at a time and let the next one
    rebuild; then re-run the guard, docs-check and the full suite.

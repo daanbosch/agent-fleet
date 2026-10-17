@@ -686,7 +686,7 @@ cat > "$STUB_RUNS/agy-contract.json" <<J
 J
 "$REPORT" streak agy-contract 2
 has agy '`agy-contract` failed its last 2 runs'   # control: fresh -> flagged
-[ "$(title_of agy)" = "agy CLI: contract fails on develop" ] || fail "unexpected streak title: $(title_of agy)"
+[ "$(title_of agy)" = "agy CLI: contract fails on main" ] || fail "unexpected streak title: $(title_of agy)"
 cat > "$STUB_RUNS/agy-contract.json" <<J
 [{"conclusion":"failure","url":"https://x/run/8","createdAt":"$OLDISO"},{"conclusion":"failure","url":"https://x/run/7","createdAt":"$OLDISO"}]
 J
@@ -786,7 +786,7 @@ releases kiro=2.29.1:2.30.0
 tested kiro 2.29.1
 sync_ok kiro
 title_is kiro "kiro CLI: run the contract on 2.30.0"
-has kiro 'gh workflow run kiro-contract.yml --ref develop -f cli_version=latest'
+has kiro 'gh workflow run kiro-contract.yml --ref main -f cli_version=latest'
 has kiro '<!-- cli-update kind=kiro -->'
 kiro_num="$(issue_of kiro)"
 
@@ -838,11 +838,11 @@ tested codex 0.162.1
 "$REPORT" failure codex 0.163.1
 sync_ok muse codex
 title_is muse "muse CLI: contract failed on 1.4.7"
-has muse 'gh workflow run muse-contract.yml --ref develop -f version=latest'
+has muse 'gh workflow run muse-contract.yml --ref main -f version=latest'
 has muse '`muse` `1.4.7`'
 has muse 'Red contracts'
 title_is codex "codex CLI: contract failed on 0.163.1"
-has codex 'gh workflow run codex-contract.yml --ref develop'
+has codex 'gh workflow run codex-contract.yml --ref main'
 hasnt codex 'cli_version'
 
 echo "== case 32: a newer release replaces the red one on an unattended kind -> the issue closes =="
@@ -903,8 +903,8 @@ cat > "$STUB_RUNS/agy-contract.json" <<J
 J
 "$REPORT" streak agy-contract 2
 sync_ok agy
-title_is agy "agy CLI: contract fails on develop"
-has agy 'gh workflow run agy-contract.yml --ref develop -f cli_version=latest'
+title_is agy "agy CLI: contract fails on main"
+has agy 'gh workflow run agy-contract.yml --ref main -f cli_version=latest'
 
 echo "== case 35: the list lookup stays empty through the real sync -> still one issue, with the row and the marker =="
 for d in "$STUB_ISSUES"/1[0-9][0-9]; do echo closed > "$d/state"; done

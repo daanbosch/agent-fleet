@@ -3,7 +3,7 @@
 #
 # CI's release-scan job scans the whole tracked tree at HEAD, so it only speaks
 # up once the string is already in the history — and taking it out then costs a
-# follow-up commit on develop (2026-09-01: a real deployment host name pasted
+# follow-up commit on main (2026-09-01: a real deployment host name pasted
 # into docs/log/81 reddened two merges in a row). This runs the same scanner
 # over just what the commit adds, while it is still only in the index.
 #

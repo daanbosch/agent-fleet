@@ -34,7 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: develop
+          ref: main
           persist-credentials: false
 
       - name: rewrite the pins
@@ -92,7 +92,7 @@ jobs:
           if [ -n "$num" ]; then
             gh pr edit "$num" --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$BODY_FILE"
           else
-            gh pr create --repo "$GITHUB_REPOSITORY" --base develop --head "$BRANCH" \
+            gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" \
               --title "$TITLE" --body-file "$BODY_FILE"
             num="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open \
               --json number --jq 'first | .number // empty')"

@@ -360,8 +360,9 @@ func TestDevIdPConsentGetIsNotAHandler(t *testing.T) {
 func TestDevIdPConsentCannotChooseAnotherWorkspacesPersona(t *testing.T) {
 	d := newDevIdPTestEnv(t)
 	d.addPersona(t, "admin", "")
-	other := store.DevIdPPersona{ID: "foreign-persona", WorkspaceID: "some-other-workspace", Handle: "root", CreatedAt: time.Now().Unix()}
-	if err := d.mgr.store.CreateDevIdPPersona(context.Background(), other); err != nil {
+	otherWS := d.addViewer(t, "persona-other")
+	other := store.DevIdPPersona{ID: "foreign-persona", WorkspaceID: "ws-" + otherWS.userKey, Handle: "root", CreatedAt: time.Now().Unix()}
+	if err := d.mgr.store.CreateDevIdPPersona(context.Background(), other, 20); err != nil {
 		t.Fatal(err)
 	}
 	redirect := d.ownHost(3000) + "/cb"
@@ -401,12 +402,12 @@ func TestDevIdPConsentRechecksTheRedirect(t *testing.T) {
 	if rec.Code == http.StatusFound {
 		t.Errorf("a redirect that is no longer allowed was followed: %s", rec.Header().Get("Location"))
 	}
-	// And so does turning the opt-in off.
+	// And so does the deployment switch going off.
 	d.setPreviewSettings(t, func(st *wsSettings) { st.PreviewPorts = []int{3000, 8080} })
 	_, ticket = d.askAs(t, "preview-user", d.authQuery(redirect, ""))
-	d.setDevIdP(t, false)
+	setDevIdPDeployment(t, d.mgr, false)
 	if rec := d.postConsent("preview-user", url.Values{"ticket": {ticket}, "choice": {"self"}}, nil); rec.Code == http.StatusFound {
-		t.Errorf("consent after the opt-in was turned off: %s", rec.Header().Get("Location"))
+		t.Errorf("consent after the deployment switch was turned off: %s", rec.Header().Get("Location"))
 	}
 }
 
@@ -415,13 +416,18 @@ func TestDevIdPConsentPageEscapesAndRefusesFraming(t *testing.T) {
 	d.addPersona(t, "admin", `<script>alert(1)</script>"><img src=x>`)
 	redirect := d.ownHost(3000) + "/cb"
 	rec := d.authorizeAs(t, "preview-user", d.authQuery(redirect, ""))
-	if strings.Contains(rec.Body.String(), "<script>") || strings.Contains(rec.Body.String(), "<img") {
+	if strings.Contains(rec.Body.String(), "<script>") || strings.Contains(rec.Body.String(), "<img src=x") {
 		t.Errorf("persona name reached the page unescaped: %s", rec.Body)
 	}
 	h := rec.Header()
 	if h.Get("X-Frame-Options") != "DENY" || !strings.Contains(h.Get("Content-Security-Policy"), "frame-ancestors 'none'") ||
-		h.Get("Cache-Control") != "no-store" || h.Get("Referrer-Policy") != "no-referrer" {
+		h.Get("Cache-Control") != "no-store" || h.Get("Referrer-Policy") != "same-origin" {
 		t.Errorf("consent page headers: %v", h)
+	}
+	// A policy that sends no Origin on the same-origin form POST (no-referrer makes it "null") is
+	// refused by sameOrigin, so every submit would 403.
+	if got := h.Get("Referrer-Policy"); got != "same-origin" {
+		t.Errorf("Referrer-Policy = %q, want same-origin", got)
 	}
 	// Chromium applies form-action to the redirect after the POST, so any value here that does not
 	// list the app's origin blocks the return to the app (measured in headless Chromium).
@@ -459,6 +465,7 @@ func TestDevIdPConsentIsNotServedOnAPreviewHost(t *testing.T) {
 func TestDevIdPConsentIsA404WhereTheIdPIsOff(t *testing.T) {
 	cfg := oauthTestConfig(t)
 	cfg.mgr.publicBaseURL = "https://af.example.com"
+	cfg.mgr.previewDomain = "pv.example.com" // the IdP is offered only with preview subdomains
 	cfg.mgr.store = brandTestStore(t)
 	setDevIdPDeployment(t, cfg.mgr, false)
 	mux := http.NewServeMux()
@@ -527,5 +534,137 @@ func TestDevIdPPersonaCollisionAfterTheCodeWasIssuedIsRefusedAtToken(t *testing.
 	}
 	if userinfo() != http.StatusUnauthorized {
 		t.Error("userinfo kept serving a persona that now collides with a real member")
+	}
+}
+
+func TestDevIdPConsentPageFollowsAcceptLanguage(t *testing.T) {
+	d := newDevIdPTestEnv(t)
+	d.addPersona(t, "admin", "Admin User")
+	redirect := d.ownHost(3000) + "/cb"
+	_, challenge := pkcePair()
+	for _, c := range []struct{ header, lang, want, absent string }{
+		{"en-US,en;q=0.9", "en", "Development sign-in", "開発用"},
+		{"ja,en;q=0.8", "ja", "開発用サインイン", "Development sign-in"},
+		{"", "ja", "開発用サインイン", "Development sign-in"},
+	} {
+		var rec *httptest.ResponseRecorder
+		d.asUser("preview-user", func() {
+			req := httptest.NewRequest(http.MethodGet, "https://af.example.com"+devIdPAuthorizePath+"?"+d.authQuery(redirect, challenge).Encode(), nil)
+			if c.header != "" {
+				req.Header.Set("Accept-Language", c.header)
+			}
+			rec = httptest.NewRecorder()
+			d.mux.ServeHTTP(rec, req)
+		})
+		page := rec.Body.String()
+		if !strings.Contains(page, `<html lang="`+c.lang+`">`) || !strings.Contains(page, c.want) || strings.Contains(page, c.absent) {
+			t.Errorf("Accept-Language %q: want only %q text, got %s", c.header, c.lang, page)
+		}
+	}
+}
+
+func TestDevIdPConsentCancelReturnsAccessDeniedToTheVettedRedirect(t *testing.T) {
+	d := newDevIdPTestEnv(t)
+	d.addPersona(t, "admin", "Admin")
+	redirect := d.ownHost(3000) + "/cb"
+	_, ticket := d.askAs(t, "preview-user", d.authQuery(redirect, ""))
+
+	// The form cannot steer the redirect: only the parked request's URI and state count.
+	form := url.Values{"ticket": {ticket}, "action": {"cancel"}, "redirect_uri": {"https://evil.example/cb"}, "state": {"forged"}}
+	rec := d.postConsent("preview-user", form, map[string]string{"Origin": "https://af.example.com", "Sec-Fetch-Site": "same-origin"})
+	if rec.Code != http.StatusFound {
+		t.Fatalf("cancel: %d %s", rec.Code, rec.Body)
+	}
+	loc, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := loc.Query()
+	if loc.Scheme+"://"+loc.Host+loc.Path != redirect || q.Get("error") != "access_denied" || q.Get("state") != "st-1" || q.Get("code") != "" {
+		t.Errorf("cancel redirect: %s", loc)
+	}
+	if rec.Header().Get("Referrer-Policy") != "no-referrer" {
+		t.Errorf("cancel redirect Referrer-Policy: %q", rec.Header().Get("Referrer-Policy"))
+	}
+	// The ticket is spent: neither a second cancel nor a continue gets anywhere.
+	for _, f := range []url.Values{form, {"ticket": {ticket}, "choice": {"self"}}} {
+		if rec := d.postConsent("preview-user", f, nil); rec.Code == http.StatusFound {
+			t.Errorf("spent ticket redirected to %s", rec.Header().Get("Location"))
+		}
+	}
+}
+
+func TestDevIdPConsentCancelIsRefusedLikeContinue(t *testing.T) {
+	d := newDevIdPTestEnv(t)
+	d.addPersona(t, "admin", "Admin")
+	redirect := d.ownHost(3000) + "/cb"
+	cancel := func(ticket string) url.Values { return url.Values{"ticket": {ticket}, "action": {"cancel"}} }
+
+	for name, ticket := range map[string]string{"none": "", "forged": "afdevask-" + devIdPRandom(32)} {
+		if rec := d.postConsent("preview-user", cancel(ticket), nil); rec.Code == http.StatusFound {
+			t.Errorf("%s ticket: redirected to %s", name, rec.Header().Get("Location"))
+		}
+	}
+	_, ticket := d.askAs(t, "preview-user", d.authQuery(redirect, ""))
+	for name, hdr := range map[string]map[string]string{
+		"foreign Origin": {"Origin": "https://evil.example"},
+		"null Origin":    {"Origin": "null"},
+		"cross-site":     {"Sec-Fetch-Site": "cross-site"},
+	} {
+		if rec := d.postConsent("preview-user", cancel(ticket), hdr); rec.Code != http.StatusForbidden {
+			t.Errorf("%s: %d, want 403", name, rec.Code)
+		}
+	}
+	// Another member's ticket is refused (and spent: consumption precedes the member check).
+	d.addViewer(t, "colleague")
+	d.setPreviewSettings(t, func(st *wsSettings) { st.PreviewTenantShare = true })
+	if rec := d.postConsent("colleague", cancel(ticket), nil); rec.Code == http.StatusFound {
+		t.Errorf("another member's ticket redirected to %s", rec.Header().Get("Location"))
+	}
+	_, ticket = d.askAs(t, "preview-user", d.authQuery(redirect, ""))
+	d.advance(devIdPConsentTTL + time.Second)
+	if rec := d.postConsent("preview-user", cancel(ticket), nil); rec.Code == http.StatusFound {
+		t.Errorf("expired ticket redirected to %s", rec.Header().Get("Location"))
+	}
+}
+
+func TestDevIdPConsentPageIsBrandedAndEscaped(t *testing.T) {
+	d := newDevIdPTestEnv(t)
+	d.cfg.brand.env, _ = buildBrand("violet", `<i>"stg"`)
+	d.addPersona(t, "admin", `<b onmouseover=x>"Ünï`)
+	rec := d.authorizeAs(t, "preview-user", d.authQuery(d.ownHost(3000)+"/cb", ""))
+	body := rec.Body.String()
+	for _, want := range []string{"#7c4dff", "&lt;i&gt;", "DEV IdP", `src="/brand/icon-192.png"`, ">:3000<", `value="cancel"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page lacks %q:\n%s", want, body)
+		}
+	}
+	for _, bad := range []string{"<i>", "<b onmouseover"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("unescaped %q reached the page", bad)
+		}
+	}
+	if csp := rec.Header().Get("Content-Security-Policy"); csp !=
+		"default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'" {
+		t.Errorf("CSP = %q", csp)
+	}
+	// Without branding the shipped teal and no label.
+	d.cfg.brand.env = brandConfig{}
+	body = d.authorizeAs(t, "preview-user", d.authQuery(d.ownHost(3000)+"/cb", "")).Body.String()
+	if !strings.Contains(body, "#149ba7") || strings.Contains(body, "#7c4dff") {
+		t.Errorf("unbranded page accent:\n%s", body)
+	}
+}
+
+// The page has no layout engine in the Go tests, so pin the two rules whose absence cut the DEV IdP
+// badge off the card at 320px (measured in headless Chromium with a 16-letter brand label) and
+// hid the test addresses' domain behind an ellipsis on phones.
+func TestDevIdPConsentPageStaysReadableOnNarrowScreens(t *testing.T) {
+	css := devIdPConsentTmpl.Tree.Root.String() + devIdPShellTmpl.Lookup("devidp-shell-css").Tree.Root.String()
+	if !strings.Contains(css, ".top{display:flex;flex-wrap:wrap;") {
+		t.Error("the header must wrap so the badge stays inside the card")
+	}
+	if strings.Contains(css, "text-overflow:ellipsis") {
+		t.Error("addresses must wrap, not be cut with an ellipsis")
 	}
 }

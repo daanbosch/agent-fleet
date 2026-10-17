@@ -544,13 +544,13 @@ It does the things the hand-typed sequence gets wrong:
 ### A development deployment: `dev-deploy.sh`
 
 `update.sh` deploys a **released** tag. A deployment kept for development wants the
-opposite: whatever is on `develop` right now, without cutting a version. That is
+opposite: whatever is on `main` right now, without cutting a version. That is
 `dev-deploy.sh` (docs/log/73), and it ends by calling `update.sh` — the pre-flight checks
 above are the reason, and writing a second copy of them for the dev path would mean the
 checks are what drifts.
 
 ```bash
-./dev-deploy.sh --profile <p> --region <r>            # origin/develop → the dev deployment
+./dev-deploy.sh --profile <p> --region <r>            # origin/main → the dev deployment
 ./dev-deploy.sh --profile <p> --region <r> --dry-run  # just the plan
 ```
 

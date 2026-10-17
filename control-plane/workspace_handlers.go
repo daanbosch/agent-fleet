@@ -940,6 +940,12 @@ type sessionWire struct {
 	// while it is pending. No DB-mirror column: a delivery only happens in a running
 	// Workspace, and the Agent turns a pending it can no longer finish into unknown on start.
 	InitialPromptState string `json:"initialPromptState,omitempty"`
+	// Moving / MovedTo: the session this one is being moved to, or was moved to (ADR 0115
+	// decision 11.7). Dropped here, a moved source's row cannot say where the conversation
+	// went or offer "resume here anyway", and a pending move offers neither retry nor cancel.
+	// No DB-mirror column: every action on them needs the running Agent.
+	Moving  string `json:"moving,omitempty"`
+	MovedTo string `json:"movedTo,omitempty"`
 }
 
 func fmtStarted(createdAt string) string {

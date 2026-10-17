@@ -18,7 +18,7 @@
 # a person has something to do** (deploy/local/cli-update-issues.sh): its title is the
 # next step and a PR closes it. The job goes red only when the check itself breaks.
 #
-# Note: schedule runs on the workflow definition of the default branch (develop).
+# Note: schedule runs on the workflow definition of the default branch (main).
 name: cli-drift
 
 on:
@@ -27,7 +27,7 @@ on:
     # odd hour, :00) is what the three schedules are tuned to; keep them together.
     - cron: "0 */2 * * *"
   workflow_dispatch:
-  # No push trigger (spreads billing; develop-trunk workflow). Verifying script
+  # No push trigger (spreads billing; main-trunk workflow). Verifying script
   # changes via the cron or workflow_dispatch is enough.
 
 permissions:

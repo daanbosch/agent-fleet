@@ -45,7 +45,7 @@ TYPES="m7i.large,m6i.large,m8g.large,m7g.large,m6g.large"
 # A BRANCH name, not a SHA: `git clone --depth 1 --branch` only accepts a branch or a
 # tag, and a shallow clone is most of the difference between "the instance is measuring"
 # and "the instance is still downloading history".
-REF="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --abbrev-ref HEAD 2>/dev/null || echo develop)"
+REF="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
 REPO="https://github.com/k-k1/agent-fleet"
 GO_VERSION=1.26.7
 NODE_MAJOR=22

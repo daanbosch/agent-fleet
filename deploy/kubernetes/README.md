@@ -19,7 +19,7 @@ file refer to it.
 | `components/gke/` | What GKE adds: the Cloud SQL Auth Proxy sidecar, Workload Identity, the workspace node pool, the global external Application Load Balancer (Gateway API) and the CP namespace's ingress policy |
 | `overlays/gke/` | The overlay to copy for a GKE deployment |
 | `overlays/generic/` | The overlay to copy for any other cluster |
-| [`../gcp/gke/`](https://github.com/k-k1/agent-fleet/tree/develop/deploy/gcp/gke) | Terraform for everything around a GKE cluster |
+| [`../gcp/gke/`](https://github.com/k-k1/agent-fleet/tree/main/deploy/gcp/gke) | Terraform for everything around a GKE cluster |
 
 > **No browser features on this runtime.** Chromium's sandbox cannot start in a workspace pod
 > (Pod Security `restricted`: NoNewPrivs stops the setuid helper, RuntimeDefault seccomp refuses
@@ -1030,7 +1030,7 @@ running with no workspace, ~¥600/day paused, plus ~¥78 per workspace node-hour
 four times the ECS floor at ¥150 to the dollar, mostly from the high-availability choices. The
 table per item, the measurement conditions, what keeps billing while paused, and the levers are
 in
-[deploy/gcp/gke, "Cost"](https://github.com/k-k1/agent-fleet/blob/develop/deploy/gcp/gke/README.md#cost).
+[deploy/gcp/gke, "Cost"](https://github.com/k-k1/agent-fleet/blob/main/deploy/gcp/gke/README.md#cost).
 
 ## The live harness
 

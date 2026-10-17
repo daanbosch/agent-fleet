@@ -15,7 +15,7 @@
 # An issue is OPENED only for a state a person must act on:
 #
 #   red         the contract failed on latest (a row in the issue's `Red contracts` section)
-#   streak      the contract failed its last 2 runs on develop, whatever the version
+#   streak      the contract failed its last 2 runs on main, whatever the version
 #   dispatch    cursor / kiro: the credential rotates, so the watcher never runs them
 #   credential  claude / copilot / agy while their CI secret is not configured
 #   manual      rtk: no contract exists, it is bumped by hand
@@ -67,9 +67,9 @@ workflow_of() { case "$1" in claude) echo claude-tui-contract.yml ;; *) echo "$1
 dispatch_cmd() {
   local wf; wf="$(workflow_of "$1")"
   case "$1" in
-    codex|opencode) echo "gh workflow run $wf --ref develop" ;;
-    muse)           echo "gh workflow run $wf --ref develop -f version=latest" ;;
-    *)              echo "gh workflow run $wf --ref develop -f cli_version=latest" ;;
+    codex|opencode) echo "gh workflow run $wf --ref main" ;;
+    muse)           echo "gh workflow run $wf --ref main -f version=latest" ;;
+    *)              echo "gh workflow run $wf --ref main -f cli_version=latest" ;;
   esac
 }
 
@@ -159,11 +159,11 @@ sync_kind() { # sync_kind <kind> <pin> <latest>
         local url; url="$(gh run list --workflow "$wf" --status failure --limit 1 --json url --jq '.[0].url // empty' 2>/dev/null || true)"
         where="${url:+[the newest red run]($url)}"; where="${where:-see the newest red run of the workflow}"
       fi
-      next="\`$wf\` failed on \`$latest\` ($where). Fix the cause in a PR that mentions this issue, and once it is merged run the contract again on \`develop\`. When it passes, the pin-bump PR that follows closes this issue."
+      next="\`$wf\` failed on \`$latest\` ($where). Fix the cause in a PR that mentions this issue, and once it is merged run the contract again on \`main\`. When it passes, the pin-bump PR that follows closes this issue."
       cmd="$(dispatch_cmd "$kind")" ;;
     streak)
-      title="$kind CLI: contract fails on develop"
-      next="\`$wf\` failed its last 2 runs on \`develop\` whatever the version, so the harness or its credential is broken rather than a release. Fix it in a PR that mentions this issue, then run the contract again. The issue closes once it passes and the pin is current."
+      title="$kind CLI: contract fails on main"
+      next="\`$wf\` failed its last 2 runs on \`main\` whatever the version, so the harness or its credential is broken rather than a release. Fix it in a PR that mentions this issue, then run the contract again. The issue closes once it passes and the pin is current."
       cmd="$(dispatch_cmd "$kind")" ;;
     manual)
       title="$kind CLI: bump the pin to $latest"

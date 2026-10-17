@@ -22,7 +22,7 @@ import { useReposStore } from "../repos/store.ts";
 import { useT } from "../../lib/i18n/index.ts";
 import { displayName, remainingShort, KEEP_AWAKE_HOURS } from "../../lib/sessionview.ts";
 import { agentOf } from "../../agents/registry.ts";
-import { openSessionTerminal, openSessionChat } from "./open.ts";
+import { openSessionTerminal, openSessionChat, openSessionByName } from "./open.ts";
 import { openGallery } from "../gallery/open.ts";
 import { openRepoMenuInRail } from "../repos/reveal.ts";
 import { useIsMobile } from "../../lib/device.ts";
@@ -69,6 +69,7 @@ export function SessionMenu({ s, actions, running, open, place, keepOpenRefs, on
   const openBranchRename = useSessionUI((u) => u.openBranchRename);
   const openSsmResume = useSessionUI((u) => u.openSsmResume);
   const openBudget = useSessionUI((u) => u.openBudget);
+  const openMove = useSessionUI((u) => u.openMove);
   const startSession = useSessionsStore((st) => st.start);
   const toast = useToast();
   const tr = useT();
@@ -179,8 +180,12 @@ export function SessionMenu({ s, actions, running, open, place, keepOpenRefs, on
       {icon} {label}
     </button>
   );
-  const resumable = !s.alive && !dead && running;
+  // A moving or moved source refuses every start (ADR 0115 decision 11.2): its way back is the
+  // move dialog's "resume here anyway", never the ordinary resume.
+  const moveClosed = !!(s.moving || s.movedTo);
+  const resumable = !s.alive && !dead && running && !moveClosed;
   const caps = agentOf(s.kind).caps;
+  const moveShown = caps.transcript && !dead && running;
 
   // The menu is a list of sections, each a list of the items visible right now; the rules between
   // sections are drawn from that list below, never placed by hand, so a section with nothing to
@@ -286,6 +291,19 @@ export function SessionMenu({ s, actions, running, open, place, keepOpenRefs, on
             onClose();
             setHandoffOpen(true);
           }, <Icon name="git-branch" />, tr("srow.handoff")),
+        // Move to another agent (ADR 0115): beside the handoff, its deterministic sibling. The
+        // same dialog finishes or cancels a pending move and takes a moved source back.
+        moveShown &&
+          !!s.movedTo &&
+          item("move-open-target", () => {
+            onClose();
+            openSessionByName(s.movedTo!);
+          }, <Icon name="arrow-right" />, tr("srow.move_open_target")),
+        moveShown &&
+          item("move", () => {
+            onClose();
+            openMove(s);
+          }, <Icon name="arrow-swap" />, tr(s.movedTo ? "srow.move_reopen" : s.moving ? "srow.move_pending" : "srow.move")),
         // Session sharing: share the conversation with another user in the same tenant.
         // shell/SSM have no transcript, so they are out of scope (docs/log/59).
         caps.transcript &&

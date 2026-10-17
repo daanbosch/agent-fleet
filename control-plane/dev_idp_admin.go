@@ -5,7 +5,7 @@ package main
 // locked it with AF_DEV_IDP=0. It lives in deployment_setting beside the egress mode, so a
 // toggle reaches every handler without a restart.
 //
-// Turning it off only stops the IdP being served. Workspace opt-ins and their client
+// Turning it off only stops the IdP being served. Workspaces' client
 // registrations stay, so turning it back on does not rotate anyone's secret.
 
 import (
@@ -118,10 +118,13 @@ type devIdPAdminStatus struct {
 	// Locked: AF_DEV_IDP=0 forces it off and the setting cannot change that.
 	Locked bool `json:"locked"`
 	// MissingBaseURL: PUBLIC_BASE_URL is unset, so there is no origin for the issuer.
-	MissingBaseURL bool   `json:"missing_base_url"`
-	Issuer         string `json:"issuer"`
-	// OptedIn counts the workspaces registered with the IdP; they survive the switch.
-	OptedIn int `json:"opted_in"`
+	MissingBaseURL bool `json:"missing_base_url"`
+	// MissingPreviewDomain: no preview domain, so nothing is served or injected (devIdPOfferedToMembers).
+	MissingPreviewDomain bool   `json:"missing_preview_domain"`
+	Issuer               string `json:"issuer"`
+	// Clients counts the workspaces holding a registration (created at start);
+	// they survive the switch.
+	Clients int `json:"clients"`
 }
 
 func (a devIdPAdminAPI) devIdpNow(ctx context.Context) (devIdPAdminStatus, error) {
@@ -135,7 +138,7 @@ func (a devIdPAdminAPI) devIdpNow(ctx context.Context) (devIdPAdminStatus, error
 	}
 	base := strings.TrimRight(a.mgr.publicBaseURL, "/")
 	s := devIdPAdminStatus{
-		Setting: setting, Locked: a.mgr.devIdPEnvOff, MissingBaseURL: base == "", OptedIn: n,
+		Setting: setting, Locked: a.mgr.devIdPEnvOff, MissingBaseURL: base == "", MissingPreviewDomain: !a.mgr.devIdPOfferedToMembers(), Clients: n,
 		Enabled: a.mgr.devIdPIssuer(ctx) != "",
 	}
 	if base != "" {

@@ -278,3 +278,94 @@ plus a restart before any member can use the IdP is the step that kept it unused
   turning it on again does not rotate any secret. The 409 rule stands: a workspace cannot store
   `devIdp: true` while the deployment does not serve the IdP.
 - Not verified: a live run on a deployment (toggle in the modal, then an app signing in).
+
+## Note (2026-10-16): consent page language and an atomic persona limit (#2227)
+
+Two limits of the personas note are closed; nothing about the security properties changes.
+
+- **Language.** The consent page and its refusal text come from a ja / en table
+  (`devIdPConsentText`) and follow `Accept-Language` through `auth.PreferredUILang`, as the login and
+  OAuth-link pages do. The page is a top-level navigation from the app being developed, so it has no
+  Console session to read a stored language from. Japanese is the default.
+- **Limit.** `CreateDevIdPPersona` counts and inserts in one transaction that first takes a row lock on
+  the workspace (`UPDATE workspace SET id=id`), so concurrent creates cannot leave more than 20 rows on
+  sqlite or Postgres. Measured: without the lock, 16 racing creates against a limit of 5 left 7 to 9 rows
+  on Postgres. The handler keeps its early check and the same `persona_limit` error.
+
+## Note (2026-10-16): members are offered the IdP only with preview subdomains (#2238)
+
+The IdP is offered to members only on a deployment with a preview domain. Without preview hosts the
+only redirect target is `http://localhost:<port>` (decision 7), which only the browser pane's
+Chromium inside the workspace can follow, and `authorize` sits behind `authGate`, so that Chromium
+would itself need a Console session. The Preview tab, where the switch lives, is hidden on such a
+deployment, so the option would also have been unreachable. Showing the switch elsewhere was rejected.
+
+- `GET /api/env/ws-settings` reports `devIdpAvailable: false` without a preview domain, and
+  `PUT devIdp: true` is a 409 `no_preview_domain`. Turning it off stays accepted, so an earlier
+  opt-in can be undone.
+- The admin status gains `missing_preview_domain`, and the modal says members cannot use the IdP
+  until preview subdomains are configured. The deployment switch stays operable.
+- Unchanged: the `/dev-idp/*` endpoints, stored opt-ins, the redirect allow-list (localhost stays
+  allowed) and personas.
+- Not verified: a live run on a deployment without a preview domain.
+
+## Note (2026-10-16): the consent page's referrer policy is `same-origin` (#2243)
+
+The personas note above says the consent page is sent with `no-referrer`. That value makes a browser send
+`Origin: null` on the page's own form POST, which the strict `sameOrigin` check refuses, so every submit
+got 403 on a deployment (the Go tests set `Origin` by hand and never saw it). The page now sends
+`Referrer-Policy: same-origin`: the same-origin POST carries the real Console origin, and no `Referer`
+reaches the app it redirects to. `sameOrigin` is unchanged (`Origin: null` is still refused). The
+authorization redirect keeps `no-referrer`; it hosts no form.
+
+## Note (2026-10-17): the consent page as an Agent Fleet screen, with Cancel (#2245)
+
+The consent page is restyled in the Console's look (inline CSS only, dark by default and a light variant,
+accent = the deployment's brand colour, brand icon and label in the header, a "DEV IdP" badge). The CSP gains
+only `img-src 'self'` for the icon. A **Cancel** button posts to the same `/dev-idp/consent` endpoint with
+`action=cancel`: after the same origin checks and the same ticket consumption and re-checks as Continue it
+returns `error=access_denied` and the parked `state` to the parked, re-vetted `redirect_uri`; neither value is
+read from the form. The form contract (`ticket`, `choice`) and the `same-origin` referrer policy are unchanged.
+
+## Note (2026-10-16): the client exists before the opt-in, and there is no per-workspace switch (#2242)
+
+This supersedes decision 5's "created at opt-in; off then on rotates" and decision 3's per-workspace
+opt-in. Opting in cost a workspace restart because the client's values reached the container only as env
+at start, and each off and on issued a new secret. The switch is then removed outright: env is fixed at
+start while a switch is not, so a switch could only break apps that follow the guide (an app that selects
+the dev issuer whenever `AF_DEV_IDP_ISSUER` is set would fail while it was off).
+
+- While the deployment offers the IdP (enabled, not locked, `PUBLIC_BASE_URL`, preview domain), every
+  workspace's client is served by `authorize` / `token` / `userinfo`, and has been created lazily at start
+  if missing (`CreateDevIdPClient` is insert-or-keep, so concurrent starts settle on one row).
+  `AF_DEV_IDP_*` is injected at every start. Where the deployment does not offer it, nothing is injected and
+  every route answers 404, as when it is off. The preview-domain rule of the note above is folded into
+  "offers": `devIdPIssuer` is empty without a preview domain.
+- `devIdp` in `PUT /api/env/ws-settings` is accepted and ignored (old clients do not get a 400) and is no
+  longer reported; a stored `devIdp` value is inert. `devIdpAvailable` is true only when the deployment
+  offers the IdP.
+- `POST /api/env/ws-settings/dev-idp/rotate` issues a new client id and secret in one upsert
+  (`ReplaceDevIdPClient`), audited as `workspace.dev_idp_rotate`; the old pair stops working at once and the
+  container gets the new one at its next start, which the Console says.
+- The admin status field `opted_in` is now `clients`: it counts registrations, which exist for every
+  started workspace.
+- Unchanged: personas, tenant-shared previews, the redirect allow-list, PKCE, single-use codes, `af_dev`.
+- Not verified: a live run on a deployment.
+
+## Note (2026-10-17): the browser-facing error pages share the consent page's shell (#2262)
+
+`authorize` and `consent` answer a refusal with an HTML page in the consent page's shell (header with the
+branded icon, deployment label and "DEV IdP" badge, the brand colour, dark and light, phone widths), not a
+plain-text body. The shell is one set of templates (`dev_idp_page.go`); the consent page's output is
+byte-identical (pinned by a golden test). Each page is a title, one sentence of what happened and one line of
+what to do next, from a ja / en table that follows `Accept-Language`; this replaces the `Refused` string of
+`devIdPConsentText`. Status codes are unchanged; the headers are the consent page's (`no-store`, the same CSP,
+`same-origin` referrer policy), and nothing on a page posts, links or redirects.
+
+- The internal reason stays in the log. An unknown client and a non-member still get the same page. A
+  `redirect_uri` the client may not use is only reached by a member of the client's workspace, so that page
+  names the rejected callback's **host** (only a plain ASCII host name, never cut, otherwise left out; never the
+  path, query or `client_id`).
+- A store failure on consent (500) says the sign-in is unavailable; every other consent refusal says the
+  confirmation is no longer valid. A wrong method on `authorize` or `consent` is a page; on `token`, `userinfo`
+  and `jwks` it stays the plain 405 / OAuth JSON, and the bare 404 while the IdP is not offered is unchanged.

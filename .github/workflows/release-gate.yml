@@ -7,7 +7,7 @@
 # OOMing the live fleet (shared, memory-constrained host), so only this gate — which
 # needs real image builds — runs on hosted CI. To limit billing it has no permanent
 # trigger: it runs on pushes that change this workflow file itself (= deliberate
-# trigger) and on workflow_dispatch once it is on develop/main.
+# trigger) and on workflow_dispatch once it is on main.
 # Re-run with `gh run rerun <id>`.
 # P4 (docs/log/35 §35.7.4): adds dist-gate (stub run of publish/install + real chromium
 # CDN download check). The dev WS network gets 400s from the PRSS CDN, so the CI

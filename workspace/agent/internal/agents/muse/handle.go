@@ -1,6 +1,7 @@
 package muse
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/lifegate"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/msp"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/transcript"
 )
@@ -85,7 +87,10 @@ type threadHandle struct {
 	starting string
 	// calling is set while the head's turn/start call is out: a host lost meanwhile leaves the
 	// head to the caller, whose call fails with ErrClosed.
-	calling  bool
+	calling bool
+	// parked is set while a pump refused by a move waits for lifegate.Reopen, so the pumps
+	// refused meanwhile do not each register a callback.
+	parked   bool
 	settings agents.ThreadSettings
 	inter    *agents.Interaction
 	pending  *pendingAsk // what inter is waiting on, in muse's own vocabulary
@@ -1001,7 +1006,9 @@ func (h *threadHandle) accept(in agents.TurnInput, steer bool) (queued bool, err
 	// at once, ahead of it.
 	if running || h.tq().Head() != nil || h.tq().Len() > 1 {
 		h.mu.Unlock()
-		h.pump()
+		// Not on this goroutine: the caller holds the session's lease, and the pump takes one of
+		// its own, which queues behind a waiting move that waits for the caller's.
+		go h.pump()
 		return true, nil
 	}
 	t := h.tq().Take()
@@ -1176,25 +1183,47 @@ func (h *threadHandle) noteImages(id string, images []string) {
 
 // pump starts the next queued turn once the previous one has settled. It is safe to call at
 // any time: while a turn runs or a start is out it does nothing.
+//
+// Each entry gets a lease of its own on the session's lifecycle gate (ADR 0115 decision 11.1),
+// taken before it leaves the queue and held until turn/start is answered (or the entry is back
+// in the queue). From the answer the host holds the input: as a turn, joined to the running one,
+// or in the host's own queue behind a running turn, and a source with a running turn cannot be
+// moved. So a move finds every accepted entry either with the host or still queued, where its
+// snapshot reads it.
 func (h *threadHandle) pump() {
 	for {
+		// Most calls find a turn running or nothing queued; they return without the gate, which
+		// a move may be holding.
+		if !h.canTake() {
+			return
+		}
+		// Taken without h.mu: a move reads the queue under h.mu while it holds the gate.
+		lease, err := lifegate.Enter(context.Background(), h.name)
+		if err != nil {
+			h.parkForMove(err)
+			return
+		}
 		h.mu.Lock()
 		if !h.alive || h.cl == nil || h.running || h.tq().Head() != nil {
 			h.mu.Unlock()
+			lease.Release()
 			return
 		}
 		t := h.tq().Take()
 		if t == nil {
 			h.mu.Unlock()
+			lease.Release()
 			return
 		}
 		id, ok := h.commitLocked(t)
 		h.mu.Unlock()
 		if !ok {
+			lease.Release()
 			continue
 		}
-		_, err := h.launch(t, id)
+		_, err = h.launch(t, id)
 		if err == nil {
+			lease.Release()
 			return
 		}
 		h.mu.Lock()
@@ -1202,7 +1231,9 @@ func (h *threadHandle) pump() {
 		h.mu.Unlock()
 		// The host went away with the input: it goes back to the head of the queue for the
 		// respawn to start, rather than being lost to a crash nobody saw.
-		if h.startFailed(t, id, err, true) || hostGone {
+		started := h.startFailed(t, id, err, true)
+		lease.Release()
+		if started || hostGone {
 			return // or the turn started after all (a late ack); its completion pumps the rest
 		}
 		// Refused by a live host: resending the same input would be refused again, so it is
@@ -1215,6 +1246,45 @@ func (h *threadHandle) pump() {
 		agents.MarkTurnEndErr(h.slotSid, agents.TurnFailed, err.Error())
 		h.emit(agents.Event{Kind: "turn_state", TurnState: agents.TurnFailed})
 	}
+}
+
+// canTake reports whether pump would take an entry now.
+func (h *threadHandle) canTake() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.alive && h.cl != nil && !h.running && h.tq().Head() == nil && h.tq().Len() > 0
+}
+
+// parkForMove stops a pump that a move refused, leaving its input queued for the move's
+// snapshot. If the move rolls back, the gate reopens and the pump starts again. The second look
+// covers a reopen that ran before the callback was registered.
+//
+// A meta the gate could not read is not a move: nothing will reopen it, so the pump looks again
+// after a pause instead.
+func (h *threadHandle) parkForMove(err error) {
+	if errors.Is(err, lifegate.ErrMetaUnreadable) {
+		time.AfterFunc(time.Second, h.pump)
+		return
+	}
+	h.mu.Lock()
+	registered := h.parked
+	h.parked = true
+	h.mu.Unlock()
+	if !registered {
+		lifegate.WhenReopened(h.name, h.unpark)
+	}
+	if !lifegate.Closed(h.name) {
+		h.unpark()
+	}
+}
+
+// unpark starts the pump of a parked handle again. Never on the caller's goroutine: Reopen runs
+// it inside a move's rollback, which must not wait for a turn/start.
+func (h *threadHandle) unpark() {
+	h.mu.Lock()
+	h.parked = false
+	h.mu.Unlock()
+	go h.pump()
 }
 
 // maxInlineImageBytes caps what AF will base64 into a single frame. The upload endpoint accepts

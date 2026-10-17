@@ -127,7 +127,7 @@ func TestManagedResumeKeepsALockSetDuringTheLaunch(t *testing.T) {
 		StoppedAt: "2026-09-25T10:00:00+09:00"})
 	useLockingDriver(t, session.KindCodex, &lockingDriver{onResume: func() { lockOnDisk(t, name) }})
 
-	if err := ensureSessionTmux(name, false); err != nil {
+	if err := ensureSessionTmux(testLease(t, name), name, false); err != nil {
 		t.Fatal(err)
 	}
 	if m := assertLocked(t, name); m.StoppedAt != "" {

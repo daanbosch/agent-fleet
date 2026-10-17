@@ -4,6 +4,7 @@ package codex
 // through the mock app-server down to the turns it ends up running.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/lifegate"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 )
 
@@ -568,10 +570,14 @@ func TestDropHandleBeforeTheTurnWaiterIsInstalled(t *testing.T) {
 	h.running, h.pumping = true, true
 	gen := h.gen
 	h.mu.Unlock()
+	lease, err := lifegate.Enter(context.Background(), h.name)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	DropHandle(h.name)
 	done := make(chan struct{})
-	go func() { h.runTurn(taken, gen); close(done) }()
+	go func() { h.runTurn(taken, gen, lease); close(done) }()
 	t.Cleanup(func() { h.runtimeLost(); <-done })
 	waitCodexCalls(t, m, "turn/start", 1)
 	waitCodexCalls(t, m, "turn/interrupt", 1)

@@ -359,6 +359,14 @@ func registerSessionRoutes(mux *http.ServeMux, cfg config) {
 	mux.HandleFunc("GET /api/sessions", ws.withResolved(ws.sessionsList))
 	mux.HandleFunc("POST /api/sessions", ws.withResolved(ws.sessionCreate))
 	mux.HandleFunc("POST /api/sessions/{name}/fork", ws.withResolved(ws.sessionFork))
+	// Move to another agent kind (ADR 0115). The move and its retry create a session, so they
+	// take fork's route through the quota check; the rest are relayed as they are.
+	mux.HandleFunc("POST /api/sessions/{name}/move", ws.withResolved(ws.sessionFork))
+	mux.HandleFunc("POST /api/sessions/{name}/move/retry", ws.withResolved(ws.sessionFork))
+	mux.HandleFunc("GET /api/sessions/{name}/move/preview", rest)
+	mux.HandleFunc("POST /api/sessions/{name}/move/cancel", rest)
+	mux.HandleFunc("POST /api/sessions/{name}/move/reopen", rest)
+	mux.HandleFunc("POST /api/sessions/{name}/move/deliver", rest)
 	mux.HandleFunc("POST /api/sessions/{name}/stop", rest)
 	mux.HandleFunc("POST /api/sessions/{name}/halt", rest)
 	mux.HandleFunc("POST /api/sessions/{name}/recreate", rest)
@@ -994,6 +1002,7 @@ func registerAgentEnvRoutes(mux *http.ServeMux, cfg config) {
 	// Reissue the preview URL (docs/log/81 §4.1). POST rather than GET/PUT because it
 	// throws state away.
 	mux.HandleFunc("POST /api/env/ws-settings/preview/reissue", wss.withResolved(wss.reissuePreview))
+	mux.HandleFunc("POST /api/env/ws-settings/dev-idp/rotate", wss.withResolved(wss.rotateDevIdPSecret))
 	// Test personas of the development OIDC IdP (ADR 0116, #2223).
 	mux.HandleFunc("GET /api/env/ws-settings/dev-idp/personas", wss.withResolved(wss.listPersonas))
 	mux.HandleFunc("POST /api/env/ws-settings/dev-idp/personas", wss.withResolved(wss.createPersona))

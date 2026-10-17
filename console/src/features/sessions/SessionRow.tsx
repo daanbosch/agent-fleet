@@ -20,7 +20,8 @@ import { ordClass } from "../../layout/badges.ts";
 import { useTtsStore } from "../../core/store/tts.ts";
 import { lineageColorOf } from "../../lib/project.ts";
 import { useSessionsStore } from "./store.ts";
-import { openSessionFromList } from "./open.ts";
+import { openSessionByName, openSessionFromList } from "./open.ts";
+import { useSessionUI } from "./ui.ts";
 import { SessionMenu } from "./SessionMenu.tsx";
 import { SessionLinks, hasSessionLinks } from "./SessionLinks.tsx";
 import { useMySharesStore } from "../sharing/store.ts";
@@ -103,7 +104,7 @@ export function SessionRow({ s, selected, opens, multi, running, actions, readOn
         (lineage ? " lineage" : "") +
         (needsYou ? " sess-needs-you" : "") +
         (unread ? " sess-unread" : "") +
-        (links ? " sess-has-links" : "")
+        (links || s.movedTo || s.moving ? " sess-has-links" : "")
       }
       style={lineage ? ({ "--sess-lineage": lineage } as CSSProperties) : undefined}
       onMouseEnter={open ? () => setHover({ session: s.name }) : undefined}
@@ -259,6 +260,36 @@ export function SessionRow({ s, selected, opens, multi, running, actions, readOn
         </div>
       )}
       {links && <SessionLinks s={s} running={running} />}
+      {(s.movedTo || s.moving) && <SessionMoveLine s={s} running={running} readOnly={readOnly} />}
     </li>
+  );
+}
+
+// SessionMoveLine — where a moved source's conversation went, or the move still waiting for
+// retry or cancel (ADR 0115 decisions 11.4 and 11.7). Its own line, like the links: the rail is
+// narrow, and this is the one thing a stopped moved row has to say. A moved source opens its
+// target; a pending one opens the move dialog, which holds retry and cancel.
+function SessionMoveLine({ s, running, readOnly }: { s: Session; running: boolean; readOnly: boolean }) {
+  const tr = useT();
+  const openMove = useSessionUI((u) => u.openMove);
+  const target = s.movedTo || s.moving || "";
+  const label = useSessionsStore((st) => {
+    const t = st.sessions.find((x) => x.name === target);
+    return t ? displayName(t) : target;
+  });
+  const moved = !!s.movedTo;
+  const text = tr(moved ? "srow.moved_to" : "srow.moving_to", { target: label });
+  const act = moved ? () => openSessionByName(target) : running && !readOnly ? () => openMove(s) : null;
+  return (
+    <div className={"sess-move-line" + (moved ? " moved" : " pending")}>
+      <Icon name={moved ? "arrow-right" : "warning"} />
+      {act ? (
+        <button type="button" className="sess-move-link" title={tr(moved ? "srow.moved_to_hint" : "srow.moving_to_hint")} onClick={act}>
+          {text}
+        </button>
+      ) : (
+        <span>{text}</span>
+      )}
+    </div>
   );
 }

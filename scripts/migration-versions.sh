@@ -2,18 +2,18 @@
 # Migration version collisions between a PR and its base (#2046).
 #
 # Two PRs that each take the next free migration number are green on their own: each one's
-# CI ran against a develop that did not have the other yet. Once both merge, the runner
-# (store_sqlite.go) refuses to migrate and develop goes red. migration-version.yml therefore
-# sets a `migration-version` commit status on every open PR into develop:
-# on the PR's own events, and again on every push to develop, because nothing else re-runs
-# a PR's checks when develop moves. Every PR gets the status, migration or not, so branch
+# CI ran against a main that did not have the other yet. Once both merge, the runner
+# (store_sqlite.go) refuses to migrate and main goes red. migration-version.yml therefore
+# sets a `migration-version` commit status on every open PR into main:
+# on the PR's own events, and again on every push to main, because nothing else re-runs
+# a PR's checks when main moves. Every PR gets the status, migration or not, so branch
 # protection can require it.
 #
 #   migration-versions.sh <base-ref> < added-paths      exit 1 and print each collision
 #   migration-versions.sh --pr <n> <sha> [--report-only]
-#                                                       check that head against develop and
+#                                                       check that head against main and
 #                                                       set the status on it
-#   migration-versions.sh --open-prs                    the same for every open PR into develop
+#   migration-versions.sh --open-prs                    the same for every open PR into main
 #
 # A collision is a new file whose version <base-ref> already holds under another name, that
 # another new file of the same change also takes, or that has no version the runner can
@@ -21,11 +21,11 @@
 # "_", so 95_x.sql and 0095_y.sql collide.
 #
 # The PR modes judge the commit the status goes on (git diff from its merge-base with the
-# develop tip), never the PR's current file list or merge ref, either of which may already
-# be another commit. A verdict is posted against a freshly fetched develop and stands only
-# if develop has not moved by the time it is posted; otherwise it is redone, so an older
+# main tip), never the PR's current file list or merge ref, either of which may already
+# be another commit. A verdict is posted against a freshly fetched main and stands only
+# if main has not moved by the time it is posted; otherwise it is redone, so an older
 # run does not leave the last word, provided it is not killed between posting and that
-# re-check (hence the workflow has no cancel-in-progress). When no verdict can be made (develop keeps moving, the
+# re-check (hence the workflow has no cancel-in-progress). When no verdict can be made (main keeps moving, the
 # head cannot be fetched) the status is `error`, which replaces an earlier success. Exit 2
 # means that. The PR modes need gh, GITHUB_REPOSITORY and an `origin` remote.
 set -euo pipefail
@@ -135,17 +135,17 @@ check_pr() {
     nul_list added git diff -z --no-renames --name-only --diff-filter=A "$mb" "$sha"; then
     collisions "$tip" "${added[@]}" || rc=$?
   else
-    echo "#$n: cannot read $sha against develop $tip" >&2
+    echo "#$n: cannot read $sha against main $tip" >&2
     rc=2
   fi
   case "$rc" in
-    0) state=success desc="no new migration's version collides with develop or within the PR" ;;
+    0) state=success desc="no new migration's version collides with main or within the PR" ;;
     1)
       state=failure
-      explain develop "#$n: "
+      explain main "#$n: "
       p="$(show "${PATH_[0]#control-plane/internal/store/}")"
       case "${KIND[0]}" in
-        base) desc="$p collides with $(show "${OTHER[0]##*/}") on develop" ;;
+        base) desc="$p collides with $(show "${OTHER[0]##*/}") on main" ;;
         change) desc="$p collides with $(show "${OTHER[0]##*/}") in this PR" ;;
         *) desc="$p has no readable version" ;;
       esac
@@ -162,15 +162,15 @@ check_pr() {
 }
 
 TIP=
-# settle <n> <sha> <post 0|1>: check_pr against develop until develop holds still across the
-# post. The develop-push sweep and a PR's own run race each other (separate concurrency
-# groups), and only a verdict whose develop was still the tip after posting may stand.
+# settle <n> <sha> <post 0|1>: check_pr against main until main holds still across the
+# post. The main-push sweep and a PR's own run race each other (separate concurrency
+# groups), and only a verdict whose main was still the tip after posting may stand.
 settle() {
   local n="$1" sha="$2" rc=2 now
   for _ in 1 2 3; do
     if [ -z "$TIP" ]; then
-      if ! git fetch -q origin develop; then
-        echo "#$n: cannot fetch develop" >&2
+      if ! git fetch -q origin main; then
+        echo "#$n: cannot fetch main" >&2
         continue
       fi
       TIP="$(git rev-parse FETCH_HEAD)"
@@ -178,14 +178,14 @@ settle() {
     rc=0
     check_pr "$TIP" "$n" "$sha" "$3" || rc=$?
     [ "$rc" != 2 ] || return 2
-    now="$(git ls-remote origin refs/heads/develop | cut -f1)" || now=
+    now="$(git ls-remote origin refs/heads/main | cut -f1)" || now=
     [ "$now" != "$TIP" ] || return "$rc"
-    echo "#$n: develop moved past $TIP during the check; checking again"
+    echo "#$n: main moved past $TIP during the check; checking again"
     TIP=
   done
-  echo "#$n: no verdict against a develop that held still" >&2
+  echo "#$n: no verdict against a main that held still" >&2
   if [ "$3" = 1 ]; then
-    post "$sha" error "develop kept moving or could not be fetched; re-run the migration-version workflow" || true
+    post "$sha" error "main kept moving or could not be fetched; re-run the migration-version workflow" || true
   fi
   return 2
 }
@@ -199,7 +199,7 @@ case "${1:-}" in
     ;;
   --open-prs)
     failed=0
-    prs="$(gh pr list --repo "$GITHUB_REPOSITORY" --base develop --state open --limit 200 \
+    prs="$(gh pr list --repo "$GITHUB_REPOSITORY" --base main --state open --limit 200 \
       --json number,headRefOid --jq '.[] | "\(.number) \(.headRefOid)"')"
     while read -r n sha; do
       [ -n "$n" ] || continue

@@ -13,6 +13,7 @@ vi.mock("../../../core/api/client.ts", async (importActual) => ({
   apiJSON: (...args: unknown[]) => apiJSON(...args),
 }));
 
+import { t } from "../../../lib/i18n/index.ts";
 import { DevIdpAdminView } from "./adminDevIdp.tsx";
 
 let root: Root | null = null;
@@ -23,8 +24,9 @@ const status = (over: Record<string, unknown> = {}) => ({
   setting: true,
   locked: false,
   missing_base_url: false,
+  missing_preview_domain: false,
   issuer: "https://af.example.com/dev-idp",
-  opted_in: 3,
+  clients: 3,
   ...over,
 });
 
@@ -56,6 +58,19 @@ afterEach(() => {
 });
 
 describe("DevIdpAdminView", () => {
+  it("says members cannot use it without a preview domain, and keeps the switch operable", async () => {
+    api.mockResolvedValue(status({ missing_preview_domain: true }));
+    await mount();
+    expect(text()).toContain(t("admin.devidp_no_preview_domain"));
+    expect(box().disabled).toBe(false);
+  });
+
+  it("does not show the preview-domain line when one is configured", async () => {
+    api.mockResolvedValue(status());
+    await mount();
+    expect(text()).not.toContain(t("admin.devidp_no_preview_domain"));
+  });
+
   it("shows it on, with the issuer and the opted-in count", async () => {
     api.mockResolvedValue(status());
     await mount();

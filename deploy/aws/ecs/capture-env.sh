@@ -154,7 +154,7 @@ AF_STACK_INGRESS=$AF_STACK_INGRESS
 AF_WS_RUNTIME=$AF_WS_RUNTIME
 AF_PERSISTENCE=$AF_PERSISTENCE
 AF_IMAGE_TAG=$AF_IMAGE_TAG
-# Set to 1 for a development deployment. dev-deploy.sh (which puts develop on a deployment
+# Set to 1 for a development deployment. dev-deploy.sh (which puts main on a deployment
 # without cutting a version tag) only ever touches a deployment carrying this mark, because
 # moving ImageTag raises a "restart required" badge for everyone running there. The mark lives
 # here rather than in the repo because which deployment is the development one is part of a

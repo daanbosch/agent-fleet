@@ -654,6 +654,40 @@ off.** In the chat view, **"Branch here"** on one of your past messages
 conversation up to that point copied as-is, on the same agent. The exact wording and the
 fine details survive, which is what you want for "redo it from that instruction".
 
+### Moving a session to another agent (move)
+
+When a session has run out of its agent's usage limit, or you simply want to carry on in another
+kind, choose **"Move to another agent…"** in its **⋯** menu (next to the handoff). Unlike the
+handoff, no AI writes a summary: the Workspace writes the conversation to a **handover file**
+(where it stopped, the working copy's state, the changed files, the conversation itself, with
+secrets masked), starts the agent you pick **in the same working copy**, and tells it to read
+that file first. The original session then **stops and takes no more input**, so only one
+session works on the working copy.
+
+A session stopped at a usage limit (or a spend limit) also shows a band above its chat with a **"Move to another agent"** button; it opens the same dialog with the agents that still have quota left in front (and marked). Agents whose usage is not shown stay selectable, unmarked. The band is not shown when no agent can take the session, or every candidate is at its own cap.
+
+The dialog shows, before you confirm:
+
+- **The agents it can move to.** The same agent is never offered (it draws on the same account's
+  quota); to continue in the same kind, use **"Branch here"** above where the kind supports it.
+  Agents that cannot read the file, or are not connected, are listed with the reason. Where the
+  workspace bar shows an agent's usage (claude, codex, muse), its current usage is shown too.
+- **Uncommitted changes** in the working copy. The move never commits, stashes or discards them;
+  the new session takes them over as they are, so tidy them first if you need to.
+- Instructions still queued, messages from other sessions not yet delivered (both go into the
+  file), the file's size, and **child sessions still running**. Children keep belonging to the
+  original session: their reports no longer reach it, so check them in the Console.
+- For a Managed cursor session: its conversation view is empty once it stops, and the file is
+  then the only record.
+
+Afterwards the original row reads **"Moved to …"** and opens the new session. Its menu offers
+**"Resume here anyway…"**, which opens the original's input again without stopping the new one;
+use only one of them from then on. If the move stopped without knowing whether the new session
+started, the row reads **"Move to … unfinished"**, and the dialog offers **"Retry"** (same file,
+same name) and **"Cancel the move"**. When the new session's first prompt is not known to have
+arrived, the dialog offers to resend it; resending may deliver it twice. The workspace has to be
+running.
+
 ### Saving a conversation as Markdown
 
 The **⋯** menu of any session that has a conversation offers **"Export as Markdown"** with three

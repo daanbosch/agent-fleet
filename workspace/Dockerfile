@@ -361,8 +361,8 @@ RUN if [ "${BAKE_RTK}" = "1" ] && [ "${BAKE_AGENT_CLIS}" = "1" ]; then set -eux;
 # 換えて再ビルド → 各 Workspace を Stop→Start。latest の確認は `npm view <pkg> version`。
 # 未ピン時代は同一 RUN 行が Docker レイヤキャッシュに当たり、再ビルドしても古い版の
 # ままになる罠があった（ピン止めなら ARG 変更が確実にキャッシュを破る）。
-ARG CLAUDE_CODE_VERSION=2.1.301
-ARG OPENCODE_VERSION=2.0.30
+ARG CLAUDE_CODE_VERSION=2.1.302
+ARG OPENCODE_VERSION=2.0.32
 ARG CODEX_VERSION=0.163.0
 ARG COPILOT_VERSION=1.0.98
 # opencode's npm package follows the pin's major: `opencode-ai` for 1.x, `@opencode/cli` for
@@ -505,9 +505,9 @@ ARG KIRO_SHA256_ARM64=d8b1e47bee2e5950b437aa85b347989d15b5fb41883b70f8c17ee2e361
 # MUSE_VERSION と両 arch の sha を揃えて書き換え）。実測 362,440,920 B / 323,360,856 B（1.4.1-R4503.1）。
 # ⚠️ 版文字列は `Muse Code 1.3.0 (1.3.0-R3401.1)`＝**括弧内のビルド id** がピンと突合する値。
 # agy の `tr -dc '0-9.'` 流儀だと `-R3401.1` が落ちて毎回不一致になる（install_muse.go）。
-ARG MUSE_VERSION=1.4.9-R6297.1
-ARG MUSE_SHA256_X64=a228010021276e112aa8422eb56ae82c0375405701950f6529bed4c9fe8abe05
-ARG MUSE_SHA256_ARM64=d64c61f4357b246fb46ab4f01332b36066bb4ac17541a88f520680354a32e06a
+ARG MUSE_VERSION=1.4.10-R6427.1
+ARG MUSE_SHA256_X64=decefc0fb33c48ee43419c3e72ac2dbc781743868611074c7292807f5960dfcf
+ARG MUSE_SHA256_ARM64=2e5afa5e8560c1565185249af2d27b3e97aaf351d3d32275b8e410be702dce35
 # Postgres供給ピン（ADR 0086 P0 供給レーン）: Zonky embedded-postgres 17.11.0 jar のハッシュ。
 # sha256 は `curl -sfL <jar-url> | sha256sum` で確認した値。
 # 他メジャー（16/17/18）は install-postgres が Maven Central の .sha256 サイドカーで動的に取得する。

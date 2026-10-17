@@ -719,7 +719,7 @@ func TestV2RunTurnLandsTheExplicitOutcome(t *testing.T) {
 			h.mu.Lock()
 			h.abortAsked = tc.asked
 			h.mu.Unlock()
-			h.runTurn(tk)
+			h.runTurn(tk, pumpLease(t, h))
 			h.mu.Lock()
 			h.tq().Settle(tk)
 			h.running = false

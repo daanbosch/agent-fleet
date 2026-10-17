@@ -14,8 +14,9 @@ interface DevIdpStatus {
   setting: boolean;
   locked: boolean;
   missing_base_url: boolean;
+  missing_preview_domain: boolean;
   issuer: string;
-  opted_in: number;
+  clients: number;
 }
 
 export function DevIdpAdminView() {
@@ -97,12 +98,15 @@ export function DevIdpAdminView() {
         {data && !data.locked && data.missing_base_url && (
           <p className="muted">{tr("admin.devidp_no_base_url")}</p>
         )}
+        {data && !data.locked && data.missing_preview_domain && (
+          <p className="muted">{tr("admin.devidp_no_preview_domain")}</p>
+        )}
         {data?.enabled && data.issuer && (
           <p className="muted">
             {tr("admin.devidp_issuer")}: <span className="mono">{data.issuer}</span>
           </p>
         )}
-        {data && <p className="muted">{tr("admin.devidp_opted_in", { n: data.opted_in })}</p>}
+        {data && <p className="muted">{tr("admin.devidp_clients", { n: data.clients })}</p>}
         {err && <p className="form-err">{err}</p>}
       </section>
     </div>
