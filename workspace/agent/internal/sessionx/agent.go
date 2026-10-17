@@ -1,7 +1,9 @@
 package sessionx
 
 import (
+	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
@@ -77,6 +79,24 @@ func NormalizeKind(kind string) string {
 		return kind
 	}
 	return session.KindClaude
+}
+
+// ValidateCreateKind is the create paths' gate: an empty kind means claude (the documented
+// default), a registered kind passes, and anything else is refused with the accepted list.
+// Matching is exact — "Codex", " codex" and "kiro-cli" are errors, never rewritten.
+//
+// It is separate from NormalizeKind on purpose. NormalizeKind is the READ-side fallback (a
+// stored session with an empty or legacy kind must keep rendering as claude), and folding an
+// unknown kind to claude at create time starts a different agent, model and billing route than
+// the caller asked for, reporting only "kind":"claude" afterwards.
+func ValidateCreateKind(kind string) error {
+	if kind == "" {
+		return nil
+	}
+	if _, ok := agentRegistry[kind]; ok {
+		return nil
+	}
+	return fmt.Errorf("unknown kind %q; accepted kinds: %s (empty means claude)", kind, strings.Join(RegisteredKinds(), ", "))
 }
 
 // ManagedDefaultKind reports whether a caller that cannot drive a pane (MCP create_session,

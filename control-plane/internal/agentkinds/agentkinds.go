@@ -13,6 +13,8 @@ package agentkinds
 import (
 	_ "embed"
 	"encoding/json"
+	"fmt"
+	"strings"
 )
 
 //go:embed catalog.json
@@ -75,4 +77,24 @@ func ManagedDefaultKinds() map[string]bool {
 		}
 	}
 	return m
+}
+
+// CheckCreateKind is the create paths' gate, the CP's copy of the Agent's
+// sessionx.ValidateCreateKind: an empty kind means claude, a kind in the snapshot passes, and
+// anything else is refused with the accepted list. Matching is exact — "Codex" or "kiro-cli" is
+// an error, not a spelling of a registered kind — because the Agent would otherwise start a
+// claude session for it. The CP asks here so a doomed create does not first wake a stopped
+// Workspace; the Agent refuses the same kinds on its own.
+func CheckCreateKind(kind string) error {
+	if kind == "" {
+		return nil
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.Kind == kind {
+			return nil
+		}
+		names = append(names, e.Kind)
+	}
+	return fmt.Errorf("unknown kind %q; accepted kinds: %s (empty means claude)", kind, strings.Join(names, ", "))
 }

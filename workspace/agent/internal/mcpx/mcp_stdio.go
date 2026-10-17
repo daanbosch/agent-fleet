@@ -3257,6 +3257,11 @@ func mcpStdioCall(req mcpReq) []byte {
 		if !writeEnabled() && !mcpFleetSpawnEnabled {
 			return mcpToolErr(req.ID, "このアシスタントはセッションの作成を許可されていません")
 		}
+		// Before the shell approval gate, the effort check and the idempotency key: an unknown
+		// kind is refused here rather than after those have treated it as something it is not.
+		if err := validateCreateKind(a.Kind); err != nil {
+			return mcpToolErr(req.ID, err.Error())
+		}
 		// Who is launching decides the provenance, the idempotency scope, the report route and
 		// the worktree default. Everything below branches on this one answer (ADR 0073).
 		parent := ""

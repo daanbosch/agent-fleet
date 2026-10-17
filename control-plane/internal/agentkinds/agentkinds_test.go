@@ -2,6 +2,7 @@ package agentkinds
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -64,6 +65,31 @@ func TestManagedDefaultKindsAreTheOldListPlusManagedOnly(t *testing.T) {
 	for _, e := range All() {
 		if e.ManagedOnly && !e.ManagedDefault {
 			t.Errorf("%s: managedOnly without managedDefault", e.Kind)
+		}
+	}
+}
+
+// CheckCreateKind takes exactly the snapshot's kinds and the empty kind, and its refusal lists
+// every accepted kind.
+func TestCheckCreateKind(t *testing.T) {
+	for _, e := range All() {
+		if err := CheckCreateKind(e.Kind); err != nil {
+			t.Errorf("CheckCreateKind(%q) = %v", e.Kind, err)
+		}
+	}
+	if err := CheckCreateKind(""); err != nil {
+		t.Errorf("CheckCreateKind(\"\") = %v, want nil (claude)", err)
+	}
+	for _, k := range []string{"Codex", " codex", "kiro-cli", "llamacpp"} {
+		err := CheckCreateKind(k)
+		if err == nil {
+			t.Errorf("CheckCreateKind(%q) = nil, want a refusal", k)
+			continue
+		}
+		for _, e := range All() {
+			if !strings.Contains(err.Error(), e.Kind) {
+				t.Errorf("CheckCreateKind(%q) = %q, does not list %q", k, err, e.Kind)
+			}
 		}
 	}
 }

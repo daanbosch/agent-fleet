@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/k-k1/agent-fleet/control-plane/internal/agentkinds"
 	"github.com/k-k1/agent-fleet/control-plane/internal/runtime"
 	"github.com/k-k1/agent-fleet/control-plane/internal/store"
 )
@@ -1054,6 +1055,12 @@ func (a workspaceAPI) sessionCreate(w http.ResponseWriter, r *http.Request, res 
 // (inbox_launch.go): any earlier, and a workspace start can outlast the claim.
 func (a workspaceAPI) sessionCreateThen(w http.ResponseWriter, r *http.Request, res *resolved, before func(context.Context) *apiError) {
 	ctx := r.Context()
+	// Before anything with a side effect (the SSM rewrite, a cold Workspace's start, the quota
+	// count): an unregistered kind would only be refused by the Agent after all of that.
+	if err := agentkinds.CheckCreateKind(peekSessionKind(r)); err != nil {
+		writeAPIErr(w, &apiError{http.StatusBadRequest, "bad_kind", err.Error()})
+		return
+	}
 	// SSM sessions (docs/log/p3-ssm-session.md): resolve the host bookmark
 	// server-side and rewrite the body with the (non-secret) instance/document/SSO
 	// coordinates before proxying — the client only sends ssm_host_id.

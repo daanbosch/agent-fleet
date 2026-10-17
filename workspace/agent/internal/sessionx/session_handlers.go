@@ -705,6 +705,12 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 // createSession is the create after its body is decoded, so a move can create its target
 // in-process with the name it booked (CreateReq.name).
 func createSession(w http.ResponseWriter, r *http.Request, req CreateReq) {
+	// First of all, ahead of the idempotency claim: a refused kind must leave no ledger entry,
+	// and every guard below goes through NormalizeKind, which would turn it into claude.
+	if err := ValidateCreateKind(req.Kind); err != nil {
+		httpx.WriteErr(w, http.StatusBadRequest, "bad_kind", err.Error())
+		return
+	}
 	// A create raised by another SESSION (ADR 0073) carries the parent's name, and the whole
 	// spawn regime hangs off it. Resolved here; the refusals run further down.
 	spawnParent := ""
