@@ -52,7 +52,7 @@ updated: "2026-10"
 | capability | 自パッケージの `Caps()`、自 `Driver` の `Capabilities()` | **利用者に見える capability は、通しで駆動するまで立てない**。`Capabilities()` は driver の実装を宣言する（§20.4）。`Caps()` は `GET /agents/kinds` がそのまま配る値でもある（§20.7）。`Tri` のフィールドを未設定のままにすると `unverified` と読まれ、`no` にはならない |
 | ターミナル起動 | 自パッケージの `BuildLaunch`（`agents.LaunchPlan` を返す）| 環境変数は `LaunchPlan.Env` に入れ、**コマンドに前置しない**（§20.3）。マネージド専用の種別は `ErrNoTerminalRoute` を返す |
 | マネージドの実行系 | 自 `Driver`。`Resume` が `ThreadHandle` を返す | 形はプロセスモデルに従う（[04 §4.3](04-agent.ja.md)）|
-| 呼び出し側がどちらの driver を選ぶか | Console: `console/src/agents/registry.ts` の `managedDriver` と `terminalDriver`。コンテナ内 MCP の `create_session`（`mcpStdioCall`）。CP: `control-plane/internal/mcpsrv/mcp.go` の `create_session` と `control-plane/scheduler_wake.go` の `injectDriver` | Agent は driver 未指定を `tui` にするので、**両対応でマネージドで始めたい種別は `Caps().ManagedDefault` を立て、全部の呼び出し側に足す**（呼び出し側はまだ導出していない）。マネージド専用は Agent が既定を決めるが、Console には `terminalDriver: false` が要る |
+| 呼び出し側がどちらの driver を選ぶか | Console: `console/src/agents/registry.ts` の `managedDriver` と `terminalDriver`。コンテナ内 MCP の `create_session`（`mcpStdioCall`）。CP: `control-plane/internal/mcpsrv/mcp.go` の `create_session` と `control-plane/scheduler_wake.go` の `injectDriver` | Agent は driver 未指定を `tui` にするので、**両対応でマネージドで始めたい種別は `Caps().ManagedDefault` を立てる**。コンテナ内の `create_session` はレジストリから、CP の `create_session` と `injectDriver` は kind カタログのスナップショット（`agentkinds.ManagedDefaultKinds`）から導出するので、その側に足すものは無い。Console の `managedDriver` はまだ手書きの写し。マネージド専用は Agent が既定を決めるが、Console には `terminalDriver: false` が要る |
 | live 状態 | フック / プラグイン / CLI のストアのポーリング / runtime イベント | 状態ストアへ正規化する。working / idle / question と、`plan`・`permission`（[04 §4.4](04-agent.ja.md)）|
 | transcript | `Agent.Transcript` の裏のリーダー | **CLI が読めて安定した native store を持つなら、それを読む。会話を自前ストアへ複製しない**。パーサは統合しない。そういうストアが無い種別は自分で持つ。[04 §4.3](04-agent.ja.md) の 2 つの例外がそれ |
 | サインイン | Agent の `/connections/<kind>/…` ハンドラ、**および** `control-plane/routes.go` で 1 本ずつ名指しで中継するルート（ログインフローは `restLogin`）| CP へのコールバックが要る種別は無い（[08 §8.6](08-integrations.ja.md)）。サインインする相手が無い種別にはフローも無い |
@@ -218,7 +218,8 @@ cd workspace/agent && go test -run TestKindCatalogSnapshot -update-kind-catalog 
 - [ ] `internal/session/session.go` の `Kind*` 定数と `agentRegistry` の登録。キーは `Kind()` と
       一致する（`TestRegisteredKindsSpellTheirOwnKind`）
 - [ ] `Caps()` の全フィールドを決める。`MCPClient` も含む（`unverified` だと
-      `TestMCPClientKindsMatchRegistry` が落ちる）
+      `TestMCPClientKindsMatchRegistry` が落ちる）。マネージドで始めたい種別は `ManagedDefault` も
+      （CP とコンテナ内の呼び出し側が追従する。集合は `TestManagedDefaultKindFollowsTheRegistry` が固定）
 - [ ] カタログのスナップショットを作り直す（`TestKindCatalogSnapshot`）。カタログの形が変わったら
       `testdata/wire.golden` も
 - [ ] [ref/agents.md](../../guide/ref/agents.ja.md) の列。`scripts/docs-check.py` が `CAPS_ROWS` の行
@@ -235,8 +236,6 @@ cd workspace/agent && go test -run TestKindCatalogSnapshot -update-kind-catalog 
 - [ ] ターミナル: `BuildLaunch`、`internal/sessionx/session_io.go` の bracketed paste 一覧
 - [ ] マネージド: `Driver`、`managedDrivers`、`internal/sessionx/session_handlers.go` の
       `ManagedAlive` / `managedBusy` / `dropManagedRuntime` の switch
-- [ ] 既定でマネージド（`ManagedDefault`）: `control-plane/internal/mcpsrv/mcp.go`（`create_session`）、
-      `control-plane/scheduler_wake.go`（`injectDriver`）、コンテナ内の `mcpStdioCall` の手書き一覧
 - [ ] サインインのハンドラと CP の中継。資格情報は `fsDeny` で隠す
 - [ ] 利用量: `usageMeasuredForKind`（`usage_fold.go`）
 - [ ] CLI を固定する種別: バージョン固定、契約ワークフロー、リリース監視への登録（§20.5）

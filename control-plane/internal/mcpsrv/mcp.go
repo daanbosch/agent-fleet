@@ -552,11 +552,10 @@ func memberTools() []mcpTool {
 			run: func(ctx context.Context, a API, res *Resolved, args map[string]any) (string, error) {
 				kind := argStr(args, "kind")
 				driver := ""
-				// Kinds where tui vs managed is a real choice and an MCP caller (which cannot
-				// drive a pane) wants managed. lcpp and muse are absent on purpose: they have no
-				// tui route (Caps().ManagedOnly), and the Agent's create handler defaults an
-				// empty driver to managed for them (sessionx/session_handlers.go).
-				if kind == "codex" || kind == "opencode" || kind == "copilot" || kind == "cursor" || kind == "kiro" {
+				// An MCP caller cannot drive a pane, so it asks for managed wherever the Agent's
+				// registry says that is the default (the kind catalog snapshot). The match is
+				// exact: an alternate spelling gets no driver, as the Agent falls it back to claude.
+				if mcpManagedDefaultKinds[kind] {
 					driver = "managed"
 				}
 				body, _ := json.Marshal(map[string]any{

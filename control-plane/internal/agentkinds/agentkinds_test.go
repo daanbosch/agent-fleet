@@ -31,3 +31,39 @@ func TestSnapshotShape(t *testing.T) {
 		t.Errorf("MCPClientKinds() = %v", mcp)
 	}
 }
+
+// The set of kinds that start managed by default is the hand list the CP kept before it was
+// derived (codex opencode copilot cursor kiro) plus lcpp and muse, which have no Terminal route
+// and which the Agent defaults to managed anyway. Pinned as a literal on purpose: a kind added to
+// the registry with ManagedDefault, or one dropped, changes this set and must be decided here,
+// not slip through a derivation.
+func TestManagedDefaultKindsAreTheOldListPlusManagedOnly(t *testing.T) {
+	oldList := []string{"codex", "opencode", "copilot", "cursor", "kiro"}
+	managedOnly := []string{"lcpp", "muse"}
+	want := map[string]bool{}
+	for _, k := range append(slices.Clone(oldList), managedOnly...) {
+		want[k] = true
+	}
+	got := ManagedDefaultKinds()
+	if len(got) != len(want) {
+		t.Errorf("ManagedDefaultKinds() = %v, want %v", got, want)
+	}
+	for k := range want {
+		if !got[k] {
+			t.Errorf("%q is missing from ManagedDefaultKinds() = %v", k, got)
+		}
+	}
+	// Exact names only: nothing but a registered spelling may be in the set.
+	for _, k := range []string{"", "claude", "agy", "shell", "ssm", "Codex", " codex", "kiro-cli",
+		"cursor-agent", "github-copilot", "llamacpp", "llama.cpp", "Muse", "antigravity"} {
+		if got[k] {
+			t.Errorf("%q must not get the managed default", k)
+		}
+	}
+	// Every managed-only kind is a managed default: it has nothing else.
+	for _, e := range All() {
+		if e.ManagedOnly && !e.ManagedDefault {
+			t.Errorf("%s: managedOnly without managedDefault", e.Kind)
+		}
+	}
+}
