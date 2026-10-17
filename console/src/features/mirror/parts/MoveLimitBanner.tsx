@@ -20,36 +20,54 @@ import type { Session } from "../../../types/session.ts";
 /** The states the Agent reports for a usage limit; the second one a wait does not clear. */
 export const isLimitState = (state?: string): boolean => state === "limited" || state === "spend_limit";
 
+/** How often an open band re-reads the preview and the usage; a limit lasts hours, so this is slow. */
+const REFRESH_MS = 60_000;
+
 export function MoveLimitBanner({ session, state, running }: { session?: Session | null; state?: string; running: boolean }) {
-  const tr = useT();
-  const openMove = useSessionUI((u) => u.openMove);
   // A moving or moved source refuses every start; its dialog (retry, cancel, resume anyway) is
   // reached from the row, not from a limit it is no longer waiting on.
   const open = !!session && isLimitState(state) && running && agentOf(session.kind).caps.transcript && !session.moving && !session.movedTo;
-  const name = session?.name ?? "";
+  // Split so that the reads (preview, connections, usage) exist only while a limit is showing.
+  return open ? <LimitBand session={session} /> : null;
+}
+
+function LimitBand({ session }: { session: Session }) {
+  const tr = useT();
+  const openMove = useSessionUI((u) => u.openMove);
+  const name = session.name;
   const [preview, setPreview] = useState<MovePreview | null>(null);
+  // Bumped on a timer: the quota of a target resets (or runs out) while the source stays limited,
+  // and a first read that failed would otherwise never be retried.
+  const [tick, setTick] = useState(0);
   useEffect(() => {
-    setPreview(null);
-    if (!open) return;
+    const id = setInterval(() => setTick((n) => n + 1), REFRESH_MS);
+    return () => clearInterval(id);
+  }, []);
+  useEffect(() => {
     let alive = true;
     movePreview(name)
       .then((d) => alive && setPreview(d && !d.error ? d : null))
-      .catch(() => {});
+      .catch(() => alive && setPreview(null));
     return () => {
       alive = false;
     };
-  }, [open, name]);
+  }, [name, tick]);
 
+  // Unlike the dialog, which takes the Agent's word while the check is cold, the band waits for
+  // it: it claims a connected target, so it must know.
   const connected = useConnectedKinds();
   const candidates = useMemo(
-    () => (preview && !preview.refusal && !preview.movedTo && !preview.moving ? offeredTargets(preview, connected).filter((k) => k !== session?.kind) : []),
-    [preview, connected, session?.kind],
+    () =>
+      preview && connected && !preview.refusal && !preview.movedTo && !preview.moving
+        ? offeredTargets(preview, connected).filter((k) => k !== session.kind)
+        : [],
+    [preview, connected, session.kind],
   );
-  const usage = useMoveUsage(candidates);
+  const usage = useMoveUsage(candidates, tick);
   const ordered = orderByQuota(candidates, usage);
   const left = ordered.filter((k) => quotaState(usage[k]) === "left");
   // Every candidate at its cap: moving there only trades one wall for another.
-  if (!open || !session || ordered.length === 0 || ordered.every((k) => quotaState(usage[k]) === "full")) return null;
+  if (ordered.length === 0 || ordered.every((k) => quotaState(usage[k]) === "full")) return null;
 
   return (
     <div className="mirror-attention mirror-move-limit" role="status">

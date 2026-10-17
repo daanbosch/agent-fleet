@@ -14,7 +14,7 @@ vi.mock("../../../core/api/client.ts", async (orig) => ({
 
 const { MoveLimitBanner } = await import("./MoveLimitBanner.tsx");
 const { useSessionUI } = await import("../../sessions/ui.ts");
-const { setCachedConns } = await import("../../repos/connsCache.ts");
+const { setCachedConns, clearCachedConns } = await import("../../repos/connsCache.ts");
 const { t } = await import("../../../lib/i18n/index.ts");
 type Session = import("../../../types/session.ts").Session;
 type MovePreview = import("../../sessions/move.ts").MovePreview;
@@ -45,7 +45,7 @@ const banner = () => host.querySelector(".mirror-move-limit");
 
 beforeEach(() => {
   routes = { [PREVIEW]: preview() };
-  setCachedConns(null);
+  setCachedConns({ codex: { connected: true }, opencode: { connected: true }, muse: { connected: true } } as never);
   useSessionUI.setState({ move: null, moveFromLimit: false });
   host = document.createElement("div");
   document.body.appendChild(host);
@@ -103,6 +103,34 @@ describe("MoveLimitBanner", () => {
     routes[PREVIEW] = preview({ targets: [{ kind: "codex", eligible: true }] });
     await render(src());
     expect(banner()).toBeNull();
+  });
+
+  it("waits for the connection check, and stays hidden when it never answers", async () => {
+    clearCachedConns();
+    await render(src());
+    expect(banner()).toBeNull();
+  });
+
+  it("re-reads the usage and the preview while it is open", async () => {
+    vi.useFakeTimers();
+    try {
+      routes["GET api/codex/usage"] = { ok: true, fiveHour: { pct: 100 } };
+      routes[PREVIEW] = preview({ targets: [{ kind: "codex", eligible: true }] });
+      await render(src());
+      expect(banner()).toBeNull();
+      routes["GET api/codex/usage"] = { ok: true, fiveHour: { pct: 10 } };
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(61_000);
+      });
+      expect(banner()?.textContent).toContain("Codex");
+      routes["GET api/codex/usage"] = { ok: true, fiveHour: { pct: 100 } };
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(61_000);
+      });
+      expect(banner()).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("names the kinds with quota left, and still offers when no kind can be judged", async () => {

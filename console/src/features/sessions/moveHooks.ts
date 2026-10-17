@@ -30,7 +30,7 @@ export function useConnectedKinds(): ((k: SessionKind) => boolean) | null {
 
 // useMoveUsage reads, once per mount, the usage of every offered kind the Console already has a
 // usage source for. Display only: the Agent's move does not look at quotas.
-export function useMoveUsage(kinds: SessionKind[]): Partial<Record<SessionKind, MoveUsage>> {
+export function useMoveUsage(kinds: SessionKind[], tick = 0): Partial<Record<SessionKind, MoveUsage>> {
   const [out, setOut] = useState<Partial<Record<SessionKind, MoveUsage>>>({});
   const key = kinds.join(",");
   useEffect(() => {
@@ -41,15 +41,21 @@ export function useMoveUsage(kinds: SessionKind[]): Partial<Record<SessionKind, 
       api(ep)
         .then((d) => {
           const u = readMoveUsage(d);
-          if (alive && u) setOut((o) => ({ ...o, [k]: u }));
+          // A failed or empty re-read drops the kind back to "unknown" rather than keep a number
+          // that may have rolled over.
+          if (!alive) return;
+          setOut((o) => {
+            const { [k]: _old, ...rest } = o;
+            return u ? { ...rest, [k]: u } : rest;
+          });
         })
         .catch(() => {});
     }
     return () => {
       alive = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by the kind list's contents
-  }, [key]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by the kind list's contents and the caller's refresh tick
+  }, [key, tick]);
   return out;
 }
 
