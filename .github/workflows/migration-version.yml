@@ -1,28 +1,28 @@
-# The `migration-version` commit status on every open PR into develop (#2046), the context
+# The `migration-version` commit status on every open PR into main (#2046), the context
 # branch protection requires. Two PRs that each take the next free migration number are
 # green on their own and collide only once both merge, so the status is set on the PR's own
-# events against the develop of that moment, and again for every open PR on each push to
-# develop, because nothing else re-runs a PR's checks when develop moves.
+# events against the main of that moment, and again for every open PR on each push to
+# main, because nothing else re-runs a PR's checks when main moves.
 #
 # Its own workflow, with no concurrency group, so nothing cancels a run on its own: the
-# script posts a verdict and then re-checks that develop has not moved, and a run killed
+# script posts a verdict and then re-checks that main has not moved, and a run killed
 # between the two (ci.yml's cancel-in-progress did exactly that) leaves a stale verdict as
 # the last word. Runs race each other instead, and the re-check settles the race.
 #
 # A fork's pull_request token cannot write statuses and stays that way: no
 # pull_request_target, so no write token ever sits next to a fork's run. A fork PR is checked
-# report-only (the job fails on a collision) and gets its status from the next develop push,
-# or at once from `gh workflow run migration-version.yml --ref develop`, the same run that
+# report-only (the job fails on a collision) and gets its status from the next main push,
+# or at once from `gh workflow run migration-version.yml --ref main`, the same run that
 # re-posts every open PR after an outage or a broken job.
 name: migration-version
 
 on:
   pull_request:
-    branches: [develop]
-    # edited: a PR retargeted from main has no status yet (the job skips other edits).
+    branches: [main]
+    # edited: a PR retargeted from another base has no status yet (the job skips other edits).
     types: [opened, synchronize, reopened, ready_for_review, edited]
   push:
-    branches: [develop]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -40,11 +40,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0 # merge-bases with develop, and the self-test's pinned commit
+          fetch-depth: 0 # merge-bases with main, and the self-test's pinned commit
       # A broken script posts nothing rather than a wrong verdict.
       - name: self-test
         run: ./scripts/migration-versions-test.sh
-      - name: check this PR's new migrations against the develop tip
+      - name: check this PR's new migrations against the main tip
         if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -52,9 +52,9 @@ jobs:
           SHA: ${{ github.event.pull_request.head.sha }}
           MODE: ${{ github.event.pull_request.head.repo.full_name != github.repository && '--report-only' || '' }}
         run: ./scripts/migration-versions.sh --pr "$PR" "$SHA" ${MODE:+"$MODE"}
-      - name: set the status on every open PR against the new develop
-        # Not in a fork of this repository: its develop has no PRs of ours to mark.
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/develop' && github.repository == 'k-k1/agent-fleet'
+      - name: set the status on every open PR against the new main
+        # Not in a fork of this repository: its main has no PRs of ours to mark.
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.repository == 'k-k1/agent-fleet'
         env:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/migration-versions.sh --open-prs

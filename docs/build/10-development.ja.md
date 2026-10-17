@@ -158,7 +158,7 @@ issue が開くのは次のときだけ:
 | `kiro CLI: run the contract on <v>`（cursor も） | 資格情報が回転するので watcher は contract を回さない。サインインで落ちたら secret を更新する | 通過後に続く版上げ PR |
 | `<kind> CLI: verify <v> (no CI credential)` | claude・copilot・agy で contract の secret が無い。登録して contract を回すか、ターミナル（CLI）で手で確かめる | 版上げ PR か手での版上げ |
 | `<kind> CLI: contract failed on <v>` | latest で contract が赤（行と実行は issue の `Red contracts` 欄。`deploy/local/cli-contract-report.sh`） | 直した contract が通ったあとの版上げ PR |
-| `<kind> CLI: contract fails on develop` | 版に関係なく `develop` で直近 2 回落ちた: ハーネスか secret が壊れている | contract が通りピンが最新になれば自分で閉じる |
+| `<kind> CLI: contract fails on main` | 版に関係なく `main` で直近 2 回落ちた: ハーネスか secret が壊れている | contract が通りピンが最新になれば自分で閉じる |
 | `<kind> CLI: upstream message fragments gone in <v>` | 新しい版から Agent Fleet が照合する文言が消えた（`Red contracts` に名前が載る）。照合するコードを確かめ、直し、レジストリも更新する | 版上げ PR、または新しい版 |
 | `rtk CLI: bump the pin to <v>` | rtk は取得元はあるが contract が無く `tested` で門番できない。手で上げる（§10.2.1） | 手での版上げ PR |
 
@@ -283,14 +283,14 @@ npm --prefix console run build
   | `secret-scan` | 全履歴に対する資格情報の混入検知（後述）|
   | `release-scan` | 追跡ツリーに対する禁止トークンのゲート——pre-commit フックがステージ内容にかけるのと同じスキャナ |
   | `model-id-lint` | 両 Go モジュールで `workspace/agent/internal/modelfallback` の外にモデル ID の形の文字列リテラルが無いこと。モデルを選ばないものは `// model-id-lint:allow <理由>` で印を付ける |
-  | `migration-versions` | `develop` 向けの開いている PR すべてに `migration-version` コミットステータスを付ける。PR が足すマイグレーションのバージョンを `develop` が既に持っている（ランナーと同じく数値で比べるので `95_x` と `0095_y` も衝突）、同じ PR の別ファイルも同じバージョンを取っている、または読めるバージョンが無い、のどれかなら failure。このジョブはスクリプトの自己テストで、ステータスを付けるのは cancel-in-progress の無い `migration-version.yml`。PR 自身のイベント（`develop` への付け替えも含む）で回り、`develop` への push のたびに開いている全 PR を検査し直す。`scripts/migration-versions.sh` |
+  | `migration-versions` | `main` 向けの開いている PR すべてに `migration-version` コミットステータスを付ける。PR が足すマイグレーションのバージョンを `main` が既に持っている（ランナーと同じく数値で比べるので `95_x` と `0095_y` も衝突）、同じ PR の別ファイルも同じバージョンを取っている、または読めるバージョンが無い、のどれかなら failure。このジョブはスクリプトの自己テストで、ステータスを付けるのは cancel-in-progress の無い `migration-version.yml`。PR 自身のイベント（`main` への付け替えも含む）で回り、`main` への push のたびに開いている全 PR を検査し直す。`scripts/migration-versions.sh` |
 
-  `develop` の必須チェックにするなら、コンテキスト **`migration-version`**（ジョブの
+  `main` の必須チェックにするなら、コンテキスト **`migration-version`**（ジョブの
   `migration-versions` や `migration-version.yml` の `publish` ジョブではなくコミットステータス）を、ソース GitHub Actions で指定する。
-  各 PR は `develop` とだけ比べ、開いている他の PR とは比べない。同じ番号を取った 2 つの
+  各 PR は `main` とだけ比べ、開いている他の PR とは比べない。同じ番号を取った 2 つの
   PR は先の方がマージされるまで両方緑のままで、そのマージによる push で後の方が赤になる。
-  fork の PR はトークンが読み取り専用なのでステータス無しで検査され、次の `develop` への
-  push か、メンテナが `gh workflow run migration-version.yml --ref develop` を回すまでマージできない。
+  fork の PR はトークンが読み取り専用なのでステータス無しで検査され、次の `main` への
+  push か、メンテナが `gh workflow run migration-version.yml --ref main` を回すまでマージできない。
   障害やジョブの故障の後に開いている全 PR のステータスを付け直すのも、同じ手動実行。
 
   PR では、変更したパスがすべて無関係なもの——`docs/` と `guide/`（テストが読む
@@ -383,7 +383,7 @@ contract を dispatch する（対象の kind は `deploy/local/cli-release-edge
 状態は 1 本の issue に置く: `tested` の印はコメントとして追記する。repository
 variables は既定のトークンで書けないためである（`deploy/local/cli-release-state.sh`）。
 `tested` を記録するのは contract が成功したときだけなので、`latest` に対して contract が赤で終わると、その版に `red` の印を書き（その CLI の更新 issue の
-`Red contracts` 欄にも行が出る。この欄は `develop` で直近 2 回続けて落ちた contract
+`Red contracts` 欄にも行が出る。この欄は `main` で直近 2 回続けて落ちた contract
 ワークフローも示す: `deploy/local/cli-contract-report.sh`）、watcher は同じ版を再度
 dispatch しない。赤い版が contract の枠を 1 日 12 回使うのを防ぐためである。新しい版・
 成功した実行（`tested == latest` が優先）・手動 dispatch で解除される。キャンセルや
@@ -555,7 +555,7 @@ NEW 末尾の `*数字` は個数指定です（そう終わる語はファイ�
 例（ja：`既定 OFF。` → `既定ではオフです。`、`デフォルト` → `既定`）：
 
 ```
-python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+python3 scripts/catalog-diff-check.py origin/main --allow-labels \
   --allow-term 'agents.note_x:OFF>オフ' --allow-term 'surface_color.default:デフォルト>既定'
 ```
 
@@ -574,8 +574,8 @@ python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
 分岐ラベルの自動書き換えは行いません。分岐も新フラグもない実行の出力は従来どおりです。
 
 ```
-python3 scripts/catalog-diff-check.py origin/develop --list-citations
-python3 scripts/catalog-diff-check.py origin/develop --allow-labels --rewrite-guide
+python3 scripts/catalog-diff-check.py origin/main --list-citations
+python3 scripts/catalog-diff-check.py origin/main --allow-labels --rewrite-guide
 ```
 
 `--list-citations` は読み取り専用で、分岐があっても終了コード 0 です。出力の区分は
@@ -741,11 +741,11 @@ git メタデータへの出力は拒否します。`.git` が gitdir ファイ�
 3. 出力されたガードを実行します。検査・引用更新の呼び出しにも承認ファイルを渡します。
 
    ```sh
-   python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+   python3 scripts/catalog-diff-check.py origin/main --allow-labels \
      --allow-terms-file "$AF_WORK_DIR/settings-applied.tsv"
-   python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+   python3 scripts/catalog-diff-check.py origin/main --allow-labels \
      --allow-terms-file "$AF_WORK_DIR/settings-applied.tsv" --list-citations
-   python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+   python3 scripts/catalog-diff-check.py origin/main --allow-labels \
      --allow-terms-file "$AF_WORK_DIR/settings-applied.tsv" --rewrite-guide
    ```
 
@@ -763,7 +763,7 @@ git メタデータへの出力は拒否します。`.git` が gitdir ファイ�
 5. PR 本文にはドメイン・規則、提案・変更・見送り数、全提案を確認した精度（誤提案数／提案数）、
    承認行、引用更新・手動判断、検証コマンドと終了コードを記録します。計画の指定どおりに
    ラベルと文のバッチを分けます。pre-commit フックを実行してコミット・push し、
-   `develop` 向けの PR を開きます。
+   `main` 向けの PR を開きます。
 
 R3 の空白処理を含む settings の受け入れ確認は作業用コピーで全 30 変更値を読み、誤提案 0 件
 （精度 100%）、R1 が 36 挿入、R2 が 8 置換、R3 が 1 置換、見送りは 9 出現でした。
@@ -909,11 +909,11 @@ Git のメタデータへの出力は拒否します。別々の新規パスを�
 手動で引用を解消してから、リポジトリのルートで docs-check を実行します。
 
 ```sh
-python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+python3 scripts/catalog-diff-check.py origin/main --allow-labels \
   --allow-terms-file "$AF_WORK_DIR/term-allowances.tsv"
-python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+python3 scripts/catalog-diff-check.py origin/main --allow-labels \
   --allow-terms-file "$AF_WORK_DIR/term-allowances.tsv" --list-citations
-python3 scripts/catalog-diff-check.py origin/develop --allow-labels \
+python3 scripts/catalog-diff-check.py origin/main --allow-labels \
   --allow-terms-file "$AF_WORK_DIR/term-allowances.tsv" --rewrite-guide
 (cd console && npm test -- --maxWorkers=2)
 python3 scripts/docs-check.py
@@ -955,10 +955,10 @@ golden、console-e2e の期待値、Go の対応文は PINNED に見えない場
    再生成します。
 3. **並列バッチは共有する値で競合します。** ファミリーは重なるため（実測: F-login∩F-onoff
    は 10 キー、F-deploy∩F-login は 9、F-deploy∩F-onoff は 14、F-default∩F-onoff は 27）、
-   後からマージするほうが必ず競合します。手順: develop をマージします（マージのみ。
-   rebase・強制 push はしません）。カタログファイルが競合したら develop 側を採り、
+   後からマージするほうが必ず競合します。手順: main をマージします（マージのみ。
+   rebase・強制 push はしません）。カタログファイルが競合したら main 側を採り、
    `ja-term-candidates.py` で OLD 値を作り直して計画を再適用します。ガイド・knowledge・
-   テストが競合したら、ファイル全体で develop 側を採り、用語の置換だけを再適用します
+   テストが競合したら、ファイル全体で main 側を採り、用語の置換だけを再適用します
    （`--list-citations` / `--rewrite-guide` と最小限の手作業）。ハンクを手でマージしません。
    PR は 1 本ずつマージし、次の PR に作り直させ、ガード・docs-check・全テストを再実行します。
 4. **レビュー役はガードに見えないものを見逃します。** 具体的な確認を渡します: 上の

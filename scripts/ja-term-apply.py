@@ -74,7 +74,7 @@ def outputs_check(root, paths, plan):
 
 
 def follow_up(path):
-    command = 'python3 scripts/catalog-diff-check.py origin/develop --allow-labels --allow-terms-file ' + \
+    command = 'python3 scripts/catalog-diff-check.py origin/main --allow-labels --allow-terms-file ' + \
         (shlex.quote(str(path)) if path else '<emitted-allowances.tsv>')
     return ['FOLLOW-UP ' + command, 'FOLLOW-UP ' + command + ' --list-citations',
             'FOLLOW-UP ' + command + ' --rewrite-guide',
