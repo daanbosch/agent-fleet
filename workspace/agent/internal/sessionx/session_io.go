@@ -597,6 +597,7 @@ func HandleSessionInput(w http.ResponseWriter, r *http.Request) {
 			confirmBase = deliveryBaseline(m)
 		}
 	}
+	cursorTUI := confirmMeta.Name != "" && isCursorTerminal(confirmMeta)
 	// Record the mirror badge's origin BEFORE typing (see recordInjection's comment). After
 	// delivery, a poll landing in the gap between the user row appearing in the transcript
 	// and the record being written pins that turn on the user's screen with no origin. peer
@@ -612,8 +613,12 @@ func HandleSessionInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rememberCodexTUIMode(name, body.Prompt, nil)
-	held := false
-	if body.Confirm && confirmMeta.Name != "" {
+	held, heldReason := false, ""
+	if cursorTUI {
+		// cursor has no turn log to confirm against (the JSONL is written when a turn ends), so
+		// the only thing to catch is a prompt the TUI hands back at submit.
+		held, heldReason = confirmCursorSubmit(confirmMeta, body.Prompt)
+	} else if body.Confirm && confirmMeta.Name != "" {
 		var err error
 		if held, err = confirmPromptDelivery(confirmMeta, pane, body.Prompt, confirmBase); err != nil {
 			// Never dress an unconfirmed delivery up as success: the caller (the CP
@@ -666,6 +671,11 @@ func HandleSessionInput(w http.ResponseWriter, r *http.Request) {
 		// behind a running turn (in memory, lost on a pane kill), so the sender must not
 		// read this as "started a turn".
 		resp["held"] = true
+		if heldReason != "" {
+			// A cursor prompt the TUI refused is not queued behind a turn: it sits in the
+			// composer and nothing will run it. The sender has to hear why.
+			resp["held_reason"] = heldReason
+		}
 	}
 	httpx.WriteJSON(w, http.StatusOK, resp)
 }

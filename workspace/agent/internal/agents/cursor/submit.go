@@ -1,0 +1,117 @@
+package cursor
+
+// Reading a Terminal send's outcome off the pane. A prompt the TUI rejects at submit (measured
+// 2026.10.16: a named model the plan cannot use) first looks accepted for about a second - the
+// composer empties and a spinner shows - and then the text comes back into the composer with an
+// error row under the model and directory rows:
+//
+//	→ say hello in one word
+//
+//	  Composer 2.5 Fast
+//	  ~/proj
+//
+//	  Error: Named models unavailable
+//	  Free plans can only use Auto. Switch to Auto or upgrade plans to continue.
+//	  hideIcon: true
+//	  hideKeybindings: true
+//
+// Nothing else says so: the JSONL is written when a turn ends, not when it starts, so only the
+// pane can tell a rejection from a turn under way. A turn that started leaves the composer on
+// its placeholder.
+
+import (
+	"regexp"
+	"strings"
+	"unicode"
+)
+
+// maxErrorChars bounds the error text handed back to the sender.
+const maxErrorChars = 300
+
+// optionRow is a "key: value" line of the toast's options (hideIcon: true), not part of its text.
+var optionRow = regexp.MustCompile(`^\w+: (true|false)$`)
+
+// ComposerHolds reports whether the pane's composer still holds the prompt as an unsubmitted
+// draft, given the first and last runes of the prompt (head and tail, whitespace removed).
+// The composer is the last "→" line and the lines that follow it up to the first gap of two
+// blank lines, so the model and directory rows under it never match; a draft wrapped at the
+// pane width is joined back. When the screen has no composer it answers false: the old
+// behaviour (the send counts as delivered) is what an unrecognised screen gets.
+func ComposerHolds(captured, head, tail string) bool {
+	if head == "" && tail == "" {
+		return false
+	}
+	lines := strings.Split(captured, "\n")
+	top := composerTop(lines)
+	if top < 0 {
+		return false
+	}
+	var draft strings.Builder
+	blanks := 0
+	for _, ln := range lines[top:] {
+		if strings.TrimSpace(ln) == "" {
+			if blanks++; blanks >= 2 {
+				break
+			}
+			continue
+		}
+		blanks = 0
+		draft.WriteString(ln)
+	}
+	d := strings.TrimPrefix(squash(draft.String()), "→")
+	return head != "" && strings.Contains(d, head) || tail != "" && strings.Contains(d, tail)
+}
+
+// SubmitError is the error cursor printed under its composer after refusing a prompt, "" when
+// there is none: the "Error:" row and the lines after it up to the next blank one, without the
+// toast's option rows.
+func SubmitError(captured string) string {
+	lines := strings.Split(captured, "\n")
+	// Only below the composer: an "Error:" line above it is transcript prose.
+	top := composerTop(lines)
+	if top < 0 {
+		return ""
+	}
+	for i := len(lines) - 1; i > top; i-- {
+		first := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(first, "Error:") {
+			continue
+		}
+		parts := []string{first}
+		for _, ln := range lines[i+1:] {
+			ln = strings.TrimSpace(ln)
+			if ln == "" {
+				break
+			}
+			if !optionRow.MatchString(ln) {
+				parts = append(parts, ln)
+			}
+		}
+		out := strings.Join(parts, " ")
+		if r := []rune(out); len(r) > maxErrorChars {
+			out = string(r[:maxErrorChars]) + "…"
+		}
+		return out
+	}
+	return ""
+}
+
+// composerTop is the index of the last "→" line, -1 when the screen has none.
+func composerTop(lines []string) int {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "→") {
+			return i
+		}
+	}
+	return -1
+}
+
+// squash drops every whitespace rune.
+func squash(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, s)
+}

@@ -1,0 +1,68 @@
+package cursor
+
+import (
+	"strings"
+	"testing"
+)
+
+// The captures are cursor 2026.10.16 panes of one send ("say hello in one word", pasted, 200 ms,
+// Enter), on a Free plan: with a named model the TUI took the prompt for about a second and then
+// put it back in the composer under an error; with Auto it ran. head and tail are the first and
+// last 12 runes of that line without whitespace, the way the sender compares it.
+const (
+	submitHead = "sayhelloinon"
+	submitTail = "lloinoneword"
+)
+
+func TestComposerHoldsTheRejectedPrompt(t *testing.T) {
+	for file, want := range map[string]bool{
+		"pane-submit-typed.txt":     true,  // pasted, Enter not yet pressed
+		"pane-submit-rejected.txt":  true,  // handed back with the error row
+		"pane-submit-composing.txt": false, // the first second: composer emptied, spinner up
+		"pane-submit-working.txt":   false, // Auto: the turn under way
+		"pane-submit-answered.txt":  false, // Auto: answered, the prompt only echoed above
+		"pane-composer-narrow.txt":  false, // an idle composer
+	} {
+		if got := ComposerHolds(readPane(t, file), submitHead, submitTail); got != want {
+			t.Errorf("%s: ComposerHolds = %v, want %v", file, got, want)
+		}
+	}
+}
+
+// A frame without a composer (a version that draws it differently) is not read as a rejection,
+// and an empty prompt matches nothing.
+func TestComposerHoldsFailsOpen(t *testing.T) {
+	if ComposerHolds("some other screen\nsay hello in one word\n", submitHead, submitTail) {
+		t.Error("a screen with no composer read as a held draft")
+	}
+	if ComposerHolds(readPane(t, "pane-submit-rejected.txt"), "", "") {
+		t.Error("an empty prompt read as a held draft")
+	}
+}
+
+// The model row, the directory row and the error under the composer are not the draft: a prompt
+// whose ends the error text happens to contain is not held once the composer is empty.
+func TestComposerHoldsIgnoresTheRowsUnderIt(t *testing.T) {
+	pane := strings.Replace(readPane(t, "pane-submit-rejected.txt"), "say hello in one word", "", 1)
+	if ComposerHolds(pane, "Freeplans", "Auto.") {
+		t.Error("the error row under the composer read as the draft")
+	}
+}
+
+func TestSubmitErrorCarriesTheToastText(t *testing.T) {
+	got := SubmitError(readPane(t, "pane-submit-rejected.txt"))
+	want := "Error: Named models unavailable Free plans can only use Auto. Switch to Auto or upgrade plans to continue."
+	if got != want {
+		t.Errorf("SubmitError = %q, want %q", got, want)
+	}
+	for _, f := range []string{"pane-submit-typed.txt", "pane-submit-working.txt", "pane-submit-answered.txt"} {
+		if got := SubmitError(readPane(t, f)); got != "" {
+			t.Errorf("%s: SubmitError = %q, want none", f, got)
+		}
+	}
+	// An "Error:" line in the transcript above the composer is prose, not the toast.
+	prose := "  Error: something the assistant quoted\n\n  → Add a follow-up\n\n  Auto\n  ~/proj\n"
+	if got := SubmitError(prose); got != "" {
+		t.Errorf("SubmitError read transcript prose: %q", got)
+	}
+}

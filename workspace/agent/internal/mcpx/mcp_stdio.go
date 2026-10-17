@@ -889,6 +889,12 @@ func isPeerTool(name string) bool {
 const peerQueuedNote = "相手は作業中です。メッセージは相手の今のターンが終わったあと、次のターンとして届きます" +
 	"（まだ読まれていません）。再送しないでください。"
 
+// peerRejectedNote rides on a send_to_peer_session result whose message the peer's terminal
+// refused at submit (held_reason): it sits in the peer's input box and nothing will run it.
+// "Do not resend" holds here too, since a resend would be typed after the first copy.
+const peerRejectedNote = "相手の端末が送信を受け付けませんでした（理由は reason）。メッセージは相手の入力欄に残っているだけで、" +
+	"実行されていません（読まれていません）。再送しないでください。相手の利用者が原因を直す必要があります。"
+
 // peerBlockedNote is peerQueuedNote for a peer waiting on its user's decision (blocked_on).
 const peerBlockedNote = "相手は利用者の回答（質問・プラン承認・権限確認）を待っています。メッセージは回答のあと、" +
 	"そのターンが終わってから届きます（まだ読まれていません）。再送しないでください。"
@@ -2903,8 +2909,9 @@ func mcpStdioCall(req mcpReq) []byte {
 		// A peer waiting on its user's answer queues it too (blocked_on, #1031): it is delivered
 		// after the answer, once that turn ends.
 		var sent struct {
-			Held      bool   `json:"held"`
-			BlockedOn string `json:"blocked_on"`
+			Held       bool   `json:"held"`
+			HeldReason string `json:"held_reason"`
+			BlockedOn  string `json:"blocked_on"`
 		}
 		_ = json.Unmarshal([]byte(out), &sent)
 		queued := sent.Held || sent.BlockedOn != ""
@@ -2914,6 +2921,10 @@ func mcpStdioCall(req mcpReq) []byte {
 			result["queued"] = true
 			result["blocked_on"] = sent.BlockedOn
 			result["note"] = peerBlockedNote
+		case sent.Held && sent.HeldReason != "":
+			result["queued"] = true
+			result["reason"] = sent.HeldReason
+			result["note"] = peerRejectedNote
 		case sent.Held:
 			result["queued"] = true
 			result["note"] = peerQueuedNote
