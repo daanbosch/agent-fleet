@@ -1,6 +1,8 @@
 package msp
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -103,8 +105,13 @@ func TestSchemaFingerprintMatchesTheBundle(t *testing.T) {
 func TestInstalledBinaryIsCompatibleWithTheBundle(t *testing.T) {
 	bin := museBinary(t)
 	if os.Getenv("AF_MUSE_BIN") == "" {
-		if hint := museVersionHint(bin); hint != "" {
-			t.Skip(strings.TrimSuffix(hint, "\n") + " (set AF_MUSE_BIN to check a binary regardless of the pin)")
+		pin, have, err := installedMuseAgainstPin(bin)
+		if err != nil {
+			t.Fatalf("cannot compare the installed muse with the Dockerfile pin: %v", err)
+		}
+		if pin != have {
+			t.Skipf("the installed muse is %s but the Dockerfile pin (the version the bundle was exported for) is %s;"+
+				" run `workspace-agent install-muse` (or set AF_MUSE_BIN to check this binary regardless of the pin)", have, pin)
 		}
 	}
 	out := t.TempDir()
@@ -154,6 +161,45 @@ func museVersionHint(bin string) string {
 		return ""
 	}
 	return staleMuseHint(string(df), string(out))
+}
+
+// museBuildFormat is the shape of a build id, 1.4.10-R6427.1. A pin that does not match is a
+// broken Dockerfile, not a version to compare against.
+var museBuildFormat = regexp.MustCompile(`^\d+\.\d+\.\d+-R\d+\.\d+$`)
+
+// installedMuseAgainstPin reads the Dockerfile pin and the installed build id. Anything it
+// cannot read or recognise is an error: the skip decision must never be reachable through a
+// missing or malformed pin.
+func installedMuseAgainstPin(bin string) (pin, have string, err error) {
+	df, err := os.ReadFile(filepath.Join("..", "..", "..", "Dockerfile"))
+	if err != nil {
+		return "", "", err
+	}
+	cmd := exec.Command(bin, "--version")
+	cmd.Env = append(os.Environ(), "MUSE_NO_AUTO_UPDATE=1")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", "", fmt.Errorf("%s --version: %w", bin, err)
+	}
+	return musePinState(string(df), string(out))
+}
+
+func musePinState(dockerfile, versionOutput string) (pin, have string, err error) {
+	p := dockerfileMusePin.FindStringSubmatch(dockerfile)
+	if p == nil {
+		return "", "", errors.New("the Dockerfile has no `ARG MUSE_VERSION=`")
+	}
+	h := museBuildID.FindStringSubmatch(versionOutput)
+	if h == nil {
+		return "", "", fmt.Errorf("no build id in `muse --version`: %q", versionOutput)
+	}
+	if !museBuildFormat.MatchString(p[1]) {
+		return "", "", fmt.Errorf("the Dockerfile pin %q is not a build id like 1.4.10-R6427.1", p[1])
+	}
+	if !museBuildFormat.MatchString(h[1]) {
+		return "", "", fmt.Errorf("the installed build id %q is not like 1.4.10-R6427.1", h[1])
+	}
+	return p[1], h[1], nil
 }
 
 func staleMuseHint(dockerfile, versionOutput string) string {
