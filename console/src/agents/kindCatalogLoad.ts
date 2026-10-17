@@ -58,6 +58,13 @@ export function loadKindCatalog(): Promise<void> {
   return p;
 }
 
+/** Loads once `ready` (the tenant settling) resolves, unless the caller has been torn down by
+ *  then: a cleanup's reset must not be followed by a load from the effect it belonged to. */
+export async function loadKindCatalogAfter(ready: Promise<unknown>, alive: () => boolean): Promise<void> {
+  await ready;
+  if (alive()) void loadKindCatalog();
+}
+
 /** Forgets the catalog and any pending retry; the next loadKindCatalog() asks again. */
 export function resetKindCatalog(): void {
   epoch++;

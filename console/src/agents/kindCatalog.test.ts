@@ -9,7 +9,7 @@ vi.mock("../core/api/client.ts", () => ({ api: (...a: unknown[]) => apiMock(...a
 
 const { AGENTS, agentOf, availableKinds, repoLaunchKinds } = await import("./registry.ts");
 const { FALLBACK_KIND_FACTS, catalogKinds, kindFacts, parseKindCatalog, setKindCatalog } = await import("./kindCatalog.ts");
-const { loadKindCatalog, resetKindCatalog } = await import("./kindCatalogLoad.ts");
+const { loadKindCatalog, loadKindCatalogAfter, resetKindCatalog } = await import("./kindCatalogLoad.ts");
 const { MCP_KINDS, mcpKinds } = await import("../features/settings/mcp/mcpWire.ts");
 const { SESSION_KINDS } = await import("../types/session.ts");
 
@@ -168,6 +168,10 @@ describe("mcpKinds", () => {
         ]),
       ),
     );
+    // The tri-state survives parsing: unverified is not folded into no (or yes).
+    expect(kindFacts("kiro")?.mcpClient).toBe("unverified");
+    expect(kindFacts("codex")?.mcpClient).toBe("no");
+    expect(kindFacts("zeta")?.mcpClient).toBe("yes");
     const got = mcpKinds();
     expect(got).not.toContain("codex");
     expect(got).not.toContain("kiro");
@@ -268,6 +272,26 @@ describe("loadKindCatalog", () => {
     resolve(body([row("claude", { managedDefault: true })]));
     await p;
     expect(AGENTS.claude.managedDriver).toBe(false);
+  });
+
+  it("does not start a load for an effect that was cleaned up while the tenant was settling", async () => {
+    apiMock.mockResolvedValue(body([row("claude")]));
+    let alive = true;
+    let settle!: () => void;
+    const init = new Promise<void>((r) => (settle = r));
+    const p = loadKindCatalogAfter(init, () => alive);
+    alive = false; // cleanup / StrictMode's first effect
+    resetKindCatalog();
+    settle();
+    await p;
+    await Promise.resolve();
+    expect(apiMock).not.toHaveBeenCalled();
+  });
+
+  it("starts the load once the tenant settles while the effect is live", async () => {
+    apiMock.mockResolvedValue(body([row("claude", { managedDefault: true })]));
+    await loadKindCatalogAfter(Promise.resolve(), () => true);
+    await vi.waitFor(() => expect(AGENTS.claude.managedDriver).toBe(true));
   });
 
   it("reset forgets the catalog and cancels the retry", async () => {

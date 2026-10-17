@@ -30,7 +30,7 @@ import { AwsLoginHost } from "../features/awslogin/AwsLoginHost.tsx";
 import { useAwsLoginStore } from "../features/awslogin/store.ts";
 import { useGcpLoginStore } from "../features/gcplogin/store.ts";
 import { clearCachedConns } from "../features/repos/connsCache.ts";
-import { loadKindCatalog, resetKindCatalog } from "../agents/kindCatalogLoad.ts";
+import { loadKindCatalog, loadKindCatalogAfter, resetKindCatalog } from "../agents/kindCatalogLoad.ts";
 import { GcpLoginHost } from "../features/gcplogin/GcpLoginHost.tsx";
 import { AuthExpiredModal } from "../features/auth/AuthExpiredModal.tsx";
 import { ProviderRequiredModal } from "../features/auth/ProviderRequiredModal.tsx";
@@ -328,10 +328,10 @@ export function App() {
     const stopNotificationPoll = startNotificationPolling();
     const unNotificationRead = wireNotificationReadOnVisibleSessions();
     void (async () => {
-      await useTenantStore.getState().init();
-      // Kind facts (managed-only, managed default, MCP client), asked once the tenant is settled.
-      // Never awaited: the static fallback answers until it lands, and a failure retries itself.
-      void loadKindCatalog();
+      // Kind facts (managed-only, managed default, MCP client), asked once the tenant is settled
+      // and only if this effect is still live (its cleanup has already reset the catalog). The
+      // static fallback answers until it lands, and a failure retries itself.
+      await loadKindCatalogAfter(useTenantStore.getState().init(), () => alive);
       // The local settings copy records whose server copy it was merged with; until whoami has
       // answered the user is "", which ui-prefs treats as an unknown owner.
       setPrefsOwnerSource(() => (getUser() ? `${getTenant()}|${getUser()}` : ""));
