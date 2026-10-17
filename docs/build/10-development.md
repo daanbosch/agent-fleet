@@ -78,9 +78,12 @@ manifest `versions.json` on the default lean image — is
    interrupt, fork-at and model-override probes (`workspace/agent/caps_probe.go`) hold each
    kind's declared `Caps` against what the real CLI does. They derive the expectation from
    `Caps()` and fail as `DRIFT` in either direction (declared but broken, or declared
-   `false` but working); the failure reaches the kind's update issue through the same
-   `cli-contract-report.sh failure` row as any red contract. Declare a cap `false` only
-   after a probe has seen it fail.
+   `false` but working). The step is **advisory** for now: a DRIFT or probe error does not
+   fail the job and writes no red-contract row or watcher `red` marker; it raises a
+   `::warning::` annotation, a job summary and an advisory row in the kind's update issue
+   (`cli-contract-report.sh advisory`, which keeps that issue open while the pin is current).
+   A later passing run clears the row. Declare a cap `false` only after a probe has seen it
+   fail. See "Promoting the caps drift probes" below.
 6. **Reflect it on the host** with `run-dev.sh`. The image smoke test (L1) runs right
    after the build. On the default lean image it checks that `versions.json` carries
    the new pins and that no CLI is baked in; with `BAKE_AGENT_CLIS=1` it also checks
@@ -94,6 +97,20 @@ manifest `versions.json` on the default lean image — is
    Home and repositories survive.
 8. **(Optional) confirm** from **Settings → Toolchains → Tool versions**, which shows
    the effective, image and pinned versions side by side.
+
+**Promoting the caps drift probes to blocking.** The probe logic has not yet run against
+real CLIs, and a false positive (strict model-name matching, the Escape racing a turn that
+ends by itself) would write the watcher's `red` marker, which for copilot stops it
+re-dispatching that version. So the `caps drift probes` step of `cursor-`, `copilot-` and
+`kiro-contract.yml` runs with `continue-on-error`. The one switch is the repository
+variable `CAPS_PROBES_BLOCKING`: set it to `true` (Settings → Variables, or
+`gh variable set CAPS_PROBES_BLOCKING --body true`) and a DRIFT fails the job and is
+reported as a red contract like any other. Unset it to go back. Before promoting, dispatch
+each of the three workflows with `cli_version=latest` and record, per kind: that the
+probes pass on a healthy CLI; the observed outcome of each probe against the declared
+`Caps()` (a DRIFT you confirm by hand is a real finding, not a reason to wait); and that two
+runs in a row give the same result, which shows the Escape race and the model-name match are
+stable. Put the run URLs and outcomes in the PR or issue that flips the variable.
 
 Two notes:
 

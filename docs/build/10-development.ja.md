@@ -72,9 +72,12 @@ CLI は通常 §10.2.2 が自動で開く版上げ PR で上がる。下の手�
    cursor / copilot / kiro の contract は最後に `caps drift probes` ステップを持つ。割り込み・
    発言時点からの分岐・モデル指定の 3 つのプローブ（`workspace/agent/caps_probe.go`）が、各 kind の
    宣言 `Caps` を実 CLI の挙動と突き合わせる。期待値は `Caps()` から導き、食い違えば（宣言どおり動かない
-   場合も、`false` 宣言なのに動く場合も）`DRIFT` として落ちる。報告は他の赤い contract と同じ
-   `cli-contract-report.sh failure` の行として kind の更新 issue に載る。cap を `false` にするのは、
-   プローブが失敗を観測してからにする。
+   場合も、`false` 宣言なのに動く場合も）`DRIFT` として落ちる。このステップは当面 **advisory**:
+   DRIFT やプローブエラーでもジョブは落ちず、赤い contract の行も watcher の `red` マーカーも
+   書かない。代わりに `::warning::` 注釈・ジョブサマリ・kind の更新 issue への advisory 行
+   （`cli-contract-report.sh advisory`。ピンが最新でもこの行がある間は issue を開いたままにする）で
+   見せる。次に通った実行で行は消える。cap を `false` にするのは、プローブが失敗を観測してから
+   にする。下の「caps drift probes を blocking に昇格する」を参照。
 6. **ホストに反映**: `run-dev.sh`。ビルド直後にイメージスモーク（L1）が走る。既定の lean
    イメージでは `versions.json` が新しいピンを持ち、CLI が焼かれていないことを確かめる。
    `BAKE_AGENT_CLIS=1` なら導入された版も確かめる。
@@ -85,6 +88,18 @@ CLI は通常 §10.2.2 が自動で開く版上げ PR で上がる。下の手�
    追従する（[04 §4.9](04-agent.ja.md#49-workspace-イメージと-entrypoint)）。home と repos は残る。
 8. **（任意）確認**: **設定 → ツールチェーン → ツールのバージョン** で、実効版・イメージ版・
    ピン版が並んで見える。
+
+**caps drift probes を blocking に昇格する。** プローブのロジックはまだ実 CLI で動いたことが
+ない。偽陽性（モデル名の厳密一致、ターンが自然終了するのと競合する Escape）が出ると watcher の
+`red` マーカーが書かれ、copilot ではその版の再 dispatch が止まる。そのため `cursor-` /
+`copilot-` / `kiro-contract.yml` の `caps drift probes` ステップは `continue-on-error` で動く。
+切り替えスイッチは 1 つ、リポジトリ変数 `CAPS_PROBES_BLOCKING`: `true` にする（Settings → Variables、
+または `gh variable set CAPS_PROBES_BLOCKING --body true`）と DRIFT でジョブが落ち、他と同じ赤い
+contract として報告される。変数を消せば advisory に戻る。昇格の前に、3 つの workflow を
+`cli_version=latest` で dispatch し、kind ごとに次を記録する: 健全な CLI でプローブが通ること、
+各プローブの観測結果と宣言 `Caps()` の対応（手で確かめた DRIFT は待つ理由ではなく本物の指摘）、
+同じ結果が 2 回続くこと（Escape の競合とモデル名一致が安定している証拠）。実行 URL と結果は、
+変数を切り替える PR か issue に書く。
 
 補足:
 
