@@ -923,6 +923,8 @@ func registerAgentEnvRoutes(mux *http.ServeMux, cfg config) {
 	mux.HandleFunc("GET /api/user-notes/preview", rest)
 	// codex / opencode model catalogs (launch model picker) — proxied to the Agent.
 	mux.HandleFunc("GET /api/agents/{kind}/models", rest)
+	// The Agent's kind catalog (#1077) — proxied to the Agent.
+	mux.HandleFunc("GET /api/agents/kinds", rest)
 	// Agent memory version control (docs/log/39 / ADR 0022 P1-P3) — a relay for work that
 	// completes inside the Agent. The last segment differs from {kind}/models, so the
 	// patterns do not collide.

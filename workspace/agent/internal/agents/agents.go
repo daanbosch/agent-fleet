@@ -104,6 +104,33 @@ type Caps struct {
 	// terminal route like every other kind today" — leave it unset unless a kind truly has no
 	// pane program, or these three places start behaving differently for it.
 	ManagedOnly bool
+	// ManagedDefault marks a kind where tui vs managed is a real choice and a caller that
+	// cannot drive a pane (MCP create_session, the scheduler) should get managed when it names
+	// no driver. A ManagedOnly kind needs no flag: it has nothing else.
+	ManagedDefault bool
+	// MCPClient says whether the kind's sessions receive af's MCP servers, and so whether an
+	// MCP definition may be scoped to it (mcpreg.ServedKinds, the CP's admin validation). The
+	// zero value reads "unverified", never "no": a kind that has not said is not refused
+	// quietly — the catalog test fails instead.
+	MCPClient Tri
+}
+
+// Tri is a capability answer that keeps "not measured" apart from "measured: no". The zero
+// value is TriUnverified, so a field a kind never set cannot be read as "unsupported".
+type Tri string
+
+const (
+	TriUnverified Tri = ""
+	TriYes        Tri = "yes"
+	TriNo         Tri = "no"
+)
+
+// Wire is the value the kind catalog serves: "yes" / "no" / "unverified".
+func (t Tri) Wire() string {
+	if t == TriUnverified {
+		return "unverified"
+	}
+	return string(t)
 }
 
 // LaunchOpts carries the per-launch inputs that aren't in session.Meta.
