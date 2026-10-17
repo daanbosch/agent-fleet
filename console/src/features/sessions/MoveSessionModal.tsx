@@ -38,11 +38,12 @@ import {
   readMoveUsage,
   type MovePreview,
   type MoveRefusal,
+  type MoveDelivery,
   type MoveResult,
   type Answer,
   type MoveUsage,
 } from "./move.ts";
-import { moveCancel, moveDeliver, movePreview, moveReopen, moveRetry, moveSession } from "./moveApi.ts";
+import { MOVE_POLL_MS, moveCancel, moveDeliver, movePreview, moveReopen, moveRetry, moveSession } from "./moveApi.ts";
 import type { ConnectionsStatus, Session, SessionKind } from "../../types/session.ts";
 
 interface MoveSessionModalProps {
@@ -60,12 +61,17 @@ export function MoveSessionModal({ session, onClose }: MoveSessionModalProps) {
   const [result, setResult] = useState<MoveResult | null>(null);
   const [note, setNote] = useState("");
 
+  // seq counts finished reads: an unchanged preview can come back as the very same object (the
+  // api() ETag cache), and the re-read below has to be rescheduled after every read regardless.
+  const [seq, setSeq] = useState(0);
   const reload = useCallback(async () => {
     try {
       const d = await movePreview(session.name);
       setLoad(d.error ? { state: "error", error: d.error } : { state: "ready", preview: d });
     } catch (e) {
       setLoad({ state: "error", error: String(e) });
+    } finally {
+      setSeq((n) => n + 1);
     }
   }, [session.name]);
   useEffect(() => {
@@ -94,6 +100,31 @@ export function MoveSessionModal({ session, onClose }: MoveSessionModalProps) {
 
   const preview = load.state === "ready" ? load.preview : null;
   const phase = result ? "done" : preview ? movePhase(preview) : null;
+  // After a move, the source's preview is what says how the target's first prompt is doing: the
+  // move's own answer is a snapshot, and a Terminal resend only reports "pending" (202) while
+  // the delivery runs in the background and may still fail.
+  const resultTarget = result?.target?.name || result?.delivery?.target || "";
+  const doneDelivery = result && preview?.movedTo === resultTarget ? preview.delivery : result?.delivery;
+  // Some states end without anything the user does: a move another tab (or a request whose
+  // answer was lost) is running, and a first prompt being typed into a Terminal target. Read
+  // the preview again while one holds, or the buttons stay disabled on a state long gone.
+  const transient =
+    !busy && !!preview && (!!preview.pending?.busy || preview.delivery?.initialPromptState === "pending");
+  useEffect(() => {
+    if (!transient) return;
+    const id = setTimeout(() => void reload(), MOVE_POLL_MS);
+    return () => clearTimeout(id);
+  }, [transient, seq, reload]);
+  const delivered = (d: { initialPromptState: string; mayDuplicate?: boolean }) =>
+    setNote(
+      tr(
+        d.initialPromptState === "pending"
+          ? "move.deliver_started"
+          : d.mayDuplicate
+            ? "move.deliver_sent_maybe_twice"
+            : "move.deliver_sent",
+      ),
+    );
 
   return (
     <Modal title={tr("move.title", { name: displayName(session) })} onClose={onClose} lockClose={busy !== ""} className="move-modal">
@@ -113,10 +144,9 @@ export function MoveSessionModal({ session, onClose }: MoveSessionModalProps) {
         {load.state === "error" && !result && (
           <div className="ui-field-hint warn move-load-error">{tr("move.load_failed", { reason: errText(load.error) })}</div>
         )}
-        {result && <MoveDone result={result} onDeliver={(t) => run("deliver", () => moveDeliver(t), (d) => {
-          setNote(tr(d.mayDuplicate ? "move.deliver_sent_maybe_twice" : "move.deliver_sent"));
-          setResult({ ...result, delivery: undefined });
-        })} busy={busy} />}
+        {result && (
+          <MoveDone result={result} delivery={doneDelivery} busy={busy} onDeliver={(t) => run("deliver", () => moveDeliver(t), delivered)} />
+        )}
         {!result && preview && phase === "move" && (
           <MoveForm
             session={session}
@@ -140,9 +170,7 @@ export function MoveSessionModal({ session, onClose }: MoveSessionModalProps) {
             preview={preview}
             busy={busy}
             onDeliver={(t) =>
-              run("deliver", () => moveDeliver(t), (d) =>
-                setNote(tr(d.mayDuplicate ? "move.deliver_sent_maybe_twice" : "move.deliver_sent")),
-              )
+              run("deliver", () => moveDeliver(t), delivered)
             }
             onReopen={() => run("reopen", () => moveReopen(session.name), () => setNote(tr("move.reopened")))}
           />
@@ -495,7 +523,17 @@ function MovedView({
   );
 }
 
-function MoveDone({ result, busy, onDeliver }: { result: MoveResult; busy: string; onDeliver: (target: string) => void }) {
+function MoveDone({
+  result,
+  delivery,
+  busy,
+  onDeliver,
+}: {
+  result: MoveResult;
+  delivery?: MoveDelivery;
+  busy: string;
+  onDeliver: (target: string) => void;
+}) {
   const tr = useT();
   const target = result.target?.name || result.delivery?.target || "";
   return (
@@ -509,7 +547,7 @@ function MoveDone({ result, busy, onDeliver }: { result: MoveResult; busy: strin
       {!result.sourceStopped && (
         <div className="ui-field-hint warn">{tr("move.done_not_stopped", { reason: result.stopError || "" })}</div>
       )}
-      {result.delivery && <DeliveryRow delivery={result.delivery} busy={busy} onDeliver={() => onDeliver(result.delivery!.target)} />}
+      {delivery && <DeliveryRow delivery={delivery} busy={busy} onDeliver={() => onDeliver(delivery.target)} />}
     </div>
   );
 }

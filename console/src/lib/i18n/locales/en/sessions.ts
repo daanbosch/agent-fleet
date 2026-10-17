@@ -430,6 +430,7 @@ export const sessions: Record<keyof typeof jaSessions, string> = {
   "move.delivery_failed": "Could not send {target} its first prompt (where the handover file is).",
   "move.delivery_unknown": "Whether {target} received its first prompt (where the handover file is) is not known. Resending may deliver it twice.",
   "move.deliver": "Resend the first prompt",
+  "move.deliver_started": "Started resending the first prompt. This dialog shows whether it arrives.",
   "move.deliver_sent": "Resent the first prompt.",
   "move.deliver_sent_maybe_twice": "Resent the first prompt. If the earlier one had arrived, it is there twice now.",
   "move.cancelled": "The move was cancelled. This session works as before.",

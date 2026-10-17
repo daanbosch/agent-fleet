@@ -3,6 +3,10 @@
 import { api, apiJSON } from "../../core/api/client.ts";
 import type { Answer, MovePreview, MoveResult } from "./move.ts";
 
+/** How often the dialog re-reads a preview whose state ends without the user (a busy move, a
+ * first prompt being delivered). */
+export const MOVE_POLL_MS = 3000;
+
 const base = (name: string) => `api/sessions/${encodeURIComponent(name)}/move`;
 
 export const movePreview = (name: string): Promise<Answer<MovePreview>> => api(base(name) + "/preview");

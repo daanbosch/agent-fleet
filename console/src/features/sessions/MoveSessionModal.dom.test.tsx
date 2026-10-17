@@ -262,3 +262,61 @@ describe("MoveSessionModal: a moved source", () => {
     expect(calls.some((c) => c.method === "POST" && c.path === "api/sessions/s1/move/reopen")).toBe(true);
   });
 });
+
+// States that end without the user: the dialog has to read the preview again, or it shows a
+// state that is long gone with its buttons disabled.
+describe("MoveSessionModal: states that move on by themselves", () => {
+  afterEach(() => vi.useRealTimers());
+  const tick = async () => {
+    await act(async () => await vi.advanceTimersByTimeAsync(3000));
+    await flush();
+  };
+
+  it("enables retry and cancel once a move running elsewhere has stopped", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let reads = 0;
+    routes[PREVIEW] = () =>
+      ++reads === 1
+        ? preview({ moving: "t9", pending: { target: "t9", targetExists: false, busy: true } })
+        : preview({ moving: "t9", pending: { target: "t9", targetExists: false, state: "uncertain" } });
+    await render();
+    expect(document.querySelector<HTMLButtonElement>(".move-retry")?.disabled).toBe(true);
+    expect(document.querySelector<HTMLButtonElement>(".move-cancel")?.disabled).toBe(true);
+    await tick();
+    expect(reads).toBe(2);
+    expect(document.querySelector<HTMLButtonElement>(".move-retry")?.disabled).toBe(false);
+    expect(document.querySelector<HTMLButtonElement>(".move-cancel")?.disabled).toBe(false);
+    // Settled: no more reads.
+    await tick();
+    expect(reads).toBe(2);
+  });
+
+  it("follows a Terminal resend that answered pending and then failed in the background", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const done = { source: "s1", target: { name: "t9", kind: "codex" }, file: "/f.md", sourceStopped: true,
+      delivery: { target: "t9", file: "/f.md", initialPromptState: "failed", deliverable: true } };
+    routes["POST api/sessions/s1/move"] = done;
+    let stage = "before";
+    routes[PREVIEW] = () =>
+      stage === "before"
+        ? preview()
+        : preview({ movedTo: "t9", delivery: { target: "t9", file: "/f.md", initialPromptState: stage, deliverable: stage !== "pending" } });
+    routes["POST api/sessions/t9/move/deliver"] = () => {
+      stage = "pending";
+      return { target: "t9", initialPromptState: "pending" };
+    };
+    await render();
+    await click(confirmBtn());
+    await click(document.querySelector(".move-done .move-deliver"));
+    // A 202 says only that typing started: not "resent", and the row stays.
+    expect(text()).toContain(t("move.deliver_started"));
+    expect(text()).not.toContain(t("move.deliver_sent"));
+    expect(document.querySelector(".move-done .move-delivery")?.textContent).toContain(t("move.delivery_pending", { target: "t9" }));
+    expect(document.querySelector(".move-done .move-deliver")).toBeNull();
+    stage = "failed";
+    await tick();
+    expect(document.querySelector(".move-done .move-delivery")?.textContent).toContain(t("move.delivery_failed", { target: "t9" }));
+    expect(document.querySelector(".move-done .move-deliver")).toBeTruthy();
+  });
+});
+
