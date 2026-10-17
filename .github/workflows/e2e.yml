@@ -3,8 +3,8 @@
 # and exercise workspace/session round-trips) -> L3 (console-e2e/: Playwright
 # browser->CP->container end-to-end). The image build is heavy, so this is split
 # out of ci.yml and runs only on PRs to main (merge gate) + a nightly cron
-# (integration check of the default branch = develop; caps breakage exposure at one
-# day and keeps bisects practical) + manual dispatch. Not run on pushes to develop
+# (integration check of the default branch = main; caps breakage exposure at one
+# day and keeps bisects practical) + manual dispatch. Not run on pushes to main
 # (spreads billing; CONTRIBUTING "Commits & PRs"). L4 (claude round-trip with real
 # credentials) consumes quota, so it only runs when the workflow_dispatch live
 # input is set.
@@ -34,7 +34,7 @@ on:
       - "deploy/local/e2e-smoke.sh"
       - ".github/workflows/e2e.yml"
   schedule:
-    - cron: "0 19 * * *" # nightly 04:00 JST — integration check of develop (default branch) + upstream CLI / base image breakage detection
+    - cron: "0 19 * * *" # nightly 04:00 JST — integration check of main (default branch) + upstream CLI / base image breakage detection
   workflow_dispatch:
     inputs:
       # An input that spends billing / quota must map to **exactly one agent this

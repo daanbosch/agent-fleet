@@ -17,14 +17,14 @@
 # green and we **upsert a single tracking issue** (auto-closed once resolved). The
 # job goes red only when the check itself breaks (npm fetch failure etc.).
 #
-# Note: schedule runs on the workflow definition of the default branch (develop).
+# Note: schedule runs on the workflow definition of the default branch (main).
 name: cli-drift
 
 on:
   schedule:
     - cron: "0 20 * * *" # daily 05:00 JST
   workflow_dispatch:
-  # No push trigger (spreads billing; develop-trunk workflow). Verifying script
+  # No push trigger (spreads billing; main-trunk workflow). Verifying script
   # changes via the daily cron or workflow_dispatch is enough.
 
 permissions:

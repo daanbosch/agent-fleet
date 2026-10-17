@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Agent Fleet — put develop on a development deployment WITHOUT cutting a version tag.
+# Agent Fleet — put main on a development deployment WITHOUT cutting a version tag.
 #
 #   deploy/aws/ecs/dev-deploy.sh --profile <p> --region <r>
 #
@@ -8,7 +8,7 @@
 # `AF_DEV_DEPLOY=1` in the local capture (written by `capture-env.sh`).
 #
 # If `update.sh` is the one command that ships a release, this is the one command that ships
-# today's develop. It folds the four steps of docs/log/72 §72.6.2 (dispatch dev-image.yml →
+# today's main. It folds the four steps of docs/log/72 §72.6.2 (dispatch dev-image.yml →
 # crane copy the CP into ECR → put the workspace under the same tag → update.sh) into one, and
 # it always ends in `update.sh`: the preflights for a missing tag, an empty changeset, a CpArch
 # mismatch and the list of running Workspaces exist only there.
@@ -61,7 +61,7 @@ usage: dev-deploy.sh --profile <p> --region <r> [options]
   --stack       ingress stack name (default af-ecs-ingress) — the one with ImageTag
                 the deployment must be marked AF_DEV_DEPLOY=1 in the local capture
                 (capture-env.sh writes it; see env.sh)
-  --ref         git ref to bake (default develop). CI checks out ORIGIN's ref.
+  --ref         git ref to bake (default main). CI checks out ORIGIN's ref.
   --tag         image tag to use (default <latest tag + patch>-dev-<sha8>). Must contain -dev
   --image       auto | cp | both (default auto — both when `workspace/` has changed)
   --platforms   architectures to bake (default linux/amd64,linux/arm64)
@@ -75,7 +75,7 @@ env:
 EOF
 }
 
-PROFILE=""; REGION=""; STACK="af-ecs-ingress"; REF="develop"; TAG=""
+PROFILE=""; REGION=""; STACK="af-ecs-ingress"; REF="main"; TAG=""
 IMAGE="auto"; PLATFORMS="linux/amd64,linux/arm64"
 SKIP_BAKE=0; REBAKE=0; DRY=0
 while [ $# -gt 0 ]; do
@@ -243,7 +243,7 @@ if [ "$need_bake" = 1 ]; then
     fi
     echo "==> watching run $run_id"
     gh run watch "$run_id" --exit-status --interval 20
-    # Did it really bake that commit? If develop moved between the dispatch and the checkout,
+    # Did it really bake that commit? If main moved between the dispatch and the checkout,
     # something else was baked and the sha in the tag is a lie.
     got_sha="$(gh run view "$run_id" --json headSha --jq .headSha)"
     [ "$got_sha" = "$SHA" ] || {

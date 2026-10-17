@@ -18,7 +18,7 @@ permissions:
   issues: write
 
 on:
-  # Not run on pushes to develop (billing spread; CONTRIBUTING "Commits & PRs").
+  # Not run on pushes to main (billing spread; CONTRIBUTING "Commits & PRs").
   # Contract checks are concentrated on PRs to main (when relevant paths changed)
   # and the weekly cron.
   pull_request:

@@ -53,30 +53,27 @@ neither on the host — only Docker.
 
 ## Commits & PRs
 
-**`develop` is the trunk** (and the default branch). Day-to-day changes go through
-a work branch → pull request → `develop`; do not push them directly to `develop`.
+**`main` is the trunk** (and the default branch). Day-to-day changes go through
+a work branch → pull request → `main`; do not push them directly to `main`.
 Issues are optional; link the related issue in the PR when one exists. The
 maintainer checks the changes and verification results, then merges after the
 required CI checks pass. Approval from another person is not required.
-**"done" means merged into `develop`**. Agents must not create branches on their
+**"done" means merged into `main`**. Agents must not create branches on their
 own — the Console hands each worktree session its own branch. Remote:
 `git@github.com:k-k1/agent-fleet.git`.
 
-**`main` is the always-green stable branch** and is updated only through
-`develop` → `main` pull requests (a release train, once or twice a week or at the
-end of a phase). Hosted CI comes in two tiers. `ci.yml` (gofmt / vet / test /
-build) runs on **pull requests targeting `develop` or `main` and every push to
-either branch**. PR checks verify changes before they reach the trunk; push
-checks verify the integrated result. The repository is public, so its runners
-are free. `e2e.yml` and the contract workflows
-do spend an external LLM quota, so those stay concentrated on the `develop` →
-`main` PR, their nightly / weekly cron over `develop`, and manual dispatch (several
-contract workflows run on dispatch only).
+Hosted CI comes in two tiers. `ci.yml` (gofmt / vet / test /
+build) runs on **pull requests targeting `main` and every push to it**. PR checks
+verify changes before they reach the trunk; push checks verify the integrated
+result. The repository is public, so its runners are free. `e2e.yml` and the
+contract workflows do spend an external LLM quota, so those stay concentrated on
+pull requests that touch their paths, their nightly / weekly cron over `main`, and
+manual dispatch (several contract workflows run on dispatch only).
 Either way, the local run above is still the per-commit check — hosted CI is the
 safety net, not the first line. See `docs/log/35-packaging.md` for the billing
-rationale behind this two-tier split. Hotfixes branch from `main` → PR → `main`,
-then back-merge into `develop`. Release tags,
-release builds and public distribution are all cut from `main`.
+rationale behind this two-tier split. Hotfixes follow the same path as any other
+change: work branch → PR → `main`. Release tags, release builds and public
+distribution are all cut from `main`.
 
 Keep commits small and focused, and follow the format below.
 

@@ -90,7 +90,7 @@ manifest `versions.json` on the default lean image — is
 
 Two notes:
 
-- **A nightly scheduled run** of `e2e.yml` (04:00 JST, against develop) catches
+- **A nightly scheduled run** of `e2e.yml` (04:00 JST, against main) catches
   upstream CLI and base-image breakage even when nothing in this repository changed. If
   it goes red, suspect upstream and use steps 4–5 to isolate.
 - To move a single member forward without rebuilding, there is an opt-in self-update: a
@@ -114,7 +114,7 @@ dispatched the contract, and nothing is being tested while it is down.
 
 ### 10.2.2 Automated agent-CLI bumps (`cli-pin-bump.yml`)
 
-`cli-pin-bump.yml` keeps **one** pull request against `develop`, on the fixed branch
+`cli-pin-bump.yml` keeps **one** pull request against `main`, on the fixed branch
 `automation/cli-pin-bump`, that raises every agent-CLI pin whose new version has already
 passed its contract. It runs when a contract workflow completes, daily at 08:00 JST as a
 backstop, and on dispatch. The decision and the edit are `deploy/local/cli-pin-bump.sh`;
@@ -276,7 +276,7 @@ npm --prefix console run build
   hard gate**: `ci.yml` fails on a single unformatted file, even when `go build`,
   `go vet` and `go test` pass.
 
-- **CI** — `ci.yml` runs on every push to and PR against `main` and `develop`, in
+- **CI** — `ci.yml` runs on every push to and PR against `main`, in
   independent jobs:
 
   | Job | What it checks |
@@ -293,7 +293,7 @@ npm --prefix console run build
   (except the files a test reads: `guide/ref/agents{,.ja}.md` and
   `docs/decisions/0029-usage-accounting{,.ja}.md`), the top-level `*.md`
   files and the docs checker. The list and the reason are in `scripts/ci-changes.sh`.
-  Pushes to `main` / `develop` always run every job.
+  Pushes to `main` always run every job.
 
   `docs.yml` runs `scripts/docs-check.py` on the same triggers. The end-to-end
   workflow is separate because building images is heavy. Upstream CLI breakage is a
@@ -328,7 +328,7 @@ cd e2e && WS_IMAGE=agent-fleet/workspace:dev go test -v -tags e2e -timeout 15m .
 cd console-e2e && npm ci && npx playwright test
 ```
 
-- `e2e.yml` runs on PRs to main (relevant paths), a nightly cron against develop, and
+- `e2e.yml` runs on PRs to main (relevant paths), a nightly cron against main, and
   manual dispatch — **never on a push**. Its jobs are `e2e` (L1 → L2) and `ui-e2e`
   (L3, which uploads traces and the CP log on failure), in parallel, and `live-smoke`
   (L4), only on dispatch with `live`. Its image build passes no platform argument, so

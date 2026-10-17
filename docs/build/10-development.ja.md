@@ -82,7 +82,7 @@ CLI は通常 §10.2.2 が自動で開く版上げ PR で上がる。下の手�
 
 補足:
 
-- **毎晩の定期実行**（`e2e.yml`、04:00 JST・develop 対象）が、このリポジトリに変更が無くても
+- **毎晩の定期実行**（`e2e.yml`、04:00 JST・main 対象）が、このリポジトリに変更が無くても
   上流 CLI や base image の破壊を検出する。red になったら上流を疑い、手順 4〜5 で切り分ける。
 - 再ビルドせず特定メンバーだけ先に進めたいときは、自己更新の opt-in がある。テナント設定で
   許可し、メンバーが 設定 → ツールチェーン で Workspace ごとにオンにする。メンバー自身の起動では latest を
@@ -103,7 +103,7 @@ CLI は通常 §10.2.2 が自動で開く版上げ PR で上がる。下の手�
 ### 10.2.2 エージェント CLI の版上げの自動化（`cli-pin-bump.yml`）
 
 `cli-pin-bump.yml` は、新しい版で contract がすでに通ったエージェント CLI のピンをまとめて
-上げる PR を、固定ブランチ `automation/cli-pin-bump` から `develop` へ**1 本だけ**保つ。
+上げる PR を、固定ブランチ `automation/cli-pin-bump` から `main` へ**1 本だけ**保つ。
 contract ワークフローが終わったとき、保険として毎日 08:00 JST、手動 dispatch で走る。判断と
 書き換えは `deploy/local/cli-pin-bump.sh`、それを固定するのが
 `deploy/local/cli-pin-bump-stub-test.sh`。
@@ -250,7 +250,7 @@ npm --prefix console run build
   [CONTRIBUTING](../../CONTRIBUTING.md#ground-rules)。**`gofmt` はハードゲート**:
   `go build`・`go vet`・`go test` が通っても、未整形ファイルが 1 つあれば `ci.yml` は落ちる。
 
-- **CI** — `ci.yml` は `main` と `develop` への push と PR のたびに、独立したジョブで回る:
+- **CI** — `ci.yml` は `main` への push と PR のたびに、独立したジョブで回る:
 
   | ジョブ | 見るもの |
   |---|---|
@@ -264,7 +264,7 @@ npm --prefix console run build
   PR では、変更したパスがすべて無関係なもの——`docs/` と `guide/`（テストが読む
   `guide/ref/agents{,.ja}.md` と `docs/decisions/0029-usage-accounting{,.ja}.md` を除く）・最上位の `*.md`・docs の検査スクリプト——なら、
   `changes` ジョブが `control-plane`・`workspace-agent`・`deploy-scripts`・`console` を飛ばす。
-  一覧と理由は `scripts/ci-changes.sh` にある。`main` / `develop` への push では常に全ジョブが回る。
+  一覧と理由は `scripts/ci-changes.sh` にある。`main` への push では常に全ジョブが回る。
 
   `docs.yml` が同じトリガで `scripts/docs-check.py` を回す。E2E ワークフローはイメージの
   build が重いので分けてある。上流 CLI の破壊検知は第 3 の系統（後述）。イメージを焼く
@@ -294,7 +294,7 @@ cd e2e && WS_IMAGE=agent-fleet/workspace:dev go test -v -tags e2e -timeout 15m .
 cd console-e2e && npm ci && npx playwright test
 ```
 
-- `e2e.yml` は main への PR（関連パス）・develop に対する毎晩の cron・手動 dispatch で走り、
+- `e2e.yml` は main への PR（関連パス）・main に対する毎晩の cron・手動 dispatch で走り、
   **push では走らない**。ジョブは `e2e`（L1 → L2）と `ui-e2e`（L3。失敗時は trace と CP ログを
   artifact に残す）が並列、`live-smoke`（L4）は `live` 付きの dispatch のときだけ。イメージの
   ビルドは platform を指定しないので **amd64 のみ**を検証する: arm64 側のアセット（agy・cursor・
