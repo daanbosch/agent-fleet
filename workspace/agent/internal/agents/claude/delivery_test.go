@@ -138,6 +138,12 @@ func TestPromptStateSince(t *testing.T) {
 		if got := PromptStateSince(sid, snap, prompt); got != PromptQueued {
 			t.Fatalf("a tool_result user line must not start the queued prompt, got %v", got)
 		}
+		echo, _ := json.Marshal(map[string]any{"type": "user", "message": map[string]any{"role": "user",
+			"content": []any{map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": "Search result: " + prompt}}}})
+		appendJSONL(t, p, string(echo)+"\n")
+		if got := PromptStateSince(sid, snap, prompt); got != PromptQueued {
+			t.Fatalf("a tool_result echoing the prompt must not start it, got %v", got)
+		}
 		usr, _ := json.Marshal(map[string]any{
 			"type": "user", "message": map[string]any{"role": "user", "content": prompt},
 		})

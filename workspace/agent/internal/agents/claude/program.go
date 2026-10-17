@@ -305,7 +305,7 @@ func PromptStateSince(sid string, snap map[string]int64, prompt string) PromptSt
 		}
 		state = PromptQueued
 		for _, l := range lines[queuedAt+1:] {
-			if bytes.Contains(l, []byte(`"type":"user"`)) && bytes.Contains(l, needle) {
+			if userLineCarries(l, needle) {
 				return PromptStarted
 			}
 		}
@@ -349,6 +349,45 @@ func jsonNeedle(prompt string) []byte {
 		return nil
 	}
 	return b[1 : len(b)-1] // strip the surrounding quotes
+}
+
+// userLineCarries reports whether l is a user record whose own text (message.content as a
+// string, or its text blocks) holds the prompt. tool_result blocks are skipped: a running
+// turn's grep/cat output can echo the same words, and that is not our prompt starting.
+func userLineCarries(l, needle []byte) bool {
+	if !bytes.Contains(l, []byte(`"type":"user"`)) || !bytes.Contains(l, needle) {
+		return false
+	}
+	var plain string
+	if json.Unmarshal(append(append([]byte{'"'}, needle...), '"'), &plain) != nil {
+		return false
+	}
+	var rec struct {
+		Type    string `json:"type"`
+		Message struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"message"`
+	}
+	if json.Unmarshal(l, &rec) != nil || rec.Type != "user" {
+		return false
+	}
+	var text string
+	if json.Unmarshal(rec.Message.Content, &text) == nil {
+		return strings.Contains(text, plain)
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(rec.Message.Content, &blocks) != nil {
+		return false
+	}
+	for _, b := range blocks {
+		if b.Type == "text" && strings.Contains(b.Text, plain) {
+			return true
+		}
+	}
+	return false
 }
 
 // JSONLResumable reports whether sid's log holds an actual conversation (a user or
