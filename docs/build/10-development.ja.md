@@ -59,7 +59,7 @@ CLI は通常 §10.2.2 が自動で開く版上げ PR で上がる。下の手�
    引数の変更は確実にキャッシュを破るので `--no-cache` は不要。
 3. **commit & push** — 小さな diff。メッセージは
    [CONTRIBUTING](../../CONTRIBUTING.md#commits--prs) に従う。
-4. **E2E ワークフローの緑を待つ。** `e2e.yml` は **push では走らない**（main への PR・毎晩の
+4. **E2E ワークフローの緑を待つ。** `e2e.yml` は **push では走らない**（イメージ入力を変える main への PR・毎晩の
    cron・手動 dispatch のみ）ので、作業ブランチでは自分で起こす:
    `gh workflow run e2e.yml --ref <ブランチ>`。CLI を焼き込んだイメージ
    （`BAKE_AGENT_CLIS=1`）をビルドし、L1（§10.3 に挙げたツールについて**導入された版 ＝ ピン**）→ L2（フリート疎通）→
@@ -326,8 +326,11 @@ cd e2e && WS_IMAGE=agent-fleet/workspace:dev go test -v -tags e2e -timeout 15m .
 cd console-e2e && npm ci && npx playwright test
 ```
 
-- `e2e.yml` は main への PR（関連パス）・main に対する毎晩の cron・手動 dispatch で走り、
-  **push では走らない**。ジョブは `e2e`（L1 → L2）と `ui-e2e`（L3。失敗時は trace と CP ログを
+- `e2e.yml` は、Workspace イメージの入力（`workspace/`。テスト専用ファイルを除く）またはハーネス
+  （`e2e/`・`console-e2e/`・`deploy/local/e2e-smoke.sh`・ワークフロー自身）を変える main への PR、
+  main に対する毎晩の cron、手動 dispatch で走り、**push では走らない**。`control-plane/` や
+  `console/` だけを変える PR では走らない（L2/L3 はそれらをソースからビルドするのでイメージ入力では
+  ない）。そちら側の破損は毎晩の実行で拾い、PR 時点の守りは `ci.yml` が担う。ジョブは `e2e`（L1 → L2）と `ui-e2e`（L3。失敗時は trace と CP ログを
   artifact に残す）が並列、`live-smoke`（L4）は `live` 付きの dispatch のときだけ。イメージの
   ビルドは platform を指定しないので **amd64 のみ**を検証する: arm64 側のアセット（agy・cursor・
   kiro・muse の arch 別 sha256 ピン）はここではビルド検証されない。
