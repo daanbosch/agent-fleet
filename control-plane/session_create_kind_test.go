@@ -72,6 +72,22 @@ func TestScheduleRefusesUnregisteredKind(t *testing.T) {
 	if up := doJSON(api.update, mv, "PATCH", `{"agent_kind":"codex"}`, dto.ID); up.Code != http.StatusOK {
 		t.Errorf("update agent_kind codex -> %d %s", up.Code, up.Body.String())
 	}
+	// An assistant schedule may hold any agent_kind, but leaving assistant mode makes it live.
+	as := doJSON(api.create, mv, "POST", `{"spec_kind":"cron","spec":"0 9 * * *","prompt":"x","session_mode":"assistant","agent_kind":"Codex"}`, "")
+	var adto scheduleDTO
+	_ = json.Unmarshal(as.Body.Bytes(), &adto)
+	for _, mode := range []string{"new", "reuse"} {
+		up := doJSON(api.update, mv, "PATCH", `{"session_mode":"`+mode+`"}`, adto.ID)
+		if up.Code != http.StatusBadRequest || !strings.Contains(up.Body.String(), "bad_kind") {
+			t.Errorf("assistant -> %s keeping agent_kind Codex -> %d %s, want 400 bad_kind", mode, up.Code, up.Body.String())
+		}
+	}
+	if up := doJSON(api.update, mv, "PATCH", `{"prompt":"y"}`, adto.ID); up.Code != http.StatusOK {
+		t.Errorf("editing an assistant schedule's prompt -> %d %s", up.Code, up.Body.String())
+	}
+	if up := doJSON(api.update, mv, "PATCH", `{"session_mode":"new","agent_kind":"codex"}`, adto.ID); up.Code != http.StatusOK {
+		t.Errorf("assistant -> new with a valid kind -> %d %s", up.Code, up.Body.String())
+	}
 	// agent_kind is ignored by an assistant fire, so it is not validated there.
 	if rec := doJSON(api.create, mv, "POST", `{"spec_kind":"cron","spec":"0 9 * * *","prompt":"x","session_mode":"assistant","agent_kind":"Codex"}`, ""); rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
 		t.Errorf("assistant schedule with an ignored agent_kind -> %d %s", rec.Code, rec.Body.String())

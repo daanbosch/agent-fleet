@@ -663,12 +663,18 @@ type schedulePatch struct {
 // spec/tz) changed, so the caller knows to recompute next_run. A malformed deliver_to is
 // the one field it rejects itself, since only it is normalized on the way in.
 func (p schedulePatch) apply(sch *store.Schedule) (specChanged bool, aerr *apiError) {
-	if p.AgentKind != nil {
-		mode := sch.SessionMode
+	// Re-checked when either half of the (mode, kind) pair changes: an assistant schedule may
+	// hold any agent_kind, and switching it to new/reuse makes that kind live. A raw patched
+	// kind wins over the stored one; an edit touching neither is left alone.
+	if p.AgentKind != nil || p.SessionMode != nil {
+		kind, mode := sch.AgentKind, sch.SessionMode
+		if p.AgentKind != nil {
+			kind = *p.AgentKind
+		}
 		if p.SessionMode != nil {
 			mode = *p.SessionMode
 		}
-		if aerr := checkScheduleKind(*p.AgentKind, mode); aerr != nil {
+		if aerr := checkScheduleKind(kind, mode); aerr != nil {
 			return false, aerr
 		}
 	}
