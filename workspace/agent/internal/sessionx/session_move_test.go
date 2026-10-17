@@ -1114,7 +1114,7 @@ func TestTerminalRedeliveryNeedsEvidence(t *testing.T) {
 	typed := make(chan string, 1)
 	prev := typeMoveDelivery
 	typeMoveDelivery = func(name, prompt string) string { typed <- prompt; return <-outcome }
-	t.Cleanup(func() { typeMoveDelivery = prev })
+	t.Cleanup(func() { moveDeliverInflight.Wait(); typeMoveDelivery = prev })
 	settled := func() string {
 		t.Helper()
 		deadline := time.Now().Add(moveGuard)
@@ -1152,6 +1152,7 @@ func TestTerminalRedeliveryNeedsEvidence(t *testing.T) {
 	if st := settled(); st != session.InitialPromptDelivered {
 		t.Fatalf("state = %q", st)
 	}
+	moveDeliverInflight.Wait() // the goroutine removes the record after it settles the state
 	if _, ok := moveDeliveries.Read(target); ok {
 		t.Fatal("the record outlived a confirmed delivery")
 	}
