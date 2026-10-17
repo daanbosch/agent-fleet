@@ -53,6 +53,7 @@ func newDevIdPTestEnv(t *testing.T) *devIdPTestEnv {
 	e.mgr.master32 = bytes.Repeat([]byte{7}, 32)
 	e.mgr.custodian = newLocalCustodian(e.mgr.master32)
 	d := &devIdPTestEnv{previewHostEnv: e, clock: time.Now()}
+	e.cfg.brand = newBrandResolver(brandConfig{}, nil) // tests set .env to brand the consent page
 	d.api = newDevIdPAPI(e.cfg)
 	d.api.now = d.now
 	d.api.keys = newDevIdPKeyring(e.mgr.store, e.mgr, d.now)

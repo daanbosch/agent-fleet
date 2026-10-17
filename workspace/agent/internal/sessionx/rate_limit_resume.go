@@ -32,7 +32,9 @@ package sessionx
 // the retries, the retirement) is shared, because none of it is claude-shaped.
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -40,6 +42,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
@@ -47,6 +50,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/codex"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/muse"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/fstore"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/lifegate"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/mcpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/notice"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
@@ -109,6 +113,10 @@ type rateLimitState struct {
 	// and the episode is retired only once the transcript tail is no longer at the limit
 	// (episodeStale / rateLimitFollowUp).
 	Spend bool `json:"spend,omitempty"`
+	// FiredDuringMove is ScheduleID when that booking fired while a move held the session's
+	// input closed and was refused (ADR 0115 decision 11.2). The once-schedule is then spent,
+	// and a move that rolls back books the resume again (repairRateLimitBookingAfterMove).
+	FiredDuringMove string `json:"firedDuringMove,omitempty"`
 }
 
 var RateLimitStates = fstore.JSON[rateLimitState](paths.AgentStateDir, "session-rate-limit", ".json")
@@ -156,28 +164,67 @@ func StartRateLimitWatch() {
 // now, which is the more urgent case — and it is claude-only: no other kind draws a menu, so
 // reading a pane for them would only cost a tmux call that can never say yes.
 func rateLimitTick(now time.Time) {
+	retryRateLimitScheduleCleanups()
 	for _, m := range session.ListMetas() {
 		if !rateLimitWatched(m) {
 			continue
 		}
-		st, has := RateLimitStates.Read(m.Name)
-		alive := SessionAlive(m)
-		if alive {
-			if NormalizeKind(m.Kind) == session.KindClaude && tmuxx.ReadPane(m.Name).RateLimitMenu {
-				// Only an account window puts up a menu, and that is the kind waiting clears.
-				rateLimitRecover(m, st, now, true, claude.LimitWindow)
-				continue
-			}
-			if kind, atLimit := atUsageLimit(m); atLimit {
-				rateLimitRecover(m, st, now, false, kind)
-				continue
-			}
-		}
-		if has {
-			rateLimitFollowUp(m, st, now, alive)
-		}
+		rateLimitTickSession(m, now)
 	}
 }
+
+// rateLimitTickSession is one session's step of the sweep, under the session's lifecycle gate.
+// m comes from the sweep's ListMetas, which a move may have overtaken since: Enter re-reads the
+// meta under the gate and refuses a session that is moving or moved, so nothing is booked for
+// it (ADR 0115 decision 11.5). The lease is held for the whole step rather than just around
+// putRateLimitSchedule, so the episode file that records the booking is written before a move
+// can close input — a move that then commits finds the id there and cancels it.
+func rateLimitTickSession(m session.Meta, now time.Time) {
+	lease, err := lifegate.Enter(context.Background(), m.Name)
+	if err != nil {
+		return
+	}
+	defer lease.Release()
+	episodeMu := rateLimitEpisodeLock(m.Name)
+	episodeMu.Lock()
+	defer episodeMu.Unlock()
+	st, has := RateLimitStates.Read(m.Name)
+	if has && st.ScheduleID != "" && st.FiredDuringMove == st.ScheduleID {
+		// A booking a move refused, recorded on a session that is open again (the lease says so)
+		// without the rollback having repaired it: book it again here.
+		if cur, ok := session.ReadMeta(m.Name); ok {
+			rebookSpentRateLimitBooking(cur, st, now)
+		}
+		return
+	}
+	alive := SessionAlive(m)
+	if alive {
+		if NormalizeKind(m.Kind) == session.KindClaude && tmuxx.ReadPane(m.Name).RateLimitMenu {
+			// Only an account window puts up a menu, and that is the kind waiting clears.
+			rateLimitRecover(m, st, now, true, claude.LimitWindow)
+			return
+		}
+		if kind, atLimit := atUsageLimit(m); atLimit {
+			rateLimitRecover(m, st, now, false, kind)
+			return
+		}
+	}
+	if has {
+		rateLimitFollowUp(m, st, now, alive)
+	}
+}
+
+// rateLimitEpisodeLock is the lock every read-modify-write of one session's episode by the sweep
+// or by a move holds (session_move_gate.go). The lease alone does not order them: the sweep's is
+// shared, and a refused booking that is repaired after a rollback holds none, so without it the
+// sweep's write of the episode it read earlier wipes the id the repair just booked. Order: a
+// lease, if any, before this lock; nothing takes the gate while holding it.
+func rateLimitEpisodeLock(name string) *sync.Mutex {
+	v, _ := rateLimitEpisodeLocks.LoadOrStore(name, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
+var rateLimitEpisodeLocks sync.Map
 
 // rateLimitWatched reports whether a usage limit can be SEEN for this session — which is what
 // decides whether waiting it out can be automated at all.
@@ -253,7 +300,7 @@ func rateLimitRecover(m session.Meta, st rateLimitState, now time.Time, onMenu b
 		// already fired (or is past saving); leaving the row behind would pile dead entries up
 		// in the Console's scheduled-execution list, and the id is about to be forgotten.
 		if st.ScheduleID != "" {
-			dropRateLimitSchedule(st.ScheduleID)
+			cancelRateLimitSchedule(m.Name, st.ScheduleID)
 		}
 		st = rateLimitState{}
 	}
@@ -369,7 +416,7 @@ func rateLimitFollowUp(m session.Meta, st rateLimitState, now time.Time, alive b
 	}
 	// Do not leave the spent once-schedule behind: dead rows pile up in the Console's list.
 	if st.ScheduleID != "" {
-		dropRateLimitSchedule(st.ScheduleID)
+		cancelRateLimitSchedule(m.Name, st.ScheduleID)
 	}
 	RateLimitStates.Remove(m.Name)
 }
@@ -572,11 +619,16 @@ func scheduleTZName() string {
 	return ""
 }
 
-// deleteRateLimitSchedule removes a spent once-schedule, best-effort.
-func deleteRateLimitSchedule(id string) {
-	if _, err := mcpx.CPScheduleDo(http.MethodDelete, "/internal/schedules/"+url.PathEscape(id), nil); err != nil {
-		log.Printf("rate-limit: could not delete the spent schedule %s: %v", id, err)
+// deleteRateLimitSchedule removes a once-schedule. nil means the CP confirmed it is gone: it
+// deleted it, or answered 404 because it no longer has it. Any other answer, or none, may have
+// left it in place, and the caller keeps the id (cancelRateLimitSchedule).
+func deleteRateLimitSchedule(id string) error {
+	_, err := mcpx.CPScheduleDo(http.MethodDelete, "/internal/schedules/"+url.PathEscape(id), nil)
+	var cpErr *mcpx.CPScheduleError
+	if errors.As(err, &cpErr) && cpErr.Status == http.StatusNotFound {
+		return nil
 	}
+	return err
 }
 
 // rateLimitResumePrompt is the nudge sent when the limit lifts. It mixes in no new

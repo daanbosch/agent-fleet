@@ -95,6 +95,29 @@ func managedBusy(m session.Meta) bool {
 	return false
 }
 
+// managedInFlight reports that a managed session's handle holds an entry it took from its queue
+// and has not settled (the drivers' ManagedInFlight). Unlike managedBusy, input still queued
+// does not count.
+func managedInFlight(m session.Meta) bool {
+	switch m.Kind {
+	case session.KindOpencode:
+		return opencode.ManagedInFlight(m.Name)
+	case session.KindCodex:
+		return codex.ManagedInFlight(m.Name)
+	case session.KindCopilot:
+		return copilot.ManagedInFlight(m.Name)
+	case session.KindCursor:
+		return cursor.ManagedInFlight(m.Name)
+	case session.KindKiro:
+		return kiro.ManagedInFlight(m.Name)
+	case session.KindLcpp:
+		return lcpp.ManagedInFlight(m.Name)
+	case session.KindMuse:
+		return muse.ManagedInFlight(m.Name)
+	}
+	return false
+}
+
 // dropManagedRuntime detaches a managed session from its runtime — the equivalent of the
 // tmux kill-session that stop / halt / archive / recreate do: abort the running turn and
 // forget the handle. The conversation's source of truth (SQLite / rollout) stays intact,
@@ -429,6 +452,10 @@ type CreateReq struct {
 	// initial_prompt carrying its id (instr) (#1257). False on the Terminal route.
 	managed bool
 	instr   string
+	// name is the slug a move booked for its target before writing the handover file there
+	// (ADR 0115 decision 9). Unexported, so no client can name a session: every other create
+	// allocates a fresh slug.
+	name string
 	// Origin / OriginConv record who STARTED this session (docs/log/46 §2-c, ADR 0029 §6) —
 	// a different axis from Source (which attributes one injected prompt). The MCP
 	// create_session sends "operator" plus its own conversation slug; the Console sends
@@ -736,6 +763,12 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSON(w, r, &req) {
 		return
 	}
+	createSession(w, r, req)
+}
+
+// createSession is the create after its body is decoded, so a move can create its target
+// in-process with the name it booked (CreateReq.name).
+func createSession(w http.ResponseWriter, r *http.Request, req CreateReq) {
 	// A create raised by another SESSION (ADR 0073) carries the parent's name, and the whole
 	// spawn regime hangs off it. Resolved here; the refusals run further down.
 	spawnParent := ""
@@ -1132,7 +1165,31 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 	// Identity is a freshly allocated random slug — NOT the client's name. It (and the
 	// sid it derives) can't collide with an archived/pruned session's jsonl, so a new
 	// session never accidentally --resumes a past conversation.
-	name := allocSessionName(req.Dir)
+	name := req.name
+	if name == "" {
+		name = allocSessionName(req.Dir)
+	} else if _, taken := session.ReadMeta(name); taken {
+		// A move's booked name is held against every allocation; a meta under it anyway is
+		// another session, which a create must never overwrite.
+		httpx.WriteErr(w, http.StatusConflict, "name_taken", "a session named "+name+" already exists")
+		return
+	}
+	// publish writes the meta. A move's target is written checked: the move commits, and stops
+	// its source, on the strength of that meta, and a target running without one is listed
+	// nowhere. Its first prompt follows the write, so a failed write leaves a target that has
+	// not been told to work.
+	publish := func(m session.Meta) bool {
+		if req.name == "" {
+			slot.publish(m)
+			return true
+		}
+		if err := writeMoveTargetMeta(m); err != nil {
+			log.Printf("move target %s: writing its meta: %v", name, err)
+			httpx.WriteErr(w, http.StatusInternalServerError, errCodeMetaWriteFailed, "the session started but its meta could not be written: "+err.Error())
+			return false
+		}
+		return true
+	}
 
 	kind := NormalizeKind(req.Kind)
 	// An SSM session with no client title defaults to "{host alias} @MMDD-HHMM" — a
@@ -1226,7 +1283,9 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 			writeRuntimeErr(w, err)
 			return
 		}
-		slot.publish(meta)
+		if !publish(meta) {
+			return
+		}
 		recordFleetGraphBirth(meta)
 		req.managed = true
 		noteCreateOrigin(name, &req, spawnParent, origin)
@@ -1251,7 +1310,9 @@ func HandleCreateSession(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusInternalServerError, "tmux_failed", err.Error())
 		return
 	}
-	slot.publish(meta)
+	if !publish(meta) {
+		return
+	}
 	recordFleetGraphBirth(meta)
 
 	// BEFORE the delivery below, not after: the record is what the mirror matches the turn
@@ -1924,6 +1985,11 @@ func HandleRecreateSession(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_name", "invalid session name")
 		return
 	}
+	lease, ok := enterSessionGate(w, r, name)
+	if !ok {
+		return
+	}
+	defer lease.Release()
 	m, ok := session.ReadMeta(name)
 	if !ok {
 		httpx.WriteErr(w, http.StatusNotFound, "not_found", "no such session: "+name)

@@ -174,6 +174,22 @@ func UpdateSessionMeta(name string, fn func(m *session.Meta) bool) (session.Meta
 	return m, true
 }
 
+// updateSessionMetaChecked is UpdateSessionMeta for a write that must be on disk before its
+// caller goes on (a move's transitions): the error of the write is returned, and the write is
+// atomic (session.WriteMetaChecked). wrote is false when fn declined or the meta is gone.
+func updateSessionMetaChecked(name string, fn func(m *session.Meta) bool) (m session.Meta, wrote bool, err error) {
+	sessionLockMu.Lock()
+	defer sessionLockMu.Unlock()
+	m, ok := session.ReadMeta(name)
+	if !ok || !fn(&m) {
+		return m, false, nil
+	}
+	if err := session.WriteMetaChecked(m); err != nil {
+		return m, false, err
+	}
+	return m, true, nil
+}
+
 // deletionGate serialises a working-copy delete (gitx.HandleDeleteRepo, from its guards to
 // settling its sessions) against the lock endpoints. Without it a lock set while `git worktree
 // remove` ran was answered "locked" and the folder was deleted anyway (ADR 0101). Order: the

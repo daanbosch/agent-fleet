@@ -46,6 +46,11 @@ func HandleSessionDriver(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_name", "invalid session name")
 		return
 	}
+	lease, ok := enterSessionGate(w, r, name)
+	if !ok {
+		return
+	}
+	defer lease.Release()
 	var req driverReq
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_body", "invalid JSON body")

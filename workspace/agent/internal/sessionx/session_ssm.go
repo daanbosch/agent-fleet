@@ -48,6 +48,11 @@ func HandleStartSession(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_name", "invalid session name")
 		return
 	}
+	lease, ok := enterSessionGate(w, r, name)
+	if !ok {
+		return
+	}
+	defer lease.Release()
 	if _, ok := session.ReadMeta(name); !ok {
 		httpx.WriteErr(w, http.StatusNotFound, "not_found", "no such session: "+name)
 		return
@@ -59,7 +64,7 @@ func HandleStartSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := ensureSessionTmux(name, force); err != nil {
+	if err := ensureSessionTmux(lease, name, force); err != nil {
 		if !writeCodexReleasingErr(w, err) {
 			httpx.WriteErr(w, http.StatusInternalServerError, "start_failed", err.Error())
 		}

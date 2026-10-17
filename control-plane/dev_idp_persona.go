@@ -281,76 +281,160 @@ func (a devIdPAPI) askConsent(w http.ResponseWriter, r *http.Request, cc devIdPC
 		return
 	}
 	lang := auth.PreferredUILang(r)
-	type row struct{ ID, Label, Email string }
+	type row struct{ ID, Label, Email, Initial string }
+	br := a.brand.get(r.Context())
 	data := struct {
-		Ticket, Action, Target, Self, Lang string
-		T                                  devIdPConsentStrings
-		Personas                           []row
-	}{Lang: lang, T: devIdPConsentText[lang], Ticket: ticket, Action: devIdPConsentPath, Self: ident.Email}
+		Ticket, Action, Target, Port, Self, SelfInitial, Lang, Accent, BrandLabel, Icon string
+		T                                                                               devIdPConsentStrings
+		Personas                                                                        []row
+	}{
+		Lang: lang, T: devIdPConsentText[lang], Ticket: ticket, Action: devIdPConsentPath, Self: ident.Email,
+		SelfInitial: initialOf(ident.Email), Accent: brandBaseHex, BrandLabel: br.label, Icon: "/brand/icon-192.png",
+	}
+	if data.SelfInitial == "" {
+		data.SelfInitial = initialOf(data.T.Myself)
+	}
+	if br.hex != "" {
+		data.Accent = br.hex
+	}
 	if u, err := url.Parse(req.redirectURI); err == nil {
 		data.Target = u.Host
+		data.Port = previewPortOf(u.Hostname())
 	}
 	for _, p := range personas {
 		pr := devIdPPersonaProfile(p)
-		data.Personas = append(data.Personas, row{ID: p.ID, Label: pr.Name, Email: pr.Email})
+		data.Personas = append(data.Personas, row{ID: p.ID, Label: pr.Name, Email: pr.Email, Initial: initialOf(pr.Name)})
 	}
 	noStore(w)
-	w.Header().Set("Referrer-Policy", "no-referrer")
+	// Never no-referrer: it makes the browser send "Origin: null" on this page's own form POST, which
+	// sameOrigin refuses (observed: every submit got 403). same-origin still sends no Referer to the app.
+	w.Header().Set("Referrer-Policy", "same-origin")
 	// The page is a click target: refuse framing so it cannot be clicked through. No form-action:
 	// Chromium applies it to the 302 that follows the POST too, so 'self' would block the return
 	// to the app on its preview host (measured in headless Chromium). The page has no script and
 	// the form's own action is fixed in the template.
 	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = devIdPConsentTmpl.Execute(w, data)
+}
+
+// initialOf is the avatar letter: the first letter or digit of s, upper-cased ("" when there is none).
+func initialOf(s string) string {
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return string(unicode.ToUpper(r))
+		}
+	}
+	return ""
+}
+
+var previewPortRE = regexp.MustCompile(`^[^.]*-(\d{1,5})(?:\.|$)`)
+
+// previewPortOf reads the port out of a preview host name ("<slug>-3000.<domain>"); "" when the
+// host is not shaped like one, in which case the page shows no port badge.
+func previewPortOf(host string) string {
+	if m := previewPortRE.FindStringSubmatch(host); m != nil {
+		return m[1]
+	}
+	return ""
 }
 
 // devIdPConsentStrings is the consent page's text for one language. The language follows the
 // browser's Accept-Language like every other CP-rendered page (auth.PreferredUILang): the page
 // is a top-level navigation from the app being developed, so there is no Console session to ask.
 type devIdPConsentStrings struct {
-	Title, Heading, SignInTo, Myself, Persona, Continue, Note, Refused string
+	Title, Heading, Lead, Section, Myself, Tag, Continue, Cancel, Footer, Refused string
 }
 
 var devIdPConsentText = map[string]devIdPConsentStrings{
 	"ja": {
-		Title:    "開発用サインイン",
+		Title:    "開発用サインイン · Agent Fleet",
 		Heading:  "開発用サインイン",
-		SignInTo: "次の身元でサインインします",
+		Lead:     "プレビュー中のアプリに、どの身元でサインインするか選んでください。",
+		Section:  "サインインする身元",
 		Myself:   "自分",
-		Persona:  "テスト用身元",
+		Tag:      "テスト用",
 		Continue: "続ける",
-		Note:     "テスト用身元は、この開発用 IdP の中だけにあります。",
+		Cancel:   "キャンセル",
+		Footer:   "Agent Fleet の開発用 IdP が発行するサインインです。テスト用の身元はここでだけ通用し、本番の設定はこの発行元を信頼してはいけません。",
 		Refused:  "dev-idp: このサインインの確認は拒否されたか、期限が切れています。最初からサインインし直してください",
 	},
 	"en": {
-		Title:    "Development sign-in",
+		Title:    "Development sign-in · Agent Fleet",
 		Heading:  "Development sign-in",
-		SignInTo: "Sign in as:",
+		Lead:     "Choose which identity to sign in to the app you are previewing.",
+		Section:  "Sign in as",
 		Myself:   "Myself",
-		Persona:  "test persona",
+		Tag:      "test",
 		Continue: "Continue",
-		Note:     "Test personas exist only on this development IdP.",
+		Cancel:   "Cancel",
+		Footer:   "This sign-in is issued by Agent Fleet's development IdP. Test identities exist only here; a production configuration must never trust this issuer.",
 		Refused:  "dev-idp: this sign-in confirmation was refused or has expired; start the sign-in again",
 	},
 }
 
+// The page is inline CSS only (the CSP allows no script, font or remote style). Dark is the Console's
+// default; the light tokens apply under prefers-color-scheme. --accent is the deployment's brand colour.
 var devIdPConsentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
 <html lang="{{.Lang}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{.T.Title}}</title>
-<style>body{font:15px system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem}
-label{display:block;padding:.5rem;border:1px solid #8884;border-radius:6px;margin:.4rem 0}
-small{color:#666}button{margin-top:1rem;padding:.5rem 1.2rem}</style></head>
-<body><h1>{{.T.Heading}}</h1>
-<p><b>{{.Target}}</b> — {{.T.SignInTo}}</p>
+<style>
+:root{--bg:#1e1e1e;--panel:#181818;--panel2:#141414;--border:#333;--fg:#ddd;--muted:#888;--accent-fg:#fff;--warn:#e0a23a;--sel:#ffffff12}
+@media (prefers-color-scheme: light){:root{--bg:#f4f5f7;--panel:#fff;--panel2:#eaecef;--border:#d2d6dc;--fg:#1c2024;--muted:#4b5563;--sel:#00000009;--warn:#a15c00}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif;padding:24px}
+.card{width:100%;max-width:440px;background:var(--panel);border:1px solid var(--border);border-radius:14px;overflow:hidden;box-shadow:0 10px 40px #0006}
+.top{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:14px 20px;border-bottom:1px solid var(--border);background:var(--panel2)}
+.top img{flex:none;width:28px;height:28px;border-radius:7px}
+.top .brand{font-weight:600;letter-spacing:.01em}
+.top .dep{color:var(--muted);font-size:13px;min-width:0;max-width:100%;overflow-wrap:anywhere}
+.badge{margin-left:auto;flex:none;font-size:11px;font-weight:700;letter-spacing:.08em;color:var(--warn);border:1px solid currentColor;border-radius:999px;padding:2px 8px}
+.body{padding:22px 20px 18px}
+h1{font-size:20px;margin:0 0 6px}
+.lead{color:var(--muted);margin:0 0 16px;font-size:14px}
+.app{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px dashed var(--border);border-radius:10px;margin-bottom:18px;font-size:13px}
+.app code{font:12.5px ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all}
+.port{flex:none;font-size:11px;background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:1px 6px;color:var(--muted)}
+.section{font-size:12px;color:var(--muted);margin:0 0 8px;text-transform:uppercase;letter-spacing:.06em}
+label.opt{position:relative;display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;margin:0 0 8px;cursor:pointer}
+label.opt:has(input:checked){border-color:var(--accent);background:var(--sel)}
+label.opt:has(input:focus-visible){outline:2px solid var(--accent);outline-offset:2px}
+label.opt input{position:absolute;opacity:0;pointer-events:none}
+.av{flex:none;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-weight:700;color:#fff;background:#3b6ea5}
+.av.p{background:#7a5bb5}
+.who{min-width:0;flex:1 1 auto}
+.who b{display:block;font-weight:600;overflow-wrap:break-word}
+.who small{color:var(--muted);display:block;overflow-wrap:anywhere}
+.tag{margin-left:auto;font-size:11px;color:var(--muted);border:1px solid var(--border);border-radius:999px;padding:1px 8px;flex:none}
+.tick{margin-left:auto;width:18px;height:18px;border-radius:50%;border:2px solid var(--border);flex:none}
+label.opt:has(input:checked) .tick{border-color:var(--accent);background:radial-gradient(var(--accent) 45%,transparent 50%)}
+.tag+.tick{margin-left:8px}
+@media (max-width:420px){.tick{display:none}label.opt{gap:10px}label.opt:has(input:checked){border-width:2px;padding:9px 11px}}
+.actions{display:flex;gap:10px;align-items:center;margin-top:16px}
+button{font:inherit;font-weight:600;border:0;border-radius:9px;padding:10px 18px;background:var(--accent);color:var(--accent-fg);cursor:pointer}
+button.cancel{background:none;color:var(--muted);font-weight:400;font-size:14px;padding:10px 6px}
+button.cancel:hover{text-decoration:underline}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.foot{border-top:1px solid var(--border);padding:12px 20px;font-size:12px;color:var(--muted);display:flex;gap:8px}
+.foot b{color:var(--warn)}
+</style></head><body style="--accent:{{.Accent}}">
+<main class="card">
+<div class="top"><img src="{{.Icon}}" alt=""><span class="brand">Agent Fleet</span>{{if .BrandLabel}}<span class="dep">· {{.BrandLabel}}</span>{{end}}<span class="badge">DEV IdP</span></div>
+<div class="body">
+<h1>{{.T.Heading}}</h1>
+<p class="lead">{{.T.Lead}}</p>
+<div class="app">{{if .Port}}<span class="port">:{{.Port}}</span>{{end}}<code>{{.Target}}</code></div>
+<p class="section">{{.T.Section}}</p>
 <form method="post" action="{{.Action}}">
 <input type="hidden" name="ticket" value="{{.Ticket}}">
-<label><input type="radio" name="choice" value="self" checked> {{.T.Myself}} <small>{{.Self}}</small></label>
-{{range .Personas}}<label><input type="radio" name="choice" value="{{.ID}}"> {{.Label}} <small>{{.Email}} ({{$.T.Persona}})</small></label>
-{{end}}<button type="submit">{{.T.Continue}}</button>
+<label class="opt"><input type="radio" name="choice" value="self" checked><span class="av">{{.SelfInitial}}</span><span class="who"><b>{{.T.Myself}}</b><small>{{.Self}}</small></span><span class="tick"></span></label>
+{{range .Personas}}<label class="opt"><input type="radio" name="choice" value="{{.ID}}"><span class="av p">{{.Initial}}</span><span class="who"><b>{{.Label}}</b><small>{{.Email}}</small></span><span class="tag">{{$.T.Tag}}</span><span class="tick"></span></label>
+{{end}}<div class="actions"><button type="submit">{{.T.Continue}}</button><button type="submit" class="cancel" name="action" value="cancel" formnovalidate>{{.T.Cancel}}</button></div>
 </form>
-<p><small>{{.T.Note}}</small></p>
+</div>
+<div class="foot"><b>⚠</b><span>{{.T.Footer}}</span></div>
+</main>
 </body></html>`))
 
 func consentRefuse(w http.ResponseWriter, r *http.Request, status int, why string) {
@@ -429,6 +513,12 @@ func (a devIdPAPI) consent(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal([]byte(g.Claims), &stored)
 	req := devIdPAuthRequest{redirectURI: g.RedirectURI, state: stored.State, nonce: g.Nonce, challenge: g.Challenge, scope: g.Scope}
+	// Cancel answers with the parked request's redirect_uri and state, never the form's; the
+	// ticket is already spent above.
+	if r.PostForm.Get("action") == "cancel" {
+		a.redirectBack(w, r, req.redirectURI, req.state, url.Values{"error": {"access_denied"}, "error_description": {"the sign-in was cancelled"}})
+		return
+	}
 	profile := devIdPClaims(ctx, a.mgr.store, ident)
 	if choice := r.PostForm.Get("choice"); choice != "self" {
 		p, found, err := a.mgr.store.GetDevIdPPersona(ctx, cc.ws.ID, choice)

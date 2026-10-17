@@ -35,6 +35,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/fleetgraph"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/lifegate"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/tmuxx"
 )
@@ -330,6 +331,14 @@ func dropExpiredPending(name string, list []agents.PendingPeer) []agents.Pending
 // writes it back in place; one that will not clear (the policy now refuses, the target is gone)
 // or that may already have reached the session drops it.
 func deliverPendingPeer(name string, p agents.PendingPeer) bool {
+	// Taken before the message leaves the spool and handed to /input on the context, so the
+	// message is either delivered or back in the spool before a move can close input, where
+	// the move's snapshot reads it (ADR 0115 decision 11.1). A moved session leaves it there.
+	lease, err := lifegate.Enter(context.Background(), name)
+	if err != nil {
+		return false
+	}
+	defer lease.Release()
 	t := pendingTargetOf(name)
 	t.mu.Lock()
 	if t.inflight != nil || !agents.TakePendingPeer(name, p.ID) {
@@ -345,7 +354,7 @@ func deliverPendingPeer(name string, p agents.PendingPeer) bool {
 		t.mu.Unlock()
 	}()
 	body, _ := json.Marshal(map[string]string{"prompt": p.Message, "peer_from": p.From, "peer_intent": p.Intent})
-	ctx := context.WithValue(context.Background(), pendingDeliveryKey{}, pendingDelivery{queuedAt: p.QueuedAt})
+	ctx := context.WithValue(lifegate.WithLease(context.Background(), lease), pendingDeliveryKey{}, pendingDelivery{queuedAt: p.QueuedAt})
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/sessions/"+name+"/input", bytes.NewReader(body))
 	req.SetPathValue("name", name)
 	rec := &captureWriter{header: http.Header{}}

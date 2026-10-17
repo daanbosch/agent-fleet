@@ -309,6 +309,24 @@ deployment, so the option would also have been unreachable. Showing the switch e
   allowed) and personas.
 - Not verified: a live run on a deployment without a preview domain.
 
+## Note (2026-10-16): the consent page's referrer policy is `same-origin` (#2243)
+
+The personas note above says the consent page is sent with `no-referrer`. That value makes a browser send
+`Origin: null` on the page's own form POST, which the strict `sameOrigin` check refuses, so every submit
+got 403 on a deployment (the Go tests set `Origin` by hand and never saw it). The page now sends
+`Referrer-Policy: same-origin`: the same-origin POST carries the real Console origin, and no `Referer`
+reaches the app it redirects to. `sameOrigin` is unchanged (`Origin: null` is still refused). The
+authorization redirect keeps `no-referrer`; it hosts no form.
+
+## Note (2026-10-17): the consent page as an Agent Fleet screen, with Cancel (#2245)
+
+The consent page is restyled in the Console's look (inline CSS only, dark by default and a light variant,
+accent = the deployment's brand colour, brand icon and label in the header, a "DEV IdP" badge). The CSP gains
+only `img-src 'self'` for the icon. A **Cancel** button posts to the same `/dev-idp/consent` endpoint with
+`action=cancel`: after the same origin checks and the same ticket consumption and re-checks as Continue it
+returns `error=access_denied` and the parked `state` to the parked, re-vetted `redirect_uri`; neither value is
+read from the form. The form contract (`ticket`, `choice`) and the `same-origin` referrer policy are unchanged.
+
 ## Note (2026-10-16): the client exists before the opt-in, and there is no per-workspace switch (#2242)
 
 This supersedes decision 5's "created at opt-in; off then on rotates" and decision 3's per-workspace

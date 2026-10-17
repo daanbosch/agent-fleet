@@ -4603,9 +4603,20 @@ func CPScheduleDo(method, path string, body []byte) (string, error) {
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("CP 定時実行API エラー (%d): %s", resp.StatusCode, string(b))
+		return "", &CPScheduleError{Status: resp.StatusCode, Body: string(b)}
 	}
 	return string(b), nil
+}
+
+// CPScheduleError is a CP schedule API answer of 4xx/5xx. It is typed so a caller can tell
+// "the schedule is gone" (404) from a failure that may still have left it in place.
+type CPScheduleError struct {
+	Status int
+	Body   string
+}
+
+func (e *CPScheduleError) Error() string {
+	return fmt.Sprintf("CP 定時実行API エラー (%d): %s", e.Status, e.Body)
 }
 
 // WithOwnerConv stamps owner_conv onto a create_schedule body so the schedule's
