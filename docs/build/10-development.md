@@ -63,7 +63,7 @@ manifest `versions.json` on the default lean image — is
 3. **Commit and push** — a small diff, with a message that follows
    [CONTRIBUTING](../../CONTRIBUTING.md#commits--prs).
 4. **Wait for the end-to-end workflow to go green.** `e2e.yml` does **not** run on a
-   push (only on PRs to main, a nightly cron and manual dispatch), so start it on your
+   push (only on PRs to main that change the image inputs, a nightly cron and manual dispatch), so start it on your
    branch yourself: `gh workflow run e2e.yml --ref <branch>`. It builds the image with
    the CLIs baked in (`BAKE_AGENT_CLIS=1`) and verifies L1 (**the installed versions
    equal the pins**, for the tools §10.3 names), L2 (fleet connectivity) and L3 (Console UI). **Do not proceed
@@ -389,8 +389,12 @@ cd e2e && WS_IMAGE=agent-fleet/workspace:dev go test -v -tags e2e -timeout 15m .
 cd console-e2e && npm ci && npx playwright test
 ```
 
-- `e2e.yml` runs on PRs to main (relevant paths), a nightly cron against main, and
-  manual dispatch — **never on a push**. Its jobs are `e2e` (L1 → L2) and `ui-e2e`
+- `e2e.yml` runs on PRs to main that change the Workspace image inputs (`workspace/`,
+  minus test-only files) or the harness (`e2e/`, `console-e2e/`, `deploy/local/e2e-smoke.sh`,
+  the workflow itself), a nightly cron against main, and manual dispatch — **never on a
+  push**. A PR touching only `control-plane/` or `console/` does not run it (L2/L3 build
+  those from source, so they are not image inputs); such a break is caught by the
+  nightly run, with `ci.yml` as the PR-time guard. Its jobs are `e2e` (L1 → L2) and `ui-e2e`
   (L3, which uploads traces and the CP log on failure), in parallel, and `live-smoke`
   (L4), only on dispatch with `live`. Its image build passes no platform argument, so
   it covers **amd64 only**: the arm64 assets (the per-arch sha256 pins for agy, cursor,
