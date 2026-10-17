@@ -52,14 +52,14 @@ updated: "2026-10"
 | capability | 自パッケージの `Caps()`、自 `Driver` の `Capabilities()` | **利用者に見える capability は、通しで駆動するまで立てない**。`Capabilities()` は driver の実装を宣言する（§20.4）。`Caps()` は `GET /agents/kinds` がそのまま配る値でもある（§20.7）。`Tri` のフィールドを未設定のままにすると `unverified` と読まれ、`no` にはならない |
 | ターミナル起動 | 自パッケージの `BuildLaunch`（`agents.LaunchPlan` を返す）| 環境変数は `LaunchPlan.Env` に入れ、**コマンドに前置しない**（§20.3）。マネージド専用の種別は `ErrNoTerminalRoute` を返す |
 | マネージドの実行系 | 自 `Driver`。`Resume` が `ThreadHandle` を返す | 形はプロセスモデルに従う（[04 §4.3](04-agent.ja.md)）|
-| 呼び出し側がどちらの driver を選ぶか | Console: `console/src/agents/registry.ts` の `managedDriver` と `terminalDriver`。コンテナ内 MCP の `create_session`（`mcpStdioCall`）。CP: `control-plane/internal/mcpsrv/mcp.go` の `create_session` と `control-plane/scheduler_wake.go` の `injectDriver` | Agent は driver 未指定を `tui` にするので、**両対応でマネージドで始めたい種別は `Caps().ManagedDefault` を立てる**。コンテナ内の `create_session` はレジストリから、CP の `create_session` と `injectDriver` は kind カタログのスナップショット（`agentkinds.ManagedDefaultKinds`）から導出するので、その側に足すものは無い。Console の `managedDriver` はまだ手書きの写し。マネージド専用は Agent が既定を決めるが、Console には `terminalDriver: false` が要る |
+| 呼び出し側がどちらの driver を選ぶか | 手で足すものは無い。Agent は driver 未指定を `tui` にするので、**両対応でマネージドで始めたい種別は `Caps().ManagedDefault` を立てる**。コンテナ内の `create_session` はレジストリから、CP の `create_session` と `injectDriver` は kind カタログのスナップショット（`agentkinds.ManagedDefaultKinds`）から、Console は `GET /api/agents/kinds` から導出する（`console/src/agents/registry.ts` の `managedDriver` / `terminalDriver` はそのゲッターで、読み込み前は `console/src/agents/kindCatalog.ts` の `FALLBACK_KIND_FACTS` が答える） | マネージド専用は Agent が既定を決め、Console は `managedOnly` から `terminalDriver: false` を導出する |
 | live 状態 | フック / プラグイン / CLI のストアのポーリング / runtime イベント | 状態ストアへ正規化する。working / idle / question と、`plan`・`permission`（[04 §4.4](04-agent.ja.md)）|
 | transcript | `Agent.Transcript` の裏のリーダー | **CLI が読めて安定した native store を持つなら、それを読む。会話を自前ストアへ複製しない**。パーサは統合しない。そういうストアが無い種別は自分で持つ。[04 §4.3](04-agent.ja.md) の 2 つの例外がそれ |
 | サインイン | Agent の `/connections/<kind>/…` ハンドラ、**および** `control-plane/routes.go` で 1 本ずつ名指しで中継するルート（ログインフローは `restLogin`）| CP へのコールバックが要る種別は無い（[08 §8.6](08-integrations.ja.md)）。サインインする相手が無い種別にはフローも無い |
 | 資格の置き場と fs denylist | 自パッケージと `fsDeny`（`fs.go`）| CLI が資格情報や状態を書く場所は**ファイルブラウザから隠す** |
 | MCP | `internal/mcpreg`: CLI が設定ファイルを読むなら `writerFor` の writer と `MaterializedKinds` への追加、別経路（ワイヤ上・プロセス内）で渡るなら `ServedKinds`。`Caps().MCPClient`。`knownKinds` は `ServedKinds` から、CP の `mcpKnownKinds` は kind カタログのスナップショット（§20.7）から導出される | CLI ごとに設定の形もプレースホルダ方言も違う。設定ファイル型で CLI を CI で動かせる種別は `mcp-config-contract.yml` にも足す |
 | エージェントへの指示 | `agent_instructions.go`: `instrSupportedKinds` と種別ごとの適用、または理由コード付きで `instrUnsupported` | Console の配布先一覧はこの 2 つから作られる。ユーザー単位の置き場が無い CLI は、**黙って捨てず理由付きで載せる**。システムプロンプトを自分で組む種別は、各層をそこで読む。lcpp は `harness.SystemPrompt` でターンごとにそうしている。こうした種別も `instrSupportedKinds` に載せ、配信方式 `prompt`・パス無し・`Applied` は true とする（行のスイッチがハーネスの読む値そのものになる）。プレビューの case も足す |
-| Console の descriptor | `console/src/types/session.ts` の `SESSION_KINDS` と、`console/src/agents/registry.ts` の descriptor 1 個 | 操作要素は descriptor の `caps` で決まる。ただし kind 名で分岐する画面がまだあるので grep する（下記）|
+| Console の descriptor | `console/src/types/session.ts` の `SESSION_KINDS` と、`console/src/agents/registry.ts` の descriptor 1 個 | 操作要素は descriptor の `caps` で決まる。driver に関する事実（`managedDriver`、`terminalDriver`）はカタログから読み、読み込み前は `console/src/agents/kindCatalog.ts` の `FALLBACK_KIND_FACTS` が答える。ただし kind 名で分岐する画面がまだあるので grep する（下記）|
 | 版ピン | `workspace/Dockerfile` の ARG、そこで書き出す `versions.json`、`deploy/local/cli-drift-check.sh` の行 | [10 §10.2.1](10-development.ja.md)。ベンダーの CLI を動かさない種別にはピンが無い |
 | contract ワークフロー | `.github/workflows/` の下に専用ファイル（ワークスペースイメージが CLI やホストをピンする種別）| **エージェント毎に 1 ファイル**。リリース監視に登録する。lcpp はイメージで何もピンせず、代わりに手動の検査を持つ（§20.5）|
 
@@ -228,8 +228,10 @@ cd workspace/agent && go test -run TestKindCatalogSnapshot -update-kind-catalog 
       （`TestKindCatalogCoversRegistry`）
 - [ ] MCP: `MaterializedKinds`（と writer）か `ServedKinds` を `Caps().MCPClient` に合わせる。
       CP はスナップショット経由で追従する
-- [ ] MCP クライアントなら Console の `MCP_KINDS`（`console/src/features/settings/mcp/mcpWire.ts`）。
-      まだ写しで、`TestMcpKnownKindsMirrorConsole` が見張る
+- [ ] Console のフォールバック（`GET /api/agents/kinds` が答えるまで使う）:
+      `console/src/agents/kindCatalog.ts` の `FALLBACK_KIND_FACTS`、MCP クライアントなら
+      `console/src/features/settings/mcp/mcpWire.ts` の `MCP_KINDS`。`kindCatalog.test.ts` が
+      両方と `SESSION_KINDS` をカタログのスナップショットと突き合わせる
 
 **種別固有 — その機能を持つときだけ:**
 
@@ -242,7 +244,7 @@ cd workspace/agent && go test -run TestKindCatalogSnapshot -update-kind-catalog 
 
 **表示だけ — Console:**
 
-- [ ] `console/src/types/session.ts` の `SESSION_KINDS` と `console/src/agents/registry.ts` の記述子
-      （`caps`、`managedDriver`、`terminalDriver`）
+- [ ] `console/src/types/session.ts` の `SESSION_KINDS`（表示順）と `console/src/agents/registry.ts` の記述子
+      （`caps`）。記述子が無い種別も汎用アイコンで表示はされるが、Console からは起動できない
 - [ ] 色・アイコン・文言。i18n の文字列を両言語で
 - [ ] 動的なモデル一覧: `console/src/lib/agentModels.ts` の `isDynamic`
