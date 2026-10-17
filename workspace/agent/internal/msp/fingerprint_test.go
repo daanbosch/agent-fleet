@@ -92,13 +92,21 @@ func TestSchemaFingerprintMatchesTheBundle(t *testing.T) {
 // deployment actually runs exports its own schema offline, so a protocol change is a red build
 // instead of a decode failure on a member's turn. It skips where no binary is installed, which
 // is every CI runner outside muse-contract.yml and a Workspace that never ran
-// `workspace-agent install-muse`.
+// `workspace-agent install-muse`. It also skips a PATH binary that is not the Dockerfile pin: a
+// home outlives its image, so the older muse that survives there reads the newer bundle as
+// removals (measured: installed 1.4.7 against the 1.4.10 bundle) and the red says nothing about
+// the types. AF_MUSE_BIN never skips on version, so muse-contract.yml still turns real drift red.
 //
 // It asks for compatibility, not an equal fingerprint: the fingerprint moves on every change to
 // the vendor's model, including the additive ones these types survive (1.3.0 -> 1.4.0-R4161.1
 // and R4161.1 -> R4302.1 were both additions only). schemagen.Compare holds the rules.
 func TestInstalledBinaryIsCompatibleWithTheBundle(t *testing.T) {
 	bin := museBinary(t)
+	if os.Getenv("AF_MUSE_BIN") == "" {
+		if hint := museVersionHint(bin); hint != "" {
+			t.Skip(strings.TrimSuffix(hint, "\n") + " (set AF_MUSE_BIN to check a binary regardless of the pin)")
+		}
+	}
 	out := t.TempDir()
 	cmd := exec.Command(bin, "schema", "generate-json-schema", "--out", out)
 	// Without this the vendor launcher may try to replace the binary mid-test, which is both
