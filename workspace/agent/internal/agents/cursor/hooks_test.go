@@ -353,8 +353,25 @@ func TestEnsureHooksRefusesWhatIsNotARegularFile(t *testing.T) {
 	}
 }
 
-// A save that lands between our read and our publish is never overwritten.
-func TestEnsureHooksOnceDoesNotClobberAConcurrentSave(t *testing.T) {
+// Saves that land during the publish are merged, never dropped, and every user version stays
+// on disk: in the file, or beside it as an .af-prev file.
+func prevFiles(t *testing.T, target string) []string {
+	t.Helper()
+	m, _ := filepath.Glob(target + ".af-prev.*")
+	return m
+}
+
+func anyContains(t *testing.T, files []string, sub string) bool {
+	t.Helper()
+	for _, f := range files {
+		if b, _ := os.ReadFile(f); strings.Contains(string(b), sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestEnsureHooksMergesASaveBeforeTheSwap(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "hooks.json")
 	if err := os.WriteFile(target, []byte(userHooks), 0o600); err != nil {
@@ -363,22 +380,67 @@ func TestEnsureHooksOnceDoesNotClobberAConcurrentSave(t *testing.T) {
 	saved := `{"version":1,"hooks":{"stop":[{"command":"./saved-later.sh"}]}}`
 	hookAfterRead = func() { _ = os.WriteFile(target, []byte(saved), 0o600) }
 	defer func() { hookAfterRead = nil }()
-	done, err := ensureHooksOnce(target, "/opt/af/a")
-	if err != nil || done {
-		t.Fatalf("done=%v err=%v, want a retry", done, err)
-	}
-	if got, _ := os.ReadFile(target); string(got) != saved {
-		t.Fatalf("the user's save was lost: %s", got)
-	}
-	hookAfterRead = nil
 	if err := ensureHooksAt(target, "/opt/af/a"); err != nil {
 		t.Fatal(err)
 	}
-	if es := stopEntries(t, target); len(es) != 2 || es[0]["command"] != "./saved-later.sh" {
-		t.Fatalf("merge after the retry = %+v", es)
+	es := stopEntries(t, target)
+	if len(es) != 2 || es[0]["command"] != "./saved-later.sh" {
+		t.Fatalf("published = %+v", es)
+	}
+	if !anyContains(t, prevFiles(t, target), "saved-later.sh") {
+		t.Fatal("the saved version is not kept beside the file")
 	}
 	if left, _ := filepath.Glob(filepath.Join(dir, ".hooks.json.af-*")); len(left) != 0 {
 		t.Fatalf("temp files left behind: %v", left)
+	}
+}
+
+// An editor saves by renaming its own temp file over the path inside the window: that inode is
+// the one the exchange swaps out, so it is found, merged and kept.
+func TestEnsureHooksKeepsAReplaceSaveDuringPublish(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(target, []byte(userHooks), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	saved := `{"version":1,"hooks":{"stop":[{"command":"./replaced-in-window.sh"}]}}`
+	hookBeforeSwap = func() {
+		hookBeforeSwap = nil // one save
+		ed := filepath.Join(dir, "editor.tmp")
+		_ = os.WriteFile(ed, []byte(saved), 0o600)
+		_ = os.Rename(ed, target)
+	}
+	defer func() { hookBeforeSwap = nil }()
+	if err := ensureHooksAt(target, "/opt/af/a"); err != nil {
+		t.Fatal(err)
+	}
+	es := stopEntries(t, target)
+	if len(es) != 2 || es[0]["command"] != "./replaced-in-window.sh" {
+		t.Fatalf("target = %+v", es)
+	}
+	prev := prevFiles(t, target)
+	// The inode the editor replaced is the editor's to drop; the one it put there must survive us.
+	if !anyContains(t, prev, "replaced-in-window.sh") {
+		t.Fatalf("the user's replace-saved version was not kept: %v", prev)
+	}
+}
+
+// A user's .af-prev file that already exists is never touched.
+func TestEnsureHooksLeavesAnExistingBackupAlone(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(target, []byte(userHooks), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mine := filepath.Join(dir, "hooks.json.af-prev")
+	if err := os.Mkdir(mine, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureHooksAt(target, "/opt/af/a"); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(mine); err != nil || !fi.IsDir() {
+		t.Fatalf("the user's own %s was disturbed: %v", mine, err)
 	}
 }
 
@@ -390,10 +452,10 @@ func TestHelperPublishCrash(t *testing.T) {
 	}
 	die := func() { os.Exit(3) }
 	switch stage {
-	case "before-rename":
-		hookBeforeRename = die
-	case "after-rename":
-		hookAfterRename = die
+	case "before-swap":
+		hookBeforeSwap = die
+	case "after-swap":
+		hookAfterSwap = die
 	}
 	_ = ensureHooksAt(os.Getenv("AF_TEST_HOOKS"), "/opt/af/a")
 	os.Exit(0) // not reached when the seam fired
@@ -402,7 +464,7 @@ func TestHelperPublishCrash(t *testing.T) {
 // A process killed while publishing never leaves the user's path empty, and the next ensure
 // still has every user hook.
 func TestEnsureHooksSurvivesAKilledPublish(t *testing.T) {
-	for _, stage := range []string{"before-rename", "after-rename"} {
+	for _, stage := range []string{"before-swap", "after-swap"} {
 		t.Run(stage, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
@@ -453,11 +515,12 @@ func TestEnsureHooksKeepsAnInPlaceWriteDuringPublish(t *testing.T) {
 		t.Fatal(err)
 	}
 	saved := `{"version":1,"hooks":{"stop":[{"command":"./saved-in-place.sh"}]}}`
-	hookBeforeRename = func() {
+	hookBeforeSwap = func() {
+		hookBeforeSwap = nil // one write
 		_ = fd.Truncate(0)
 		_, _ = fd.WriteAt([]byte(saved), 0)
 	}
-	defer func() { hookBeforeRename = nil }()
+	defer func() { hookBeforeSwap = nil }()
 	if err := ensureHooksAt(target, "/opt/af/a"); err != nil {
 		t.Fatal(err)
 	}
@@ -465,7 +528,7 @@ func TestEnsureHooksKeepsAnInPlaceWriteDuringPublish(t *testing.T) {
 	if len(es) != 2 || es[0]["command"] != "./saved-in-place.sh" || !strings.Contains(es[1]["command"].(string), "cursor-hook") {
 		t.Fatalf("published entries = %+v", es)
 	}
-	if b, _ := os.ReadFile(target + backupSuffix); string(b) != saved {
-		t.Fatalf("backup = %s", b)
+	if !anyContains(t, prevFiles(t, target), "saved-in-place.sh") {
+		t.Fatal("the in-place version is not kept beside the file")
 	}
 }
