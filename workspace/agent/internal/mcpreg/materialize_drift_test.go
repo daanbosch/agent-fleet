@@ -325,7 +325,8 @@ func TestDriftOpencodeMatchesMCPAdd(t *testing.T) {
 			// CLI runs in a throwaway directory: without it the file lands in the repo checkout and
 			// the global one this test reads is never created.
 			add := tc.add
-			if opencodeHasGlobalFlag(t, bin, cliDir, cliEnv) {
+			v2 := opencodeHasGlobalFlag(t, bin, cliDir, cliEnv)
+			if v2 {
 				add = append([]string{add[0], add[1], "--global"}, add[2:]...)
 			}
 			runCLIIn(t, cliDir, cliEnv, bin, add...)
@@ -339,19 +340,39 @@ func TestDriftOpencodeMatchesMCPAdd(t *testing.T) {
 			got := opencodeCLIEntry(t, filepath.Dir(opencodeConfigPath()), "afdrift")
 
 			// "enabled" is just af spelling out opencode's own default (true).
-			requireSameKeys(t, "opencode", got, want, "enabled")
+			requireSameKeys(t, "opencode", opencodeDropDefaultEnabled(t, got), opencodeDropDefaultEnabled(t, want))
 
 			// The raw comparison above only proves the entries look alike. What production relies
 			// on is that the CLI READS af's layout (flat mcp.<name>, which 2.x accepts only as a
 			// compatibility path), so have the CLI resolve both files and compare what it sees. A
 			// CLI that stops reading af's file turns this red even when the raw entries still match.
-			wantSeen := opencodeResolvedEntry(t, bin, cliHome, "afdrift")
-			gotSeen := opencodeResolvedEntry(t, bin, afHome, "afdrift")
-			// "enabled" resolves to "disabled": false (2.x) or stays "enabled" (1.x); either is af
-			// spelling out the default.
-			requireSameKeys(t, "opencode (as resolved by `debug config`)", gotSeen, wantSeen, "enabled", "disabled")
+			wantSeen := opencodeResolvedEntry(t, bin, cliHome, "afdrift", v2)
+			gotSeen := opencodeResolvedEntry(t, bin, afHome, "afdrift", v2)
+			requireSameKeys(t, "opencode (as resolved by `debug config`)",
+				opencodeDropDefaultEnabled(t, gotSeen), opencodeDropDefaultEnabled(t, wantSeen))
 		})
 	}
+}
+
+// opencodeDropDefaultEnabled removes the spelling of opencode's default (enabled) from an
+// entry so the CLI's terse form and af's explicit one compare equal. It checks the VALUE
+// first: "enabled" must be true and "disabled" (what 2.x resolves enabled:true to) false, so
+// a server the CLI would switch off is never normalised away. The entry is copied.
+func opencodeDropDefaultEnabled(t *testing.T, e map[string]any) map[string]any {
+	t.Helper()
+	out := make(map[string]any, len(e))
+	for k, v := range e {
+		out[k] = v
+	}
+	if v, ok := out["enabled"]; ok && v != true {
+		t.Fatalf("opencode entry has enabled=%v, want true: %v", v, e)
+	}
+	if v, ok := out["disabled"]; ok && v != false {
+		t.Fatalf("opencode entry has disabled=%v, want false: %v", v, e)
+	}
+	delete(out, "enabled")
+	delete(out, "disabled")
+	return out
 }
 
 // opencodeSandboxEnv confines everything the CLI writes (config, data and its log, cache,
@@ -379,27 +400,28 @@ func opencodeHasGlobalFlag(t *testing.T, bin, dir string, env []string) bool {
 // documents carry the normalised mcp.servers.<name>; 1.x prints the merged config with
 // mcp.<name>. 2.x answers through a background service, which is pinned to a free port inside
 // the sandbox and stopped on cleanup so neither another session's service nor a leftover one
-// is involved.
-func opencodeResolvedEntry(t *testing.T, bin, home, name string) map[string]any {
+// is involved. v2 is whether the CLI is 2.x: there the isolation setup must succeed (failing
+// closed rather than reaching the default shared service); 1.x has no service at all.
+func opencodeResolvedEntry(t *testing.T, bin, home, name string, v2 bool) map[string]any {
 	t.Helper()
 	env := opencodeSandboxEnv(home)
 	dir := t.TempDir()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
-	cmd := exec.Command(bin, "service", "set", "port", strconv.Itoa(port))
-	cmd.Dir, cmd.Env = dir, append(os.Environ(), env...)
-	if out, err := cmd.CombinedOutput(); err == nil {
+	if v2 {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := l.Addr().(*net.TCPAddr).Port
+		l.Close()
+		// Registered before the service can start, so a failed set still stops whatever came up.
 		t.Cleanup(func() {
 			stop := exec.Command(bin, "service", "stop")
 			stop.Dir, stop.Env = dir, append(os.Environ(), env...)
-			_ = stop.Run()
+			if out, err := stop.CombinedOutput(); err != nil {
+				t.Errorf("opencode service stop: %v\n%s", err, out)
+			}
 		})
-	} else {
-		t.Logf("opencode service set port (1.x has none): %v\n%s", err, out)
+		runCLIIn(t, dir, env, bin, "service", "set", "port", strconv.Itoa(port))
 	}
 	out := runCLIIn(t, dir, env, bin, "debug", "config")
 
