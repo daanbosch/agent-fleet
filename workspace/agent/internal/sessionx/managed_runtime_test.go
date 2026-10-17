@@ -106,39 +106,60 @@ func TestManagedRuntimeWithoutHandle(t *testing.T) {
 	}
 }
 
+// fakeRuntimeAgent answers each question independently, and only for its own session name, so a
+// wrapper that asks the wrong op or passes the wrong name gets a different answer.
 type fakeRuntimeAgent struct {
 	agents.Agent
-	answer          bool
-	dropped, purged []string
+	name                  string
+	alive, busy, inFlight bool
+	calls                 []string // "op name"
 }
 
 func (f *fakeRuntimeAgent) ManagedRuntime() agents.ManagedRuntimeOps {
-	ask := func(string) bool { return f.answer }
+	ask := func(op string, answer *bool) func(string) bool {
+		return func(n string) bool {
+			f.calls = append(f.calls, op+" "+n)
+			return n == f.name && *answer
+		}
+	}
+	record := func(op string) func(string) {
+		return func(n string) { f.calls = append(f.calls, op+" "+n) }
+	}
 	return agents.ManagedRuntimeOps{
-		Alive: ask, Busy: ask, InFlight: ask,
-		Drop:         func(n string) { f.dropped = append(f.dropped, n) },
-		RemoveLedger: func(n string) { f.purged = append(f.purged, n) },
+		Alive:        ask("alive", &f.alive),
+		Busy:         ask("busy", &f.busy),
+		InFlight:     ask("inFlight", &f.inFlight),
+		Drop:         record("drop"),
+		RemoveLedger: record("removeLedger"),
 	}
 }
 
-// The sessionx wrappers hand the runtime's answer through untouched and pass the session name.
+// Each sessionx wrapper asks its own op, with the session's name, and hands the answer through.
 func TestManagedRuntimeWrappersPassThrough(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	const kind = "rt-fake"
-	f := &fakeRuntimeAgent{Agent: agentRegistry[session.KindClaude]}
+	f := &fakeRuntimeAgent{Agent: agentRegistry[session.KindClaude], name: "rt-probe"}
 	agentRegistry[kind] = f
 	t.Cleanup(func() { delete(agentRegistry, kind) })
-	m := session.Meta{Name: "rt-probe", Kind: kind, Driver: session.DriverManaged}
-	for _, answer := range []bool{true, false} {
-		f.answer = answer
-		if ManagedAlive(m) != answer || managedBusy(m) != answer || managedInFlight(m) != answer {
-			t.Errorf("answer %v: alive/busy/inFlight = %v/%v/%v", answer, ManagedAlive(m), managedBusy(m), managedInFlight(m))
+	m := session.Meta{Name: f.name, Kind: kind, Driver: session.DriverManaged}
+	for _, tc := range []struct{ alive, busy, inFlight bool }{
+		{true, false, false}, {false, true, false}, {false, false, true}, {true, true, true}, {},
+	} {
+		f.alive, f.busy, f.inFlight = tc.alive, tc.busy, tc.inFlight
+		f.calls = nil
+		got := []bool{ManagedAlive(m), managedBusy(m), managedInFlight(m)}
+		if !slices.Equal(got, []bool{tc.alive, tc.busy, tc.inFlight}) {
+			t.Errorf("runtime says alive/busy/inFlight = %v/%v/%v; wrappers answered %v", tc.alive, tc.busy, tc.inFlight, got)
+		}
+		if want := []string{"alive rt-probe", "busy rt-probe", "inFlight rt-probe"}; !slices.Equal(f.calls, want) {
+			t.Errorf("calls %q, want %q", f.calls, want)
 		}
 	}
+	f.calls = nil
 	dropManagedRuntime(m)
 	removeManagedLedger(m)
-	if !slices.Equal(f.dropped, []string{"rt-probe"}) || !slices.Equal(f.purged, []string{"rt-probe"}) {
-		t.Errorf("dropped %v, purged %v; want each [rt-probe]", f.dropped, f.purged)
+	if want := []string{"drop rt-probe", "removeLedger rt-probe"}; !slices.Equal(f.calls, want) {
+		t.Errorf("calls %q, want %q", f.calls, want)
 	}
 }
 
