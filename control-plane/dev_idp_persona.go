@@ -282,20 +282,18 @@ func (a devIdPAPI) askConsent(w http.ResponseWriter, r *http.Request, cc devIdPC
 	}
 	lang := auth.PreferredUILang(r)
 	type row struct{ ID, Label, Email, Initial string }
-	br := a.brand.get(r.Context())
 	data := struct {
-		Ticket, Action, Target, Port, Self, SelfInitial, Lang, Accent, BrandLabel, Icon string
-		T                                                                               devIdPConsentStrings
-		Personas                                                                        []row
+		devIdPShell
+		Ticket, Action, Target, Port, Self, SelfInitial string
+		T                                               devIdPConsentStrings
+		Personas                                        []row
 	}{
-		Lang: lang, T: devIdPConsentText[lang], Ticket: ticket, Action: devIdPConsentPath, Self: ident.Email,
-		SelfInitial: initialOf(ident.Email), Accent: brandBaseHex, BrandLabel: br.label, Icon: "/brand/icon-192.png",
+		devIdPShell: a.shell(r, lang),
+		T:           devIdPConsentText[lang], Ticket: ticket, Action: devIdPConsentPath, Self: ident.Email,
+		SelfInitial: initialOf(ident.Email),
 	}
 	if data.SelfInitial == "" {
 		data.SelfInitial = initialOf(data.T.Myself)
-	}
-	if br.hex != "" {
-		data.Accent = br.hex
 	}
 	if u, err := url.Parse(req.redirectURI); err == nil {
 		data.Target = u.Host
@@ -305,17 +303,7 @@ func (a devIdPAPI) askConsent(w http.ResponseWriter, r *http.Request, cc devIdPC
 		pr := devIdPPersonaProfile(p)
 		data.Personas = append(data.Personas, row{ID: p.ID, Label: pr.Name, Email: pr.Email, Initial: initialOf(pr.Name)})
 	}
-	noStore(w)
-	// Never no-referrer: it makes the browser send "Origin: null" on this page's own form POST, which
-	// sameOrigin refuses (observed: every submit got 403). same-origin still sends no Referer to the app.
-	w.Header().Set("Referrer-Policy", "same-origin")
-	// The page is a click target: refuse framing so it cannot be clicked through. No form-action:
-	// Chromium applies it to the 302 that follows the POST too, so 'self' would block the return
-	// to the app on its preview host (measured in headless Chromium). The page has no script and
-	// the form's own action is fixed in the template.
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'")
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	setDevIdPPageHeaders(w)
 	_ = devIdPConsentTmpl.Execute(w, data)
 }
 
@@ -344,7 +332,7 @@ func previewPortOf(host string) string {
 // browser's Accept-Language like every other CP-rendered page (auth.PreferredUILang): the page
 // is a top-level navigation from the app being developed, so there is no Console session to ask.
 type devIdPConsentStrings struct {
-	Title, Heading, Lead, Section, Myself, Tag, Continue, Cancel, Footer, Refused string
+	Title, Heading, Lead, Section, Myself, Tag, Continue, Cancel, Footer string
 }
 
 var devIdPConsentText = map[string]devIdPConsentStrings{
@@ -358,7 +346,6 @@ var devIdPConsentText = map[string]devIdPConsentStrings{
 		Continue: "続ける",
 		Cancel:   "キャンセル",
 		Footer:   "Agent Fleet の開発用 IdP が発行するサインインです。テスト用の身元はここでだけ通用し、本番の設定はこの発行元を信頼してはいけません。",
-		Refused:  "dev-idp: このサインインの確認は拒否されたか、期限が切れています。最初からサインインし直してください",
 	},
 	"en": {
 		Title:    "Development sign-in · Agent Fleet",
@@ -370,30 +357,15 @@ var devIdPConsentText = map[string]devIdPConsentStrings{
 		Continue: "Continue",
 		Cancel:   "Cancel",
 		Footer:   "This sign-in is issued by Agent Fleet's development IdP. Test identities exist only here; a production configuration must never trust this issuer.",
-		Refused:  "dev-idp: this sign-in confirmation was refused or has expired; start the sign-in again",
 	},
 }
 
-// The page is inline CSS only (the CSP allows no script, font or remote style). Dark is the Console's
-// default; the light tokens apply under prefers-color-scheme. --accent is the deployment's brand colour.
-var devIdPConsentTmpl = template.Must(template.New("consent").Parse(`<!doctype html>
+// The shell (header, tokens, card) is shared with the error pages: dev_idp_page.go.
+var devIdPConsentTmpl = template.Must(template.Must(devIdPShellTmpl.Clone()).New("consent").Parse(`<!doctype html>
 <html lang="{{.Lang}}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{.T.Title}}</title>
 <style>
-:root{--bg:#1e1e1e;--panel:#181818;--panel2:#141414;--border:#333;--fg:#ddd;--muted:#888;--accent-fg:#fff;--warn:#e0a23a;--sel:#ffffff12}
-@media (prefers-color-scheme: light){:root{--bg:#f4f5f7;--panel:#fff;--panel2:#eaecef;--border:#d2d6dc;--fg:#1c2024;--muted:#4b5563;--sel:#00000009;--warn:#a15c00}}
-*{box-sizing:border-box}
-body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif;padding:24px}
-.card{width:100%;max-width:440px;background:var(--panel);border:1px solid var(--border);border-radius:14px;overflow:hidden;box-shadow:0 10px 40px #0006}
-.top{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:14px 20px;border-bottom:1px solid var(--border);background:var(--panel2)}
-.top img{flex:none;width:28px;height:28px;border-radius:7px}
-.top .brand{font-weight:600;letter-spacing:.01em}
-.top .dep{color:var(--muted);font-size:13px;min-width:0;max-width:100%;overflow-wrap:anywhere}
-.badge{margin-left:auto;flex:none;font-size:11px;font-weight:700;letter-spacing:.08em;color:var(--warn);border:1px solid currentColor;border-radius:999px;padding:2px 8px}
-.body{padding:22px 20px 18px}
-h1{font-size:20px;margin:0 0 6px}
-.lead{color:var(--muted);margin:0 0 16px;font-size:14px}
-.app{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px dashed var(--border);border-radius:10px;margin-bottom:18px;font-size:13px}
+{{template "devidp-shell-css"}}.app{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px dashed var(--border);border-radius:10px;margin-bottom:18px;font-size:13px}
 .app code{font:12.5px ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all}
 .port{flex:none;font-size:11px;background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:1px 6px;color:var(--muted)}
 .section{font-size:12px;color:var(--muted);margin:0 0 8px;text-transform:uppercase;letter-spacing:.06em}
@@ -420,7 +392,7 @@ button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .foot b{color:var(--warn)}
 </style></head><body style="--accent:{{.Accent}}">
 <main class="card">
-<div class="top"><img src="{{.Icon}}" alt=""><span class="brand">Agent Fleet</span>{{if .BrandLabel}}<span class="dep">· {{.BrandLabel}}</span>{{end}}<span class="badge">DEV IdP</span></div>
+{{template "devidp-top" .}}
 <div class="body">
 <h1>{{.T.Heading}}</h1>
 <p class="lead">{{.T.Lead}}</p>
@@ -437,10 +409,15 @@ button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 </main>
 </body></html>`))
 
-func consentRefuse(w http.ResponseWriter, r *http.Request, status int, why string) {
+// consentRefuse answers a POST the consent endpoint will not act on. A 500 is the store failing,
+// which the member can only retry; every other status is a ticket or request that cannot be used.
+func (a devIdPAPI) consentRefuse(w http.ResponseWriter, r *http.Request, status int, why string) {
 	log.Printf("dev idp: consent refused: %s", why)
-	noStore(w)
-	http.Error(w, devIdPConsentText[auth.PreferredUILang(r)].Refused, status)
+	kind := devIdPErrExpired
+	if status == http.StatusInternalServerError {
+		kind = devIdPErrUnavailable
+	}
+	a.writeErrPage(w, r, status, kind, "")
 }
 
 // sameOrigin is the cross-site guard for the consent POST: a browser that sends Origin or
@@ -464,17 +441,17 @@ func (a devIdPAPI) sameOrigin(r *http.Request) bool {
 func (a devIdPAPI) consent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if !a.sameOrigin(r) {
-		consentRefuse(w, r, http.StatusForbidden, "cross-site")
+		a.consentRefuse(w, r, http.StatusForbidden, "cross-site")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
 	if err := r.ParseForm(); err != nil {
-		consentRefuse(w, r, http.StatusBadRequest, "unreadable form")
+		a.consentRefuse(w, r, http.StatusBadRequest, "unreadable form")
 		return
 	}
 	ticket := r.PostForm.Get("ticket")
 	if ticket == "" {
-		consentRefuse(w, r, http.StatusBadRequest, "no ticket")
+		a.consentRefuse(w, r, http.StatusBadRequest, "no ticket")
 		return
 	}
 	id := a.mgr.resolveIdentity(r)
@@ -485,27 +462,27 @@ func (a devIdPAPI) consent(w http.ResponseWriter, r *http.Request) {
 	g, ok, err := a.mgr.store.ConsumeDevIdPConsent(ctx, devIdPHash(ticket), a.now().Unix())
 	if err != nil {
 		log.Printf("dev idp: consume consent: %v", err)
-		consentRefuse(w, r, http.StatusInternalServerError, "store")
+		a.consentRefuse(w, r, http.StatusInternalServerError, "store")
 		return
 	}
 	if !ok {
-		consentRefuse(w, r, http.StatusBadRequest, "unknown, spent or expired ticket")
+		a.consentRefuse(w, r, http.StatusBadRequest, "unknown, spent or expired ticket")
 		return
 	}
 	cc, found := a.loadClient(r, g.ClientID)
 	if !found {
-		consentRefuse(w, r, http.StatusBadRequest, "client")
+		a.consentRefuse(w, r, http.StatusBadRequest, "client")
 		return
 	}
 	// Everything authorize decided is decided again: the member, the redirect and the deployment
 	// switch may have changed in the minutes the page was open.
 	ident, mv, aerr := a.mgr.resolveMembership(ctx, id.key, id.email, cc.ws.TenantID)
 	if aerr != nil || mv.MembershipID != g.MembershipID || ident.ID != g.IdentityID {
-		consentRefuse(w, r, http.StatusForbidden, "ticket belongs to another member")
+		a.consentRefuse(w, r, http.StatusForbidden, "ticket belongs to another member")
 		return
 	}
 	if !a.mgr.devIdPRedirectAllowed(ctx, cc.ws, cc.st, mv.MembershipID, g.RedirectURI) {
-		consentRefuse(w, r, http.StatusBadRequest, "redirect_uri")
+		a.consentRefuse(w, r, http.StatusBadRequest, "redirect_uri")
 		return
 	}
 	var stored struct {
@@ -523,11 +500,11 @@ func (a devIdPAPI) consent(w http.ResponseWriter, r *http.Request) {
 	if choice := r.PostForm.Get("choice"); choice != "self" {
 		p, found, err := a.mgr.store.GetDevIdPPersona(ctx, cc.ws.ID, choice)
 		if err != nil {
-			consentRefuse(w, r, http.StatusInternalServerError, "store")
+			a.consentRefuse(w, r, http.StatusInternalServerError, "store")
 			return
 		}
 		if !found {
-			consentRefuse(w, r, http.StatusBadRequest, "no such persona in this workspace")
+			a.consentRefuse(w, r, http.StatusBadRequest, "no such persona in this workspace")
 			return
 		}
 		if ok, err := a.mgr.personaUsable(ctx, p); err != nil || !ok {

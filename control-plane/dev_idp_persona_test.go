@@ -660,7 +660,7 @@ func TestDevIdPConsentPageIsBrandedAndEscaped(t *testing.T) {
 // badge off the card at 320px (measured in headless Chromium with a 16-letter brand label) and
 // hid the test addresses' domain behind an ellipsis on phones.
 func TestDevIdPConsentPageStaysReadableOnNarrowScreens(t *testing.T) {
-	css := devIdPConsentTmpl.Tree.Root.String()
+	css := devIdPConsentTmpl.Tree.Root.String() + devIdPShellTmpl.Lookup("devidp-shell-css").Tree.Root.String()
 	if !strings.Contains(css, ".top{display:flex;flex-wrap:wrap;") {
 		t.Error("the header must wrap so the badge stays inside the card")
 	}
