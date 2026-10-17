@@ -339,6 +339,10 @@ npm --prefix console run build
   it on the packaging branch (see
   [deploy/release/notes](../../deploy/release/notes/README.md)).
 
+  Both `release-gate.yml` and `publish-dist.yml` also list the open `cli-drift` issues as
+  warnings and in the job summary (`deploy/release/cli-drift-warn.sh`). It only warns: drift is
+  the steady state, so it never fails a release, and a failed listing is itself a warning.
+
 ### End to end: image smoke, fleet, UI, real API
 
 Four layers. **L1** is the image smoke test (§10.3, seconds). **L2** is `e2e/` (a Go

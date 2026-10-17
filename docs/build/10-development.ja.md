@@ -304,6 +304,10 @@ npm --prefix console run build
   `publish-dist.yml` は dispatch 専用。`release-gate.yml` は dispatch と、packaging ブランチで
   自身を変更する push で走る（[deploy/release/notes](../../deploy/release/notes/README.md) を参照）。
 
+  `release-gate.yml` と `publish-dist.yml` は、開いている `cli-drift` Issue も警告とジョブサマリに
+  並べる（`deploy/release/cli-drift-warn.sh`）。警告だけで、ドリフトは常態なのでリリースは止めない。
+  一覧の取得に失敗した場合もそれ自体が警告になる。
+
 ### E2E（イメージスモーク + フリート疎通 + UI + 実 API）
 
 4 層構成。**L1** はイメージスモーク（§10.3・数秒）。**L2** は `e2e/`（独立 Go モジュール・
