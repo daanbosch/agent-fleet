@@ -30,6 +30,7 @@ import { AwsLoginHost } from "../features/awslogin/AwsLoginHost.tsx";
 import { useAwsLoginStore } from "../features/awslogin/store.ts";
 import { useGcpLoginStore } from "../features/gcplogin/store.ts";
 import { clearCachedConns } from "../features/repos/connsCache.ts";
+import { loadKindCatalog, resetKindCatalog } from "../agents/kindCatalogLoad.ts";
 import { GcpLoginHost } from "../features/gcplogin/GcpLoginHost.tsx";
 import { AuthExpiredModal } from "../features/auth/AuthExpiredModal.tsx";
 import { ProviderRequiredModal } from "../features/auth/ProviderRequiredModal.tsx";
@@ -320,6 +321,9 @@ export function App() {
     const stopWsPoll = startWorkspacePolling();
     const stopSessPoll = startSessionsPolling();
     const stopReposPoll = startReposPolling();
+    // Kind facts (managed-only, managed default, MCP client). Never awaited: the static fallback
+    // answers until it lands, and a failure retries on its own.
+    void loadKindCatalog();
     // Import jobs (docs/log/78): polls fast only while one is running. The work continues
     // with the browser closed, so this also restores the rows after a reload.
     const stopRepoJobsPoll = startRepoJobsPolling();
@@ -344,6 +348,7 @@ export function App() {
     consumeSessionDeepLink();
     return () => {
       alive = false;
+      resetKindCatalog(); // stops a pending retry
       unAttention();
       document.removeEventListener("visibilitychange", onPrefsVisible);
       window.removeEventListener("focus", refreshPrefs);
@@ -385,6 +390,8 @@ export function App() {
       // jobs, cloud logins, the chat list) are not keyed on the tenant, so drop and re-ask. The
       // FILES tree, the connection hook and the chat rail reload on the tenant themselves.
       clearCachedConns();
+      resetKindCatalog();
+      void loadKindCatalog();
       useRepoJobsStore.getState().reset();
       void useRepoJobsStore.getState().refresh();
       useChatStore.getState().resetConvs();
