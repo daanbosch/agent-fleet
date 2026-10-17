@@ -4,7 +4,7 @@ package kiro
 // docs/log/132 §1. The recorder appends one JSONL line per ACP message the TUI exchanges
 // with its agent; `session/request_permission` (dir "in") opens an approval and the TUI's
 // JSON-RPC response with the same string id (dir "out") closes it. It is an undocumented
-// flag and was measured on 2.31.0 only, NOT on the 2.32.0 pin, so it can only ADD a pending
+// flag and was measured on 2.31.0 and the 2.32.0 pin (docs/log/132 §4), so it can only ADD a pending
 // approval to the pane scrape in state.go; it never hides one the scrape sees. Anything the
 // parser does not recognise is ignored and left to the scrape.
 
@@ -25,8 +25,8 @@ const (
 	// recorder is no longer trusted for the rest of that launch and the scrape decides alone:
 	// the TUI keeps the file open, so truncating it under the writer is not safe.
 	maxRecorderBytes = 64 << 20
-	// One read step; a longer unterminated tail waits for the next poll.
-	recorderReadChunk = 4 << 20
+	// One read step; lines are assembled across steps.
+	recorderReadChunk = 1 << 20
 	maxRecorderLine   = 8 << 20
 	maxPendingIDs     = 64
 	maxDetailRunes    = 120
@@ -70,7 +70,9 @@ type recorderLine struct {
 type recorderState struct {
 	mu      sync.Mutex
 	file    os.FileInfo
-	offset  int64
+	offset  int64             // bytes consumed from the file
+	partial []byte            // unterminated tail of the last read, at most maxRecorderLine
+	skip    bool              // inside a line longer than maxRecorderLine: drop bytes up to its newline
 	pending map[string]string // request id -> one-line detail
 	over    bool              // file exceeded maxRecorderBytes
 }
@@ -80,8 +82,22 @@ var (
 	recorders   = map[string]*recorderState{}
 )
 
-// recorderPending returns the details of approvals the recorder shows as open, oldest
-// order unspecified. Empty when the file is missing, unreadable, or too large.
+// forgetRecorder removes a deleted session's recorder file and its cache entry.
+func forgetRecorder(name string) {
+	p := recorderPath(name)
+	_ = os.Remove(p)
+	recordersMu.Lock()
+	delete(recorders, p)
+	recordersMu.Unlock()
+}
+
+// ForgetRecorder is forgetRecorder for callers outside the package (session deletion).
+func ForgetRecorder(name string) { forgetRecorder(name) }
+
+// recorderPending returns the details of approvals the recorder shows as open. Nothing is
+// returned unless the poll caught up with the file's size at the time of the poll: a
+// half-read history would publish requests that a later line already answered. Empty also
+// when the file is missing, unreadable, or too large.
 func recorderPending(path string) []string {
 	recordersMu.Lock()
 	st := recorders[path]
@@ -111,8 +127,10 @@ func (st *recorderState) poll(path string) []string {
 		st.pending = map[string]string{}
 		return nil
 	}
-	if fi.Size() > st.offset {
-		st.read(path, fi.Size())
+	if fi.Size() > st.offset && !st.read(path, fi.Size()) {
+		// Unreadable: restart from the top on recovery rather than keep a stale view.
+		st.reset(nil)
+		return nil
 	}
 	out := make([]string, 0, len(st.pending))
 	for _, d := range st.pending {
@@ -123,35 +141,59 @@ func (st *recorderState) poll(path string) []string {
 
 func (st *recorderState) reset(fi os.FileInfo) {
 	st.file, st.offset, st.over = fi, 0, false
+	st.partial, st.skip = nil, false
 	st.pending = map[string]string{}
 }
 
-func (st *recorderState) read(path string, size int64) {
+// read consumes the file up to size in bounded chunks and reports whether it got there.
+func (st *recorderState) read(path string, size int64) bool {
 	f, err := os.Open(path)
 	if err != nil {
-		return
+		return false
 	}
 	defer f.Close()
-	n := size - st.offset
-	if n > recorderReadChunk {
-		n = recorderReadChunk
+	buf := make([]byte, recorderReadChunk)
+	for st.offset < size {
+		n := size - st.offset
+		if n > recorderReadChunk {
+			n = recorderReadChunk
+		}
+		got, err := f.ReadAt(buf[:n], st.offset)
+		if int64(got) < n && err != nil {
+			return false
+		}
+		st.offset += int64(got)
+		st.feed(buf[:got])
 	}
-	buf := make([]byte, n)
-	got, _ := f.ReadAt(buf, st.offset)
-	buf = buf[:got]
-	for {
-		i := bytes.IndexByte(buf, '\n')
+	return true
+}
+
+// feed splits a chunk into lines. A line is assembled across chunks up to maxRecorderLine;
+// a longer one is skipped to its newline (a huge tool output is never a request).
+func (st *recorderState) feed(b []byte) {
+	for len(b) > 0 {
+		i := bytes.IndexByte(b, '\n')
 		if i < 0 {
-			// An unterminated tail is a line still being written; wait for its newline,
-			// unless it can never be a line we accept.
-			if len(buf) > maxRecorderLine {
-				st.offset += int64(len(buf))
+			if !st.skip {
+				if len(st.partial)+len(b) > maxRecorderLine {
+					st.skip, st.partial = true, nil
+				} else {
+					st.partial = append(st.partial, b...)
+				}
 			}
 			return
 		}
-		st.apply(buf[:i])
-		st.offset += int64(i + 1)
-		buf = buf[i+1:]
+		if st.skip {
+			st.skip = false
+		} else if len(st.partial)+i > maxRecorderLine {
+			// too long: dropped
+		} else if len(st.partial) > 0 {
+			st.apply(append(st.partial, b[:i]...))
+		} else {
+			st.apply(b[:i])
+		}
+		st.partial = nil
+		b = b[i+1:]
 	}
 }
 

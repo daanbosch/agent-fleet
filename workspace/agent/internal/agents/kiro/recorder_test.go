@@ -8,7 +8,7 @@ import (
 )
 
 // The fixtures are lines recorded on kiro-cli 2.31.0 (docs/log/132 §1.3), ids shortened.
-// 2.32.0, the pin, is not measured.
+// The 2.32.0 pin showed the same behaviour (docs/log/132 §4).
 func fixture(t *testing.T, name string) string {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("testdata", name))
@@ -165,5 +165,87 @@ func TestBuildProgramRecorderEnv(t *testing.T) {
 	}
 	if strings.Contains(buildProgram("", "", "", "", true, ""), "KIRO_ACP_RECORD_PATH") {
 		t.Error("empty path must not set the env")
+	}
+}
+
+const reqLine = `{"ts":4,"dir":"in","msg":{"jsonrpc":"2.0","method":"session/request_permission","params":{"toolCall":{"title":"Running: touch probe.txt"},"options":[{"optionId":"allow_once"}]},"id":"217c1a80-aaaa"}}` + "\n"
+const respLine = `{"dir":"out","msg":{"jsonrpc":"2.0","id":"217c1a80-aaaa","result":{"outcome":{"outcome":"cancelled"}}}}` + "\n"
+
+func bigLine(n int) string {
+	return `{"dir":"in","msg":{"method":"session/update","x":"` + strings.Repeat("a", n) + `"}}` + "\n"
+}
+
+// A single line far larger than one read chunk (and than maxRecorderLine) sits between the
+// request and its response: the response behind it must still be reached.
+func TestRecorderHugeLineBetweenRequestAndResponse(t *testing.T) {
+	for _, n := range []int{5 << 20, maxRecorderLine + 1<<20} {
+		p := filepath.Join(t.TempDir(), "r.jsonl")
+		appendTo(t, p, reqLine+bigLine(n)+respLine)
+		if got := recorderPending(p); len(got) != 0 {
+			t.Errorf("line of %d bytes: answered request still pending %v", n, got)
+		}
+	}
+}
+
+// A backlog spanning several chunks is read to the end before anything is published.
+func TestRecorderBacklogCaughtUpBeforePublishing(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "r.jsonl")
+	appendTo(t, p, reqLine+strings.Repeat(bigLine(100<<10), 30)+respLine)
+	if got := recorderPending(p); len(got) != 0 {
+		t.Errorf("history pending published: %v", got)
+	}
+}
+
+// A response line that straddles a chunk boundary is assembled, not lost.
+func TestRecorderResponseAcrossChunks(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "r.jsonl")
+	// Filler sized so the response line starts 20 bytes before the chunk boundary.
+	filler := bigLine(recorderReadChunk - len(reqLine) - 20 - len(bigLine(0)))
+	appendTo(t, p, reqLine+filler+respLine)
+	if got := recorderPending(p); len(got) != 0 {
+		t.Errorf("response across the boundary missed: %v", got)
+	}
+}
+
+func TestRecorderUnreadableFallsBack(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads anything")
+	}
+	p := filepath.Join(t.TempDir(), "r.jsonl")
+	appendTo(t, p, reqLine)
+	if len(recorderPending(p)) != 1 {
+		t.Fatal("setup")
+	}
+	appendTo(t, p, respLine)
+	if err := os.Chmod(p, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := recorderPending(p); len(got) != 0 {
+		t.Errorf("unreadable file returned %v", got)
+	}
+	if err := os.Chmod(p, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := recorderPending(p); len(got) != 0 {
+		t.Errorf("after recovery the answered request is pending: %v", got)
+	}
+}
+
+func TestForgetRecorder(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	p := prepareRecorder("slotx")
+	appendTo(t, p, reqLine)
+	if len(recorderPending(p)) != 1 {
+		t.Fatal("setup")
+	}
+	forgetRecorder("slotx")
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Errorf("file survived: %v", err)
+	}
+	recordersMu.Lock()
+	_, ok := recorders[p]
+	recordersMu.Unlock()
+	if ok {
+		t.Error("cache entry survived")
 	}
 }
