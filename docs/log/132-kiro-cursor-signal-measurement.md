@@ -1,4 +1,4 @@
-# 131. Kiro ACP recorder and Cursor stop hook — signal measurement (#1082)
+# 132. Kiro ACP recorder and Cursor stop hook — signal measurement (#1082)
 
 status: **Measured (2026-10-17).** The two open items of #1082 were run against real, logged-in
 CLIs in tmux sessions of their own. Kiro: the recorder works and is recommended (follow-up #2285),
@@ -154,7 +154,7 @@ Explicit model (`--model gpt-5.3-codex-low-fast`): `beforeSubmitPrompt` and `sto
 
 `-p` under the same project: result JSON
 `{"type":"result","subtype":"success",…,"usage":{"inputTokens":10307,"outputTokens":74,"cacheReadTokens":0,"cacheWriteTokens":0}}`
-and **no hook line at all** (log file line count unchanged), confirming that hooks do not fire under `-p`.
+and **no hook line at all** (log file line count unchanged), so none of the three registered events (`stop`, `beforeSubmitPrompt`, `afterAgentResponse`) fired in this `-p` probe, `stop` in particular. The probe ran no shell tool, so other events (e.g. `beforeShellExecution`, which `docs/log/40` recorded firing under `-p` on an older version) were not measured.
 
 ### 2.3 What is present / absent
 
@@ -167,17 +167,17 @@ and **no hook line at all** (log file line count unchanged), confirming that hoo
 | `transcript_path` | a path to the JSONL transcript (as before); `null` in `beforeSubmitPrompt` of a new chat |
 | USD / cost | no |
 | One `stop` per turn | yes for `completed`; **two** for an aborted turn (`aborted`, then `error`) |
-| Fired under `-p` | no |
+| Fired under `-p` | not in this probe (`stop` not observed; other events not measured) |
 | Whether `input_tokens` includes `cache_read_tokens` | **unresolved**: turn 2 has `input 20958`, `cache_read 20608`, while `-p` reports them as separate fields (`log/40` §usage probe: `inputTokens 3693`, `cacheReadTokens 22144`). Needs a priced-model comparison before any USD is computed |
 | Multi-step turns: sum or last step | **not measured** (one single-tool turn only; input went 10303 → 20958 between turns 1 and 2, which does not say whether a turn reports a sum or its last step) |
 
 This corrects `docs/log/40-cursor-agent-kind.md` Track D-1 ("usage is not available on the live
 path"): that probe covered ACP, the JSONL transcript and `-p`, not hooks. Hooks carry usage for
-the interactive TUI. They do not help Managed (ACP) sessions, and no hook fires under `-p`.
+the interactive TUI. They do not help Managed (ACP) sessions, and `stop` was not observed under `-p`.
 
 ### 2.4 Recommendation
 
-**Implement**, with these rules from the measurements (follow-up #2286):
+**Implement, gated on verifying the token granularity** (follow-up #2286). Rules from the measurements:
 
 - Key on `generation_id`; write a ledger row only for `status:"completed"` payloads that carry
   token fields. `aborted` / `error` are never rows, and the double `stop` of an aborted turn cannot
@@ -188,6 +188,7 @@ the interactive TUI. They do not help Managed (ACP) sessions, and no hook fires 
   (`log/40` Track D) preferred not to own the user's global `~/.cursor/hooks.json`. The merge rule
   with a user's existing hooks is the open design point.
 - Resolve the cache question (above) before computing any cost.
+- **Granularity gate**: whether a multi-step turn reports the sum of all steps or only the last step is unmeasured. Before the hook feeds a per-turn ledger, compare a known multi-tool turn against its steps; until then store and show the numbers only as "hook-reported, semantics unverified", so an under-count is not shipped as per-turn usage.
 
 ## 3. Not measured (summary)
 
