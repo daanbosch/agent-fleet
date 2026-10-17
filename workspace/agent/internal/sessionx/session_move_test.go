@@ -833,15 +833,31 @@ func TestOrphanTargetIsStoppedByCancelNotDuplicatedByRetry(t *testing.T) {
 	}
 }
 
+// fixedSlugs makes randSlug draw from *slugs. The handed-out memory outlives a test (an hour), so
+// the second run in a process (-count=N) would find every fixed slug already taken and run the
+// list dry: the names in forgotten are cleared before and after.
+func fixedSlugs(t *testing.T, slugs *[]string, forgotten ...string) {
+	t.Helper()
+	forget := func() {
+		slugMu.Lock()
+		for _, s := range forgotten {
+			delete(slugHandedAt, s)
+			delete(slugBooked, s)
+		}
+		slugMu.Unlock()
+	}
+	forget()
+	prev := randSlug
+	randSlug = func() string { s := (*slugs)[0]; *slugs = (*slugs)[1:]; return s }
+	t.Cleanup(func() { randSlug = prev; forget() })
+}
+
 // A booked target name, held in memory or by a pending move's record across a restart, is
 // never handed to another session; it is free again once the move ends.
 func TestBookedMoveTargetIsNeverHandedOut(t *testing.T) {
 	pendingTestEnv(t)
 	slugs := []string{"sbooked", "sbooked", "sother1"}
-	prev := randSlug
-	next := func() string { s := slugs[0]; slugs = slugs[1:]; return s }
-	randSlug = next
-	t.Cleanup(func() { randSlug = prev })
+	fixedSlugs(t, &slugs, "sbooked", "sother1", "sother2", "sother3")
 	if got := bookMoveTarget(t.TempDir()); got != "sbooked" {
 		t.Fatalf("booked %q", got)
 	}
@@ -1014,10 +1030,8 @@ func TestTargetNameHeldByMovingAloneAndCancelWithoutARecord(t *testing.T) {
 	slugMu.Lock()
 	delete(slugHandedAt, target)
 	slugMu.Unlock()
-	prev := randSlug
 	slugs := []string{target, "sfresh1"}
-	randSlug = func() string { s := slugs[0]; slugs = slugs[1:]; return s }
-	t.Cleanup(func() { randSlug = prev })
+	fixedSlugs(t, &slugs, "sfresh1")
 	if got := allocSessionName(t.TempDir()); got != "sfresh1" {
 		t.Fatalf("handed out %q, which the source's meta names as its move target", got)
 	}

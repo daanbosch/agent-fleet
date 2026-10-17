@@ -146,10 +146,13 @@ func HandleSessionMoveDeliver(w http.ResponseWriter, r *http.Request) {
 		// until it reports delivered.
 		go func() {
 			state := typeMoveDelivery(name, d.Prompt)
-			settleInitialPrompt(name, state)
+			// The record goes before the state says delivered: whoever sees "delivered" (a poll,
+			// a test) may then rely on the record being gone, and nothing of this delivery is left
+			// to drop the record of a later one.
 			if state == session.InitialPromptDelivered {
 				moveDeliveries.Remove(name)
 			}
+			settleInitialPrompt(name, state)
 		}()
 		answer.InitialPromptState = session.InitialPromptPending
 		httpx.WriteJSON(w, http.StatusAccepted, answer)
