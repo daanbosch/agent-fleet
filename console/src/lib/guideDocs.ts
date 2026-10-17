@@ -4,6 +4,8 @@
 // the shelves (member/, admin/, …) with no docs/ level. English is canonical (`name.md`); the
 // Japanese page sits beside it as `name.ja.md`. The file viewer has no heading-anchor
 // target, so callers open the page, not a section.
+// Native runtime without a rootfs stages the guide elsewhere (AGENT_DOCS_DIR) and the agent
+// refuses this path there; the Console is not told the real root yet (#2315).
 import { useLayoutStore } from "../layout/store.ts";
 import { getLocale } from "./i18n/index.ts";
 
