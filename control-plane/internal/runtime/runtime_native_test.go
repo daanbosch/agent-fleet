@@ -613,11 +613,13 @@ func TestNativeDocsRoot(t *testing.T) {
 		t.Error("AGENT_DOCS_DIR does not match DocsRoot")
 	}
 	// A deployment override wins in the env, so it must win in the payload too; an empty one
-	// is the agent default, and a relative one names nothing the Console can open.
+	// is the agent default, a relative one is taken from the agent's cwd (home), and dot / double-slash spellings are cleaned.
 	for _, c := range []struct{ override, want string }{
 		{"AGENT_DOCS_DIR=/opt/manual", "/opt/manual"},
 		{"AGENT_DOCS_DIR=", ""},
-		{"AGENT_DOCS_DIR=rel/docs", ""},
+		{"AGENT_DOCS_DIR=rel/docs", filepath.Join(dir, "home", "rel", "docs")},
+		{"AGENT_DOCS_DIR=/opt/manual/../manual", "/opt/manual"},
+		{"AGENT_DOCS_DIR=/opt//manual/./", "/opt/manual"},
 	} {
 		n.extraEnv = []string{"AGENT_DOCS_DIR=/first", c.override}
 		if got := n.DocsRoot(); got != c.want {
@@ -629,7 +631,11 @@ func TestNativeDocsRoot(t *testing.T) {
 				env = strings.TrimPrefix(kv, "AGENT_DOCS_DIR=")
 			}
 		}
-		if c.want != "" && env != c.want {
+		// The launch env keeps the raw override; the agent canonicalises it the same way.
+		if !filepath.IsAbs(env) {
+			env = filepath.Join(dir, "home", env)
+		}
+		if c.want != "" && filepath.Clean(env) != c.want {
 			t.Errorf("override %q: AGENT_DOCS_DIR = %q, want %q", c.override, env, c.want)
 		}
 	}

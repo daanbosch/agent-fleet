@@ -271,9 +271,9 @@ func (n *nativeRuntime) startingMarker() agentStartingMarker {
 // DocsRoot is the path the agent serves the user guide from when it is not the image's
 // fixed one, i.e. the AGENT_DOCS_DIR the traditional (host-agent) launch ends up with: the
 // staged <dataDir>/docs, unless a deployment override (WS_ENV, per-workspace env) replaces
-// it; an empty override means the agent's default. Empty in rootfs mode (the docs are
-// ro-bound onto the fixed path), before anything is staged, and for a relative override
-// (the agent's cwd is home, so it names no place the Console can open). The workspace
+// it; an empty override means the agent's default. The value is the agent's own canonical
+// root (cleaned; a relative override is taken from the agent's cwd, home). Empty in rootfs
+// mode (the docs are ro-bound onto the fixed path) and before anything is staged. The workspace
 // payload hands it to the Console so the guide opens at a path the agent's file API allows.
 func (n *nativeRuntime) DocsRoot() string {
 	if n.rootfs != "" {
@@ -282,10 +282,16 @@ func (n *nativeRuntime) DocsRoot() string {
 	env := map[string]string{}
 	n.setDocsEnv(env)
 	n.overlayWorkspaceEnv(env)
-	if root := env["AGENT_DOCS_DIR"]; filepath.IsAbs(root) {
-		return root
+	root := env["AGENT_DOCS_DIR"]
+	if root == "" {
+		return ""
 	}
-	return ""
+	// The agent cleans the root and resolves a relative one against its cwd (home), and its
+	// file API rejects a non-canonical query path, so hand over the same spelling.
+	if !filepath.IsAbs(root) {
+		root = filepath.Join(n.dataDir, "home", root)
+	}
+	return filepath.Clean(root)
 }
 
 // setDocsEnv is the CP's own AGENT_DOCS_DIR, before the deployment overlay: the staged
