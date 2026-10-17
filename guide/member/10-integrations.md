@@ -243,8 +243,7 @@ until the next start.
 An app running on your own PC at `http://localhost:<port>` can sign in through the same IdP, **also while the
 workspace is stopped** (ADR 0116).
 
-1. In a workspace terminal, read the three values: `printenv AF_DEV_IDP_ISSUER AF_DEV_IDP_CLIENT_ID
-   AF_DEV_IDP_CLIENT_SECRET`. Settings › Preview subdomains shows the issuer and client id too; the secret exists
+1. In a workspace terminal, read the three values: `printenv AF_DEV_IDP_ISSUER AF_DEV_IDP_CLIENT_ID AF_DEV_IDP_CLIENT_SECRET`. Settings › Preview subdomains shows the issuer and client id too; the secret exists
    only in the container, so start the workspace once to read it. Set the three as environment variables on your
    machine.
 2. Make the app's callback `http://localhost:<port>/<callback path>` (`127.0.0.1` works too, any port).

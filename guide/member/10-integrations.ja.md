@@ -235,8 +235,7 @@ Google API のアクセストークン（Calendar、Drive など）は得られ�
 自分の PC の `http://localhost:<ポート>` で動くアプリも、同じ IdP でサインインできます。**ワークスペースが停止中でも**
 使えます（ADR 0116）。
 
-1. ワークスペースのターミナルで 3 つの値を読みます：`printenv AF_DEV_IDP_ISSUER AF_DEV_IDP_CLIENT_ID
-   AF_DEV_IDP_CLIENT_SECRET`。設定 › プレビュー用サブドメインにも issuer と client id は出ますが、secret はコンテナ内
+1. ワークスペースのターミナルで 3 つの値を読みます：`printenv AF_DEV_IDP_ISSUER AF_DEV_IDP_CLIENT_ID AF_DEV_IDP_CLIENT_SECRET`。設定 › プレビュー用サブドメインにも issuer と client id は出ますが、secret はコンテナ内
    にしかないので、読むには一度ワークスペースを起動してください。3 つを PC の環境変数に設定します。
 2. アプリのコールバックを `http://localhost:<ポート>/<コールバックのパス>` にします（`127.0.0.1` も可、ポートは任意）。
 3. その PC のブラウザで Console にサインインしたままにします。ほかのログインは要りません。
