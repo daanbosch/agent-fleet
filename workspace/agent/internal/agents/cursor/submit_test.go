@@ -102,3 +102,22 @@ func TestComposerDraftSeesOnlyTypedText(t *testing.T) {
 		t.Error("a screen with no composer read as a draft")
 	}
 }
+
+// A draft that merely starts with the placeholder's words is still a draft.
+func TestComposerDraftKeepsTextThatStartsLikeThePlaceholder(t *testing.T) {
+	const typed = "Add a follow-up regression test for this bug"
+	for _, f := range []string{"pane-submit-rejected.txt", "pane-submit-typed.txt"} {
+		pane := strings.Replace(readPane(t, f), "say hello in one word", typed, 1)
+		if !ComposerDraft(pane) {
+			t.Errorf("%s: ComposerDraft = false for %q", f, typed)
+		}
+		if !ComposerHolds(pane, "Addafollow-up", "forthisbug") {
+			t.Errorf("%s: ComposerHolds = false for %q", f, typed)
+		}
+	}
+	// Wrapped over two rows, the second row is part of the draft too.
+	wrapped := "  → Add a follow-up regression\n  test for this bug\n\n\n  Auto\n  ~/proj\n"
+	if !ComposerHolds(wrapped, "Addafollow-up", "forthisbug") {
+		t.Error("a wrapped draft starting with the placeholder's words was not held")
+	}
+}

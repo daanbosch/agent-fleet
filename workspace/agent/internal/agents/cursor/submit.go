@@ -21,6 +21,7 @@ package cursor
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -80,12 +81,11 @@ func composerDraft(captured string) string {
 		ln = strings.TrimSpace(ln)
 		if i == 0 {
 			ln = strings.TrimSpace(strings.TrimPrefix(ln, "→"))
-			for _, c := range composerMarks {
-				if strings.HasPrefix(ln, c) {
-					return ""
-				}
-			}
 			ln = strings.TrimSpace(strings.TrimSuffix(ln, keyHint))
+			// The whole row, not a prefix: "Add a follow-up regression test" is a real draft.
+			if slices.Contains(composerMarks, ln) {
+				return ""
+			}
 		}
 		if ln == "" {
 			if blanks++; blanks >= 2 {
