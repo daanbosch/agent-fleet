@@ -257,8 +257,8 @@ cd workspace/agent && go test -run TestKindCatalogSnapshot -update-kind-catalog 
 **Kind-specific — only when the kind has the feature:**
 
 - [ ] Terminal: `BuildLaunch`, the bracketed-paste list in `internal/sessionx/session_io.go`
-- [ ] Managed: a `Driver`, `managedDrivers`, the `ManagedAlive` / `managedBusy` /
-      `dropManagedRuntime` switches in `internal/sessionx/session_handlers.go`
+- [ ] Managed: a `Driver`, `managedDrivers`, and `agents.ManagedRuntime` on the Agent
+      (`TestManagedRuntimeFollowsCaps` fails without it; add the kind's row to `wantRuntime`)
 - [ ] sign-in handlers and their CP relays; credentials hidden by `fsDeny`
 - [ ] usage: `usageMeasuredForKind` (`usage_fold.go`)
 - [ ] a pinned CLI: the version pin, a contract workflow and the release-watcher

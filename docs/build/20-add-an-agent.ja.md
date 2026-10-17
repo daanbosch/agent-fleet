@@ -236,8 +236,8 @@ cd workspace/agent && go test -run TestKindCatalogSnapshot -update-kind-catalog 
 **種別固有 — その機能を持つときだけ:**
 
 - [ ] ターミナル: `BuildLaunch`、`internal/sessionx/session_io.go` の bracketed paste 一覧
-- [ ] マネージド: `Driver`、`managedDrivers`、`internal/sessionx/session_handlers.go` の
-      `ManagedAlive` / `managedBusy` / `dropManagedRuntime` の switch
+- [ ] マネージド: `Driver`、`managedDrivers`、Agent に `agents.ManagedRuntime`
+      （無いと `TestManagedRuntimeFollowsCaps` が落ちる。`wantRuntime` にその種別の行を足す）
 - [ ] サインインのハンドラと CP の中継。資格情報は `fsDeny` で隠す
 - [ ] 利用量: `usageMeasuredForKind`（`usage_fold.go`）
 - [ ] CLI を固定する種別: バージョン固定、契約ワークフロー、リリース監視への登録（§20.5）
