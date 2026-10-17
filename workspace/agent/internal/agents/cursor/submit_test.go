@@ -66,3 +66,39 @@ func TestSubmitErrorCarriesTheToastText(t *testing.T) {
 		t.Errorf("SubmitError read transcript prose: %q", got)
 	}
 }
+
+// The placeholder and the working composer's key hint are not a draft. A peer message ends in
+// the sender's last line, so a body ending in "stop" or "follow-up" must not match the idle or
+// working composer and turn a normal send into a held one.
+func TestComposerHoldsIgnoresThePlaceholderAndKeyHint(t *testing.T) {
+	for _, f := range []string{"pane-submit-working.txt", "pane-submit-answered.txt", "pane-composer-narrow.txt"} {
+		pane := readPane(t, f)
+		for _, ends := range [][2]string{{"[agent-fleet", "stop"}, {"[agent-fleet", "follow-up"}, {"Addafollow", "ollow-up"}} {
+			if ComposerHolds(pane, ends[0], ends[1]) {
+				t.Errorf("%s: ComposerHolds(%q, %q) = true, want false", f, ends[0], ends[1])
+			}
+		}
+	}
+	// A real draft still matches, and carries no hint of its own.
+	if !ComposerHolds(readPane(t, "pane-submit-rejected.txt"), "[agent-fleet", "lloinoneword") {
+		t.Error("the rejected draft no longer matches by its tail")
+	}
+}
+
+func TestComposerDraftSeesOnlyTypedText(t *testing.T) {
+	for file, want := range map[string]bool{
+		"pane-submit-typed.txt":     true,
+		"pane-submit-rejected.txt":  true,
+		"pane-submit-composing.txt": false,
+		"pane-submit-working.txt":   false,
+		"pane-submit-answered.txt":  false,
+		"pane-composer-narrow.txt":  false,
+	} {
+		if got := ComposerDraft(readPane(t, file)); got != want {
+			t.Errorf("%s: ComposerDraft = %v, want %v", file, got, want)
+		}
+	}
+	if ComposerDraft("no composer here\n") {
+		t.Error("a screen with no composer read as a draft")
+	}
+}

@@ -23,10 +23,16 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/tmuxx"
 )
 
 // maxErrorChars bounds the error text handed back to the sender.
 const maxErrorChars = 300
+
+// keyHint is the working composer's hint at the right of its first row.
+const keyHint = "ctrl+c to stop"
 
 // optionRow is a "key: value" line of the toast's options (hideIcon: true), not part of its text.
 var optionRow = regexp.MustCompile(`^\w+: (true|false)$`)
@@ -38,18 +44,50 @@ var optionRow = regexp.MustCompile(`^\w+: (true|false)$`)
 // pane width is joined back. When the screen has no composer it answers false: the old
 // behaviour (the send counts as delivered) is what an unrecognised screen gets.
 func ComposerHolds(captured, head, tail string) bool {
-	if head == "" && tail == "" {
+	d := squash(composerDraft(captured))
+	if d == "" {
 		return false
 	}
+	return head != "" && strings.Contains(d, head) || tail != "" && strings.Contains(d, tail)
+}
+
+// ComposerDraft reports whether the composer holds any unsent text, whoever typed it.
+func ComposerDraft(captured string) bool { return composerDraft(captured) != "" }
+
+// TerminalDraft is ComposerDraft for a Terminal pane that shows no modal: a menu row also
+// starts with "→", and the free-text gate answers for it.
+func TerminalDraft(m session.Meta) bool {
+	if m.DriverKind() == session.DriverManaged {
+		return false
+	}
+	s := tmuxx.CapturePane(session.TmuxName(m.Name))
+	return paneModal(s, cwdForms(m)...) == "" && ComposerDraft(s)
+}
+
+// composerDraft is the text typed into the composer, "" when it is empty or not on screen.
+// The placeholder ("Add a follow-up") and the hint drawn at the right of the first row ("ctrl+c
+// to stop" while a turn runs) are not text: a prompt ending in "stop" or "follow-up" must not
+// match them.
+func composerDraft(captured string) string {
 	lines := strings.Split(captured, "\n")
 	top := composerTop(lines)
 	if top < 0 {
-		return false
+		return ""
 	}
 	var draft strings.Builder
 	blanks := 0
-	for _, ln := range lines[top:] {
-		if strings.TrimSpace(ln) == "" {
+	for i, ln := range lines[top:] {
+		ln = strings.TrimSpace(ln)
+		if i == 0 {
+			ln = strings.TrimSpace(strings.TrimPrefix(ln, "→"))
+			for _, c := range composerMarks {
+				if strings.HasPrefix(ln, c) {
+					return ""
+				}
+			}
+			ln = strings.TrimSpace(strings.TrimSuffix(ln, keyHint))
+		}
+		if ln == "" {
 			if blanks++; blanks >= 2 {
 				break
 			}
@@ -57,9 +95,9 @@ func ComposerHolds(captured, head, tail string) bool {
 		}
 		blanks = 0
 		draft.WriteString(ln)
+		draft.WriteByte('\n')
 	}
-	d := strings.TrimPrefix(squash(draft.String()), "→")
-	return head != "" && strings.Contains(d, head) || tail != "" && strings.Contains(d, tail)
+	return strings.TrimSpace(draft.String())
 }
 
 // SubmitError is the error cursor printed under its composer after refusing a prompt, "" when

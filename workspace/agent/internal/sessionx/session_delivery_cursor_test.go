@@ -84,9 +84,9 @@ func TestConfirmCursorSubmitHoldsAStuckDraft(t *testing.T) {
 
 // fakeCursorTmux is a tmux whose pane shows an idle composer until text is pasted, then the
 // frame given.
-func fakeCursorTmux(t *testing.T, afterPaste string) {
+func fakeCursorTmux(t *testing.T, afterPaste string) (bin string) {
 	t.Helper()
-	bin := t.TempDir()
+	bin = t.TempDir()
 	idle := "  → Add a follow-up\n\n  Auto\n  ~/proj\n"
 	for f, c := range map[string]string{"idle.txt": idle, "after.txt": afterPaste} {
 		if err := os.WriteFile(filepath.Join(bin, f), []byte(c), 0o600); err != nil {
@@ -111,6 +111,7 @@ esac
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("AGENT_INPUT_SUBMIT_DELAY_MS", "0")
 	t.Setenv("AF_SESSIONS_DIR", filepath.Join(t.TempDir(), "sessions"))
+	return bin
 }
 
 // End to end through /input on a cursor Terminal session: a confirmed send whose prompt the
@@ -150,5 +151,24 @@ func TestInputToCursorTerminalReportsARejectedSubmit(t *testing.T) {
 	r := postInput(t, "cur_http_plain", `{"prompt":"`+cursorSent+`"}`)
 	if r.Code != http.StatusOK || strings.Contains(r.Body.String(), "held") {
 		t.Errorf("unconfirmed send = %d %s, want a plain 200", r.Code, r.Body.String())
+	}
+}
+
+// A prompt cursor handed back stays in the composer. The next confirmed send, whatever it
+// says, must not be pasted after it: the two would run as one prompt. The pane is left alone.
+func TestInputToCursorTerminalRefusesAStaleDraft(t *testing.T) {
+	withTempHome(t)
+	bin := fakeCursorTmux(t, "")
+	rejected := cursorPane(t, "pane-submit-rejected.txt")
+	if err := os.WriteFile(filepath.Join(bin, "idle.txt"), []byte(rejected), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session.WriteMeta(session.Meta{Name: "cur_stale", Dir: t.TempDir(), Kind: session.KindCursor})
+	r := postInput(t, "cur_stale", `{"prompt":"a different request","confirm":true}`)
+	if r.Code != http.StatusConflict || !strings.Contains(r.Body.String(), "composer_not_empty") {
+		t.Fatalf("send over a stale draft = %d %s, want 409 composer_not_empty", r.Code, r.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(bin, "pasted")); err == nil {
+		t.Error("the prompt was pasted over the stale draft")
 	}
 }

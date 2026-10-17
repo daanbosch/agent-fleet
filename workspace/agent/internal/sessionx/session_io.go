@@ -598,6 +598,16 @@ func HandleSessionInput(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	cursorTUI := confirmMeta.Name != "" && isCursorTerminal(confirmMeta)
+	// An earlier prompt cursor handed back (or a half-typed one) is still in the composer, and
+	// a paste lands after it: two instructions run as one. Refuse rather than clear it, which
+	// would lose the earlier request.
+	if cursorTUI && cursor.TerminalDraft(confirmMeta) {
+		httpx.WriteErr(w, http.StatusConflict, "composer_not_empty",
+			"the cursor session's input box still holds unsent text (a prompt its CLI refused, "+
+				"or a draft); sending now would append to it and run both as one prompt. "+
+				"Clear or send that text in the pane (or fix what made the CLI refuse it), then send again.")
+		return
+	}
 	// Record the mirror badge's origin BEFORE typing (see recordInjection's comment). After
 	// delivery, a poll landing in the gap between the user row appearing in the transcript
 	// and the record being written pins that turn on the user's screen with no origin. peer
