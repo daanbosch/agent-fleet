@@ -238,6 +238,32 @@ client; turning it on again issues a **new** client id and secret (that is how y
 switch takes effect immediately for the endpoints, but a running container keeps the values it started with
 until the next start.
 
+##### Using it from an app on your own machine
+
+An app running on your own PC at `http://localhost:<port>` can sign in through the same IdP, **also while the
+workspace is stopped** (ADR 0116).
+
+1. In a workspace terminal, read the three values: `printenv AF_DEV_IDP_ISSUER AF_DEV_IDP_CLIENT_ID
+   AF_DEV_IDP_CLIENT_SECRET`. Settings › Preview subdomains shows the issuer and client id too; the secret exists
+   only in the container, so start the workspace once to read it. Set the three as environment variables on your
+   machine.
+2. Make the app's callback `http://localhost:<port>/<callback path>` (`127.0.0.1` works too, any port).
+3. In the browser on that machine, stay signed in to the Console. The sign-in needs no other login.
+
+- **Treat the secret like a password**: keep it out of git, chat and screenshots. Settings › Preview subdomains ›
+  "Issue a new secret…" revokes every copy at once; the workspace then needs a restart to get the new one, and
+  your machine needs the new value.
+- **It does not work while** the deployment is paused, the IdP is switched off in the Admin modal, or the
+  deployment has no preview domain (the issuer then answers 404).
+- **A redirect to the preview URL still needs the workspace running**; only `localhost` / `127.0.0.1` is
+  accepted while it is stopped.
+- **One configuration for both places**: Settings › Preview subdomains › "App configuration examples" generates
+  the snippets, with a variant that reads the environment variables. The idea is a fallback: use the dev issuer
+  only when the variables exist. Spring Boot: put it in the `devidp` profile
+  (`SPRING_PROFILES_ACTIVE=devidp`, recommended: the production configuration never names the dev issuer).
+  Auth.js: `process.env.AF_DEV_IDP_ISSUER ? { issuer, clientId, clientSecret } : {}`, as in the example above.
+  Never put the dev issuer into the production configuration.
+
 ### Examples by setup
 
 | Setup | Example input | Which to open with |
