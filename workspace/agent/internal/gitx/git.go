@@ -1458,6 +1458,7 @@ func gitBranchInfos(dir, current string) []BranchInfo {
 	infos := []BranchInfo{}
 	seen := map[string]bool{}
 	rank := remoteRank(dir, current)
+	remotes := remoteNames(dir)
 	// Local first so a local branch wins over its remote duplicate; remotes are
 	// then ordered so origin wins over a same-named branch on another remote.
 	for _, ns := range []string{"refs/heads", "refs/remotes"} {
@@ -1485,9 +1486,9 @@ func gitBranchInfos(dir, current string) []BranchInfo {
 				entries = append(entries, entry{f: f, name: rest})
 				continue
 			}
-			remote, name, ok := strings.Cut(rest, "/")
-			if !ok || name == "" || name == "HEAD" {
-				continue // refs/remotes/<remote>/HEAD (or a bare remote ref): not a branch
+			remote, name, ok := splitRemoteRef(remotes, rest)
+			if !ok || name == "HEAD" {
+				continue // refs/remotes/<remote>/HEAD, or a ref under no configured remote: not a branch
 			}
 			entries = append(entries, entry{remote: remote, f: f, name: name})
 		}
@@ -1536,17 +1537,40 @@ func refExists(dir, ref string) bool {
 	return err == nil
 }
 
-// remotesWithBranch lists the remotes that have a remote-tracking ref for name,
-// best first (see remoteRank).
+// remoteNames lists the configured remotes (`git remote`). A remote name may
+// contain slashes, so refs/remotes/<...> cannot be split without it.
+func remoteNames(dir string) []string {
+	out, err := Run(dir, "remote")
+	if err != nil {
+		return nil
+	}
+	return strings.Fields(out)
+}
+
+// splitRemoteRef splits the part of a refs/remotes/ name into configured remote
+// and branch. Remote names can contain slashes (`team/upstream`) and so can
+// branch names, so the longest matching remote wins.
+func splitRemoteRef(remotes []string, rest string) (remote, branch string, ok bool) {
+	for _, r := range remotes {
+		if b, found := strings.CutPrefix(rest, r+"/"); found && b != "" && len(r) > len(remote) {
+			remote, branch, ok = r, b, true
+		}
+	}
+	return remote, branch, ok
+}
+
+// remotesWithBranch lists the configured remotes that have a remote-tracking ref
+// for name, best first (see remoteRank).
 func remotesWithBranch(dir, name, current string) []string {
 	out, err := Run(dir, "for-each-ref", "--format=%(refname)", "refs/remotes")
 	if err != nil {
 		return nil
 	}
+	configured := remoteNames(dir)
 	var remotes []string
 	for _, ref := range strings.Split(out, "\n") {
-		remote, b, ok := strings.Cut(strings.TrimPrefix(ref, "refs/remotes/"), "/")
-		if ok && b == name {
+		remote, b, ok := splitRemoteRef(configured, strings.TrimPrefix(ref, "refs/remotes/"))
+		if ok && b == name && !slices.Contains(remotes, remote) {
 			remotes = append(remotes, remote)
 		}
 	}
@@ -1619,9 +1643,13 @@ func HandleRepoCheckout(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		args = []string{"checkout", ref}
-		// A branch with no local ref is created from a remote-tracking one. Bare-name
-		// DWIM fails (exit 128) when two remotes have it, so track one explicitly.
-		if !refExists(dir, "refs/heads/"+ref) {
+		// A picked branch (not a free-form ref: tags and HEAD keep plain `git checkout`)
+		// with no local ref is created from a remote-tracking one. Bare-name DWIM fails
+		// (exit 128) when two remotes have it, so track one explicitly — by full ref,
+		// since `origin/main` is ambiguous when a local branch or tag has that name,
+		// and with -b, since --track alone names the branch after what follows the
+		// remote (`upstream/main` for a remote called `team/upstream`).
+		if strings.TrimSpace(req.Branch) != "" && !refExists(dir, "refs/heads/"+ref) {
 			st, _ := GitStatus(dir)
 			remotes := remotesWithBranch(dir, ref, st.Branch)
 			remote := strings.TrimSpace(req.Remote)
@@ -1632,7 +1660,7 @@ func HandleRepoCheckout(w http.ResponseWriter, r *http.Request) {
 				remote = remotes[0]
 			}
 			if remote != "" {
-				args = []string{"checkout", "--track", remote + "/" + ref}
+				args = []string{"checkout", "-b", ref, "--track", "refs/remotes/" + remote + "/" + ref}
 			}
 		}
 	}

@@ -8,20 +8,18 @@ export interface RemoteSwitchTarget {
   branch: string;
 }
 
-/** remoteSwitchTargets lists the `<remote>/<branch>` refs worth a "switch" entry:
- * the remote's symbolic HEAD is not a branch, and a branch that also has a local
- * head on the same commit is already offered as a plain switch. A remote name has
- * no slash but a branch name can, so only the first slash splits. */
+/** remoteSwitchTargets lists the remote refs worth a "switch" entry. The agent
+ * splits each ref on the configured remote names (remote and branch names can both
+ * contain slashes), so refs it could not attribute to a remote are skipped, as are
+ * the remote's symbolic HEAD and branches that also have a local head on the same
+ * commit (already offered as a plain switch). */
 export function remoteSwitchTargets(refs: GraphRef[]): RemoteSwitchTarget[] {
   const local = new Set(refs.filter((r) => r.type === "head").map((r) => r.name));
   const out: RemoteSwitchTarget[] = [];
   for (const r of refs) {
-    if (r.type !== "remote") continue;
-    const i = r.name.indexOf("/");
-    if (i <= 0) continue;
-    const branch = r.name.slice(i + 1);
-    if (!branch || branch === "HEAD" || local.has(branch)) continue;
-    out.push({ ref: r.name, remote: r.name.slice(0, i), branch });
+    if (r.type !== "remote" || !r.remote || !r.branch) continue;
+    if (r.branch === "HEAD" || local.has(r.branch)) continue;
+    out.push({ ref: r.name, remote: r.remote, branch: r.branch });
   }
   return out;
 }
