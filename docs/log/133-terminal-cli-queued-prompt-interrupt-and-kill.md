@@ -1,4 +1,4 @@
-# 131. What each Terminal CLI does with a queued prompt on interrupt (Esc) and on pane kill
+# 133. What each Terminal CLI does with a queued prompt on interrupt (Esc) and on pane kill
 
 - Request: #1256. It completes the measurement that docs/log/127 started (claude, codex and opencode on Esc).
 - Related: docs/log/125 §4 (the Managed-route fix, #1244), docs/log/127, ADR 0105.
@@ -12,23 +12,25 @@ observations, not a statement of what each CLI guarantees.
 
 | CLI (version) | Esc while the prompt is queued | Pane killed (`tmux kill-session`) while it is queued |
 |---|---|---|
-| claude 2.1.302 | **Runs.** The turn is interrupted and the queued prompt is sent at once as the next request, prefixed `[Request interrupted by user]` | **Dropped.** The transcript holds only a `queue-operation` `enqueue` line; `--continue` restores the first prompt, the composer is empty, no request is sent |
+| claude 2.1.302 | **Runs.** The turn is interrupted and the queued prompt is sent at once as the next request, prefixed `[Request interrupted by user]` | **Dropped.** The transcript holds only a `queue-operation` `enqueue` line; `--continue` restores the first prompt, the composer is empty, no request is sent. Lost (this one rests on the transcript and the fake server's request log) |
 | codex 0.163.0 | **Runs.** `Model interrupted to submit steer instructions.`, then the queued prompt is sent | **Runs, without the pane.** codex's app-server daemon (PPID 1) outlives the pane, finishes the tool and sends the queued prompt 30 s later |
 | opencode 2.0.32 | **Runs.** Two Esc within about a second interrupt (one Esc only arms "esc again to interrupt"); the queued prompt is sent as the next request. Nothing is sent before the interrupt | **Runs, without the pane.** opencode's `serve --service` daemon (PPID 1) outlives the pane, the stream ends, and the queued prompt is sent with no TUI attached |
-| cursor 2026.10.16-e3cb207 | **Dropped, and the turn is not interrupted.** Esc cancels the queued follow-up and the turn runs to the end. Ctrl+C (the key the CLI advertises) interrupts and leaves the follow-up held in its panel (`↑ to edit`), not run | **Dropped.** No process survives; `--resume <chat id>` opens an empty chat (the first prompt is gone as well) |
-| kiro-cli 2.31.0 | **Runs.** Esc interrupts and the queued prompt runs as the next turn | **Dropped.** No process survives; `chat --resume` in the same directory opens a fresh, empty chat |
-| copilot 1.0.98 | **Not interrupted.** With a prompt pending, one Esc and two Esc both left the stream running to its end; the pending prompt then ran. Ctrl+C: `Operation cancelled by user`, **dropped** (gone from the display and the composer, never run) | **Dropped.** No process survives; `--continue` restores the first prompt only |
+| cursor 2026.10.16-e3cb207 | **Gone from the panel, and the turn is not interrupted** (pane observation: it never ran). Esc cancels the queued follow-up and the turn runs to the end. Ctrl+C (the key the CLI advertises) interrupts and leaves the follow-up held in its panel (`↑ to edit`), not run | **Not seen again.** No process survives; `--resume <chat id>` opens an empty chat (the first prompt is gone too), so a lost queue cannot be told from a lost turn. Whether it reached the backend is unknown |
+| kiro-cli 2.31.0 | **Runs.** Esc interrupts and the queued prompt runs as the next turn | **Not seen again.** No process survives; `chat --resume` in the same directory opens a fresh, empty chat; not restored, not run in the pane, whether it reached the backend is unknown |
+| copilot 1.0.98 | **Not interrupted.** With a prompt pending, one Esc and two Esc both left the stream running to its end; the pending prompt then ran. Ctrl+C: `Operation cancelled by user`; the pending prompt is gone from the display and the composer and never ran (pane observation) | **Not seen again.** No process survives; `--continue` restores the first prompt only; the queued one is not restored or run in the pane, whether it reached the backend is unknown |
 | agy | not measured: the binary aborts on start (`CRNGT failed.` / `SIGABRT: abort`) even for `--help`, so neither its version nor its behaviour could be read in this container | not measured: same |
 
 Two behaviours that decide how to read the table:
 
-- **codex has no queue unless a tool is in flight.** A second prompt typed while only text was streaming was sent
-  immediately and cut the stream (18:34:28, `n_user=3`, the `SLOW one` request then disconnected). Only during a tool
-  call does it show `Messages to be submitted after next tool call` (18:36:26).
+- **codex, this build: in this text-only trial a second prompt was sent at once.** It cut the stream (18:34:28,
+  `n_user=3`, the `SLOW one` request then disconnected). The `Messages to be submitted after next tool call` queue
+  was observed only while a tool was running (18:36:26). One trial each; this is not a rule for every turn.
 - **codex and opencode keep the turn, and the queue, outside the pane.** Killing the pane ends only the TUI.
 
 Changes against docs/log/127: opencode 1.18.33 did not send a queued prompt on its own after an interrupt; 2.0.32
-does (18:38:35). The claude and codex Esc results agree with 127.
+does (18:38:35). The Esc results of claude and codex agree with 127. The condition under which codex queues does not: 127 §4 recorded a
+queue in a text-only turn on 0.159.2; here a text-only turn on 0.163.0 took the prompt at once. Version or setup
+difference is not resolved.
 
 ## 2. Method
 
@@ -185,8 +187,9 @@ and was not repeated.
 
 ## 4. What it means for Agent Fleet
 
-- **A queued prompt can be lost.** Pane kill drops it for claude, cursor, kiro and copilot, and cursor's Esc and
-  copilot's Ctrl+C drop it too. A pane kill is what stop-and-archive, a recreate and an Agent restart do to a
+- **A queued prompt can be lost.** After a pane kill the prompt was not seen again for claude, cursor, kiro and copilot (certain for claude, from
+  the transcript and the request log; for the other three only the resumed pane was observed, and delivery to the
+  backend is unknown). In cursor's Esc and copilot's Ctrl+C runs it vanished from the pane and never ran. A pane kill is what stop-and-archive, a recreate and an Agent restart do to a
   Terminal session.
 - **claude is the one that matters for peer messages.** `confirmPromptDelivery` / `deliveryEvidenced`
   (`workspace/agent/internal/sessionx/session_delivery.go`) call the prompt delivered once
@@ -206,7 +209,7 @@ and was not repeated.
 ## 5. Not measured
 
 - agy (see the table).
-- A queue of two or more prompts, a second Esc after the first, and interrupts during a tool call (except codex).
+- A queue of two or more prompts, a second interrupt of the turn that the first interrupt started, or of what is still queued, and interrupts during a tool call (except codex).
 - kiro, cursor and copilot ran on real backends, so the evidence is the pane only; whether the CLI sent the queued
   prompt to its backend before a kill is not observable.
 - After a kill, `--resume` / `--continue` of cursor and kiro opened an empty chat, so those two cells cannot say
