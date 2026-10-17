@@ -84,11 +84,14 @@ func (e *liveProbeEnv) Interrupt() probeObservation {
 		started = e.spec.agent.WireLive(meta, true).State == "working"
 	}
 	if !started {
-		return observeInterrupt(false, false, false)
+		return observeInterrupt(false, false, false, false)
 	}
 	time.Sleep(capsProbeStreamFor)
-	if td, ok := e.spec.agent.Transcript(meta); ok && mirrorHasTurn(td.Turns, "assistant", done) {
-		return observeInterrupt(true, true, false)
+	// Working right now, not merely at some point before: a turn that ended or errored on its
+	// own is idle without any help from Escape.
+	workingAtEscape := e.spec.agent.WireLive(meta, true).State == "working"
+	if !workingAtEscape {
+		return observeInterrupt(true, false, false, false)
 	}
 	// One Escape, the same keys the chat stop button sends (sessionx handleSessionTurn).
 	if out, err := tmuxx.Cmd("send-keys", "-t", tn, "Escape").CombinedOutput(); err != nil {
@@ -98,7 +101,8 @@ func (e *liveProbeEnv) Interrupt() probeObservation {
 	for deadline := time.Now().Add(capsProbeInterruptWait); !idle && time.Now().Before(deadline); time.Sleep(500 * time.Millisecond) {
 		idle = e.spec.agent.WireLive(meta, true).State == "idle"
 	}
-	return observeInterrupt(true, false, idle)
+	td, _ := e.spec.agent.Transcript(meta)
+	return observeInterrupt(true, true, idle, mirrorHasTurn(td.Turns, "assistant", done))
 }
 
 // oneLineTurn starts a session (with model, when given), runs a one-line turn to completion
@@ -133,9 +137,18 @@ func (e *liveProbeEnv) ModelOverride(model string) probeObservation {
 	if model == "" {
 		return probeObservation{Err: errors.New("no model id to start with")}
 	}
-	td, _, err := e.oneLineTurn("model", model)
+	td, meta, err := e.oneLineTurn("model", model)
 	if err != nil {
 		return probeObservation{Err: err}
 	}
-	return observeModelOverride(td.Turns, model)
+	// Read the CLI's own record with the request cleared, so a store that only echoes the
+	// meta cannot answer for itself (see observeModelOverride).
+	recaller, haveRecaller := e.spec.agent.(agents.SettingsRecaller)
+	var recalled agents.RecalledSettings
+	if haveRecaller {
+		asked := meta
+		asked.Model = ""
+		recalled = recaller.RecallSettings(asked)
+	}
+	return observeModelOverride(td.Turns, recalled, haveRecaller, model)
 }

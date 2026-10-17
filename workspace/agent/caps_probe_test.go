@@ -223,41 +223,49 @@ func TestObserveForkAt(t *testing.T) {
 }
 
 func TestObserveModelOverride(t *testing.T) {
-	turn := func(model string) []transcript.Turn {
-		return []transcript.Turn{{Role: "user", Model: "want"}, {Role: "assistant", Model: model}}
-	}
+	stamped := []transcript.Turn{{Role: "user"}, {Role: "assistant", Model: "want"}}
+	rec := func(m string) agents.RecalledSettings { return agents.RecalledSettings{Model: m} }
 	for _, c := range []struct {
-		reported, want string
-		ok             bool
+		name     string
+		turns    []transcript.Turn
+		recalled agents.RecalledSettings
+		have     bool
+		want     string
+		worked   bool
+		inconcl  bool
 	}{
-		{"claude-x", "claude-x", true},
-		{"Claude-X", "claude-x", true},
-		{"anthropic/claude-x", "claude-x", true},
-		{"gpt-5-mini", "gpt-5", false},
-		{"other", "claude-x", false},
-		{"", "claude-x", false},
+		{"store agrees", stamped, rec("claude-x"), true, "claude-x", true, false},
+		{"case and provider prefix", stamped, rec("Anthropic/Claude-X"), true, "claude-x", true, false},
+		{"store keeps the base id", stamped, rec("gemini-x"), true, "gemini-x-high", true, false},
+		{"store disagrees although the transcript echoes the request", stamped, rec("other"), true, "want", false, false},
+		{"prefix of a different model", stamped, rec("gpt-5-mini"), true, "gpt-5", false, false},
+		{"transcript alone is no evidence", stamped, agents.RecalledSettings{}, true, "want", false, true},
+		{"agent has no recorder", stamped, agents.RecalledSettings{}, false, "want", false, true},
+		{"no assistant model at all", []transcript.Turn{{Role: "user", Model: "want"}, {Role: "assistant"}}, rec("want"), true, "want", false, true},
 	} {
-		if got := observeModelOverride(turn(c.reported), c.want).Worked; got != c.ok {
-			t.Errorf("reported %q want %q: Worked=%v, want %v", c.reported, c.want, got, c.ok)
+		o := observeModelOverride(c.turns, c.recalled, c.have, c.want)
+		if o.Worked != c.worked || (o.Err != nil) != c.inconcl {
+			t.Errorf("%s: Worked=%v Err=%v, want Worked=%v inconclusive=%v", c.name, o.Worked, o.Err, c.worked, c.inconcl)
 		}
-	}
-	// A user turn's Model is not the answer's.
-	if observeModelOverride([]transcript.Turn{{Role: "user", Model: "m"}}, "m").Worked {
-		t.Error("only assistant turns may vouch for the model")
 	}
 }
 
 func TestObserveInterrupt(t *testing.T) {
-	if o := observeInterrupt(true, false, true); !o.Worked || o.Err != nil {
-		t.Errorf("idle after Escape: %+v", o)
+	cases := []struct {
+		name                                        string
+		started, workingAtEscape, idle, reachedMark bool
+		worked, inconclusive                        bool
+	}{
+		{"idle after Escape, turn cut short", true, true, true, false, true, false},
+		{"still busy after Escape", true, true, false, false, false, false},
+		{"never started", false, false, true, false, false, true},
+		{"already idle at Escape (finished or errored alone)", true, false, true, false, false, true},
+		{"Escape ignored, turn ran to completion", true, true, true, true, false, true},
 	}
-	if o := observeInterrupt(true, false, false); o.Worked || o.Err != nil {
-		t.Errorf("still busy after Escape must be a plain failure: %+v", o)
-	}
-	if o := observeInterrupt(false, false, true); o.Err == nil {
-		t.Error("a turn that never started is inconclusive")
-	}
-	if o := observeInterrupt(true, true, true); o.Err == nil {
-		t.Error("a turn that finished by itself is inconclusive, not a pass")
+	for _, c := range cases {
+		o := observeInterrupt(c.started, c.workingAtEscape, c.idle, c.reachedMark)
+		if o.Worked != c.worked || (o.Err != nil) != c.inconclusive {
+			t.Errorf("%s: Worked=%v Err=%v, want Worked=%v inconclusive=%v", c.name, o.Worked, o.Err, c.worked, c.inconclusive)
+		}
 	}
 }

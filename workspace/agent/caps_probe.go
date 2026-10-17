@@ -249,36 +249,58 @@ func modelMatches(reported, want string) bool {
 	return r == w || strings.HasSuffix(r, "/"+w) || strings.HasSuffix(w, "/"+r)
 }
 
-// observeModelOverride checks that an assistant turn of a session started with `want`
-// reports that model.
-func observeModelOverride(turns []transcript.Turn, want string) probeObservation {
-	var seen []string
-	for _, t := range turns {
-		if t.Role != "assistant" || t.Model == "" {
-			continue
-		}
-		if modelMatches(t.Model, want) {
-			return probeObservation{Worked: true, Detail: "transcript reports " + t.Model}
-		}
-		seen = append(seen, t.Model)
+// recalledModelMatches compares the model the CLI's own store recorded with the one asked
+// for. Some stores keep the base id without the catalog's parameter suffix (cursor:
+// "gemini-x" for the listed "gemini-x-high"), so a base id that prefixes the request counts.
+func recalledModelMatches(recalled, want string) bool {
+	if modelMatches(recalled, want) {
+		return true
 	}
-	if len(seen) == 0 {
-		return probeObservation{Detail: fmt.Sprintf("started with %q but no assistant turn reports a model", want)}
-	}
-	return probeObservation{Detail: fmt.Sprintf("started with %q but the transcript reports %s", want, strings.Join(seen, ", "))}
+	r, w := strings.ToLower(strings.TrimSpace(recalled)), strings.ToLower(strings.TrimSpace(want))
+	return r != "" && strings.HasPrefix(w, r+"-")
 }
 
-// observeInterrupt turns the three things the live probe watched into an observation.
-// Only a turn that was seen running and was still running when Escape went in can say
-// anything; the others are PROBE-ERROR, not DRIFT.
-func observeInterrupt(startedWorking, finishedBeforeEscape, idleAfter bool) probeObservation {
+// observeModelOverride checks that a session started with `want` ended up on it. The
+// evidence is recalled: what the CLI itself recorded (agents.SettingsRecaller, read with an
+// empty meta.Model). The transcript is NOT evidence: cursor and kiro stamp meta.Model onto
+// every assistant turn, so the probe's own request would come back and match even when the
+// CLI ignored the flag. No independent record is PROBE-ERROR, never a pass.
+func observeModelOverride(turns []transcript.Turn, recalled agents.RecalledSettings, haveRecaller bool, want string) probeObservation {
+	reported := false
+	for _, t := range turns {
+		if t.Role == "assistant" && t.Model != "" {
+			reported = true
+			break
+		}
+	}
+	switch {
+	case !reported:
+		return probeObservation{Err: fmt.Errorf("started with %q but no assistant turn reports a model", want)}
+	case !haveRecaller:
+		return probeObservation{Err: errors.New("the agent records no settings of its own to check the model against")}
+	case recalled.Model == "":
+		return probeObservation{Err: errors.New("the CLI's own store recorded no model for the session")}
+	case recalledModelMatches(recalled.Model, want):
+		return probeObservation{Worked: true, Detail: "the CLI recorded " + recalled.Model}
+	default:
+		return probeObservation{Detail: fmt.Sprintf("started with %q but the CLI recorded %s", want, recalled.Model)}
+	}
+}
+
+// observeInterrupt turns what the live probe watched into an observation. Only a turn that
+// was seen running, was still running when Escape went in, and did not reach its completion
+// marker afterwards can say anything: a CLI that ignores Escape and finishes the turn by
+// itself must not read as interrupted. Those cases are PROBE-ERROR, not DRIFT.
+func observeInterrupt(startedWorking, workingAtEscape, idleAfter, reachedMarker bool) probeObservation {
 	switch {
 	case !startedWorking:
 		return probeObservation{Err: errors.New("the long turn never reached the working state")}
-	case finishedBeforeEscape:
-		return probeObservation{Err: errors.New("the turn finished before Escape was sent; nothing to interrupt")}
+	case !workingAtEscape:
+		return probeObservation{Err: errors.New("the turn was no longer working when Escape was sent; nothing to interrupt")}
+	case reachedMarker:
+		return probeObservation{Err: errors.New("the turn ran to its completion marker; Escape either did nothing or came too late")}
 	case idleAfter:
-		return probeObservation{Worked: true, Detail: "returned to idle after Escape"}
+		return probeObservation{Worked: true, Detail: "returned to idle after Escape without completing the turn"}
 	default:
 		return probeObservation{Detail: "still not idle after Escape"}
 	}
