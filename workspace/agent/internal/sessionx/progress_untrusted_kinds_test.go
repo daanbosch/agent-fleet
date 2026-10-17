@@ -48,13 +48,15 @@ func TestProgressOfUntrustedTerminalKindsKeepHolding(t *testing.T) {
 	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 	stale := now.Add(-5 * time.Hour)
 	for _, kind := range []string{session.KindMuse, session.KindLcpp, session.KindShell, session.KindSSM} {
-		calls := 0
-		p := progFixture{status: &stale, source: &stale, pane: &stale, toolObserved: true}.probes(now, &calls)
-		p.trusted = progressTrusted
-		p.paneOnly = progressPaneOnly
-		m := session.Meta{Name: "hold-" + kind, Kind: kind, Dir: t.TempDir()}
-		if at, ok := progressOf(m, "working", p); ok {
-			t.Errorf("%s: progress answered %v for a stale row with a long silent tool; want no answer (hold)", kind, at)
+		for _, tool := range []bool{false, true} {
+			calls := 0
+			p := progFixture{status: &stale, source: &stale, pane: &stale, tool: tool, toolObserved: true}.probes(now, &calls)
+			p.trusted = progressTrusted
+			p.paneOnly = progressPaneOnly
+			m := session.Meta{Name: "hold-" + kind, Kind: kind, Dir: t.TempDir()}
+			if at, ok := progressOf(m, "working", p); ok {
+				t.Errorf("%s (tool alive=%v): progress answered %v for a stale row; want no answer (hold)", kind, tool, at)
+			}
 		}
 	}
 }
