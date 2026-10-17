@@ -762,6 +762,17 @@ var sseClient = &http.Client{Transport: authTransport{}}
 
 // streamEvents reads one SSE connection until it breaks. Returns the read error.
 func (s *Supervisor) streamEvents(addr string, gen int) error {
+	// Whatever ends this stream (EOF, a failed or refused reconnect, a hang) leaves a window
+	// in which the daemon can start a tool nobody hears about, so the in-flight sets stop being
+	// trusted the moment the stream is gone, not when the next one connects. A superseded
+	// generation's monitor must not touch the handles of the current one.
+	defer func() {
+		if s.Generation() == gen {
+			for _, h := range liveHandles() {
+				h.tools.Unknown()
+			}
+		}
+	}()
 	req, err := http.NewRequest("GET", eventURL(addr), nil)
 	if err != nil {
 		return err
@@ -774,6 +785,11 @@ func (s *Supervisor) streamEvents(addr string, gen int) error {
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		return fmt.Errorf("event stream: HTTP %d", res.StatusCode) // a 401 must not read as a clean EOF
+	}
+	// Events are not replayed across a reconnect, so a tool call announced during the gap is
+	// invisible: the in-flight sets are unknown until a turn boundary shows up on this stream.
+	for _, h := range liveHandles() {
+		h.tools.Unknown()
 	}
 	sc := bufio.NewScanner(res.Body)
 	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
