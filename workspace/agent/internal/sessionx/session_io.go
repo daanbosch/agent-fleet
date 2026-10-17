@@ -612,8 +612,10 @@ func HandleSessionInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rememberCodexTUIMode(name, body.Prompt, nil)
+	held := false
 	if body.Confirm && confirmMeta.Name != "" {
-		if err := confirmPromptDelivery(confirmMeta, pane, body.Prompt, confirmBase); err != nil {
+		var err error
+		if held, err = confirmPromptDelivery(confirmMeta, pane, body.Prompt, confirmBase); err != nil {
 			// Never dress an unconfirmed delivery up as success: the caller (the CP
 			// scheduler / the operator MCP) records and notifies it as an error instead
 			// of manufacturing a false "fired" (docs/log/38, delivery confirmation).
@@ -658,7 +660,14 @@ func HandleSessionInput(w http.ResponseWriter, r *http.Request) {
 			fleetgraph.RecordInstruct("user", name, "", p)
 		}
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"sent": name})
+	resp := map[string]any{"sent": name}
+	if held {
+		// Same key and meaning as the managed path below: claude has only queued the prompt
+		// behind a running turn (in memory, lost on a pane kill), so the sender must not
+		// read this as "started a turn".
+		resp["held"] = true
+	}
+	httpx.WriteJSON(w, http.StatusOK, resp)
 }
 
 // inputMirrors counts the detached Discord/Slack mirror goroutines. In production nobody
@@ -1081,7 +1090,8 @@ func typeInitialPrompt(name, prompt string) string {
 	// HTTP — log it if it stays unconfirmed. Unlike the reuse sender's confirm, this stays
 	// best-effort.
 	if metaOK && base.logs != nil {
-		if err := confirmPromptDelivery(meta, pane, prompt, base); err != nil {
+		// A queued initial prompt (held) still counts: the CLI has it and runs it next.
+		if _, err := confirmPromptDelivery(meta, pane, prompt, base); err != nil {
 			log.Printf("initial prompt delivery UNCONFIRMED for %s: %v", name, err)
 			return session.InitialPromptUnknown
 		}
