@@ -120,4 +120,9 @@ func TestComposerDraftKeepsTextThatStartsLikeThePlaceholder(t *testing.T) {
 	if !ComposerHolds(wrapped, "Addafollow-up", "forthisbug") {
 		t.Error("a wrapped draft starting with the placeholder's words was not held")
 	}
+	// The first row is exactly the placeholder and the rest follows on the next row.
+	broken := "  → Add a follow-up\n  regression test for this bug\n\n\n  Auto\n  ~/proj\n"
+	if !ComposerDraft(broken) || !ComposerHolds(broken, "Addafollow-up", "forthisbug") {
+		t.Error("a draft whose first row equals the placeholder was read as empty")
+	}
 }

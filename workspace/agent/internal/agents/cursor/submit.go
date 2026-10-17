@@ -82,10 +82,6 @@ func composerDraft(captured string) string {
 		if i == 0 {
 			ln = strings.TrimSpace(strings.TrimPrefix(ln, "→"))
 			ln = strings.TrimSpace(strings.TrimSuffix(ln, keyHint))
-			// The whole row, not a prefix: "Add a follow-up regression test" is a real draft.
-			if slices.Contains(composerMarks, ln) {
-				return ""
-			}
 		}
 		if ln == "" {
 			if blanks++; blanks >= 2 {
@@ -97,7 +93,12 @@ func composerDraft(captured string) string {
 		draft.WriteString(ln)
 		draft.WriteByte('\n')
 	}
-	return strings.TrimSpace(draft.String())
+	out := strings.TrimSpace(draft.String())
+	// The whole block, not its first row: "Add a follow-up" followed by more rows is a draft.
+	if slices.Contains(composerMarks, out) {
+		return ""
+	}
+	return out
 }
 
 // SubmitError is the error cursor printed under its composer after refusing a prompt, "" when

@@ -87,7 +87,7 @@ func TestConfirmCursorSubmitHoldsAStuckDraft(t *testing.T) {
 func fakeCursorTmux(t *testing.T, afterPaste string) (bin string) {
 	t.Helper()
 	bin = t.TempDir()
-	idle := "  → Add a follow-up\n\n  Auto\n  ~/proj\n"
+	idle := "  → Add a follow-up\n\n\n  Auto\n  ~/proj\n"
 	for f, c := range map[string]string{"idle.txt": idle, "after.txt": afterPaste} {
 		if err := os.WriteFile(filepath.Join(bin, f), []byte(c), 0o600); err != nil {
 			t.Fatal(err)
