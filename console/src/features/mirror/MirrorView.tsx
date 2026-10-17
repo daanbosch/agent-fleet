@@ -17,6 +17,7 @@ import { autoGrowTextarea } from "../../lib/autoGrow.ts";
 import { prettyModel } from "../../lib/modelName.ts";
 import { MirrorToggle } from "./MirrorToggle.tsx";
 import { MirrorBanners } from "./parts/MirrorBanners.tsx";
+import { MoveLimitBanner } from "./parts/MoveLimitBanner.tsx";
 import { useMirrorTts } from "./parts/useMirrorTts.tsx";
 import { useMirrorScroll } from "./parts/useMirrorScroll.ts";
 import { useSkillPicker } from "./parts/useSkillPicker.ts";
@@ -572,6 +573,11 @@ function MirrorViewBody({
         }}
         onAcceptTitle={acceptTitle}
         onDismissTitle={dismissTitle}
+      />
+      <MoveLimitBanner
+        session={sessionRow ?? sessionMeta}
+        state={status || sessionRow?.state || sessionMeta?.state}
+        running={running}
       />
 
       <div

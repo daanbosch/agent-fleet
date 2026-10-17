@@ -43,8 +43,8 @@ const src: Session = { name: "s1", kind: "claude", alive: false, state: "", titl
 const flush = async () => {
   for (let i = 0; i < 6; i++) await act(async () => await Promise.resolve());
 };
-const render = async (s: Session = src) => {
-  await act(async () => root!.render(<MoveSessionModal session={s} onClose={() => {}} />));
+const render = async (s: Session = src, fromLimit = false) => {
+  await act(async () => root!.render(<MoveSessionModal session={s} fromLimit={fromLimit} onClose={() => {}} />));
   await flush();
 };
 const click = async (el: Element | null) => {
@@ -107,6 +107,46 @@ describe("MoveSessionModal: before the move", () => {
     expect(missing.map((li) => li.dataset.kind)).toEqual(["claude", "cursor", "lcpp"]);
     expect(missing[1].textContent).toContain(t("move.reason.not_measured"));
     expect(missing[2].textContent).toContain(t("move.reason.cannot_read_file"));
+  });
+
+  it("keeps the Agent's order, and marks nothing, when not opened from a limit banner", async () => {
+    routes["GET api/codex/usage"] = { ok: true, fiveHour: { pct: 10 } };
+    await render();
+    expect(kindButtons()).toEqual(["codex", "opencode"]);
+    expect(document.querySelector(".move-quota-left")).toBeNull();
+  });
+
+  it("from a limit banner puts the kinds with quota left first, marked, and defaults to the first", async () => {
+    routes[PREVIEW] = preview({
+      targets: [
+        { kind: "claude", eligible: false, reason: "same_kind" },
+        { kind: "codex", eligible: true },
+        { kind: "opencode", eligible: true },
+        { kind: "muse", eligible: true },
+      ],
+    });
+    routes["GET api/codex/usage"] = { ok: true, fiveHour: { pct: 100 } };
+    routes["GET api/muse/usage"] = { ok: true, fiveHour: { pct: 30 } };
+    await render(src, true);
+    // muse has quota; opencode has no usage source (selectable, unmarked); codex is at its cap.
+    expect(kindButtons()).toEqual(["muse", "opencode", "codex"]);
+    const marked = [...document.querySelectorAll<HTMLElement>(".seg-btn.quota-left")].map((b) => b.dataset.kind);
+    expect(marked).toEqual(["muse"]);
+    expect(document.querySelector(".seg-btn.active")?.getAttribute("data-kind")).toBe("muse");
+  });
+
+  it("does not move the user's choice when usage reorders the picks", async () => {
+    routes["GET api/codex/usage"] = { ok: true, fiveHour: { pct: 100 } };
+    routes["GET api/muse/usage"] = { ok: true, fiveHour: { pct: 30 } };
+    routes[PREVIEW] = preview({
+      targets: [
+        { kind: "codex", eligible: true },
+        { kind: "muse", eligible: true },
+      ],
+    });
+    await render(src, true);
+    await click(document.querySelector('.seg-btn[data-kind="codex"]'));
+    expect(document.querySelector(".seg-btn.active")?.getAttribute("data-kind")).toBe("codex");
   });
 
   it("points a same-kind source at fork when its kind can fork, and says another kind is needed when not", async () => {

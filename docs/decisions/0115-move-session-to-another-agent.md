@@ -440,3 +440,15 @@ it is not yet.
   as not connected, and lists every other kind with its reason. It shows usage only for the kinds
   the Console already reads it for (the WS bar's claude, codex and muse sources), read once when
   the dialog opens. Model and driver default as the new-session dialog does for the working copy.
+
+## Addendum (2026-10-17) — the limit banner (P2b, #2182)
+
+- **There was no limit banner in the mirror to extend**, only the state chip, so P2b adds one band
+  (`MoveLimitBanner`) under the other mirror bands. It shows for `limited` and `spend_limit` on a
+  running Workspace, never for a moving or moved source, and only when the preview (no refusal)
+  leaves a connected target that is not the source's own kind and not already at its cap. Its
+  button opens the existing dialog flagged as coming from the limit.
+- **Quota ordering is display only.** From the banner the picker lists kinds with quota left first
+  (least used first), then kinds with no usage source or reading, then those at 100% in a window.
+  The first of them is the default until the user chooses. The usage is the same three sources as
+  the WS bar; a kind without one is judged neither way and stays selectable and unmarked.

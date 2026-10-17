@@ -664,6 +664,8 @@ secrets masked), starts the agent you pick **in the same working copy**, and tel
 that file first. The original session then **stops and takes no more input**, so only one
 session works on the working copy.
 
+A session stopped at a usage limit (or a spend limit) also shows a band above its chat with a **"Move to another agent"** button; it opens the same dialog with the agents that still have quota left in front (and marked). Agents whose usage is not shown stay selectable, unmarked. The band is not shown when no agent can take the session, or every candidate is at its own cap.
+
 The dialog shows, before you confirm:
 
 - **The agents it can move to.** The same agent is never offered (it draws on the same account's

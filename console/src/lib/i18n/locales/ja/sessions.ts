@@ -411,6 +411,7 @@ export const sessions = {
   "move.size": "引き継ぎファイルの大きさ: {size}",
   "move.size_over": "目安の大きさを超えていますが、そのまま書き出します。移動先は必要な部分だけ読みます。",
   "move.usage_five": "短期枠 {pct}%",
+  "move.quota_left": "枠に余裕あり",
   "move.usage_week": "週 {pct}%",
   "move.confirm": "移す",
   "move.busy_move": "移動しています（移動先を起動中）…",

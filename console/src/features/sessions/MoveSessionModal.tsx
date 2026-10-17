@@ -16,13 +16,12 @@
 // The preview is read without the Agent's gate and can be stale by the time the user confirms;
 // the move checks everything again, so a refusal it answers is shown as the result, not guessed
 // at here.
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Modal } from "../../ui/Modal.tsx";
 import { Icon } from "../../ui/Icon.tsx";
 import { ModelPicker } from "../../ui/ModelPicker.tsx";
-import { api, errText } from "../../core/api/client.ts";
+import { errText } from "../../core/api/client.ts";
 import { agentOf } from "../../agents/registry.ts";
-import { getCachedConns, setCachedConns, subscribeConns } from "../repos/connsCache.ts";
 import { kindDisplayName } from "../../lib/sessionkind.ts";
 import { useT } from "../../lib/i18n/index.ts";
 import { getSettings, agentLaunchDefault } from "../../lib/settings.ts";
@@ -31,11 +30,11 @@ import { displayName } from "../../lib/sessionview.ts";
 import { useSessionsStore } from "./store.ts";
 import { openSessionByName } from "./open.ts";
 import {
-  MOVE_USAGE_ENDPOINTS,
   fmtSize,
   movePhase,
   offeredTargets,
-  readMoveUsage,
+  orderByQuota,
+  quotaState,
   type MovePreview,
   type MoveRefusal,
   type MoveDelivery,
@@ -44,10 +43,14 @@ import {
   type MoveUsage,
 } from "./move.ts";
 import { MOVE_POLL_MS, moveCancel, moveDeliver, movePreview, moveReopen, moveRetry, moveSession } from "./moveApi.ts";
-import type { ConnectionsStatus, Session, SessionKind } from "../../types/session.ts";
+import { useConnectedKinds, useMoveUsage } from "./moveHooks.ts";
+import type { Session, SessionKind } from "../../types/session.ts";
 
 interface MoveSessionModalProps {
   session: Session;
+  /** Opened from the mirror's limit banner: the kinds with quota left lead the picker and the
+   *  first of them is the default (ADR 0115 P2b). Anything else opens it as the menu does. */
+  fromLimit?: boolean;
   onClose: () => void;
 }
 
@@ -58,7 +61,7 @@ type Load =
   | { state: "error"; error: MoveRefusal | string }
   | { state: "ready"; preview: MovePreview; stale?: MoveRefusal | string };
 
-export function MoveSessionModal({ session, onClose }: MoveSessionModalProps) {
+export function MoveSessionModal({ session, fromLimit = false, onClose }: MoveSessionModalProps) {
   const tr = useT();
   const [load, setLoad] = useState<Load>({ state: "loading" });
   const [busy, setBusy] = useState<"" | "move" | "retry" | "cancel" | "reopen" | "deliver">("");
@@ -165,6 +168,7 @@ export function MoveSessionModal({ session, onClose }: MoveSessionModalProps) {
           <MoveForm
             session={session}
             preview={preview}
+            fromLimit={fromLimit}
             busy={busy === "move"}
             onMove={(kind, model, driver) =>
               run("move", () => moveSession(session.name, kind, model, driver), (d) => setResult(d))
@@ -216,35 +220,31 @@ export function MoveSessionModal({ session, onClose }: MoveSessionModalProps) {
 function MoveForm({
   session,
   preview,
+  fromLimit,
   busy,
   onMove,
 }: {
   session: Session;
   preview: MovePreview;
+  fromLimit: boolean;
   busy: boolean;
   onMove: (kind: SessionKind, model: string, driver: string) => void;
 }) {
   const tr = useT();
-  const conns = useSyncExternalStore(subscribeConns, getCachedConns, getCachedConns);
-  // The connection check the handoff dialog relies on: warm from the rail, fetched only cold.
-  useEffect(() => {
-    if (conns) return;
-    let alive = true;
-    api("api/connections")
-      .then((d) => alive && setCachedConns(d && !d.error ? (d as ConnectionsStatus) : null))
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- once on open; `conns` is the warm-cache guard
-  }, []);
-  const connected = useMemo(() => (conns ? (k: SessionKind) => agentOf(k).available({ conns }) : null), [conns]);
+  const connected = useConnectedKinds();
   const offered = useMemo(() => offeredTargets(preview, connected), [preview, connected]);
+  const usage = useMoveUsage(offered);
+  // From a limit banner the kinds with quota left lead; a kind with no usage source stays
+  // selectable and unmarked (only a kind with a source can be judged).
+  const picks = useMemo(() => (fromLimit ? orderByQuota(offered, usage) : offered), [fromLimit, offered, usage]);
   const [kind, setKind] = useState<SessionKind | "">("");
+  // Usage arrives after the first paint and reorders the picks: until the user chooses, the
+  // default follows the head of the list instead of the head the list had before it.
+  const chosen = useRef(false);
   useEffect(() => {
-    if (kind && offered.includes(kind)) return;
-    setKind(offered[0] ?? "");
-  }, [offered, kind]);
+    if (kind && picks.includes(kind) && (chosen.current || !fromLimit)) return;
+    setKind(picks[0] ?? "");
+  }, [picks, kind, fromLimit]);
   const [model, setModel] = useState("");
   const [driver, setDriver] = useState("");
   // Model and driver default the way the new-session dialog defaults them for this working
@@ -254,7 +254,6 @@ function MoveForm({
     setModel(resolveModel(kind, session.repo || "", agentLaunchDefault(getSettings(), kind).model));
     setDriver(agentOf(kind).managedDriver ? "managed" : "");
   }, [kind, session.repo]);
-  const usage = useMoveUsage(offered);
 
   const notOffered = preview.targets.filter((t) => !offered.includes(t.kind));
   const reasonText = (k: SessionKind, reason?: string): string => {
@@ -287,21 +286,26 @@ function MoveForm({
         <span className="ui-field-label">{tr("move.target_label")}</span>
         {offered.length === 0 && <div className="muted launch-noagents">{tr("move.no_targets")}</div>}
         <div className="ui-seg big">
-          {offered.map((k) => {
+          {picks.map((k) => {
             const ag = agentOf(k);
             const u = usage[k];
+            const left = fromLimit && quotaState(u) === "left";
             return (
               <button
                 key={k}
                 type="button"
                 data-kind={k}
                 title={tr(ag.launchHintKey)}
-                className={"seg-btn kind-" + ag.cssClass + (kind === k ? " active" : "")}
-                onClick={() => setKind(k)}
+                className={"seg-btn kind-" + ag.cssClass + (kind === k ? " active" : "") + (left ? " quota-left" : "")}
+                onClick={() => {
+                  chosen.current = true;
+                  setKind(k);
+                }}
               >
                 <Icon name={ag.icon} className="seg-ic" />
                 {kindDisplayName(k)}
                 {u && <span className="seg-sub move-usage">{usageText(u, tr)}</span>}
+                {left && <span className="seg-sub move-quota-left">{tr("move.quota_left")}</span>}
               </button>
             );
           })}
@@ -428,31 +432,6 @@ function MoveGitSection({ preview }: { preview: MovePreview }) {
       )}
     </div>
   );
-}
-
-// useMoveUsage reads, once per open, the usage of every offered kind the Console already has a
-// usage source for. Display only: the Agent's move does not look at quotas.
-function useMoveUsage(kinds: SessionKind[]): Partial<Record<SessionKind, MoveUsage>> {
-  const [out, setOut] = useState<Partial<Record<SessionKind, MoveUsage>>>({});
-  const key = kinds.join(",");
-  useEffect(() => {
-    let alive = true;
-    for (const k of kinds) {
-      const ep = MOVE_USAGE_ENDPOINTS[k];
-      if (!ep) continue;
-      api(ep)
-        .then((d) => {
-          const u = readMoveUsage(d);
-          if (alive && u) setOut((o) => ({ ...o, [k]: u }));
-        })
-        .catch(() => {});
-    }
-    return () => {
-      alive = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by the kind list's contents
-  }, [key]);
-  return out;
 }
 
 function usageText(u: MoveUsage, tr: ReturnType<typeof useT>): string {

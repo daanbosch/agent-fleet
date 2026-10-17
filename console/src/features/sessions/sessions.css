@@ -1027,6 +1027,12 @@
   flex-direction: column;
   gap: 10px;
 }
+.ui-seg .seg-btn.quota-left {
+  box-shadow: inset 0 0 0 1px var(--ok, #4caf7d);
+}
+.ui-seg .move-quota-left {
+  color: var(--ok, #4caf7d);
+}
 .move-not-offered,
 .move-list {
   margin: 4px 0 0;
