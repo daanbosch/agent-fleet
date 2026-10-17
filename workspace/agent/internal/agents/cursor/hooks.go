@@ -347,8 +347,9 @@ const maxPublishTries = 4
 //     swapped out of the path, stay beside it as hooks.json.af-prev.<random> (never overwriting
 //     anything that already exists). They accumulate by one per update, and updates only
 //     happen when the entry changes, i.e. when this binary moves.
-//   - Not covered: a write through a descriptor held on a swapped-out inode after our
-//     comparison lands only in that kept file.
+//   - Our own earlier publish, once swapped out and verified byte-equal, is removed; nothing
+//     else is. A write through a descriptor held on a kept inode after our comparison lands
+//     only in that kept file.
 //
 // Where the exchange is unavailable (not Linux, or a filesystem without it) an existing file is
 // not updated at all.
@@ -389,8 +390,15 @@ func ensureHooksOnce(target, exe string) (done bool, err error) {
 		if err != nil {
 			// The user's newest content cannot be merged: put it back as written.
 			if published != nil {
-				if _, p, serr := swapIn(target, cur, mode); serr == nil {
-					_ = os.Remove(p) // our own stale publish
+				// Only our own publish may be dropped; whatever else the exchange pushed out
+				// (a newer save of the user's) is kept and the error says so.
+				if oldB, p, serr := swapIn(target, cur, mode); serr == nil {
+					if bytes.Equal(oldB, published) {
+						_ = os.Remove(p)
+					} else {
+						keepAside(p, target)
+						return false, fmt.Errorf("%s: %w; a newer save was kept beside it as %s.af-prev.*", target, err, target)
+					}
 				}
 			}
 			return false, fmt.Errorf("%s: %w, restored as saved", target, err)

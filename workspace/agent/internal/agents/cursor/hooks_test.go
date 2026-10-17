@@ -532,3 +532,27 @@ func TestEnsureHooksKeepsAnInPlaceWriteDuringPublish(t *testing.T) {
 		t.Fatal("the in-place version is not kept beside the file")
 	}
 }
+
+// The restore path of an unmergeable save must not drop a newer, valid save that replaced the
+// path while it ran.
+func TestEnsureHooksInvalidRestoreKeepsTheNewestSave(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(target, []byte(userHooks), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	replace := func(content string) {
+		ed := filepath.Join(dir, "editor.tmp")
+		_ = os.WriteFile(ed, []byte(content), 0o600)
+		_ = os.Rename(ed, target)
+	}
+	newest := `{"version":1,"hooks":{"stop":[{"command":"./newest.sh"}]}}`
+	hookBeforeSwap = func() { hookBeforeSwap = nil; replace(`{"version":1,`) } // broken save
+	hookAfterSwap = func() { hookAfterSwap = nil; replace(newest) }            // then a valid one
+	defer func() { hookBeforeSwap, hookAfterSwap = nil, nil }()
+	_ = ensureHooksAt(target, "/opt/af/a") // an error is acceptable; losing the save is not
+	files := append(prevFiles(t, target), target)
+	if !anyContains(t, files, "newest.sh") {
+		t.Fatal("the newest save is neither in the file nor kept beside it")
+	}
+}
