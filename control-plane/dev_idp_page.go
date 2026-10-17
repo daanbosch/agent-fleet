@@ -9,7 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"unicode"
+	"strings"
 
 	"github.com/k-k1/agent-fleet/control-plane/internal/auth"
 )
@@ -198,21 +198,20 @@ func (a devIdPAPI) writeErrPage(w http.ResponseWriter, r *http.Request, status i
 }
 
 // callbackHost is what an error page may say about a rejected redirect_uri: its host and nothing
-// else (no path, query or userinfo, which can carry a state or a secret). Anything that is not a
-// plain printable host name comes back empty, and a long one is cut.
+// else (no path, query or userinfo, which can carry a state or a secret). This is a trusted
+// screen, so only a plain ASCII host name (letters, digits, '.', '-', an optional port, a bracketed
+// IPv6 literal) is shown: a non-ASCII host could read as an instruction, and a truncated one would
+// hide the real domain. Anything else, or longer than a DNS name can be, comes back empty.
 func callbackHost(raw string) string {
 	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
+	if err != nil || u.Host == "" || len(u.Host) > 253 {
 		return ""
 	}
-	h := []rune(u.Host)
-	if len(h) > 100 {
-		h = append(h[:100], '…')
-	}
-	for _, c := range h {
-		if !unicode.IsPrint(c) {
+	for _, c := range u.Host {
+		ok := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune(".-:[]", c)
+		if !ok {
 			return ""
 		}
 	}
-	return string(h)
+	return u.Host
 }

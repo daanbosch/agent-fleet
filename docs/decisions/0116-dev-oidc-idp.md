@@ -364,7 +364,8 @@ what to do next, from a ja / en table that follows `Accept-Language`; this repla
 
 - The internal reason stays in the log. An unknown client and a non-member still get the same page. A
   `redirect_uri` the client may not use is only reached by a member of the client's workspace, so that page
-  names the rejected callback's **host** (escaped, length-capped; never the path, query or `client_id`).
+  names the rejected callback's **host** (only a plain ASCII host name, never cut, otherwise left out; never the
+  path, query or `client_id`).
 - A store failure on consent (500) says the sign-in is unavailable; every other consent refusal says the
   confirmation is no longer valid. A wrong method on `authorize` or `consent` is a page; on `token`, `userinfo`
   and `jwks` it stays the plain 405 / OAuth JSON, and the bare 404 while the IdP is not offered is unchanged.

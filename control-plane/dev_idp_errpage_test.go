@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"github.com/k-k1/agent-fleet/control-plane/internal/store"
 	"html"
 	"net/http"
 	"net/http/httptest"
@@ -114,20 +117,28 @@ func TestDevIdPErrorPagesWearTheShellAndKeepTheirStatus(t *testing.T) {
 	wantErrPage(t, "cross-site", rec, http.StatusForbidden, "Sign-in confirmation is no longer valid")
 }
 
-func TestDevIdPErrorPageEscapesTheEchoedHost(t *testing.T) {
+func TestDevIdPErrorPageEchoesOnlyAPlainHost(t *testing.T) {
 	d := newDevIdPTestEnv(t)
 	rec := d.getAs("preview-user", "https://af.example.com"+devIdPAuthorizePath+"?"+
 		d.authQuery("https://a'b.example/cb", "").Encode(), "en")
 	body := wantErrPage(t, "quote in host", rec, http.StatusBadRequest, "Callback address not allowed")
-	if !strings.Contains(body, "a&#39;b.example") || strings.Contains(body, "a'b.example") {
-		t.Errorf("host not escaped:\n%s", body)
+	// Only plain host characters are ever shown, so a host that needs escaping is left out.
+	if strings.Contains(body, "b.example") || strings.Contains(body, "Rejected callback") {
+		t.Errorf("odd host was echoed:\n%s", body)
 	}
+	long := strings.Repeat("trusted-prefix.", 12) + "evil.example"
 	for raw, want := range map[string]string{
 		"javascript:alert(1)":                 "",
+		"javascript://h.example/%0aalert(1)":  "h.example",
 		"":                                    "",
-		"https://u:p@h.example/x?y=1#z":       "h.example",
-		"https://" + strings.Repeat("a", 300): strings.Repeat("a", 100) + "…",
+		"https://u:p@h.example:8443/x?y=1#z":  "h.example:8443",
+		"https://[::1]:3000/cb":               "[::1]:3000",
+		"https://" + strings.Repeat("a", 300): "",
+		"https://" + long:                     long, // never cut: the tail is the real domain
 		"https://bad\x7f.example/":            "",
+		"https://パスワードを入力してください。例.jp/cb":  "", // an instruction, not a host
+		"https://xn--28j2a3ar1p.example/": "xn--28j2a3ar1p.example",
+		"https://a b.example/":            "",
 	} {
 		if got := callbackHost(raw); got != want {
 			t.Errorf("callbackHost(%q) = %q, want %q", raw, got, want)
@@ -140,8 +151,6 @@ func TestDevIdPErrorPageCatalogueHasJaAndEnInStep(t *testing.T) {
 	if len(devIdPErrCatalogue) != 2 {
 		t.Fatalf("languages: %d", len(devIdPErrCatalogue))
 	}
-	check := func(path string, a, b reflect.Value) {}
-	_ = check
 	var walk func(path string, a, b reflect.Value)
 	walk = func(path string, a, b reflect.Value) {
 		if a.Kind() == reflect.Struct {
@@ -167,4 +176,23 @@ func TestDevIdPErrorPageCatalogueHasJaAndEnInStep(t *testing.T) {
 		t.Errorf("kinds share a title: %v", seen)
 	}
 	walk("consent", reflect.ValueOf(devIdPConsentText["ja"]), reflect.ValueOf(devIdPConsentText["en"]))
+}
+
+// failingConsume is a store whose consent consumption fails, as a database outage would.
+type failingConsume struct{ store.Store }
+
+func (failingConsume) ConsumeDevIdPConsent(context.Context, string, int64) (store.DevIdPGrant, bool, error) {
+	return store.DevIdPGrant{}, false, errors.New("boom: secret-internal-detail")
+}
+
+func TestDevIdPConsentStoreFailureIsTheUnavailablePage(t *testing.T) {
+	d := newDevIdPTestEnv(t)
+	d.mgr.store = failingConsume{d.mgr.store}
+	for lang, title := range map[string]string{"en": "Can't complete the sign-in", "ja": "サインインを完了できません"} {
+		rec := d.postConsent("preview-user", url.Values{"ticket": {"afdevask-x"}, "choice": {"self"}}, map[string]string{"Accept-Language": lang})
+		body := wantErrPage(t, "store failure "+lang, rec, http.StatusInternalServerError, title)
+		if strings.Contains(body, "boom") || strings.Contains(body, "secret-internal-detail") {
+			t.Errorf("internal error reached the page: %s", body)
+		}
+	}
 }
