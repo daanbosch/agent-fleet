@@ -56,6 +56,9 @@ func testDeps() Deps {
 		SessionIsShell:    func(string) bool { return false },
 
 		ManagedDefaultKind: func(k string) bool { return k == "codex" },
+		// Accepts everything: the refusal itself is held in sessionx (the registry) and in
+		// TestCreateSessionRefusesUnregisteredKind (this package, which swaps in a real rule).
+		ValidateCreateKind: func(string) error { return nil },
 
 		ReadUIPrefs:                func() map[string]any { return map[string]any{} },
 		EnsureClaudeSettingsWiring: func(string) {},

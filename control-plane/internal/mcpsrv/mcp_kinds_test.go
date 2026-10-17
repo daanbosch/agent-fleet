@@ -117,10 +117,34 @@ func TestCreateSessionManagedDriverFollowsTheCatalog(t *testing.T) {
 			t.Errorf("create_session(kind=%q): driver %q, want managed", k, got)
 		}
 	}
-	for _, k := range []string{"", "claude", "agy", "shell", "ssm", "Codex", "CODEX", " codex", "codex ",
-		"kiro-cli", "cursor-agent", "github-copilot", "llamacpp", "llama.cpp", "Muse", "open-code", "antigravity"} {
+	for _, k := range []string{"", "claude", "agy", "shell", "ssm"} {
 		if got := createSessionDriver(t, k); got != "" {
 			t.Errorf("create_session(kind=%q): driver %q, want none", k, got)
+		}
+	}
+}
+
+// create_session refuses a kind the snapshot does not list — the Agent would otherwise fold it
+// to claude and start a different agent than the caller named (#2297) — and says which kinds
+// are accepted. Nothing is sent to the Agent. The empty kind stays claude.
+func TestCreateSessionRefusesUnregisteredKind(t *testing.T) {
+	for _, k := range []string{"Codex", "CODEX", " codex", "codex ", "kiro-cli", "cursor-agent",
+		"github-copilot", "llamacpp", "llama.cpp", "Muse", "open-code", "antigravity"} {
+		var raw []byte
+		a := API{cp: bodyCP{body: &raw}}
+		_, err := memberTool(t, "create_session").run(context.Background(), a, &Resolved{}, map[string]any{"kind": k})
+		if err == nil || !strings.Contains(err.Error(), "accepted kinds") || !strings.Contains(err.Error(), "codex") {
+			t.Errorf("create_session(kind=%q) = %v, want a refusal naming the accepted kinds", k, err)
+		}
+		if raw != nil {
+			t.Errorf("create_session(kind=%q) still reached the Agent: %s", k, raw)
+		}
+	}
+	for _, k := range []string{"", "claude", "codex"} {
+		var raw []byte
+		a := API{cp: bodyCP{body: &raw}}
+		if _, err := memberTool(t, "create_session").run(context.Background(), a, &Resolved{}, map[string]any{"kind": k}); err != nil || raw == nil {
+			t.Errorf("create_session(kind=%q) = %v (sent %q), want it forwarded", k, err, raw)
 		}
 	}
 }

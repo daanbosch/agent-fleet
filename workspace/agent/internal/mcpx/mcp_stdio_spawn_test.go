@@ -965,3 +965,60 @@ func TestCreateSessionDriverComesFromTheWiredPredicate(t *testing.T) {
 		}
 	}
 }
+
+// create_session refuses a kind the wired validator rejects before anything else happens: no
+// request reaches the Agent, so no session of a different agent (claude) is started. The
+// validator is handed the raw value, so "Codex", " codex", "kiro-cli" and "llamacpp" are all
+// refused; a registered kind and the empty kind (claude) still go through. (The rule itself is
+// sessionx.ValidateCreateKind, held against the registry there; package main's
+// TestMCPWiringIsLive holds the wiring.)
+func TestCreateSessionRefusesUnregisteredKind(t *testing.T) {
+	withFleetSpawn(t, true)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AF_SESSIONS_DIR", t.TempDir())
+
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write([]byte(`{"name":"slot09"}`))
+	}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	t.Setenv("AGENT_ADDR", u.Host)
+
+	d := testDeps()
+	d.ValidateCreateKind = func(k string) error {
+		if k == "" || k == "claude" || k == "codex" {
+			return nil
+		}
+		return fmt.Errorf("unknown kind %q; accepted kinds: claude, codex (empty means claude)", k)
+	}
+	old := Wired()
+	Configure(d)
+	defer Configure(old)
+
+	call := func(kind string) string {
+		a, _ := json.Marshal(map[string]any{"dir": "/repos/app", "initial_prompt": "x", "kind": kind})
+		params, _ := json.Marshal(map[string]any{"name": "create_session", "arguments": json.RawMessage(a)})
+		return string(mcpStdioCall(mcpReq{ID: json.RawMessage(`1`), Params: params}))
+	}
+	for _, kind := range []string{"Codex", " codex", "kiro-cli", "llamacpp"} {
+		hits = 0
+		resp := call(kind)
+		if !strings.Contains(resp, `"isError":true`) || !strings.Contains(resp, "accepted kinds") {
+			t.Errorf("create_session(kind=%q) = %s, want a refusal naming the accepted kinds", kind, resp)
+		}
+		if hits != 0 {
+			t.Errorf("create_session(kind=%q) reached the Agent %d time(s); a refused kind must start nothing", kind, hits)
+		}
+	}
+	for _, kind := range []string{"codex", "claude", ""} {
+		hits = 0
+		if resp := call(kind); strings.Contains(resp, `"isError":true`) {
+			t.Errorf("create_session(kind=%q) refused: %s", kind, resp)
+		}
+		if hits != 1 {
+			t.Errorf("create_session(kind=%q) reached the Agent %d time(s), want 1", kind, hits)
+		}
+	}
+}

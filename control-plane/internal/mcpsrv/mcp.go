@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/k-k1/agent-fleet/control-plane/internal/agentkinds"
 	"github.com/k-k1/agent-fleet/control-plane/internal/store"
 )
 
@@ -551,10 +552,14 @@ func memberTools() []mcpTool {
 			},
 			run: func(ctx context.Context, a API, res *Resolved, args map[string]any) (string, error) {
 				kind := argStr(args, "kind")
+				// Refused here, with the Workspace untouched, rather than left to the Agent.
+				if err := agentkinds.CheckCreateKind(kind); err != nil {
+					return "", err
+				}
 				driver := ""
 				// An MCP caller cannot drive a pane, so it asks for managed wherever the Agent's
 				// registry says that is the default (the kind catalog snapshot). The match is
-				// exact: an alternate spelling gets no driver, as the Agent falls it back to claude.
+				// exact; an alternate spelling never reaches this point (refused above).
 				if mcpManagedDefaultKinds[kind] {
 					driver = "managed"
 				}

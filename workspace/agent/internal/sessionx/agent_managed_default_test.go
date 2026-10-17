@@ -43,11 +43,11 @@ func TestManagedDefaultKindRefusesAlternateSpellings(t *testing.T) {
 	}
 }
 
-// A CP newer than its Agent may name a kind the Agent has not registered yet. The Agent folds it
-// to claude (NormalizeKind), which has no managed driver: driver=managed is refused with 400
-// driver_unsupported, where an empty driver would go on to start a claude TUI under the wrong
-// kind. Driven through HandleCreateSession, because the refusal is a branch of the handler, not
-// a property of the registry.
+// A CP newer than its Agent may name a kind the Agent has not registered yet. The create is
+// refused as bad_kind (#2297) whatever the driver: folding the kind to claude would start a
+// claude TUI under the wrong kind when no driver is named, and would answer driver_unsupported
+// for the wrong reason when managed is. Driven through HandleCreateSession, because the refusal
+// is a branch of the handler, not a property of the registry.
 func TestUnregisteredKindWithManagedDriverIsRefused(t *testing.T) {
 	logPath := fakeTmux(t)
 	// allocSessionName asks tmux has-session; the default stub says every name is taken, which
@@ -63,18 +63,16 @@ func TestUnregisteredKindWithManagedDriverIsRefused(t *testing.T) {
 		return rec
 	}
 
-	rec := post(`{"kind":"` + unknown + `","driver":"managed"}`)
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "driver_unsupported") {
-		t.Fatalf("unknown kind + managed: status = %d, body = %s, want 400 driver_unsupported", rec.Code, rec.Body.String())
-	}
-
-	// Control: the same kind with no driver is not refused for its driver. It stops later, on
-	// the directory that does not exist, before any session starts.
-	rec = post(`{"kind":"` + unknown + `","dir":"/nonexistent-af-test-dir"}`)
-	if strings.Contains(rec.Body.String(), "driver_unsupported") {
-		t.Fatalf("unknown kind + no driver was refused for its driver: %d %s", rec.Code, rec.Body.String())
+	for _, body := range []string{
+		`{"kind":"` + unknown + `","driver":"managed"}`,
+		`{"kind":"` + unknown + `","dir":"/nonexistent-af-test-dir"}`,
+	} {
+		rec := post(body)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "bad_kind") {
+			t.Fatalf("unknown kind, %s: status = %d, body = %s, want 400 bad_kind", body, rec.Code, rec.Body.String())
+		}
 	}
 	if got, _ := os.ReadFile(logPath); strings.Contains(string(got), "new-session") {
-		t.Fatalf("the control request started a tmux session: %q", got)
+		t.Fatalf("a refused request started a tmux session: %q", got)
 	}
 }

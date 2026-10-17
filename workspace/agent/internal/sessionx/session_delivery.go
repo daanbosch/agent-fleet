@@ -34,6 +34,7 @@ import (
 	"unicode"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/claude"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents/cursor"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/tmuxx"
 )
@@ -281,4 +282,62 @@ func squashSpace(s string) string {
 		}
 		return r
 	}, s)
+}
+
+const (
+	// A cursor Terminal send is watched for cursorSubmitPolls reads, cursorSubmitPoll apart,
+	// after its Enter. cursor takes a prompt it will refuse for about a second (the composer
+	// empties, a spinner shows) and hands it back at 1.0-1.4 s (measured on 2026.10.16, Free
+	// plan, named model); neither the pane nor the JSONL shows a started turn earlier than
+	// that, so a normal send waits the whole window too. Short enough that a sender is not held
+	// up, long enough for a slow host.
+	cursorSubmitPoll  = 250 * time.Millisecond
+	cursorSubmitPolls = 10 // 10 x 250 ms
+)
+
+// cursorCapture and cursorSleep are the pane read and the wait of confirmCursorSubmit, swapped
+// by its tests.
+var (
+	cursorCapture = tmuxx.CapturePane
+	cursorSleep   = time.Sleep
+)
+
+// isCursorTerminal reports whether m is a cursor session driven through its TUI, the only kind
+// whose rejected submit confirmCursorSubmit can see.
+func isCursorTerminal(m session.Meta) bool {
+	return NormalizeKind(m.Kind) == session.KindCursor && m.DriverKind() != session.DriverManaged
+}
+
+// confirmCursorSubmit reports whether the cursor TUI handed the just-submitted prompt back:
+// the text is in the composer again and cursor printed an error under it (a model the plan
+// cannot use). held is true then, with reason set to the TUI's error text, and the draft is
+// left alone: a retype would append to it, and the cause is not one a retry fixes.
+//
+// Fails toward "delivered" on anything it does not recognise: an unreadable pane, no composer
+// on screen, a draft that went away. A draft that stays without an error row for the whole
+// window is held too (Enter lost), with no reason. Only a draft seen on two polls in a row
+// counts, because a send in flight shows the draft for a moment.
+func confirmCursorSubmit(m session.Meta, prompt string) (held bool, reason string) {
+	head, tail := promptEnds(prompt)
+	if head == "" {
+		return false, ""
+	}
+	tn := session.TmuxName(m.Name)
+	streak := 0
+	for poll := 1; ; poll++ {
+		cursorSleep(cursorSubmitPoll)
+		pane := cursorCapture(tn)
+		if cursor.ComposerHolds(pane, head, tail) {
+			streak++
+			reason = cursor.SubmitError(pane)
+			if streak >= 2 && reason != "" {
+				return true, reason
+			}
+		} else {
+			streak, reason = 0, ""
+		}
+		if poll >= cursorSubmitPolls {
+			return streak >= 2, reason
+		}
+	}
 }
