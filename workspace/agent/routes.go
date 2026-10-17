@@ -470,6 +470,9 @@ func buildMux() *http.ServeMux {
 	// Live model catalogs (codex: `codex debug models` / opencode: `opencode models`)
 	// for the Console's launch model picker.
 	mux.HandleFunc("GET /agents/{kind}/models", handleAgentModels)
+	// The kind catalog (#1077): every registered kind with its caps, for the CP and Console
+	// to derive their kind lists from.
+	mux.HandleFunc("GET /agents/kinds", handleAgentKinds)
 	// Agent memory version control (docs/log/39 / ADR 0022 P1-P3): snapshots claude/codex
 	// memory md into a bare repo, giving history, diffs, rollback to a chosen point and
 	// transfer between environments.

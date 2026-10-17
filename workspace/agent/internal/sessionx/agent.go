@@ -1,6 +1,7 @@
 package sessionx
 
 import (
+	"sort"
 	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/agents"
@@ -54,6 +55,19 @@ func AgentOf(kind string) agents.Agent {
 		return a
 	}
 	return agentRegistry[session.KindClaude]
+}
+
+// RegisteredKinds lists every kind in the registry, sorted. It is the source the kind
+// catalog (GET /agents/kinds) and the drift guards iterate: a hand-kept list of kinds is
+// exactly what drifted before. AgentOf's claude fallback is not a kind, so an unknown or
+// alternate spelling never appears here.
+func RegisteredKinds() []string {
+	kinds := make([]string, 0, len(agentRegistry))
+	for k := range agentRegistry {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds)
+	return kinds
 }
 
 // NormalizeKind maps a create request's kind onto a registered one, defaulting the
