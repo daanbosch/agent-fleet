@@ -3,6 +3,7 @@ package cursor
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -378,5 +379,93 @@ func TestEnsureHooksOnceDoesNotClobberAConcurrentSave(t *testing.T) {
 	}
 	if left, _ := filepath.Glob(filepath.Join(dir, ".hooks.json.af-*")); len(left) != 0 {
 		t.Fatalf("temp files left behind: %v", left)
+	}
+}
+
+// TestHelperPublishCrash is the child of the crash tests: it dies inside the publish.
+func TestHelperPublishCrash(t *testing.T) {
+	stage := os.Getenv("AF_TEST_CRASH_STAGE")
+	if stage == "" {
+		t.Skip("child process only")
+	}
+	die := func() { os.Exit(3) }
+	switch stage {
+	case "before-rename":
+		hookBeforeRename = die
+	case "after-rename":
+		hookAfterRename = die
+	}
+	_ = ensureHooksAt(os.Getenv("AF_TEST_HOOKS"), "/opt/af/a")
+	os.Exit(0) // not reached when the seam fired
+}
+
+// A process killed while publishing never leaves the user's path empty, and the next ensure
+// still has every user hook.
+func TestEnsureHooksSurvivesAKilledPublish(t *testing.T) {
+	for _, stage := range []string{"before-rename", "after-rename"} {
+		t.Run(stage, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			path := hooksPath()
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(userHooks), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(os.Args[0], "-test.run=^TestHelperPublishCrash$")
+			cmd.Env = append(os.Environ(), "AF_TEST_CRASH_STAGE="+stage, "AF_TEST_HOOKS="+path, "HOME="+home)
+			if err := cmd.Run(); err == nil {
+				t.Fatal("the child was expected to die inside the publish")
+			}
+			if fi, err := os.Stat(path); err != nil || fi.Size() == 0 {
+				t.Fatalf("the user's path is gone or empty after a kill: %v", err)
+			}
+			if err := ensureHooksAt(path, "/opt/af/b"); err != nil {
+				t.Fatal(err)
+			}
+			es := stopEntries(t, path)
+			if len(es) != 2 || es[0]["command"] != "./mine.sh" {
+				t.Fatalf("stop entries after recovery = %+v", es)
+			}
+			if _, ok := readJSON(t, path)["hooks"].(map[string]any)["beforeShellExecution"]; !ok {
+				t.Fatal("the user's other event is gone")
+			}
+		})
+	}
+}
+
+// An editor holding the old file open writes into it after our final check: that content is
+// merged into the published file rather than dropped, and the backup keeps the user's text.
+func TestEnsureHooksKeepsAnInPlaceWriteDuringPublish(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(target, []byte(userHooks), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := os.OpenFile(target, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fd.Close()
+	// os.O_TRUNC emptied it; restore through the same descriptor, as an editor would.
+	if _, err := fd.WriteString(userHooks); err != nil {
+		t.Fatal(err)
+	}
+	saved := `{"version":1,"hooks":{"stop":[{"command":"./saved-in-place.sh"}]}}`
+	hookBeforeRename = func() {
+		_ = fd.Truncate(0)
+		_, _ = fd.WriteAt([]byte(saved), 0)
+	}
+	defer func() { hookBeforeRename = nil }()
+	if err := ensureHooksAt(target, "/opt/af/a"); err != nil {
+		t.Fatal(err)
+	}
+	es := stopEntries(t, target)
+	if len(es) != 2 || es[0]["command"] != "./saved-in-place.sh" || !strings.Contains(es[1]["command"].(string), "cursor-hook") {
+		t.Fatalf("published entries = %+v", es)
+	}
+	if b, _ := os.ReadFile(target + backupSuffix); string(b) != saved {
+		t.Fatalf("backup = %s", b)
 	}
 }

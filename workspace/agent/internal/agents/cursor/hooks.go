@@ -318,18 +318,35 @@ func readHooks(path string) (data []byte, mode os.FileMode, exists bool, err err
 	return data, fi.Mode().Perm(), true, nil
 }
 
-// hookAfterRead is a test seam: it runs between the read and the publish, where an editor's
-// save would land.
-var hookAfterRead func()
+// Test seams: hookAfterRead runs between the read and the final check, hookBeforeRename right
+// before the atomic replace, hookAfterRename right after it. They are where an editor's save or
+// a killed process would land.
+var hookAfterRead, hookBeforeRename, hookAfterRename func()
+
+func seam(f func()) {
+	if f != nil {
+		f()
+	}
+}
+
+// backupSuffix names the single backup kept beside the user's file.
+const backupSuffix = ".af-prev"
 
 // ensureHooksOnce merges once. done=false means the file changed under us and the caller should
 // read it again.
 //
-// Publishing never overwrites a save the user made after our read: the current file is first
-// moved aside (an atomic rename), checked against what we merged from, and the new content is
-// then linked into place, which fails if anything has appeared at the path in the meantime.
-// A changed file is put back as it was. The only moment the path is empty is between the two
-// renames; cursor reading hooks.json then sees no file, which it treats as no hooks.
+// What this guarantees, and what it cannot:
+//   - The path is never empty: the new content replaces the old with one atomic rename, so a
+//     process killed at any point leaves either the old or the new file, and the next ensure
+//     merges again from whatever is there.
+//   - Before the rename the old content gets a second name (a hard link, a copy where links
+//     fail) at <file>.af-prev. That file is the user's previous hooks.json and is kept.
+//   - A save made by replacing the file (what most editors do) between the final comparison and
+//     the rename is the one window left, a few microseconds wide; its content is not lost from
+//     disk but is not merged either, and ends up only if the user saves again.
+//   - A write straight into the old file (an editor holding it open) after the rename lands in
+//     the inode the backup still names. It is detected by comparing the backup with what was
+//     merged from, and merged into the published file at once.
 func ensureHooksOnce(target, exe string) (done bool, err error) {
 	orig, mode, exists, err := readHooks(target)
 	if err != nil {
@@ -342,31 +359,22 @@ func ensureHooksOnce(target, exe string) (done bool, err error) {
 	if err != nil {
 		return false, fmt.Errorf("%s: %w, leaving it alone", target, err)
 	}
-	if hookAfterRead != nil {
-		hookAfterRead()
-	}
 	if !changed {
 		return true, nil
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(target), ".hooks.json.af-*")
+	seam(hookAfterRead)
+	tmp, err := writeTemp(target, out, mode)
 	if err != nil {
 		return false, err
 	}
-	defer os.Remove(tmp.Name()) // no-op once linked or removed
-	if _, err := tmp.Write(out); err != nil {
-		_ = tmp.Close()
-		return false, err
-	}
-	if err := tmp.Chmod(mode); err != nil { // keep the user's mode; a new file is 0600
-		_ = tmp.Close()
-		return false, err
-	}
-	if err := tmp.Close(); err != nil {
-		return false, err
+	defer os.Remove(tmp) // no-op once renamed
+	// An editor may have saved since our read: do not publish a merge of the old content.
+	if now, _, nowExists, err := readHooks(target); err != nil || nowExists != exists || !bytes.Equal(now, orig) {
+		return false, nil
 	}
 	if !exists {
-		// Link fails with EEXIST when the user created the file since our read.
-		if err := os.Link(tmp.Name(), target); err != nil {
+		// Link fails with EEXIST when the user created the file since our check.
+		if err := os.Link(tmp, target); err != nil {
 			if os.IsExist(err) {
 				return false, nil
 			}
@@ -374,35 +382,70 @@ func ensureHooksOnce(target, exe string) (done bool, err error) {
 		}
 		return true, nil
 	}
-	aside := tmp.Name() + ".prev"
-	if err := os.Rename(target, aside); err != nil {
+	backup := target + backupSuffix
+	if err := keepBackup(target, backup, orig, mode); err != nil {
+		return false, fmt.Errorf("cannot keep a backup of %s: %w", target, err)
+	}
+	seam(hookBeforeRename)
+	if err := os.Rename(tmp, target); err != nil {
 		return false, err
 	}
-	moved, _, _, rerr := readHooks(aside)
-	if rerr != nil || !bytes.Equal(moved, orig) {
-		// Saved since our read: put that save back untouched and merge again from it.
-		if err := os.Link(aside, target); err != nil {
-			return false, fmt.Errorf("%s changed while it was being updated; the user's newer content is kept at %s: %w", target, aside, err)
-		}
-		_ = os.Remove(aside)
-		return false, nil
+	seam(hookAfterRename)
+	// The backup still names the old inode: a write into it after our check shows up here.
+	late, _, ok, err := readHooks(backup)
+	if err != nil || !ok || bytes.Equal(late, orig) {
+		return true, nil
 	}
-	if err := os.Link(tmp.Name(), target); err != nil {
-		// A new file appeared at the path: it is the user's newest, so ours is dropped and the
-		// moved-aside content is only the older version of it.
-		if os.IsExist(err) {
-			_ = os.Remove(aside)
-			return false, nil
-		}
-		// Anything else: restore the original so the user is never left without a file.
-		if lerr := os.Link(aside, target); lerr != nil {
-			return false, fmt.Errorf("%s could not be restored (a copy is at %s): %w", target, aside, lerr)
-		}
-		_ = os.Remove(aside)
+	merged, _, mergeErr := mergeStop(late, exe)
+	if mergeErr != nil {
+		merged = late // not mergeable any more: put the user's text back as written
+	}
+	tmp2, err := writeTemp(target, merged, mode)
+	if err != nil {
 		return false, err
 	}
-	_ = os.Remove(aside)
+	defer os.Remove(tmp2)
+	if err := os.Rename(tmp2, target); err != nil {
+		return false, err
+	}
+	if mergeErr != nil {
+		return false, fmt.Errorf("%s was edited while it was being updated and is not mergeable: %w, restored as saved", target, mergeErr)
+	}
 	return true, nil
+}
+
+// writeTemp writes content to a new temp file beside target with the given mode.
+func writeTemp(target string, content []byte, mode os.FileMode) (string, error) {
+	f, err := os.CreateTemp(filepath.Dir(target), ".hooks.json.af-*")
+	if err != nil {
+		return "", err
+	}
+	_, werr := f.Write(content)
+	cerr := f.Chmod(mode) // keep the user's mode; a new file is 0600
+	if err := f.Close(); werr == nil && cerr == nil {
+		werr = err
+	}
+	if werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		os.Remove(f.Name())
+		return "", werr
+	}
+	return f.Name(), nil
+}
+
+// keepBackup gives target's current inode a second name, replacing the previous backup. Where
+// hard links are unavailable it falls back to a copy of orig, which loses the late-write
+// detection but keeps the content.
+func keepBackup(target, backup string, orig []byte, mode os.FileMode) error {
+	if err := os.Remove(backup); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if os.Link(target, backup) == nil {
+		return nil
+	}
+	return os.WriteFile(backup, orig, mode)
 }
 
 // hooksLockPath is the cross-process lock for hooks.json, kept in the agent's own state so
