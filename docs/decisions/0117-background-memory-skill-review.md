@@ -329,10 +329,13 @@ questions and the decisions stay as written; this records the answers.
 - **Input:** keep 40,000 characters for the window, built from text, tool labels and tool results clipped to 500
   characters; a longer window is split and reviewed oldest-first rather than cut to the newest part. Index and memory
   bodies were not sized (assumption for P1: 12,000 characters of index, 2,000 per body).
-- **Output:** 5 operations, 4 KiB per operation text, 16 KiB per reply (observed: 0, 0 and 3 operations of up to
-  1.2 KiB).
-- **In flight:** one, unchanged. **Daily run cap:** 200 runs per workspace (measured maximum 184 with the recommended
-  trigger, $0.003–0.006 per run at the Short tier).
-- **Tier:** `OneShotShort` stays (it resolves to `claude-haiku-5-5` on claude, the only tool-less backend); 1 of 3
+- **Output:** 5 operations, 6 KiB (bytes) per operation text, 24 KiB (bytes) per reply (observed: 0, 0 and 3
+  operations of up to 1,165 characters, ASCII, so also 1,165 bytes).
+- **In flight:** one, unchanged. **Daily call cap:** 250 per workspace (measured maximum 215 calls per day after
+  splitting over-long windows, 184 windows unsplit, $0.003–0.006 per call at the Short tier). The cap and any queue
+  bound are policy assumptions from one heavy-use sample, not validated on real traffic.
+- **Tier:** `OneShotShort` stays (it resolves to `claude-haiku-5-5` on claude). The trial verified tool-less only for
+  claude with an extra empty, strict MCP configuration; whether the current shared one-shot guarantees decision 3's
+  deny-all is not verified and is P1's (#2320) to provide. Measurements left open: #2333. 1 of 3
   hand-run proposals was plausibly useful. The one-shot environment's `MAX_THINKING_TOKENS=0` did not stop hidden
   thinking, which was 74–97 % of the output tokens.

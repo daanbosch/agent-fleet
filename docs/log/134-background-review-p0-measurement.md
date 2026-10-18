@@ -20,15 +20,35 @@ counted. It is **not** a user prompt and not a JSONL line:
   carries text, a tool call or a non-empty thinking block is its own assistant turn. Claude
   writes one response as several lines (text, each tool call), so one response is several turns.
   A user line holding only tool results is **not** a turn; the result is attached to its call.
-  Meta lines, bookkeeping lines and the compaction summary are not counted.
+  Meta lines and bookkeeping lines are not turns, with two exceptions the parser itself makes: a
+  peer message (`origin.kind` peer) is accepted before the meta gate, and the compaction summary
+  is returned with `Compact=true` rather than rejected. A synthesized API-error line is an
+  assistant turn.
 - **codex** (`agents/codex/transcript.go`, `parseRolloutFull`): each displayable `response_item`
   (user or assistant message, reasoning with a summary, a function or custom tool call) is a
   turn. Tool outputs attach to their call; developer messages and injected context blocks are
-  dropped.
+  dropped. A `compacted` line becomes a user turn with `Compact=true`, and a `context_compacted`
+  event adds one only when the previous turn is not already a compact block.
 
-Consequence: one user prompt produced about 12 assistant turns in claude (98,462 assistant
-turns for 8,164 user turns) and about 11 in codex (44,074 for 3,984). "K = 10 turns" therefore
-means roughly one prompt and its tool chain, not ten exchanges.
+**What the measurement counted.** Every turn kind above is a turn in the totals, so the totals
+equal what the normalizer returns; the one thing that differs is that **compact turns were
+counted in the totals but left out of every window, block and per-turn figure** (a compaction
+summary is a restatement of earlier turns, not new work, though the product's watermark would
+count it). Peer turns: 0 in this data. Reconciliation (outside probe runs):
+
+| | claude | codex |
+|---|---|---|
+| assistant turns | 98,462 | 44,074 |
+| user turns (queued prompts included) | 8,164 | 3,984 |
+| compact turns | 1 | 95 |
+| **total normalized turns** | **106,627** | **48,153** |
+
+(`context_compacted` events without a `compacted` line before them: none found, so they add
+nothing.) A P1 count over the normalizer's output therefore matches these totals; it must skip
+`Compact` turns to match the window figures.
+
+Consequence: one user prompt produced about 12 assistant turns in claude and about 11 in codex.
+"K = 10 turns" therefore means roughly one prompt and its tool chain, not ten exchanges.
 
 ### 1.2 Part A — sizes (every claude and codex transcript on the workspace)
 
@@ -36,7 +56,10 @@ Two scripts streamed the files once each and wrote **only numbers** (one TSV row
 turn, one per file). A second script computed the aggregates. No transcript text was printed,
 searched or written anywhere. Where the normalizer's Go code decides something (what is a turn,
 the 4,000-rune cap on a tool output in `transcript.CapOutput`, the 80-rune tool label), the
-script re-implements the rule; it was checked against the Go source, not against the Go binary.
+script re-implements the rule; it was checked against the Go source, not run against the Go
+binary, and it differs in two known places: the tool label is an upper bound (the first string
+field up to 81 characters, not the exact `toolInfo` pick), and a delegation or plan payload is
+counted with the payload, not as text.
 
 Per turn the scripts record the character counts of: text (user and assistant text), the tool
 trace (tool name plus the one-line label), the delegation/edit payload, the tool result
@@ -69,7 +92,7 @@ per cent.
 
 Material: **only** the sessions of the #1559 work itself (the parent conductor and two other
 claude sessions identified by working directory, and one codex session). One had only 7 turns
-and produced no window. Three windows were sent, one tool-less call each:
+and produced no window. Three windows were sent, one call each with tools and MCP verified empty (section 1.3, item 3):
 
 1. **Window.** Built by a script from the policy simulation (K = 10, S = 120 s), turns numbered,
    tool results clipped to 500 characters and marked as data, cut at 40,000 characters (newest
@@ -194,9 +217,14 @@ of 996 claude sessions ever get a run (451 of 906 for codex), because a spawned 
 session often has one prompt and hundreds of tool turns. That is why the recommended trigger has
 both a turn count and a prompt count.
 
-Combined across both kinds with the recommended trigger: 2,779 runs over 70 active days; per day
-p50 13, p90 109, p99 181, **max 184**. Bursts under the proposed trigger: at most 5 windows
-closing in the same minute for claude and 6 for codex.
+Every row above counts **one run per quiet window, before any splitting**. The recommended
+trigger yields 2,779 windows (both kinds, 70 active days), 338 of which (272 claude, 66 codex)
+exceed 40,000 characters at L4. Splitting them greedily at turn boundaries into calls of at most
+40,000 characters gives **3,176 calls**; per active day (both kinds combined) p50 16, p90 124,
+p99 201, **max 215** (unsplit: max 184); at most 8 calls fall in the same minute (combined), and
+at most 5 windows (claude) or 6 (codex) per kind under the proposed trigger. The 215 includes the
+6.66k-token floor once per call. Neither figure says how a real queue would behave: the
+simulation has no latency, retry or concurrency in it.
 
 ## 3. Part B — the helper trial
 
@@ -208,14 +236,18 @@ recommendation (`recommendedUtilityModelV`, `chat_providers.go`):
 
 | kind | model the Short tier picks | tool-less? |
 |---|---|---|
-| claude | first visible of `haiku`, `sonnet`, `opus`, `fable` — the `haiku` alias, **measured as `claude-haiku-5-5`** on this workspace | yes: `--tools ""` |
+| claude | first visible of `haiku`, `sonnet`, `opus`, `fable` — the `haiku` alias, **measured as `claude-haiku-5-5`** on this workspace | built-in tools off (`--tools ""`); MCP not guaranteed by the product args (see below) |
 | codex | cheapest priced model in the live catalog (`cheapestListedModel`), else the first id with a size marker; reasoning effort `low` | no (`--ephemeral` only) |
-| opencode | not auto-picked: the member's default unless `AF_TITLE_MODEL_OPENCODE` names one | no |
+| opencode | `AF_TITLE_MODEL_OPENCODE` if set; else `opencode-go/deepseek-v4-flash` when the account's visible catalog lists it, else empty, i.e. the CLI default (`recommendedUtilityModelV`, `recommendedCatalogModel`) | no |
 | agy | cheapest priced model of its catalog, else the Flash default | no (`read_url`) |
 | cursor | `AF_TITLE_MODEL_CURSOR`, else the CLI default (no recommendation case) | no |
 | muse | `museSafeOneShotModel` | – |
 
-Only claude meets decision 3's tool-less requirement today, so the trial ran on it.
+This trial ran on claude with the extra empty, strict MCP configuration described in section 1.3,
+and verified `tools: []` and `mcp_servers: []` for that invocation only. Whether the current shared
+one-shot (`claudeOneShotArgs`) guarantees decision 3's deny-all is **not verified**: it has no
+`--strict-mcp-config`. P1 (#2320) has to provide and verify that contract; no other backend was
+tried.
 
 ### 3.2 Results
 
@@ -242,8 +274,8 @@ Only claude meets decision 3's tool-less requirement today, so the trial ran on 
   ADR decision 3 cannot be read from the visible reply, and the title and branch one-shots
   presumably carry the same hidden cost. Not retested with `--effort`, to keep to one call per
   window.
-- **Operations (window B, paraphrased; text 383–1,165 characters; evidence turn numbers all
-  inside the window):**
+- **Operations (window B, paraphrased; text 383–1,165 characters, which here equal 383–1,165
+  bytes because the replies were ASCII English; evidence turn numbers all inside the window):**
 
 | Operation | Plausibly useful? |
 |---|---|
@@ -268,7 +300,7 @@ Only claude meets decision 3's tool-less requirement today, so the trial ran on 
 4. **A fixed 6.7k-token floor** per call makes the number of runs, not the window size, the cost
    driver at the Short tier: a 40k-character window adds about $0.003 to a $0.0013 floor.
 5. **Cost is not the binding constraint.** At the Short tier a run is $0.003–0.006, so even
-   184 runs a day is about a dollar; the limits that matter are the approval load (2 of 3
+   215 calls a day is about a dollar; the limits that matter are the approval load (2 of 3
    proposals were useless), the member's plan quota, and the single in-flight slot.
 6. **Settle does not mean finished.** Even at 300 s, 38–40 % of windows are followed by more
    activity within ten minutes; the watermark design already tolerates that.
@@ -283,8 +315,8 @@ Only claude meets decision 3's tool-less requirement today, so the trial ran on 
   transcripts only. Their normalizers differ (store-backed kinds update a message after the
   fact), so these figures should not be read across.
 - The memory index and existing-memory bodies in the prompt. The default `memory_index` budget is
-  24,576 bytes, which alone is more than half of the proposed 40,000 characters; the bodies of
-  ADR decision 2 were not sized.
+  24,576 **bytes**; in characters that is about 16,000 at the 1.53 bytes per character measured
+  for claude text, and up to 24,576 if ASCII. The bodies of ADR decision 2 were not sized.
 - Any non-claude helper backend, a second tier above Short, and `--effort` control.
 - Helper quality beyond three windows, and the false-negative rate.
 - Plan-quota use. Costs are API-equivalent.
@@ -300,10 +332,10 @@ says the numbers are confirmed after P0).
 | K = 10 turns | A turn is a displayable row, about 12 per prompt; 10 rows means about one run per prompt, 116 runs per active day at the median for claude (max 261). Counting prompts alone leaves 37–50 % of sessions unreviewed | **30 turns or 3 user prompts**, whichever comes first (71 runs per active day at the median for claude, max 159; codex max 71) |
 | 40,000-character input | L2 fits 98.9 % (claude) of windows, L4 fits 85.9 % (claude) and 92.3 % (codex); raw bytes are unusable; 0.41 tokens per character | **Keep 40,000 characters for the window**, built as L4 (each tool result clipped to 500 characters, redacted before the clip). When a window is longer, **split it at a turn boundary and review the oldest part first** instead of dropping it (the proposed "newest kept" never reviews the dropped turns) |
 | Index and up to five memory bodies (unsized) | Index budget 24,576 bytes; bodies not measured | **Assumption for P1 to confirm:** index at most 12,000 characters, at most 2,000 characters per body, so the whole prompt stays near 62,000 characters (about 25k tokens plus the 6.7k floor) |
-| Output of 5 operations of 8 KiB | 0, 0 and 3 operations; texts 383–1,165 characters; output 290–3,795 tokens, 74–97 % hidden thinking | **Keep 5 operations; 4 KiB per operation text; 16 KiB per reply**; a larger reply is dropped whole. Do not rely on the thinking switch |
-| One review in flight | Latency 2.7–19.5 s; at most 5–6 windows close in one minute | **Keep one in flight**; one pending window per session (it just grows), a global queue bound of 20 sessions |
-| Daily run cap (P3) | Recommended trigger, both kinds combined: p90 109, p99 181, max 184 runs per day; $0.003–0.006 per run | **200 runs per day per workspace** (about $0.8 a day API-equivalent at the Short tier); a runaway guard, not a limit anyone should meet |
-| Tier `OneShotShort` | claude resolves to `claude-haiku-5-5`; only claude is tool-less; 1 of 3 proposals useful, no proof of weakness | **Keep `OneShotShort` for P1.** Count approved against rejected proposals in P1 and revisit with a pin to the Prose tier if fewer than a third are accepted |
+| Output of 5 operations of 8 KiB | 0, 0 and 3 operations; texts 383–1,165 characters; output 290–3,795 tokens, 74–97 % hidden thinking | **Keep 5 operations; 6 KiB (bytes) per operation text; 24 KiB (bytes) per reply**; a larger reply is dropped whole. The observed texts were ASCII; a Japanese memory of the same 1,165 characters is about 3.4 KiB, so a 4 KiB limit would have left little margin. Do not rely on the thinking switch |
+| One review in flight | Latency 2.7–19.5 s; at most 8 calls fall in one minute in the simulation (no queueing modelled) | **Keep one in flight**; one pending window per session (it just grows). The bound on queued sessions (20) is a policy assumption, not measured |
+| Daily run cap (P3) | Recommended trigger, both kinds combined, after splitting: p90 124, p99 201, max 215 calls per day (184 windows unsplit); $0.003–0.006 per call | **250 calls per day per workspace** (measured maximum 215 after splitting; about $1 a day API-equivalent at the Short tier); a runaway guard sized from one heavy-use sample, an unvalidated policy assumption until P1 runs on real traffic |
+| Tier `OneShotShort` | claude resolves to `claude-haiku-5-5`; the trial verified tool-less only for claude with a strict empty MCP config, which the product args do not yet have; 1 of 3 proposals useful, no proof of weakness | **Keep `OneShotShort` for P1.** Count approved against rejected proposals in P1 and revisit with a pin to the Prose tier if fewer than a third are accepted |
 
 ## 7. Limits of these figures
 
@@ -315,5 +347,6 @@ says the numbers are confirmed after P0).
   slightly and was not de-duplicated.
 - Three helper calls. Cost per run is a fit to three points plus a floor call.
 
-Follow-ups: #2320 (P1 owns the thinking and MCP controls of the findings above and the unsized
-index and bodies); #2319 stays open until the owner confirms the caps.
+Follow-ups: #2320 (P1 owns the thinking and MCP controls of the findings above and the
+deny-all contract), #2333 (the measurements section 5 lists as not done); #2319 stays open until
+the owner confirms the caps.
