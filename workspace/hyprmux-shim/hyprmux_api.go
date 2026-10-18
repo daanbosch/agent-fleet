@@ -173,6 +173,7 @@ type sessionWireRow struct {
 	ProjectID string `json:"projectId"`
 	Agent     string `json:"agent"`
 	UpdatedAt string `json:"updatedAt"`
+	External  bool   `json:"external"`
 }
 
 func listSessions(r *http.Request, cli hyprmuxCLI) ([]sessionWireRow, error) {
