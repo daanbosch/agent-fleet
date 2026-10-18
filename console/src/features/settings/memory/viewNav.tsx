@@ -6,7 +6,7 @@
 // own default. The views themselves are standalone components, so this nav is the only thing
 // that ties them to the Settings modal.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { useSettingsUI, lastSectionView, rememberSectionView } from "../store.ts";
 
 export interface ViewDef {
@@ -55,7 +55,8 @@ export function useSectionView(
   return [view, pick];
 }
 
-/** Tabs at desktop widths, a select at phone width (the CSS shows one of the two). */
+/** A tablist at every width. When the labels do not fit, the row scrolls sideways (memory.css)
+ *  instead of wrapping, so the active tab is kept in view. */
 export function ViewNav({
   label,
   views,
@@ -70,17 +71,64 @@ export function ViewNav({
   /** Id prefix tying each tab to the panel it controls (`${prefix}-panel`). */
   prefix: string;
 }) {
+  const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+
+  const rowRef = useRef<HTMLDivElement>(null);
+
+  // Scrolls the row itself, never an ancestor: scrollIntoView would also move the dialog body
+  // vertically when the view changes from somewhere down the page.
+  useEffect(() => {
+    const row = rowRef.current;
+    const tab = tabRefs.current[value];
+    if (!row || !tab) return;
+    const r = row.getBoundingClientRect();
+    const b = tab.getBoundingClientRect();
+    if (b.left < r.left) row.scrollLeft += b.left - r.left;
+    else if (b.right > r.right) row.scrollLeft += b.right - r.right;
+  }, [value]);
+
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    // Leave modified keys (browser/OS shortcuts) and IME composition (keyCode 229) alone.
+    if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey || e.nativeEvent.isComposing || e.keyCode === 229) return;
+    const at = views.findIndex((v) => v.key === value);
+    let next: number;
+    switch (e.key) {
+      case "ArrowRight":
+        next = (at + 1) % views.length;
+        break;
+      case "ArrowLeft":
+        next = (at - 1 + views.length) % views.length;
+        break;
+      case "Home":
+        next = 0;
+        break;
+      case "End":
+        next = views.length - 1;
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+    const key = views[next].key;
+    onChange(key);
+    tabRefs.current[key]?.focus({ preventScroll: true });
+  };
+
   return (
     <div className="mem-viewnav">
-      <div className="mem-viewnav-tabs" role="tablist" aria-label={label}>
+      <div className="mem-viewnav-tabs" ref={rowRef} role="tablist" aria-label={label} onKeyDown={onKeyDown}>
         {views.map((v) => (
           <button
             key={v.key}
+            ref={(el) => {
+              tabRefs.current[v.key] = el;
+            }}
             type="button"
             role="tab"
             id={`${prefix}-tab-${v.key}`}
             aria-selected={v.key === value}
             aria-controls={`${prefix}-panel`}
+            tabIndex={v.key === value ? 0 : -1}
             className={"mem-viewnav-tab" + (v.key === value ? " active" : "")}
             onClick={() => onChange(v.key)}
           >
@@ -88,18 +136,6 @@ export function ViewNav({
           </button>
         ))}
       </div>
-      <select
-        className="cinput mem-viewnav-select"
-        aria-label={label}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-      >
-        {views.map((v) => (
-          <option key={v.key} value={v.key}>
-            {v.label}
-          </option>
-        ))}
-      </select>
     </div>
   );
 }

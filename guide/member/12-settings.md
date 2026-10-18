@@ -255,7 +255,8 @@ The page opens with one status line: whether it is on, how many memories in how 
 and a warning, with a link to Settings, when the background sync with Claude Code needs you. Under it are four views:
 **Memories · Changes · Import & export · Settings**. The view you leave open is remembered. While the workspace is stopped
 only **Settings** works (the switches are saved for the next start); the other views offer **Start the workspace**. On a
-phone the view names become a drop-down.
+phone or a tablet in portrait the tabs stay on one row and scroll sideways when they do not all fit; the arrow keys,
+Home and End move between them.
 
 #### Memories
 
