@@ -400,6 +400,12 @@ func latestEnd(run *Run, limit time.Time) time.Time {
 	return latest
 }
 
+// OnQueued is told when a run ends with proposals in the queue: the run, how many it queued and how
+// many are pending in all. The Agent raises the Console notification from it (package main). It
+// carries counts only, and a replayed run (queued again after a stop) calls it again, so the
+// notification is keyed by the run id.
+var OnQueued func(runID string, queued, pending int)
+
 // finish queues the validated operations and ends the run. It is safe to repeat after a stop at
 // any of its steps: proposals have derived ids, one that already got a decision is skipped, and
 // the run is marked done only once everything is queued. When the queue has no room it stops with
@@ -434,6 +440,9 @@ func (r *Reviewer) finish(run *Run) (Result, error) {
 	r.stage("ended")
 	if err := moveWatermark(run.Key, run.Last, now); err != nil {
 		return Result{}, err
+	}
+	if res.Queued > 0 && OnQueued != nil {
+		OnQueued(run.ID, res.Queued, pendingCount())
 	}
 	stateMu.Lock()
 	gcDecidedLocked()

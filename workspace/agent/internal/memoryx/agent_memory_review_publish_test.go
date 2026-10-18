@@ -71,7 +71,7 @@ func TestPublishReviewIsAnOrdinaryAuthoredCommit(t *testing.T) {
 		}
 	}
 	ch := agentMemChangesT(t)
-	if len(ch) != 1 || ch[0].AuthorKind != "review" || !ch[0].Latest {
+	if len(ch) != 1 || ch[0].AuthorKind != "review" || ch[0].ReviewRun != testRun || !ch[0].Latest {
 		t.Fatalf("change list = %+v", ch)
 	}
 	e, err := agentMemRead(agentMemCallerT(t, "codex-wt"), "project", "build-cmd")
