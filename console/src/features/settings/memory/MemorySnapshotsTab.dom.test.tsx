@@ -110,6 +110,34 @@ describe("MemorySnapshotsTab", () => {
     }
   });
 
+  // An unread or failed roots load is not "automatic off" and not "no snapshots yet".
+  it("asserts nothing in the header until the roots are read", async () => {
+    let release: (v: unknown) => void = () => {};
+    const rootsReply = new Promise((r) => (release = r));
+    const base = api.getMockImplementation()!;
+    api.mockImplementation((path: string) => (path.startsWith("api/agents/memory/roots") ? rootsReply : base(path)));
+    await mount();
+    const head = () => host!.querySelector(".mem-status")!.textContent!;
+    expect(head()).not.toContain(t("mem.status_auto_off"));
+    expect(head()).not.toContain(t("mem.status_auto_on"));
+    expect(head()).not.toContain(t("mem.never"));
+    await act(async () => release({ roots: [], auto: true, autoLocked: false, lastSnapshot: "2026-10-04T10:00:00Z" }));
+    await flush();
+    expect(head()).toContain(t("mem.status_auto_on"));
+  });
+
+  it("asserts nothing when the roots fail to load", async () => {
+    const base = api.getMockImplementation()!;
+    api.mockImplementation((path: string) =>
+      path.startsWith("api/agents/memory/roots") ? Promise.resolve({ error: { code: "boom", message: "boom" } }) : base(path),
+    );
+    await mount();
+    const head = host!.querySelector(".mem-status")!.textContent!;
+    expect(head).not.toContain(t("mem.status_auto_off"));
+    expect(head).not.toContain(t("mem.never"));
+    expect(host!.querySelector(".mem-warn")).toBeTruthy();
+  });
+
   it("puts the roots, the codex memories toggle and Automatic snapshots under Targets", async () => {
     await mount();
     await goto("targets");

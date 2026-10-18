@@ -3,7 +3,7 @@
 // endpoints the panels below already call (entries/list, entries/changes, auto-sync); nothing
 // here is new API. A read that fails leaves its figure out rather than showing a wrong zero.
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, isTransientErr } from "../../../../core/api/client.ts";
 import { useRetryLoad } from "../../../../lib/retryLoad.ts";
 import { useSettings } from "../../../../lib/settings.ts";
@@ -16,7 +16,11 @@ interface Figures {
   projects: number | null;
   lastChange: string | null;
   syncProblem: boolean;
+  /** The reconciler is still catching up with the switch, or a failure is waiting to be fixed. */
+  watching: boolean;
 }
+
+const POLL_MS = 4000;
 
 // The reconciler needs the member when a run failed, the Agent reported a problem it cannot fix
 // by itself, or the last run left conflicts or skipped secrets.
@@ -29,15 +33,19 @@ function needsAttention(st: AutoSyncStatus | undefined): boolean {
 export function AgentMemoryStatus({
   running,
   reload,
+  view,
   onOpenSettings,
 }: {
   running: boolean;
   reload: number;
+  /** The view showing: moving between views re-reads, so the header never disagrees with the list under it. */
+  view: string;
   onOpenSettings: () => void;
 }) {
   const tr = useT();
   const enabled = useSettings().agentMemory;
   const [fig, setFig] = useState<Figures | null>(null);
+  const [tick, setTick] = useState(0);
 
   const load = useCallback(
     async (signal: AbortSignal) => {
@@ -51,18 +59,27 @@ export function AgentMemoryStatus({
       if (signal.aborted) return true;
       if (isTransientErr(list) || isTransientErr(changes) || isTransientErr(sync)) return false;
       const entries: MemoryListed[] | null = list?.error ? null : (list?.entries ?? []);
+      const st = sync?.error ? undefined : (sync as AutoSyncStatus);
       const last: MemoryChange | undefined = changes?.error ? undefined : changes?.changes?.[0];
       setFig({
         count: entries ? entries.length : null,
         projects: entries ? new Set(entries.flatMap((m) => (m.project ? [m.project.id] : []))).size : null,
         lastChange: last?.at ?? null,
-        syncProblem: !sync?.error && needsAttention(sync as AutoSyncStatus),
+        syncProblem: needsAttention(st),
+        // Same rule as the sync panel's own polling: the switch and the Agent disagree, or a run is going.
+        watching: !!st && (st.want !== enabled || !st.settled || st.phase === "writing_back" || (st.catchUpPending ?? 0) > 0 || !!st.failing),
       });
       return true;
     },
-    [running],
+    [running, enabled],
   );
-  useRetryLoad(load, [running, reload]);
+  // The switch flipping re-reads at once; a run that finishes or fails later is caught by the poll below.
+  useRetryLoad(load, [running, reload, view, enabled, tick]);
+  useEffect(() => {
+    if (!running || !fig?.watching) return;
+    const timer = setTimeout(() => setTick((n) => n + 1), POLL_MS);
+    return () => clearTimeout(timer);
+  }, [running, fig]);
 
   return (
     <div className="mem-status">

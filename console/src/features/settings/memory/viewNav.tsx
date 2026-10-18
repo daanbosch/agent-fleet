@@ -23,10 +23,14 @@ export function useSectionView(
   dflt: string,
   useRemembered = true,
 ): [string, (view: string) => void] {
-  const requested = useSettingsUI((s) => s.settingsView);
+  // A request names a section too. Only the entry it is addressed to may take or drop it: while
+  // the dialog switches entries, the old entry is still mounted for a render and must leave the
+  // request for the new one.
+  const requested = useSettingsUI((s) => (s.settingsSection === section ? s.settingsView : null));
   const clearRequested = useSettingsUI((s) => s.clearSettingsView);
   const [view, setView] = useState(() => {
-    const ask = useSettingsUI.getState().settingsView;
+    const st = useSettingsUI.getState();
+    const ask = st.settingsSection === section ? st.settingsView : null;
     if (ask && views.includes(ask)) return ask;
     const last = useRemembered ? lastSectionView(section) : "";
     return views.includes(last) ? last : dflt;

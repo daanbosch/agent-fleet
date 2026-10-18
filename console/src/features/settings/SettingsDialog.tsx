@@ -158,7 +158,10 @@ export function SettingsDialog() {
   // Ignored by the desktop two-pane layout (CSS).
   // A request with a scroll target opens straight into its section: the target lives inside
   // the detail view, and scrolling to an element under display:none does nothing.
-  const [entered, setEntered] = useState(() => useSettingsUI.getState().settingsTarget !== null);
+  const [entered, setEntered] = useState(() => {
+    const st = useSettingsUI.getState();
+    return st.settingsTarget !== null || st.settingsView !== null;
+  });
   // A detail view gets its own history layer above Modal's close layer. Therefore the
   // first device/browser back returns to this list and the second closes the modal.
   useBackClose(() => setEntered(false), mobileMatches() && entered);
@@ -178,6 +181,18 @@ export function SettingsDialog() {
       setEntered(true);
     }
   }, [settingsSection]);
+
+  // A request naming a view of a section ("memory:settings") opens that section's detail on a
+  // phone even when the section is already the current one, where the effect above sees no change.
+  const settingsView = useSettingsUI((s) => s.settingsView);
+  const mountedSettingsView = useRef(false);
+  useEffect(() => {
+    if (!mountedSettingsView.current) {
+      mountedSettingsView.current = true;
+      return;
+    }
+    if (settingsView) setEntered(true);
+  }, [settingsView]);
 
   // Remember the last-opened section (localStorage) so reopening lands here; the store's
   // openSettings() restores it on the next open (first-ever open defaults to Display).

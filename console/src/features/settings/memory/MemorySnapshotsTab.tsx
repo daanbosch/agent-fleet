@@ -253,16 +253,21 @@ export function MemorySnapshotsTab() {
       {/* Status header: the three things worth knowing from any view */}
       <div className="mem-status">
         <div className="mem-status-line">
-          <span className="muted">
-            {data?.lastSnapshot
-              ? tr("mem.last_snapshot", {
-                  when: fmtDateTime(data.lastSnapshot, DATETIME_FULL),
-                })
-              : tr("mem.never")}
-          </span>
-          <span className={"mem-badge " + (data?.auto ? "mem-on" : "mem-off")}>
-            {tr(data?.auto ? "mem.status_auto_on" : "mem.status_auto_off")}
-          </span>
+          {/* Nothing is asserted until the roots have been read: an unread or failed load is not "off" or "never". */}
+          {data ? (
+            <>
+              <span className="muted">
+                {data.lastSnapshot
+                  ? tr("mem.last_snapshot", { when: fmtDateTime(data.lastSnapshot, DATETIME_FULL) })
+                  : tr("mem.never")}
+              </span>
+              <span className={"mem-badge " + (data.auto ? "mem-on" : "mem-off")}>
+                {tr(data.auto ? "mem.status_auto_on" : "mem.status_auto_off")}
+              </span>
+            </>
+          ) : (
+            !err && <span className="muted">{tr("common.loading")}</span>
+          )}
           <button type="button" disabled={busy} onClick={snapshotNow}>
             {tr("mem.snapshot_now")}
           </button>

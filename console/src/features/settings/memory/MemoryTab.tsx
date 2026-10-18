@@ -45,7 +45,7 @@ export function MemoryTab() {
 
   return (
     <div className="mem-tab">
-      <AgentMemoryStatus running={running} reload={reload} onOpenSettings={() => setView("settings")} />
+      <AgentMemoryStatus running={running} reload={reload} view={view} onOpenSettings={() => setView("settings")} />
       <ViewNav label={tr("mem.views_label")} views={defs} value={view} onChange={setView} prefix="mem-af" />
       <div role="tabpanel" id="mem-af-panel" aria-labelledby={`mem-af-tab-${view}`} className="mem-view">
         {view === "settings" ? (

@@ -399,12 +399,9 @@ findings and asked to confirm.
 
 #### Settings
 
-memory Agent Fleet keeps itself, which every kind of agent reads and writes with the af tools `memory_index` /
-`memory_search` / `memory_read` / `memory_save` / `memory_forget`. It is per project (a worktree shares its
-repository's), plus one user-wide scope, so what one agent learns survives a switch of kind, a handoff and a
-child of another kind. **It is off by default**: turn on "Let sessions use Agent Fleet memory" first, in this
-view (on reaches sessions started from then on; off refuses running sessions' reads and writes at once; the
-Memories and Changes views work either way). While it is on, every kind is also told, in its own instruction
+**It is off by default.** Turn on "Let sessions use Agent Fleet memory" first, here in this view: on reaches sessions
+started from then on, and off refuses running sessions' reads and writes at once. The Memories and Changes views work
+either way. While it is on, every kind is also told, in its own instruction
 file, that the tools exist and when to call them (a short fixed note; it never contains memories, and turning
 the switch off removes it without touching your own text there). Local-model (lcpp) sessions additionally
 start with the project's memory index in their system prompt; Cursor has no such file, so its guidance is in

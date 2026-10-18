@@ -214,6 +214,80 @@ describe("MemoryTab status header", () => {
   });
 });
 
+// The header follows the sync run and the switch, not just the first read.
+describe("MemoryTab status header over time", () => {
+  const sync = (o: object) => ({ phase: "on", want: true, settled: true, nativeMemoryOff: true, ...o });
+  const entry = (n: string) => ({ name: n, scope: "user", pinned: false, uses: 0 });
+  const head = () => host!.querySelector(".mem-status")!.textContent!;
+  const advance = async (ms: number) => {
+    await act(async () => {
+      vi.advanceTimersByTime(ms);
+    });
+    await flush();
+  };
+
+  beforeEach(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] }));
+  afterEach(() => vi.useRealTimers());
+
+  it("shows the count after an import that was still running when the switch was flipped", async () => {
+    let done = false;
+    api.mockImplementation((path: string) => {
+      if (path.startsWith("api/agents/memory/entries/list"))
+        return Promise.resolve({ entries: done ? [entry("a"), entry("b"), entry("c")] : [] });
+      if (path.startsWith("api/agents/memory/auto-sync"))
+        return Promise.resolve(done ? sync({}) : sync({ phase: "importing", settled: false }));
+      return Promise.resolve({});
+    });
+    setSettings({ ...settingsDefaults(), agentMemory: true });
+    await mount();
+    await goto("settings");
+    expect(head()).toContain(t("mem.status_count", { n: 0 }));
+    done = true;
+    await advance(4500);
+    expect(head()).toContain(t("mem.status_count", { n: 3 }));
+  });
+
+  it("clears the sync warning once Retry succeeds, and raises one for a run that fails later", async () => {
+    let st: object = sync({ failing: true });
+    api.mockImplementation((path: string) =>
+      path.startsWith("api/agents/memory/auto-sync") ? Promise.resolve(st) : Promise.resolve({}),
+    );
+    setSettings({ ...settingsDefaults(), agentMemory: true });
+    await mount();
+    expect(head()).toContain(t("mem.status_sync_problem"));
+    st = sync({});
+    await advance(4500);
+    expect(head()).not.toContain(t("mem.status_sync_problem"));
+
+    // A run in progress that fails afterwards.
+    st = sync({ phase: "importing", settled: false });
+    await goto("changes");
+    expect(head()).not.toContain(t("mem.status_sync_problem"));
+    st = sync({ phase: "importing", settled: false, failing: true });
+    await advance(4500);
+    expect(head()).toContain(t("mem.status_sync_problem"));
+  });
+
+  it("re-reads when the switch is flipped, and when the member moves between views", async () => {
+    let n = 0;
+    api.mockImplementation((path: string) => {
+      if (path.startsWith("api/agents/memory/entries/list")) return Promise.resolve({ entries: Array.from({ length: n }, (_, i) => entry("m" + i)) });
+      return Promise.resolve(path.startsWith("api/agents/memory/auto-sync") ? sync({}) : {});
+    });
+    await mount();
+    expect(head()).toContain(t("mem.status_off"));
+    n = 2;
+    await goto("changes");
+    expect(head()).toContain(t("mem.status_count", { n: 2 }));
+    setSettings({ ...settingsDefaults(), agentMemory: true });
+    n = 5;
+    await flush();
+    expect(head()).toContain(t("mem.status_on"));
+    expect(head()).toContain(t("mem.status_count", { n: 5 }));
+  });
+});
+
+
 // The history and the import need the Agent, so every view but Settings shows the start prompt;
 // the switches are ui-prefs the member sets for the next start, and this page is their only home.
 describe("MemoryTab while the workspace is stopped", () => {
