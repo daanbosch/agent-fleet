@@ -377,3 +377,28 @@ turn-end evidence and "Review now". Nothing publishes in any of them. Where the 
 - **`memoryReview` needs `agentMemory` too**, and `auto` reads as `off` until P3 defines it.
 
 Follow-ups: #2320 (B and C), #2321, #2322.
+
+**Note (2026-10-18, #2320): part B of P1 (run state, one helper call, pending queue) fixes these readings.**
+Nothing publishes and nothing triggers a review yet.
+
+- **State lives in `af-memory-review/` beside the memory store's mount**, outside the memory repo: `runs/`,
+  `watermark/`, `daily.json`, `pending/`, `rejected/`. A run is keyed by the session identity and the window end,
+  created `claimed` before any call, `dispatched` before each call, `answered` once a validated reply is kept, and
+  ends `done` or `failed`. At most one run is open per session; a second trigger resumes it instead of claiming
+  another window, and "Review now" ignores the backoff but not the attempt budget, the daily cap or the
+  in-flight limit.
+- **Budget:** one call and at most one retry per window. A call that was never sent (no deny-all backend) spends
+  neither an attempt nor a daily call. A reply the scan refuses is not retried. When the budget is spent the run
+  ends `failed` and the watermark moves past the window; so does a window the transcript can no longer rebuild.
+  Failure reasons come from a closed vocabulary: nothing a model or a process printed is stored.
+- **Recovery:** a `dispatched` attempt found after a restart is closed as `lost` and linked to its ledger row when
+  one exists, else marked cost-unknown, then counted against the budget. An `answered` run is queued without a
+  call, with proposal ids derived from the run, so a stop mid-queueing duplicates nothing. The watermark moves
+  before the run is marked done, so a stop between the two resumes the run instead of re-reviewing the window.
+- **Bounds:** one review in flight in the Agent; 250 helper calls per local day (counted and persisted before the
+  call, so a crash over-counts rather than under-counts); at most 100 pending proposals.
+- **Queue retention (decision 8):** pending text is deleted on any decision; a rejection keeps only the content
+  hash (operation, scope, name, type, description, body and the project) until the memory is forgotten
+  (`ForgetMemory`); a rejected idea and an identical pending one are not queued again.
+
+Follow-ups: #2320 (part C), #2321, #2322.
