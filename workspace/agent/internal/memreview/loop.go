@@ -210,7 +210,13 @@ func CountNew(turns []transcript.Turn, firstNumber, watermark int) (n, prompts i
 
 // Tick is one wake-up.
 func (l *Loop) Tick(ctx context.Context) {
-	if l.isClosed() || !l.enabled() {
+	if l.isClosed() {
+		return
+	}
+	// Owed releases are finished whether or not the review is on: a rejection must not outlive the
+	// memory it concerned because the member switched the review off.
+	ReconcileReleases()
+	if !l.enabled() {
 		return
 	}
 	now := l.now()

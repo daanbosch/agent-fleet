@@ -247,7 +247,8 @@ type ReviewTargetState struct {
 	// Withheld: the file exists but fails the store's scan or cannot be read, so its text is not
 	// returned.
 	Withheld bool
-	// Forgotten: a tombstone says the memory was forgotten.
+	// Forgotten: a tombstone, or (for a name that does not exist) any change in the history, says the
+	// memory was forgotten; a create is refused over it.
 	Forgotten bool
 }
 
@@ -290,6 +291,11 @@ func ReviewTarget(scope, projectID, name string) (ReviewTargetState, error) {
 		return ReviewTargetState{Exists: true, Withheld: true, Forgotten: out.Forgotten}, nil
 	}
 	if !ok {
+		// The rule a create is held to at approval, so the screen agrees with it: a lost tombstone
+		// does not hide a name the history knows.
+		if !out.Forgotten && errors.Is(agentMemRefuseRevival(rel, name), errReviewRevival) {
+			out.Forgotten = true
+		}
 		return out, nil
 	}
 	out.Exists = true
@@ -448,30 +454,40 @@ func reviewRevertState(cd reviewRunCommit) (string, error) {
 	return "", nil
 }
 
-// forgottenHook is told when a memory has been forgotten (a forget committed, a creation undone, a
-// memory moved out of its project), so the review can release the rejected proposals it remembered
-// about it. It is called with the store lock held: it must not call back into this package.
-var forgottenHook atomic.Pointer[func(scope, projectID, name string)]
-
-// SetForgottenHook installs the hook; nil removes it.
-func SetForgottenHook(f func(scope, projectID, name string)) {
-	if f == nil {
-		forgottenHook.Store(nil)
-		return
-	}
-	forgottenHook.Store(&f)
+// ForgetHooks tell the review that a memory is going away or has gone, so it can release the
+// rejected proposals it remembered about it. Intent is called before the forget is committed (the
+// review writes down that a release is owed, so a stop or a failure after the commit cannot lose
+// it); Done after the commit succeeded. Both are called with the store lock held and must not call
+// back into this package. A forget that then fails to commit leaves an intent for a memory that
+// still exists, which the review drops.
+type ForgetHooks struct {
+	Intent, Done func(scope, projectID, name string)
 }
 
-// notifyForgotten reports a forgotten memory of the scope directory rel ("user" or
-// "projects/<id>").
+var forgetHooks atomic.Pointer[ForgetHooks]
+
+// SetForgetHooks installs the hooks; nil removes them.
+func SetForgetHooks(h *ForgetHooks) { forgetHooks.Store(h) }
+
+// notifyForgetIntent and notifyForgotten report a forgotten memory of the scope directory rel
+// ("user" or "projects/<id>").
+func notifyForgetIntent(rel, name string) {
+	if h := forgetHooks.Load(); h != nil && h.Intent != nil {
+		scope, pid := reviewScopeOf(rel)
+		h.Intent(scope, pid, name)
+	}
+}
+
 func notifyForgotten(rel, name string) {
-	f := forgottenHook.Load()
-	if f == nil {
-		return
+	if h := forgetHooks.Load(); h != nil && h.Done != nil {
+		scope, pid := reviewScopeOf(rel)
+		h.Done(scope, pid, name)
 	}
-	scope, pid := agentMemScopeUser, ""
+}
+
+func reviewScopeOf(rel string) (scope, projectID string) {
 	if id, ok := strings.CutPrefix(filepath.ToSlash(rel), "projects/"); ok {
-		scope, pid = agentMemScopeProject, id
+		return agentMemScopeProject, id
 	}
-	(*f)(scope, pid, name)
+	return agentMemScopeUser, ""
 }

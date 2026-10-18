@@ -44,6 +44,7 @@ func TestMemberOriginWireVector(t *testing.T) {
 func TestMemberOriginRoutesAreTheMemberWrites(t *testing.T) {
 	want := []string{
 		"POST /api/agents/memory-review/proposals/approve",
+		"POST /api/agents/memory-review/proposals/list",
 		"POST /api/agents/memory-review/proposals/reject",
 		"POST /api/agents/memory-review/proposals/reject-all",
 		"POST /api/agents/memory-review/run",

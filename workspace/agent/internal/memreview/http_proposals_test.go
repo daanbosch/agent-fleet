@@ -16,6 +16,7 @@ import (
 // decisionRoutes are the routes that change anything. Their handlers are mounted exactly as
 // workspace/agent/routes.go mounts them (the real table is checked in package main too).
 var decisionRoutes = map[string]http.HandlerFunc{
+	"/agents/memory-review/proposals/list":       HandleProposals,
 	"/agents/memory-review/proposals/approve":    HandleApprove,
 	"/agents/memory-review/proposals/reject":     HandleReject,
 	"/agents/memory-review/proposals/reject-all": HandleRejectAll,
@@ -24,7 +25,6 @@ var decisionRoutes = map[string]http.HandlerFunc{
 
 func decisionMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /agents/memory-review/proposals", HandleProposals)
 	mux.HandleFunc("GET /agents/memory-review", HandleStatus)
 	for path, h := range decisionRoutes {
 		mux.Handle("POST "+path, memberorigin.Require(DecideMaxRequest, h))
@@ -35,7 +35,7 @@ func decisionMux() *http.ServeMux {
 // bodyFor is a request that would do something if it were allowed to.
 func bodyFor(path string, p Proposal) string {
 	switch path {
-	case "/agents/memory-review/proposals/reject-all":
+	case "/agents/memory-review/proposals/reject-all", "/agents/memory-review/proposals/list":
 		return `{}`
 	case "/agents/memory-review/runs/revert":
 		return `{"run":"` + p.RunID + `"}`
@@ -112,6 +112,9 @@ func TestNoRouteDecidesWithoutAGenuineMemberMark(t *testing.T) {
 			if w.Code != http.StatusForbidden {
 				t.Errorf("%s / %s: status %d: %s", path, name, w.Code, w.Body)
 			}
+			if strings.Contains(w.Body.String(), "SENTINEL-WANTED") {
+				t.Errorf("%s / %s: a refusal carries the proposal text", path, name)
+			}
 			unchanged(path + " / " + name)
 		}
 
@@ -181,8 +184,7 @@ func TestDecisionRoutesWithTheMemberMark(t *testing.T) {
 	queue(t, ok, rej, secret)
 
 	// The list: the queue, each with a diff; no secret anywhere.
-	w := httptest.NewRecorder()
-	decisionMux().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/agents/memory-review/proposals", nil))
+	w := doPost(mux, "/agents/memory-review/proposals/list", `{}`, member.Sign)
 	var list ProposalsResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil || w.Code != 200 || len(list.Proposals) != 3 || list.Proposals[0].Diff == "" {
 		t.Fatalf("list: %d %s", w.Code, w.Body)
@@ -276,5 +278,27 @@ func TestStatusCountsPendingWithoutText(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), "SENTINEL") || strings.Contains(w.Body.String(), "about a") {
 		t.Fatalf("the status carries text: %s", w.Body)
+	}
+}
+
+// The queue is text nobody has published: a session with only AGENT_TOKEN reads none of it, and the
+// refusal itself carries none.
+func TestTheQueueListIsNotReadableWithAgentTokenAlone(t *testing.T) {
+	approvalEnv(t)
+	memberorigintest.Install(t)
+	queue(t, uprop(1, apRun1, OpCreate, "private", "SENTINEL-UNPUBLISHED", 0))
+	mux := decisionMux()
+	for _, r := range []*http.Request{
+		httptest.NewRequest(http.MethodPost, "/agents/memory-review/proposals/list", strings.NewReader(`{}`)),
+		httptest.NewRequest(http.MethodGet, "/agents/memory-review/proposals", nil),
+		httptest.NewRequest(http.MethodGet, "/agents/memory-review/proposals/list", nil),
+	} {
+		r.Header.Set("Authorization", "Bearer a-sessions-agent-token")
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code == http.StatusOK || strings.Contains(w.Body.String(), "SENTINEL-UNPUBLISHED") {
+			t.Errorf("%s %s: %d %s", r.Method, r.URL.Path, w.Code, w.Body)
+		}
 	}
 }

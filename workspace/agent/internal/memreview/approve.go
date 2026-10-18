@@ -106,13 +106,6 @@ func RevertRun(runID string, now time.Time) (memoryx.ReviewRevertReport, error) 
 	return memoryx.RevertReviewRun(runID, now)
 }
 
-// ReleaseRejections lets go of the rejected hashes of a memory that has been forgotten. It is the
-// forgotten hook memoryx calls (package main installs it): a rejected idea about a memory is
-// remembered only as long as the memory is.
-func ReleaseRejections(scope, projectID, name string) {
-	_, _ = ForgetMemory(scope, name, projectID)
-}
-
 // The states of a listed proposal.
 const (
 	StatePending = "pending"
@@ -131,19 +124,22 @@ type Current struct {
 
 // ProposalView is a queued proposal as the approval screen lists it.
 type ProposalView struct {
-	ID           string    `json:"id"`
-	RunID        string    `json:"runId"`
-	Session      string    `json:"session"`
-	Op           string    `json:"op"`
-	Scope        string    `json:"scope"`
-	ProjectID    string    `json:"projectId,omitempty"`
-	Project      string    `json:"project,omitempty"` // the project's display name
-	Name         string    `json:"name"`
-	Type         string    `json:"type,omitempty"`
-	Description  string    `json:"description,omitempty"`
-	Body         string    `json:"body,omitempty"`
-	Reason       string    `json:"reason"`
-	Evidence     []int     `json:"evidence"`
+	ID          string `json:"id"`
+	RunID       string `json:"runId"`
+	Session     string `json:"session"`
+	Op          string `json:"op"`
+	Scope       string `json:"scope"`
+	ProjectID   string `json:"projectId,omitempty"`
+	Project     string `json:"project,omitempty"` // the project's display name
+	Name        string `json:"name"`
+	Type        string `json:"type,omitempty"`
+	Description string `json:"description,omitempty"`
+	Body        string `json:"body,omitempty"`
+	Reason      string `json:"reason"`
+	Evidence    []int  `json:"evidence"`
+	// Withheld: the proposal matches a secret rule now (the rules grew since it was queued), so
+	// its name, text and diff are not returned. It can still be rejected.
+	Withheld     bool      `json:"withheld,omitempty"`
 	BaseRevision int       `json:"baseRevision,omitempty"`
 	Created      time.Time `json:"created"`
 	// State is pending, or stale when approving would be refused: StaleReason says why (a
@@ -174,14 +170,35 @@ func Proposals() []ProposalView {
 	return out
 }
 
+// textProblem is the first rule that a free-text field of the proposal now matches, "" if none. The
+// queue was scanned when the proposal went in; the rules grow, so what leaves the Agent is judged
+// again, as the published diffs are.
+func textProblem(p Proposal) string {
+	for _, s := range []string{p.Session, p.ProjectID, p.Op.Op, p.Op.Scope, p.Op.Name, p.Op.Type, p.Op.Description,
+		p.Op.Body, p.Op.Reason} {
+		if r := memoryx.ReviewTextProblem(s); r != "" {
+			return r
+		}
+	}
+	return ""
+}
+
 func viewOf(p Proposal) ProposalView {
 	v := ProposalView{
-		ID: p.ID, RunID: p.RunID, Session: p.Session, Op: p.Op.Op, Scope: p.Op.Scope, ProjectID: p.ProjectID,
-		Name: p.Op.Name, Type: p.Op.Type, Description: p.Op.Description, Body: p.Op.Body, Reason: p.Op.Reason,
-		Evidence: p.Op.Evidence, BaseRevision: p.Op.BaseRevision, Created: p.Created, State: StatePending,
+		ID: p.ID, RunID: p.RunID, Op: p.Op.Op, Scope: p.Op.Scope, Created: p.Created, State: StatePending,
+		Evidence: []int{},
 	}
-	if v.Evidence == nil {
-		v.Evidence = []int{}
+	if textProblem(p) != "" {
+		// Nothing of the proposal that could carry the match is returned, the name and the diff
+		// included; the member can still reject it, which deletes the text.
+		v.Withheld, v.State, v.StaleReason = true, StateStale, memoryx.ReviewSecret
+		return v
+	}
+	v.Session, v.ProjectID, v.Name, v.Type, v.Description, v.Body, v.Reason = p.Session, p.ProjectID, p.Op.Name,
+		p.Op.Type, p.Op.Description, p.Op.Body, p.Op.Reason
+	v.BaseRevision = p.Op.BaseRevision
+	if p.Op.Evidence != nil {
+		v.Evidence = p.Op.Evidence
 	}
 	if p.ProjectID != "" {
 		v.Project = memoryx.ReviewProjectDisplay(p.ProjectID)
@@ -200,7 +217,9 @@ func viewOf(p Proposal) ProposalView {
 			v.State, v.StaleReason = StateStale, ReasonChanged
 		}
 	}
-	if v.State == StatePending && (p.Stale == memoryx.ReviewSecret || p.Stale == memoryx.ReviewInvalid) {
+	// What an approval attempt found and the store cannot show again is kept: a refused secret, an
+	// unknown project, a name that was forgotten.
+	if v.State == StatePending && (p.Stale == memoryx.ReviewSecret || p.Stale == memoryx.ReviewInvalid || p.Stale == memoryx.ReviewForgotten) {
 		v.State, v.StaleReason = StateStale, p.Stale
 	}
 	v.Diff = proposalDiff(p, v.Current)

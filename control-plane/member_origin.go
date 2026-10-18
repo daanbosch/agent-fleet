@@ -67,7 +67,9 @@ var memberOriginRoutes = map[string]bool{
 	"POST /api/agents/memory/entries/purge":        true,
 	"POST /api/agents/memory/entries/project-move": true,
 	// The member's decisions on what the review proposed (ADR 0117 decision 6): approving
-	// publishes into every kind's memory, so a session's own AGENT_TOKEN must not be able to.
+	// publishes into every kind's memory, and the list returns text nobody has published, so a
+	// session's own AGENT_TOKEN must not be able to do either.
+	"POST /api/agents/memory-review/proposals/list":       true,
 	"POST /api/agents/memory-review/proposals/approve":    true,
 	"POST /api/agents/memory-review/proposals/reject":     true,
 	"POST /api/agents/memory-review/proposals/reject-all": true,

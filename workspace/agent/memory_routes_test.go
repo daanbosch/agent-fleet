@@ -81,6 +81,7 @@ func TestMemberWriteRoutesRequireTheMark(t *testing.T) {
 		"/agents/memory/entries/project-move",
 		"/agents/memory/snapshots",
 		"/agents/memory/import/apply",
+		"/agents/memory-review/proposals/list",
 		"/agents/memory-review/proposals/approve",
 		"/agents/memory-review/proposals/reject",
 		"/agents/memory-review/proposals/reject-all",
@@ -111,6 +112,7 @@ func TestMemberWriteRoutesAdmitAMarkedRequest(t *testing.T) {
 		"/agents/memory/entries/project-move",
 		"/agents/memory/import/apply",
 		"/agents/memory/snapshots",
+		"/agents/memory-review/proposals/list",
 		"/agents/memory-review/proposals/approve",
 		"/agents/memory-review/proposals/reject",
 		"/agents/memory-review/proposals/reject-all",
@@ -136,7 +138,12 @@ func TestMemberWriteRoutesAdmitAMarkedRequest(t *testing.T) {
 			}
 			continue
 		}
-		if w.Code != http.StatusBadRequest || strings.Contains(w.Body.String(), "member_origin") {
+		// The queue list takes no input: it answers 200 past the mark.
+		want := http.StatusBadRequest
+		if p == "/agents/memory-review/proposals/list" {
+			want = http.StatusOK
+		}
+		if w.Code != want || strings.Contains(w.Body.String(), "member_origin") {
 			t.Errorf("%s with a mark: %d %s", p, w.Code, w.Body)
 		}
 	}

@@ -471,25 +471,38 @@ Console half (P2b) follows. The decisions above are unchanged.
   member-origin mark (ADR 0113); the CP signs and audits them (`memory.review.approve`, `.reject`, `.reject_all`,
   `.revert_run`; the hint is a 20-hex proposal or run id and nothing else). The handlers check the mark themselves as well
   as through the wrapper, no af MCP tool names these routes (a test keeps it so), and the review loop never calls the
-  functions behind them. The queue itself, `GET /agents/memory-review/proposals`, is readable with AGENT_TOKEN like the
-  change list: it reads, and the text in it has passed the same scan as everything else. The count for a badge is the
-  existing `pending` of `GET /agents/memory-review` (the queue length, stale proposals included, since each still needs a
-  decision); it carries no text.
+  functions behind them. The queue list is member-only as well (`POST …/proposals/list`, a POST because the mark signs
+  JSON requests, not audited because it changes nothing): a proposal is text the model drew from other sessions'
+  conversations that the member has not chosen to publish, so a session holding only AGENT_TOKEN must not read it, unlike
+  the change list, which shows memory that is already published. What the list returns is scanned again with the current
+  rules (they grow after a proposal is queued); a proposal that matches now is returned without its name, text, reason and
+  diff, flagged `withheld`, and can still be rejected. The count for a badge is the existing `pending` of
+  `GET /agents/memory-review` (the queue length, stale proposals included, since each still needs a decision); it carries no
+  text.
 - **Approval publishes through `agentMemSave` / `agentMemForget`**, as author kind `review`, the reviewed session as author
   session (also when it is gone: a project that already has memory is read from the store, one that does not is refused),
   with `AF-Review-Run: <run id>` and one more trailer, `AF-Review-Proposal: <proposal id>`. The second is what makes a retry
   harmless: a stop between the commit and the removal of the queue entry leaves the proposal pending, and the next approval
   finds the commit by that trailer and writes nothing. An `update` keeps the kinds the memory has (the model is not shown
-  them). A secret is refused at approval again, by the store's own scan.
+  them). A secret is refused at approval again, by the store's own scan. An approval that published but could not clear the queue
+  entry answers 500 `decision_incomplete`; the CP audits it as an approval (detail `published_queue_not_cleared`) because
+  the commit exists, and a retry finishes the clearing.
 - **Stale and forgotten.** A base revision that is no longer the memory's, a memory that is gone or has appeared, is
   `stale`; a `create` over a name with a tombstone, or with any change in the history (the tombstone can be lost with its
   directory, the history cannot), is `forgotten`, checked inside the store lock of the save. Neither writes anything. The
   proposal stays in the queue, marked, with its text, because the member still has to decide; rejecting it removes the text
   and keeps the hash like any rejection (a stale idea is not offered again unchanged). The list computes the state from the
-  live store, so a proposal made stale by an edit shows as stale before anyone presses approve.
-- **Rejected hashes are released.** P1 kept the hash until the memory is forgotten but nothing told the queue when that
-  happened. `memoryx` now calls a hook after a forget, an undone creation or a move out of a project commits, and the Agent
-  installs `memreview.ForgetMemory` on it.
+  live store with the same rule approval applies (history included, not only the tombstone), so a proposal made stale by an
+  edit shows as stale before anyone presses approve; a reason an approval attempt recorded and the store cannot show again
+  (secret, unknown project, forgotten) is kept.
+- **Rejected hashes are released, durably.** P1 kept the hash until the memory is forgotten but nothing told the queue when
+  that happened. `memoryx` now calls two hooks around a forget, an undone creation or a move out of a project: before the
+  commit, the review writes down that a release is owed (only when a rejection about that memory exists, so a forget never
+  depends on the review's directory); after it, the review releases and strikes the note. A release that fails, or a stop
+  between the commit and the hook, leaves the note, and every wake-up of the loop (also while the review is off) finishes
+  it: a note for a memory that still exists means the forget never committed and is dropped. Only rejections made up to the
+  note's time are released; one made after the forget is about the memory as it is then. Notes still owed are counted in
+  the status (`releasePending`).
 - **"Revert this run"** reverts, as new commits by the member with `AF-Revert-Of`, each commit carrying the run id that is
   still its memory's newest change and whose memory is exactly as it left it. The answer is per commit: `reverted`,
   `already` (an earlier revert of this run undid it), `conflict` (`edited`: a later change exists; `blocked`: the revert

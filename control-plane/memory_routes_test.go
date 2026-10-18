@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -33,7 +34,7 @@ func TestMemoryRoutesProxiedByCP(t *testing.T) {
 		{"POST", "/api/agents/memory/entries/pin", "POST /api/agents/memory/entries/pin"},
 		{"GET", "/api/agents/memory-review", "GET /api/agents/memory-review"},
 		{"POST", "/api/agents/memory-review/run", "POST /api/agents/memory-review/run"},
-		{"GET", "/api/agents/memory-review/proposals", "GET /api/agents/memory-review/proposals"},
+		{"POST", "/api/agents/memory-review/proposals/list", "POST /api/agents/memory-review/proposals/list"},
 		{"POST", "/api/agents/memory-review/proposals/approve", "POST /api/agents/memory-review/proposals/approve"},
 		{"POST", "/api/agents/memory-review/proposals/reject", "POST /api/agents/memory-review/proposals/reject"},
 		{"POST", "/api/agents/memory-review/proposals/reject-all", "POST /api/agents/memory-review/proposals/reject-all"},
@@ -264,5 +265,57 @@ func TestMemoryImportRelayLogDoesNotQuoteQuery(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), secret) {
 		t.Errorf("the query reached the CP log: %s", logs.String())
+	}
+}
+
+// An approval that published the memory but could not clear the proposal from the queue answers 500
+// decision_incomplete. The commit exists, so the CP audits the approval anyway (the member may never
+// retry); any other failure is not audited, and the response reaches the caller untouched.
+func TestReviewApprovalPublishedButNotClearedIsAudited(t *testing.T) {
+	const id = "0123456789abcdef0123"
+	cases := []struct {
+		name, body string
+		status     int
+		wantAudit  bool
+		wantDetail string
+	}{
+		{"published, queue not cleared", `{"error":{"code":"decision_incomplete","message":"published, but removing it failed"}}`, 500, true, "published_queue_not_cleared"},
+		{"another failure", `{"error":{"code":"internal","message":"the proposal could not be published"}}`, 500, false, ""},
+		{"stale", `{"error":{"code":"proposal_stale","message":"x"}}`, 409, false, ""},
+		{"approved", `{"commit":"abc","revision":1}`, 200, true, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			proxy, res, st, cleanup := newFSProxyTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/agents/memory-review/proposals/approve" || r.Header.Get("X-AF-Member-Origin") == "" {
+					t.Errorf("upstream request = %s, mark %q", r.URL.Path, r.Header.Get("X-AF-Member-Origin"))
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(c.status)
+				_, _ = w.Write([]byte(c.body))
+			}))
+			defer cleanup()
+			req := httptest.NewRequest(http.MethodPost, "/api/agents/memory-review/proposals/approve?id="+id, strings.NewReader(`{"id":"`+id+`"}`))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			proxy.rest(rec, req, res)
+			if rec.Code != c.status || rec.Body.String() != c.body {
+				t.Fatalf("response = %d %s", rec.Code, rec.Body.String())
+			}
+			rows, err := st.ListAuditByTenant(context.Background(), res.ws.TenantID, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !c.wantAudit {
+				if len(rows) != 0 {
+					t.Fatalf("audited: %+v", rows)
+				}
+				return
+			}
+			if len(rows) != 1 || rows[0].Action != "memory.review.approve" || rows[0].Target != id ||
+				rows[0].Detail != c.wantDetail || rows[0].HTTPStatus != c.status {
+				t.Fatalf("audit = %+v", rows)
+			}
+		})
 	}
 }

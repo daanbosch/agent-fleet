@@ -516,6 +516,7 @@ func agentMemRevert(req agentMemRevertReq, now time.Time) (agentMemWriteResult, 
 			}
 			return agentMemWriteResult{}, memoryErrf(http.StatusConflict, errCodeMemoryConflict, "the memory is already gone")
 		}
+		notifyForgetIntent(scopeDir, name)
 		if err := agentMemWriteTomb(scopeDir, name, floor); err != nil {
 			return agentMemWriteResult{}, err
 		}

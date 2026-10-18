@@ -948,8 +948,9 @@ func registerAgentEnvRoutes(mux *http.ServeMux, cfg config) {
 	mux.HandleFunc("GET /api/agents/memory-review", rest)
 	mux.HandleFunc("POST /api/agents/memory-review/run", rest)
 	// The member's decisions on the queue the review fills (approve, reject, reject all, undo a
-	// run) are signed and audited; the list only reads.
-	mux.HandleFunc("GET /api/agents/memory-review/proposals", rest)
+	// run) are signed and audited; the list is signed too (it returns unpublished text) and not
+	// audited (it changes nothing).
+	mux.HandleFunc("POST /api/agents/memory-review/proposals/list", rest)
 	mux.HandleFunc("POST /api/agents/memory-review/proposals/approve", rest)
 	mux.HandleFunc("POST /api/agents/memory-review/proposals/reject", rest)
 	mux.HandleFunc("POST /api/agents/memory-review/proposals/reject-all", rest)

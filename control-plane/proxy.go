@@ -311,9 +311,14 @@ func (a agentProxyAPI) rest(w http.ResponseWriter, r *http.Request, res *resolve
 
 	var bufferedResponse []byte
 	var fsPutOutcome string
-	if r.Method == http.MethodPut && r.URL.Path == "/api/fs/file" {
-		// PUT errors are deliberately small JSON envelopes. Read only a bounded
-		// prefix before the audit decision so write_state_unknown cannot be lost,
+	// Two error envelopes decide the audit: a file write that may have landed, and an approved
+	// review proposal that was published although clearing it from the queue failed (the commit
+	// exists, so the approval must be on record even if the member never retries).
+	reviewApprove := r.Method == http.MethodPost && r.URL.Path == "/api/agents/memory-review/proposals/approve" &&
+		resp.StatusCode == http.StatusInternalServerError
+	if (r.Method == http.MethodPut && r.URL.Path == "/api/fs/file") || reviewApprove {
+		// These errors are deliberately small JSON envelopes. Read only a bounded
+		// prefix before the audit decision so the outcome cannot be lost,
 		// while still forwarding an unexpectedly larger upstream response.
 		bufferedResponse, _ = io.ReadAll(io.LimitReader(resp.Body, (64<<10)+1))
 		if len(bufferedResponse) <= 64<<10 {
@@ -327,15 +332,19 @@ func (a agentProxyAPI) rest(w http.ResponseWriter, r *http.Request, res *resolve
 			}
 		}
 	}
+	reviewPublishedUncleared := reviewApprove && fsPutOutcome == reviewDecisionIncompleteCode
 
 	// M1 audit (docs/log/20): record a successful change operation. actor/tenant come from
 	// the resolved request; best-effort with a detached context so a client disconnect
 	// during the body copy below can't cancel the write.
 	if action, target, ok := auditActionTarget(r); ok &&
 		((resp.StatusCode >= 200 && resp.StatusCode < 300) ||
-			(resp.StatusCode == http.StatusInternalServerError && fsPutOutcome == errCodeFSWriteStateUnknown)) {
+			(resp.StatusCode == http.StatusInternalServerError && fsPutOutcome == errCodeFSWriteStateUnknown) ||
+			reviewPublishedUncleared) {
 		detail := ""
-		if fsPutOutcome == errCodeFSWriteStateUnknown {
+		if reviewPublishedUncleared {
+			detail = "published_queue_not_cleared"
+		} else if fsPutOutcome == errCodeFSWriteStateUnknown {
 			detail = "write_state_unknown"
 		} else if strings.HasPrefix(action, "gcp.login.") {
 			// ADR 0107 decision 3: the audit says the call came through the relay; the
@@ -610,6 +619,11 @@ func auditProjectHint(s string) string {
 	}
 	return ""
 }
+
+// reviewDecisionIncompleteCode is the Agent's answer to an approval that published the memory but
+// could not clear the proposal from its queue (workspace/agent/internal/memreview). It is the
+// Agent's code, not one the CP emits, so it is not an errcodes.go entry.
+const reviewDecisionIncompleteCode = "decision_incomplete"
 
 var auditSessionNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,40}$`)
 

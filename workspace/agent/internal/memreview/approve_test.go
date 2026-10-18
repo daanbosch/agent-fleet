@@ -1,8 +1,11 @@
 package memreview
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -24,7 +27,7 @@ func approvalEnv(t *testing.T) {
 	t.Setenv("GIT_CONFIG_COUNT", "1")
 	t.Setenv("GIT_CONFIG_KEY_0", "gc.autoDetach")
 	t.Setenv("GIT_CONFIG_VALUE_0", "false")
-	t.Cleanup(func() { memoryx.SetForgottenHook(nil) })
+	t.Cleanup(func() { memoryx.SetForgetHooks(nil) })
 }
 
 func apID(n int) string { return fmt.Sprintf("%019x%d", n, n%10) }
@@ -64,7 +67,7 @@ func refusal(err error) string {
 	return ""
 }
 
-var apNow = time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC)
+var apNow = time.Now()
 
 // Approving publishes the memory and leaves no copy of the proposal text anywhere in the review's
 // state; the decided marker keeps a replaying run from queueing it again.
@@ -251,7 +254,7 @@ func TestRejectAllCountsAFailureAndRetries(t *testing.T) {
 // approved forget, which goes through the same store path as every other forget) releases it.
 func TestForgettingAMemoryReleasesItsRejectedHashes(t *testing.T) {
 	approvalEnv(t)
-	memoryx.SetForgottenHook(ReleaseRejections)
+	memoryx.SetForgetHooks(ForgetHooks())
 	seed := uprop(1, apRun1, OpCreate, "topic", "v1", 0)
 	queue(t, seed)
 	if _, err := Approve(seed.ID, apNow); err != nil {
@@ -277,7 +280,7 @@ func TestForgettingAMemoryReleasesItsRejectedHashes(t *testing.T) {
 		t.Fatal("forgetting one memory released another's hash")
 	}
 	// ... and without the hook installed nothing is released (the control for the check above).
-	memoryx.SetForgottenHook(nil)
+	memoryx.SetForgetHooks(nil)
 	again := uprop(5, apRun2, OpCreate, "topic2", "v1", 0)
 	queue(t, again)
 	if _, err := Approve(again.ID, apNow); err != nil {
@@ -390,5 +393,84 @@ func TestUnifiedDiff(t *testing.T) {
 	other := append([]string{"extra"}, big...)
 	if bd := unifiedDiff("p", big, true, other, true); !strings.Contains(bd, "+extra\n") {
 		t.Error("the capped diff lost the change")
+	}
+}
+
+// The rules grow after a proposal was queued. Approval already refuses what matches them now; what
+// is returned for display must be judged again too, as the published diffs are.
+func TestAProposalThatMatchesTheRulesNowIsWithheldFromTheList(t *testing.T) {
+	approvalEnv(t)
+	p := uprop(1, apRun1, OpUpdate, "doc", "clean at first", 1)
+	seed := uprop(2, apRun1, OpCreate, "doc", "the live text", 0)
+	queue(t, seed)
+	if _, err := Approve(seed.ID, apNow); err != nil {
+		t.Fatal(err)
+	}
+	queue(t, p)
+	// A later release of the scan knows a key the old one did not: simulated by editing the file.
+	q, _ := pendingStore.Read(p.ID)
+	q.Op.Body = "now with " + fakeKey()
+	q.Op.Description = "also " + fakeKey()
+	q.Op.Reason = "and " + fakeKey()
+	if err := pendingStore.Write(p.ID, q); err != nil {
+		t.Fatal(err)
+	}
+	// Positive control: approval does refuse it, so the check below looks at a real hit.
+	if _, err := Approve(p.ID, apNow); refusal(err) != memoryx.ReviewSecret {
+		t.Fatalf("approve: %v", err)
+	}
+	views := Proposals()
+	if len(views) != 1 {
+		t.Fatalf("views = %+v", views)
+	}
+	v := views[0]
+	if !v.Withheld || v.State != StateStale || v.StaleReason != memoryx.ReviewSecret {
+		t.Fatalf("view = %+v", v)
+	}
+	b, _ := json.Marshal(views)
+	if strings.Contains(string(b), fakeKey()[:8]) || v.Body != "" || v.Description != "" || v.Reason != "" || v.Diff != "" || v.Name != "" {
+		t.Fatalf("the view carries the match: %s", b)
+	}
+	// The member can still get rid of it, and the text goes.
+	if err := Reject(p.ID, apNow); err != nil {
+		t.Fatal(err)
+	}
+	assertNoneContains(t, stateRoot(), fakeKey())
+}
+
+// The list agrees with approval about a forgotten name even when the tombstone is gone, and keeps a
+// "forgotten" that an approval attempt recorded.
+func TestListedCreateOverAForgottenNameIsForgottenWithoutItsTombstone(t *testing.T) {
+	approvalEnv(t)
+	seed := uprop(1, apRun1, OpCreate, "once", "v1", 0)
+	gone := uprop(2, apRun1, OpForget, "once", "", 1)
+	queue(t, seed, gone)
+	for _, id := range []string{seed.ID, gone.ID} {
+		if _, err := Approve(id, apNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.RemoveAll(filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "af-agent-memory", "user", ".forgotten")); err != nil {
+		t.Fatal(err)
+	}
+	revive := uprop(3, apRun2, OpCreate, "once", "back", 0)
+	queue(t, revive)
+	// Before anyone presses approve (which would record the reason): the live state alone.
+	if v := Proposals(); len(v) != 1 || v[0].State != StateStale || v[0].StaleReason != memoryx.ReviewForgotten {
+		t.Fatalf("view = %+v", v)
+	}
+	// Positive control: the store refuses it, with the tombstone gone.
+	if _, err := Approve(revive.ID, apNow); refusal(err) != memoryx.ReviewForgotten {
+		t.Fatalf("approve: %v", err)
+	}
+	// A recorded "forgotten" is not thrown away when the live state alone would say pending.
+	q, _ := pendingStore.Read(revive.ID)
+	q.Op.Name = "never-existed"
+	q.Stale = memoryx.ReviewForgotten
+	if err := pendingStore.Write(revive.ID, q); err != nil {
+		t.Fatal(err)
+	}
+	if v := Proposals(); len(v) != 1 || v[0].State != StateStale || v[0].StaleReason != memoryx.ReviewForgotten {
+		t.Fatalf("recorded reason dropped: %+v", v)
 	}
 }

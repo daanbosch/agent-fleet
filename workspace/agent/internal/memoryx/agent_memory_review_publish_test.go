@@ -411,13 +411,17 @@ func TestRevertedReviewCreationStaysGone(t *testing.T) {
 	}
 }
 
-// The forgotten hook is told about every way a memory goes away, with the scope and project.
-func TestForgottenHookReportsEveryForget(t *testing.T) {
+// The forget hooks are told about every way a memory goes away, the intent before the commit and
+// the done after it, with the scope and project.
+func TestForgetHooksReportEveryForget(t *testing.T) {
 	_, _, _ = agentMemTestEnv(t)
-	type ev struct{ scope, pid, name string }
+	type ev struct{ phase, scope, pid, name string }
 	var got []ev
-	SetForgottenHook(func(scope, pid, name string) { got = append(got, ev{scope, pid, name}) })
-	t.Cleanup(func() { SetForgottenHook(nil) })
+	SetForgetHooks(&ForgetHooks{
+		Intent: func(scope, pid, name string) { got = append(got, ev{"intent", scope, pid, name}) },
+		Done:   func(scope, pid, name string) { got = append(got, ev{"done", scope, pid, name}) },
+	})
+	t.Cleanup(func() { SetForgetHooks(nil) })
 	now := time.Now()
 	c := agentMemCallerT(t, "claude-main")
 	pid := c.Project.ID
@@ -437,9 +441,8 @@ func TestForgottenHookReportsEveryForget(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Undoing a creation forgets it too.
-	ch := agentMemChangesT(t)
 	var create string
-	for _, x := range ch {
+	for _, x := range agentMemChangesT(t) {
 		if x.Name == "p2" {
 			create = x.Commit
 		}
@@ -447,7 +450,9 @@ func TestForgottenHookReportsEveryForget(t *testing.T) {
 	if _, err := agentMemRevert(agentMemRevertReq{Commit: create}, now); err != nil {
 		t.Fatal(err)
 	}
-	want := []ev{{"project", pid, "p1"}, {"user", "", "u1"}, {"project", pid, "p2"}}
+	want := []ev{{"intent", "project", pid, "p1"}, {"done", "project", pid, "p1"},
+		{"intent", "user", "", "u1"}, {"done", "user", "", "u1"},
+		{"intent", "project", pid, "p2"}, {"done", "project", pid, "p2"}}
 	if len(got) != len(want) {
 		t.Fatalf("hook calls = %+v, want %+v", got, want)
 	}
@@ -455,5 +460,28 @@ func TestForgottenHookReportsEveryForget(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("call %d = %+v, want %+v", i, got[i], want[i])
 		}
+	}
+}
+
+// The screen's view of a create agrees with approval: a name the history knows is forgotten even
+// when its tombstone is gone.
+func TestReviewTargetForgottenSeesTheHistoryWhenTheTombstoneIsLost(t *testing.T) {
+	_, _, _ = agentMemTestEnv(t)
+	now := time.Now()
+	c := agentMemCallerT(t, "claude-main")
+	if _, err := agentMemSave(c, agentMemSaveReq{Name: "a", Description: "d", Type: "project", Body: "v1"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agentMemForget(c, agentMemForgetReq{Name: "a", Revision: 1}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(agentMemDir(), "projects", c.Project.ID, agentMemTombDir)); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := ReviewTarget("project", c.Project.ID, "a"); st.Exists || !st.Forgotten {
+		t.Fatalf("state = %+v, want forgotten by history", st)
+	}
+	if st, _ := ReviewTarget("project", c.Project.ID, "never-was"); st.Forgotten {
+		t.Fatalf("a name that never existed reads as forgotten: %+v", st)
 	}
 }

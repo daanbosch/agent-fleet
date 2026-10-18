@@ -521,10 +521,11 @@ func buildMux() *http.ServeMux {
 	// purpose: these are not memory tools and no MCP tool reaches them.
 	mux.Handle("POST /agents/memory-review/run", memberorigin.Require(memreview.RunMaxRequest, http.HandlerFunc(memreview.HandleRun)))
 	mux.HandleFunc("GET /agents/memory-review", memreview.HandleStatus)
-	// What the member does with the queue the review fills: the list is read-only; approving
-	// publishes, rejecting and undoing a run change the store, so each answers only the mark.
-	mux.HandleFunc("GET /agents/memory-review/proposals", memreview.HandleProposals)
+	// What the member does with the queue the review fills. Every route answers only the mark,
+	// the list too: it returns text the model drew from other sessions' conversations that the
+	// member has not published (it is a POST because the mark signs JSON requests).
 	for route, h := range map[string]http.HandlerFunc{
+		"POST /agents/memory-review/proposals/list":       memreview.HandleProposals,
 		"POST /agents/memory-review/proposals/approve":    memreview.HandleApprove,
 		"POST /agents/memory-review/proposals/reject":     memreview.HandleReject,
 		"POST /agents/memory-review/proposals/reject-all": memreview.HandleRejectAll,

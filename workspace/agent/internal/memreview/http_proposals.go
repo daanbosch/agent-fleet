@@ -1,11 +1,13 @@
 package memreview
 
-// The approval routes (ADR 0117 decision 6). Reading the queue is open to the Console's relay like
-// the change list is; every decision answers only a request carrying the Control Plane's
-// member-origin mark (ADR 0113). The mark is the whole authorisation: AGENT_TOKEN is held by every
-// session's shell, so a session (or a model that talked one into it) can read the queue but can
-// neither publish its own proposal nor reject, nor undo a run. Each handler checks the mark itself
-// as well as through memberorigin.Require, so a route registered without the wrapper still refuses.
+// The approval routes (ADR 0117 decision 6). Every one of them, the list included, answers only a
+// request carrying the Control Plane's member-origin mark (ADR 0113). The mark is the whole
+// authorisation: AGENT_TOKEN is held by every session's shell, so a session (or a model that talked
+// one into it) can neither publish its own proposal, reject, nor undo a run, and cannot read the
+// queue either: a proposal is text the model drew from other sessions' conversations that the member
+// has not yet chosen to publish. Each handler checks the mark itself as well as through
+// memberorigin.Require, so a route registered without the wrapper still refuses. The list is a POST
+// with an empty JSON body because the mark is made for JSON requests; it changes nothing.
 
 import (
 	"errors"
@@ -26,9 +28,12 @@ type ProposalsResponse struct {
 	Proposals []ProposalView `json:"proposals"`
 }
 
-// HandleProposals is GET /agents/memory-review/proposals: the queue with each proposal's live state
-// and diff.
+// HandleProposals is POST /agents/memory-review/proposals/list: the queue with each proposal's live
+// state and diff.
 func HandleProposals(w http.ResponseWriter, r *http.Request) {
+	if !memberorigin.RefuseUnverified(w, r) {
+		return
+	}
 	out := ProposalsResponse{Proposals: Proposals()}
 	if out.Proposals == nil {
 		out.Proposals = []ProposalView{}

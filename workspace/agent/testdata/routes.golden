@@ -4,8 +4,8 @@
 # count: 404
 GET /agents/kinds
 GET /agents/memory-review
-GET /agents/memory-review/proposals
 POST /agents/memory-review/proposals/approve
+POST /agents/memory-review/proposals/list
 POST /agents/memory-review/proposals/reject
 POST /agents/memory-review/proposals/reject-all
 POST /agents/memory-review/run

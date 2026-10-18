@@ -117,8 +117,8 @@ GET /api/admin/workspace-sizing
 DELETE /api/admin/workspaces
 GET /api/agents/kinds
 GET /api/agents/memory-review
-GET /api/agents/memory-review/proposals
 POST /api/agents/memory-review/proposals/approve
+POST /api/agents/memory-review/proposals/list
 POST /api/agents/memory-review/proposals/reject
 POST /api/agents/memory-review/proposals/reject-all
 POST /api/agents/memory-review/run

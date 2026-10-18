@@ -766,6 +766,7 @@ func agentMemMoveOne(plan agentMemMovePlan, it agentMemMoveItem, now time.Time) 
 		return res, err
 	}
 	srcRel := fromRel + "/" + it.Name + ".md"
+	notifyForgetIntent(fromRel, it.Name)
 	if err := agentMemWriteTomb(fromRel, it.Name, cur.Entry.Revision); err != nil {
 		return res, err
 	}

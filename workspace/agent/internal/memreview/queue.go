@@ -246,18 +246,29 @@ func gcDecidedLocked() {
 func ForgetMemory(scope, name, projectID string) (int, error) {
 	stateMu.Lock()
 	defer stateMu.Unlock()
+	return releaseLocked(scope, name, projectID, time.Time{})
+}
+
+// releaseLocked removes the rejections of one memory made at or before cutoff (all of them when it
+// is zero), with stateMu held.
+func releaseLocked(scope, name, projectID string, cutoff time.Time) (int, error) {
 	n := 0
 	var first error
 	for _, h := range rejectedStore.keys() {
-		if r, ok := rejectedStore.Read(h); ok && r.Scope == scope && r.Name == name && r.ProjectID == projectID {
-			if err := rejectedStore.Remove(h); err != nil {
-				if first == nil {
-					first = err
-				}
-				continue
-			}
-			n++
+		r, ok := rejectedStore.Read(h)
+		if !ok || r.Scope != scope || r.Name != name || r.ProjectID != projectID {
+			continue
 		}
+		if !cutoff.IsZero() && r.At.After(cutoff) {
+			continue
+		}
+		if err := rejectedStore.Remove(h); err != nil {
+			if first == nil {
+				first = err
+			}
+			continue
+		}
+		n++
 	}
 	return n, first
 }
