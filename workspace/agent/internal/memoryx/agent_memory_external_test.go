@@ -134,3 +134,26 @@ func TestAgentMemoryExternalRefusals(t *testing.T) {
 		t.Errorf("secret: %d %s", code, b)
 	}
 }
+
+// A memory limited to other kinds is not readable by name from outside, and the refused read is not
+// a use; one limited to "external" is.
+func TestAgentMemoryExternalReadHonoursKinds(t *testing.T) {
+	_, _, _ = agentMemTestEnv(t)
+	c := agentMemCallerT(t, "claude-main")
+	externalMode(t, ExternalMemoryRead)
+	for name, kinds := range map[string][]string{"only-claude": {"claude"}, "for-outside": {"external"}} {
+		if _, err := agentMemSave(c, agentMemSaveReq{Name: name, Description: "d", Type: "project", Body: "b", Kinds: kinds}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	q := extBase + "read?project=" + c.Project.ID + "&scope=project&name="
+	if code, b := memberDo(t, http.MethodGet, q+"only-claude", nil); code != http.StatusNotFound || strings.Contains(string(b), `"body"`) {
+		t.Fatalf("kind-limited read: %d %s", code, b)
+	}
+	if got := agentMemLoadUsage("projects/" + c.Project.ID)["only-claude"]; got != 0 {
+		t.Fatalf("a refused read counted as a use: %d", got)
+	}
+	if code, _ := memberDo(t, http.MethodGet, q+"for-outside", nil); code != http.StatusOK {
+		t.Fatalf("external-kind read: %d", code)
+	}
+}

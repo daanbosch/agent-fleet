@@ -183,3 +183,34 @@ func TestMCPClientName(t *testing.T) {
 		t.Errorf("meta: %q", got)
 	}
 }
+
+// With scope omitted the Agent works in the project when one is named, so the audit says project;
+// an explicit user scope stays user.
+func TestMemoryAuditUsesTheAgentsDefaultScope(t *testing.T) {
+	st := memStore(t)
+	cp := &memCP{testCP: testCP{store: st}, state: "running"}
+	base := map[string]any{"name": "n", "description": "d", "type": "user", "body": "b"}
+	with := func(extra map[string]any) map[string]any {
+		m := map[string]any{}
+		for k, v := range base {
+			m[k] = v
+		}
+		for k, v := range extra {
+			m[k] = v
+		}
+		return m
+	}
+	memCall(t, cp, "write", "memory_save", with(map[string]any{"project": "demo-0123456789ab"}))
+	memCall(t, cp, "write", "memory_save", with(map[string]any{"project": "demo-0123456789ab", "scope": "user"}))
+	memCall(t, cp, "write", "memory_save", with(nil))
+	memCall(t, cp, "write", "memory_forget", map[string]any{"name": "n", "revision": 1, "project": "demo-0123456789ab"})
+	rows, _ := st.ListAuditByTenant(context.Background(), "t1", 10)
+	n := map[string]int{}
+	for _, r := range rows {
+		n[r.Action+" "+r.Detail]++
+	}
+	if n["memory.entry.save external scope=project"] != 1 || n["memory.entry.save external scope=user"] != 2 ||
+		n["memory.entry.forget external scope=project"] != 1 {
+		t.Fatalf("audit details: %v", n)
+	}
+}

@@ -224,6 +224,10 @@ func (a API) memoryAudit(ctx context.Context, res *Resolved, action, project, sc
 	if mcpMemoryProjectIDRe.MatchString(project) {
 		target = project
 	}
+	// The Agent's default when scope is omitted: the project if one is named, else the user scope.
+	if scope == "" && project != "" {
+		scope = "project"
+	}
 	if scope != "project" {
 		scope = "user"
 	}

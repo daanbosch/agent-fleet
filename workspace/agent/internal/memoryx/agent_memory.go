@@ -754,6 +754,11 @@ func agentMemRead(c agentMemCaller, scope, name string) (agentMemEntry, error) {
 			return agentMemEntry{}, memoryErrf(http.StatusUnprocessableEntity, errCodeMemorySecretDetected,
 				"this memory is withheld: its file looks like it contains a secret or cannot be checked; your user has to fix the file")
 		}
+		// An outside client is held to the kinds filter the index and search apply: a memory
+		// limited to other kinds is not readable by name either, and is not counted as a use.
+		if c.Kind == agentMemExternalKind && !agentMemAppliesTo(l.Entry, c.Kind) {
+			continue
+		}
 		// Counted under the read lock: a forget or re-create (write lock) cannot slip between the
 		// read and the count and leave this use on a newer memory.
 		agentMemRecordUses(c, l.Entry)
