@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 )
@@ -47,6 +48,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("hyprmux-shim: %v", err)
 	}
+	cfg.CLI = discoverHyprmuxCLI()
+	cfg.TelegramCheckpoint = telegramCheckpointPath(os.Getenv("HOME"))
 	srv := &http.Server{Addr: addr, Handler: newHandler(cfg), ReadHeaderTimeout: 10 * time.Second}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -62,4 +65,13 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("hyprmux-shim: %v", err)
 	}
+}
+
+// telegramCheckpointPath is the hall's checkpoint in the host's hyprmux state directory; an
+// empty home means there is no location to read, which the Telegram endpoints report.
+func telegramCheckpointPath(home string) string {
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".local", "state", "hyprmux", "telegram-hall-checkpoint.json")
 }

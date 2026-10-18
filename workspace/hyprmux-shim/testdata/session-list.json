@@ -1,0 +1,4 @@
+[
+  {"id": "h-sup-1", "title": "TG 8 · Supervisor · alpha", "status": "running", "projectId": "proj-alpha", "agent": "pi", "updatedAt": "2026-10-18T12:00:00Z", "prompt": "SECRET-PROMPT-MARKER do the thing", "workdir": "/work/alpha"},
+  {"id": "h-work-2", "title": "worker", "status": "exited", "projectId": "proj-alpha", "agent": "claude", "updatedAt": "2026-10-17T12:00:00Z", "prompt": "SECRET-PROMPT-MARKER", "workdir": "/work/alpha"}
+]

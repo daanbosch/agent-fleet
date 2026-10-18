@@ -72,7 +72,7 @@ func TestHealthzIsOpenAndCountsSessions(t *testing.T) {
 
 func TestSessionRoutesRequireBearer(t *testing.T) {
 	srv := newTestServer(t, fixtureRegistry)
-	for _, path := range []string{"/sessions", "/sessions/h-pi-0003", "/sessions/h-pi-0003/log", "/ws/pty?session=h-pi-0003"} {
+	for _, path := range []string{"/sessions", "/sessions/h-pi-0003", "/sessions/h-pi-0003/log", "/sessions/h-pi-0003/messages", "/ws/pty?session=h-pi-0003"} {
 		if code, _, _ := request(t, srv, path, false); code != http.StatusUnauthorized {
 			t.Errorf("%s without token = %d, want 401", path, code)
 		}
@@ -209,5 +209,77 @@ func TestWsPtyRefusesAttachHonestly(t *testing.T) {
 	}
 	if code, _, _ := request(t, srv, "/ws/pty?session=h-nope-9999", true); code != http.StatusNotFound {
 		t.Fatalf("attach to unknown session = %d, want 404", code)
+	}
+}
+
+func TestMessagesReturnsHeadlessLogTailAsOneTurn(t *testing.T) {
+	srv := newTestServer(t, fixtureRegistry)
+	code, body, _ := request(t, srv, "/sessions/h-pi-0003/messages", true)
+	if code != http.StatusOK {
+		t.Fatalf("/messages = %d %s, want 200", code, body)
+	}
+	var m struct {
+		Messages []transcriptTurn `json:"messages"`
+		Reset    bool             `json:"reset"`
+	}
+	decodeJSON(t, body, &m)
+	if !m.Reset || len(m.Messages) != 1 || m.Messages[0].Role != "assistant" || len(m.Messages[0].Parts) != 1 {
+		t.Fatalf("messages = %+v reset=%v, want one assistant text turn and reset", m.Messages, m.Reset)
+	}
+	text := m.Messages[0].Parts[0].Text
+	if !strings.HasPrefix(text, "```text\n") || !strings.Contains(text, "line1\nline2\nline3") {
+		t.Fatalf("log turn = %q, want the fenced log lines", text)
+	}
+}
+
+func TestMessagesIsEmptyWhereNoLogIsWritten(t *testing.T) {
+	srv := newTestServer(t, fixtureRegistry)
+	for _, name := range []string{"h-claude-0001", "h-pi-0004"} {
+		code, body, _ := request(t, srv, "/sessions/"+name+"/messages", true)
+		if code != http.StatusOK || !strings.Contains(body, `"messages":[]`) {
+			t.Errorf("/messages for %s = %d %s, want 200 with an empty transcript", name, code, body)
+		}
+	}
+}
+
+func TestFenceLogOutlastsBackticksInLog(t *testing.T) {
+	got := fenceLog("a ```` b")
+	if !strings.HasPrefix(got, "`````text\n") || !strings.HasSuffix(got, "\n`````") {
+		t.Fatalf("fenceLog = %q, want a five-backtick fence around the log", got)
+	}
+}
+
+func TestStripANSIRemovesTerminalEscapes(t *testing.T) {
+	in := "\x1b[31mred\x1b[0m\r\n\x1b]0;title\x07done\x1bM\n"
+	if got := stripANSI(in); got != "red\ndone\n" {
+		t.Fatalf("stripANSI = %q, want %q", got, "red\ndone\n")
+	}
+}
+
+func TestHealthzReportsRegistryErrorAsBoolean(t *testing.T) {
+	bad := filepath.Join(t.TempDir(), "sessions-v4.json")
+	if err := os.WriteFile(bad, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := newTestServer(t, bad)
+	code, body, _ := request(t, srv, "/healthz", false)
+	if code != http.StatusOK || !strings.Contains(body, `"registryError":true`) {
+		t.Fatalf("healthz = %d %s, want registryError as true", code, body)
+	}
+	if strings.Contains(body, bad) || strings.Contains(body, "parse") {
+		t.Fatalf("healthz leaked the registry path or parser error: %s", body)
+	}
+}
+
+func TestLogPathRejectsIdsOutsideLogsDir(t *testing.T) {
+	s := &server{cfg: config{LogsDir: t.TempDir()}}
+	for _, id := range []string{"../escape", "a/b", "", ".hidden", "h-pi-0003/../../x"} {
+		if p, err := s.logPath(id); err == nil {
+			t.Errorf("logPath(%q) = %q, want an error", id, p)
+		}
+	}
+	p, err := s.logPath("h-pi-0003")
+	if err != nil || filepath.Base(p) != "h-pi-0003.log" {
+		t.Fatalf("logPath(h-pi-0003) = %q, %v", p, err)
 	}
 }

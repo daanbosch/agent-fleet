@@ -23,9 +23,11 @@ const (
 var validName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 type config struct {
-	Token        string
-	RegistryPath string
-	LogsDir      string
+	Token              string
+	RegistryPath       string
+	LogsDir            string
+	CLI                hyprmuxCLI
+	TelegramCheckpoint string
 }
 
 type server struct {
@@ -41,7 +43,16 @@ func newHandler(cfg config) http.Handler {
 	mux.HandleFunc("GET /sessions", s.auth(s.list))
 	mux.HandleFunc("GET /sessions/{name}", s.auth(s.detail))
 	mux.HandleFunc("GET /sessions/{name}/log", s.auth(s.logTail))
+	mux.HandleFunc("GET /sessions/{name}/messages", s.auth(s.messages))
 	mux.HandleFunc("GET /ws/pty", s.auth(s.attachRefused))
+	mux.HandleFunc("GET /api/hyprmux/status", s.auth(s.hyprmuxStatus))
+	mux.HandleFunc("GET /api/hyprmux/projects", s.auth(s.hyprmuxProjects))
+	mux.HandleFunc("GET /api/hyprmux/room-items", s.auth(s.roomItems))
+	mux.HandleFunc("POST /api/hyprmux/room-item", s.auth(s.roomItemCreate))
+	mux.HandleFunc("POST /api/hyprmux/session-launch", s.auth(s.sessionLaunch))
+	mux.HandleFunc("GET /api/telegram/status", s.auth(s.telegramStatus))
+	mux.HandleFunc("GET /api/telegram/topics", s.auth(s.telegramTopics))
+	mux.HandleFunc("POST /api/telegram/topic-message", s.auth(s.telegramTopicMessage))
 	return mux
 }
 
@@ -59,9 +70,7 @@ func (s *server) auth(h http.HandlerFunc) http.HandlerFunc {
 func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
 	body := map[string]any{"ok": true, "sessions": 0, "alive": 0, "headless": 0}
 	rows, err := loadRegistry(s.cfg.RegistryPath)
-	if err != nil {
-		body["registryError"] = err.Error()
-	}
+	body["registryError"] = err != nil
 	alive, headless := 0, 0
 	for _, row := range rows {
 		if viewOf(row).Alive {
@@ -103,7 +112,7 @@ func (s *server) detail(w http.ResponseWriter, r *http.Request) {
 	}
 	d := sessionDetail{sessionView: viewOf(row)}
 	if isHeadless(row) {
-		tail, found, err := readTail(s.logPath(row.ID), defaultTailBytes)
+		tail, found, err := s.readLog(row.ID, defaultTailBytes)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -128,7 +137,7 @@ func (s *server) logTail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	tail, found, err := readTail(s.logPath(row.ID), n)
+	tail, found, err := s.readLog(row.ID, n)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -198,10 +207,21 @@ func (s *server) row(name string) (registryRow, bool, error) {
 	return registryRow{}, false, nil
 }
 
-// logPath is only ever built from a registry id, which the caller has matched against
-// validName, so a crafted session name cannot step outside LogsDir.
-func (s *server) logPath(id string) string {
-	return filepath.Join(s.cfg.LogsDir, id+".log")
+// logPath re-checks the id against validName itself, so a crafted id cannot step outside
+// LogsDir even where a caller skipped the route's validation.
+func (s *server) logPath(id string) (string, error) {
+	if !validName.MatchString(id) {
+		return "", errors.New("invalid session name")
+	}
+	return filepath.Join(s.cfg.LogsDir, id+".log"), nil
+}
+
+func (s *server) readLog(id string, n int) (string, bool, error) {
+	path, err := s.logPath(id)
+	if err != nil {
+		return "", false, err
+	}
+	return readTail(path, n)
 }
 
 func tailBytesParam(r *http.Request) (int, error) {

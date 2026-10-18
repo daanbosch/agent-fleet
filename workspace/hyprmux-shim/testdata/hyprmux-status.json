@@ -1,0 +1,11 @@
+{
+  "source": "hyprmux",
+  "updatedAt": "2026-10-18T12:00:00Z",
+  "hall": {"projectId": "proj-alpha", "state": "local", "canOpen": true, "counts": {"tasks": "1", "questions": "0", "blockers": "0", "insights": "0"}},
+  "currentProject": {"id": "proj-alpha", "name": "Alpha", "root": "/work/alpha", "browser": {"urls": ["https://example.invalid/"]}},
+  "projects": [
+    {"id": "proj-alpha", "name": "Alpha", "slug": "alpha", "group": "Personal", "root": "/work/alpha"},
+    {"id": "proj-beta", "name": "Beta", "slug": "beta", "group": "Work", "root": "/work/beta"}
+  ],
+  "sessions": [{"id": "h-sup-1", "prompt": "SECRET-PROMPT-MARKER do the thing"}]
+}
