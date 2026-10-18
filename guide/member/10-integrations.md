@@ -346,6 +346,28 @@ next instruction". Issue the token for this in **⚙ Settings → the "MCP token
 Tokens you no longer need can be **revoked** ("Revoke") on the same screen (once revoked, connections using
 that token are rejected from the next attempt).
 
+## Using Agent Fleet memory from an external agent
+
+The same MCP token can also let your own Claude Code / Claude Desktop use the memory Agent Fleet keeps (see
+[Agent memory](12-settings.md#agent-memory)). Two things have to be true: the token's scope, and **⚙ Settings → Agent
+memory → "Use Agent Fleet memory from outside Agent Fleet"** (`Off` by default; `Read only` or `Read and write`).
+The "MCP tokens" tab lists what the token can do and links to that setting; the setting has a "How to connect"
+link back.
+
+- **Tools**: `memory_projects`, `memory_index`, `memory_search` and `memory_read` need a read (or higher) token;
+  `memory_save` and `memory_forget` need a write token and "Read and write". The setting and the scope both have
+  to allow a call: the narrower one wins.
+- **Asking the agent**: just say it in plain words in your local client, e.g. "search my Agent Fleet memory for how
+  we run the integration tests" or "save to Agent Fleet memory that this repo's lint step needs `make gen` first".
+  The agent picks the project with `memory_projects` (a project must already hold memory; new projects are
+  started from inside the workspace) and writes facts, not secrets: text that looks like one is refused.
+- **What is recorded**: a save shows in the Agent memory list as written by author kind `external`, and the
+  commit message carries an `AF-External-Client: <name>` trailer with the client's self-declared name (for
+  information only). Each external save and forget is also written to the audit log as `memory.entry.save` /
+  `memory.entry.forget`, with the project id and never the memory's name. You can revert or forget any of it from
+  the Agent memory list.
+- **A stopped workspace** answers that it must be started first; start it in the Console and ask again.
+
 ## Connecting Discord / Slack (chat bridge)
 
 Connect your own Discord / Slack bot from ⚙ Settings → the **"Chat"** tab in the Connections group, and session

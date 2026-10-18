@@ -17,6 +17,7 @@ import { setSetting, useSettings } from "../../../lib/settings.ts";
 import { useT, tMaybe } from "../../../lib/i18n/index.ts";
 import { fmtDateTime, DATETIME_FULL } from "../../../lib/intl.ts";
 import { AutoSyncPanel, useFlipAgentMemory } from "./memoryAutoSync.tsx";
+import { ExternalMemoryHelpLink } from "./ExternalMemoryHelpLink.tsx";
 import type { ChangeDiff, MemoryChange, SecretFinding } from "./memoryTypes.ts";
 
 // An unknown op from a newer Agent is printed raw rather than breaking the row.
@@ -61,6 +62,7 @@ export function ExternalMemorySwitch() {
         />
       </Row>
       <p className="muted ds-note">{tr("mem.ext_switch_note")}</p>
+      <ExternalMemoryHelpLink />
     </>
   );
 }

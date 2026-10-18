@@ -907,6 +907,7 @@ export const tools: Record<keyof typeof jaTools, string> = {
   "mem.ext_read": "Read only",
   "mem.ext_write": "Read and write",
   "mem.ext_switch_note": "Lets an agent on another machine (Claude Code or Claude Desktop with your Agent Fleet MCP token) list, search and read your memories, and with “Read and write” also save and forget them. The memory text leaves this workspace and reaches that client's model: the secret scan stops credentials, not customer names or internal context. A memory written from outside is read by every kind of session here, and shows in the Memories view as written by “external”. Reads need a read-scoped token, writes a write-scoped one; the workspace must be running. Independent of the switch above. Default Off.",
+  "mem.ext_help": "How to connect",
   "mem.af_intro": "What agents save with af's memory_* tools is shared with every kind of agent at once, without approval (the tools are available only while the switch below is on; it is off by default). Check here who changed what and when, and revert or forget a bad change. Nothing leaves the history: a revert is recorded as a new change.",
   "mem.af_empty": "No changes yet.",
   "mem.af_scope_user": "User-wide (shared with every project)",

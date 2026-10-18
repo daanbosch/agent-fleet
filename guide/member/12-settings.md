@@ -454,6 +454,7 @@ refused.
   names or internal context. The workspace has to be running; a stopped one answers that it must be started
   first. The setting is a per-member one, and a deployment that does not serve `/mcp` (`AF_MCP_ENABLED`)
   has no outside access at all.
+  How to ask for it, and what is recorded, is in [10 Going further](10-integrations.md#using-agent-fleet-memory-from-an-external-agent).
 
 ### Memory snapshots
 
@@ -595,6 +596,9 @@ search.
 
 Tokens for driving your workspace remotely from Claude Code / Claude Desktop on your own machine.
 → [10 Going further](10-integrations.md#driving-your-workspace-from-an-external-claude-mcp)
+
+The same token can use your Agent Fleet memory too; the tab lists what it can do:
+→ [10 Going further](10-integrations.md#using-agent-fleet-memory-from-an-external-agent)
 
 ### AWS profiles/SSM
 

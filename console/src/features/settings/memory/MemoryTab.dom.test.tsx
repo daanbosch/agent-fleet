@@ -115,6 +115,17 @@ describe("MemoryTab views", () => {
     expect(headings()).toEqual([]);
   });
 
+  // #2329: the "How to connect" link belongs beside the outside-client setting, and only there.
+  it("mounts the outside-access help link in Settings, next to the setting", async () => {
+    await mount();
+    const link = () => Array.from(host!.querySelectorAll("button")).filter((b) => b.textContent === t("mem.ext_help"));
+    expect(link()).toHaveLength(0);
+    await goto("settings");
+    expect(link()).toHaveLength(1);
+    const row = switchRow(t("mem.ext_switch"))!;
+    expect(row.parentElement!.contains(link()[0])).toBe(true);
+  });
+
   it("does not carry the snapshot panels any more", async () => {
     await mount();
     for (const v of ["memories", "changes", "importexport", "settings"]) {
