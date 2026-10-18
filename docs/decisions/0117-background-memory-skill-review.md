@@ -296,3 +296,22 @@ Each is a choice about cost, default or approval experience and is deliberately 
    skills after (P4) and only if memory review proves worth its cost.
 6. **How long are rejected proposals' hashes and pending text kept?** Proposed: pending text is
    deleted on decision, the hash is kept until the memory it concerned is forgotten.
+
+**Note (2026-10-18, #1559): the owner answered all six questions above, each taking the recommendation.** The
+questions and the decisions stay as written; this records the answers.
+
+1. Default mode when the switch is turned on: `propose`. `auto` stays an explicit opt-in mode, and skills are
+   always approval-gated.
+2. Cost ceiling: start from the proposed bounds (one review per session per 10 new turns, at most one in flight,
+   a daily run cap) and apply them to unattended and scheduled sessions too, which are reviewed under the same
+   caps. The numbers are confirmed only after P0 (#2319) measures them; P1 and later do not start before that.
+3. Provider: the review follows the shared one-shot order and the `memory.review` feature pin lets the member
+   choose a provider. A redacted transcript may therefore go to a provider other than the reviewed session's
+   kind, and the switch's text says so.
+4. Approval lives in the Agent memory screen only, with no banner in the session mirror. Its exact placement
+   follows the Agent memory tab rework in #2324 (planned as "Proposed (n)" under Changes plus the policy in
+   Settings); P2 (#2321) follows that.
+5. Skills are not in the first release: memory first (P1–P2), skills (P4, #2323) only if memory review proves
+   worth its cost.
+6. Retention: pending proposal text is deleted on decision; a rejected proposal's hash is kept until the memory
+   it concerned is forgotten.
