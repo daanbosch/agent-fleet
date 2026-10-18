@@ -519,7 +519,7 @@ The view you leave open is remembered. It needs the running workspace.
 - **Automatic snapshots**: taken a few minutes after an agent stops (nothing is stored if nothing changed).
   "Snapshot now" takes one by hand. On some deployments the operator has disabled automatic snapshots.
 
-#### Export & import
+#### Export & import (Memory snapshots)
 
 - **Export & import**: bundle (full history) or tar.gz (latest only). If what you are about to export looks
   like it contains secrets, you are warned and asked to confirm first.
