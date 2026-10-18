@@ -315,3 +315,28 @@ questions and the decisions stay as written; this records the answers.
    worth its cost.
 6. Retention: pending proposal text is deleted on decision; a rejected proposal's hash is kept until the memory
    it concerned is forgotten.
+
+**Note (2026-10-18, #2319): phase P0 measured the proposed caps; the figures and the recommended caps are in
+`docs/log/134-background-review-p0-measurement.md`.** Nothing above is rewritten, and the caps below are
+**confirmed by the owner on 2026-10-18**, and P1 (#2320) builds to them. The daily cap and the queue bound remain
+policy assumptions from one heavy-use sample, to be revisited from P1 traffic (#2333).
+
+- **What a turn is:** a displayable transcript row (about 12 per user prompt), so K = 10 means roughly one review per
+  prompt.
+- **Settle:** 300 s instead of 120 s (gaps inside a response exceed 120 s in 0.03–0.14 % of cases; at 300 s 23 % fewer
+  runs and 38–40 % of windows still see further activity within ten minutes).
+- **Trigger:** 30 turns or 3 user prompts, whichever comes first (a prompt count alone leaves 37–50 % of sessions
+  unreviewed).
+- **Input:** keep 40,000 characters for the window, built from text, tool labels and tool results clipped to 500
+  characters; a longer window is split and reviewed oldest-first rather than cut to the newest part. Index and memory
+  bodies were not sized (assumption for P1: 12,000 characters of index, 2,000 per body).
+- **Output:** 5 operations, 6 KiB (bytes) per operation text, 24 KiB (bytes) per reply (observed: 0, 0 and 3
+  operations of up to 1,165 characters, ASCII, so also 1,165 bytes).
+- **In flight:** one, unchanged. **Daily call cap:** 250 per workspace (measured maximum 215 calls per day after
+  splitting over-long windows, 184 windows unsplit, $0.003–0.006 per call at the Short tier). The cap and any queue
+  bound are policy assumptions from one heavy-use sample, not validated on real traffic.
+- **Tier:** `OneShotShort` stays (it resolves to `claude-haiku-5-5` on claude). The trial verified tool-less only for
+  claude with an extra empty, strict MCP configuration; whether the current shared one-shot guarantees decision 3's
+  deny-all is not verified and is P1's (#2320) to provide. Measurements left open: #2333. 1 of 3
+  hand-run proposals was plausibly useful. The one-shot environment's `MAX_THINKING_TOKENS=0` did not stop hidden
+  thinking, which was 74–97 % of the output tokens.
