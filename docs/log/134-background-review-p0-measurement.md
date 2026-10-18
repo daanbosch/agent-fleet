@@ -222,8 +222,8 @@ trigger yields 2,779 windows (both kinds, 70 active days), 338 of which (272 cla
 exceed 40,000 characters at L4. Splitting them greedily at turn boundaries into calls of at most
 40,000 characters gives **3,176 calls**; per active day (both kinds combined) p50 16, p90 124,
 p99 201, **max 215** (unsplit: max 184); at most 8 calls fall in the same minute (combined), and
-at most 5 windows (claude) or 6 (codex) per kind under the proposed trigger. The 215 includes the
-6.66k-token floor once per call. Neither figure says how a real queue would behave: the
+at most 5 windows (claude) or 6 (codex) per kind under the proposed trigger. The cost estimates in this journal
+charge the 6.66k-token floor once per call. These counts do not say how a real queue would behave: the
 simulation has no latency, retry or concurrency in it.
 
 ## 3. Part B — the helper trial
