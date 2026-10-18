@@ -5,7 +5,7 @@
 // and the pane says so and points to the Changes view rather than paging through everything.
 // An entry's diff is the Changes view's own ChangeDiffBody.
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, errText, isTransientErr } from "../../../core/api/client.ts";
 import { useRetryLoad } from "../../../lib/retryLoad.ts";
 import { useT } from "../../../lib/i18n/index.ts";
@@ -23,39 +23,58 @@ export interface HistoryTarget {
   name: string;
 }
 
+/** The newest HISTORY_LIMIT changes of every memory, read once by the Memories view and shared by the
+ *  history of whichever memory is picked: picking another memory only filters this array. Read again
+ *  when `version` moves (a write of this view, or the parent's reload). */
+export interface AllChanges {
+  /** null: not read yet. */
+  changes: MemoryChange[] | null;
+  capped: boolean;
+  err: string;
+}
+
+export function useAllChanges(version: number): AllChanges {
+  const [state, setState] = useState<AllChanges>({ changes: null, capped: false, err: "" });
+  const load = useCallback(async (signal: AbortSignal) => {
+    const res = await api(`api/agents/memory/entries/changes?limit=${HISTORY_LIMIT}`);
+    if (signal.aborted) return true;
+    if (isTransientErr(res)) return false;
+    const all: MemoryChange[] = res?.error ? [] : (res?.changes ?? []);
+    setState({
+      changes: all,
+      capped: !res?.error && (all.length >= HISTORY_LIMIT || (res?.withheld ?? 0) > 0),
+      err: res?.error ? errText(res.error) : "",
+    });
+    return true;
+  }, []);
+  useRetryLoad(load, [version]);
+  return state;
+}
+
 export function MemoryHistory({
   target,
-  version,
+  data,
   onOpenChanges,
 }: {
   target: HistoryTarget;
-  /** Bumped whenever the memory may have changed, so the entries are read again. */
-  version: number;
+  data: AllChanges;
   onOpenChanges?: () => void;
 }) {
   const tr = useT();
-  const [entries, setEntries] = useState<MemoryChange[] | null>(null);
-  const [capped, setCapped] = useState(false);
-  const [err, setErr] = useState("");
   const [sel, setSel] = useState("");
   const { scope, project, name } = target;
-
-  const load = useCallback(
-    async (signal: AbortSignal) => {
-      const res = await api(`api/agents/memory/entries/changes?limit=${HISTORY_LIMIT}`);
-      if (signal.aborted) return true;
-      if (isTransientErr(res)) return false;
-      const all: MemoryChange[] = res?.error ? [] : (res?.changes ?? []);
-      setErr(res?.error ? errText(res.error) : "");
-      setCapped(!res?.error && (all.length >= HISTORY_LIMIT || (res?.withheld ?? 0) > 0));
-      setEntries(
-        all.filter((c) => c.name === name && c.scope === scope && (scope === "user" || c.project?.id === project)),
-      );
-      return true;
-    },
-    [scope, project, name],
+  const { capped, err } = data;
+  const entries = useMemo(
+    () =>
+      data.changes?.filter(
+        (c) => c.name === name && c.scope === scope && (scope === "user" || c.project?.id === project),
+      ) ?? null,
+    [data.changes, scope, project, name],
   );
-  useRetryLoad(load, [scope, project, name, version]);
+  // An entry that is no longer in the history (a purge rewrote it) must not keep its diff on screen.
+  useEffect(() => {
+    if (entries && sel && !entries.some((c) => c.commit === sel)) setSel("");
+  }, [entries, sel]);
 
   const who = (c: MemoryChange) =>
     c.authorKind === "member" ? tr("mem.af_by_member") : `${c.authorKind} · ${c.authorSession}`;

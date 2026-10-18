@@ -29,7 +29,7 @@ import { useConfirm } from "../../../ui/ConfirmProvider.tsx";
 import { useT } from "../../../lib/i18n/index.ts";
 import { fmtDateTime, DATETIME_FULL } from "../../../lib/intl.ts";
 import { PurgeHistoryDialog, type PurgeTarget } from "./memoryPurge.tsx";
-import { MemoryHistory } from "./memoryHistory.tsx";
+import { MemoryHistory, useAllChanges } from "./memoryHistory.tsx";
 import type { MemoryBody, MemoryChange, MemoryListed, MemorySearchHit, SecretFinding } from "./memoryTypes.ts";
 
 const TYPES = ["user", "feedback", "project", "reference"] as const;
@@ -160,6 +160,7 @@ export function MemoriesMasterDetail({
     return true;
   }, []);
   useRetryLoad(load, [reload, mine]);
+  const allChanges = useAllChanges(reload * 1_000_000 + mine);
 
   // The forgotten memories of the scope on screen ("all" sends no scope param, which makes the Agent
   // list the user scope and every project). Each memory's newest change is the one that took it
@@ -208,9 +209,12 @@ export function MemoriesMasterDetail({
     for (const [k, display] of goneProjects) if (!out.has(k)) out.set(k, display);
     return [...out.entries()];
   }, [rows, goneProjects, tr]);
+  // A remembered project scope is judged only once both lists have answered: before that the
+  // project is not among the candidates yet.
   useEffect(() => {
+    if (rows === null || !goneLoaded) return;
     if (!scopes.some(([k]) => k === scope)) setScope(ALL);
-  }, [scopes, scope]);
+  }, [scopes, scope, rows, goneLoaded]);
 
   const q = query.trim().toLowerCase();
   // Body search: asked after a pause, for the scope on screen. "All" sends no scope param, which makes the
@@ -289,6 +293,8 @@ export function MemoriesMasterDetail({
       return;
     }
     if (filter === "forgotten") return setSel(null);
+    // The Pinned chip lists pinned memories only: a pick that is no longer one leaves with its row.
+    if (curRow && filter === "pinned" && !curRow.pinned) return setSel(null);
     if (curRow) {
       if (justSaved.current === key) justSaved.current = "";
     } else if (rows !== null && justSaved.current !== key) setSel(null);
@@ -752,7 +758,7 @@ export function MemoriesMasterDetail({
               <MemoryHistory
                 key={key}
                 target={{ scope: sel.scope, project: sel.project, name: sel.name }}
-                version={mine + reload}
+                data={allChanges}
                 onOpenChanges={onOpenChanges}
               />
             </div>
@@ -823,7 +829,7 @@ export function MemoriesMasterDetail({
               <MemoryHistory
                 key={key}
                 target={{ scope: sel.scope, project: sel.project, name: sel.name }}
-                version={mine + reload}
+                data={allChanges}
                 onOpenChanges={onOpenChanges}
               />
             </div>

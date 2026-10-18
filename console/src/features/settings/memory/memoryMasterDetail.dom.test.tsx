@@ -107,6 +107,7 @@ const text = (label: string) =>
   Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent === label);
 // The memory list proper; the forgotten list below it reuses the row class.
 const listRows = () => Array.from(document.body.querySelectorAll(".mem-br-list")[0].querySelectorAll(".mem-br-row"));
+const calls0 = (prefix: string) => api.mock.calls.filter((c) => String(c[0]).startsWith(prefix));
 const btn = (key: Parameters<typeof t>[0]) => text(t(key));
 // Pick the i-th row of the live list (its select button, not an action).
 const pickRow = (i: number) => click(listRows()[i].querySelector(".mem-md-pick"));
@@ -487,7 +488,8 @@ describe("MemoriesMasterDetail", () => {
 
   it("asks for the forgotten memories of the scope on screen, not the recent changes", async () => {
     expect(api).toHaveBeenCalledWith("api/agents/memory/entries/member-forgotten");
-    expect(api).not.toHaveBeenCalledWith(expect.stringContaining("entries/changes"));
+    // The only changes read is the per-memory history's own page, never what the forgotten list is built from.
+    expect(calls0("api/agents/memory/entries/changes").map((c) => c[0])).toEqual(["api/agents/memory/entries/changes?limit=300"]);
     await chip("mem.md_f_forgotten");
     await setValue(select(), "user");
     expect(api).toHaveBeenCalledWith("api/agents/memory/entries/member-forgotten?scope=user");
@@ -902,6 +904,83 @@ describe("MemoriesMasterDetail master-detail", () => {
     resetMemoriesSession();
     await remount();
     expect(btn("mem.md_f_all")!.getAttribute("aria-pressed")).toBe("true");
+    expect(root_().getAttribute("data-pane")).toBe("list");
+  });
+
+  it("drops an opened diff when a purge removes that entry from the history", async () => {
+    withChanges();
+    const base = api.getMockImplementation()!;
+    let purged = false;
+    api.mockImplementation(async (url: string) => {
+      if (url.startsWith("api/agents/memory/entries/changes") && purged) return { changes: [history[0]] };
+      if (url.startsWith("api/agents/memory/entries/purge-preview"))
+        return { scope: "user", name: "rules", live: true, keepsCurrent: true, nothing: false, changes: [], changesTotal: 1, snapshots: 0, refs: [], findings: [], plan: "p1" };
+      return base(url);
+    });
+    apiJSON.mockImplementation(async () => {
+      purged = true;
+      return {};
+    });
+    await remount();
+    await pickRow(0);
+    await click(detail().querySelectorAll(".mem-md-hist-list button")[1]);
+    expect(detail().querySelector(".mem-md-history .mem-diff")).toBeTruthy();
+    await click(detail().querySelector('[aria-haspopup="menu"]'));
+    await click(document.body.querySelector('[role="menuitem"]'));
+    await setValue(document.body.querySelector<HTMLInputElement>(".mem-purge input")!, "rules");
+    await click(Array.from(document.body.querySelectorAll<HTMLButtonElement>(".mem-purge button")).find((b) => b.textContent === t("mem.pg_run")));
+    expect(detail().querySelectorAll(".mem-md-hist-list button")).toHaveLength(1);
+    expect(detail().querySelector(".mem-md-history .mem-diff")).toBeNull();
+  });
+
+  it("keeps a project scope across a remount, even while the lists are still loading", async () => {
+    await setValue(select(), "project:" + project.id);
+    const base = api.getMockImplementation()!;
+    let release: (v: unknown) => void = () => {};
+    api.mockImplementation(async (url: string) =>
+      url.startsWith("api/agents/memory/entries/list")
+        ? new Promise((r) => {
+            release = r;
+          })
+        : base(url),
+    );
+    await remount();
+    // The project is not a candidate until the list arrives; the scope must not fall back meanwhile.
+    await act(async () => release({ entries }));
+    await flush();
+    expect(select().value).toBe("project:" + project.id);
+  });
+
+  it("reads the changes once however many memories are picked, and again after a write", async () => {
+    withChanges();
+    await remount();
+    const n = () => calls("api/agents/memory/entries/changes").length;
+    const start = n();
+    await pickRow(0);
+    await pickRow(1);
+    await pickRow(0);
+    expect(n()).toBe(start);
+    await click(btn("mem.pin_unpin"));
+    expect(n()).toBeGreaterThan(start);
+  });
+
+  it("drops a pick that the Pinned chip no longer lists after it is unpinned", async () => {
+    await chip("mem.md_f_pinned");
+    await pickRow(0);
+    const base = api.getMockImplementation()!;
+    api.mockImplementation(async (url: string) =>
+      url.startsWith("api/agents/memory/entries/list")
+        ? { entries: [{ ...entries[0], pinned: false }, entries[1]] }
+        : base(url),
+    );
+    await click(btn("mem.pin_unpin"));
+    expect(root_().getAttribute("data-pane")).toBe("list");
+    expect(listRows()).toHaveLength(0);
+  });
+
+  it("clears an unpinned pick when switching to the Pinned chip", async () => {
+    await pickRow(1);
+    await chip("mem.md_f_pinned");
     expect(root_().getAttribute("data-pane")).toBe("list");
   });
 });
