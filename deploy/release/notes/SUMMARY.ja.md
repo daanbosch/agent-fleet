@@ -30,7 +30,7 @@
 - **[プラン]** 修正した計画を同じレビュー役で再レビューする。持ち越された計画も別セッションでレビューできる ([#2219](https://github.com/k-k1/agent-fleet/issues/2219), [#2211](https://github.com/k-k1/agent-fleet/issues/2211))
 - **[エージェント]** アシスタントのチャットで Claude のログイン切れに再認証と再試行を出し、再認証はそのエージェントのカードを開く ([#2180](https://github.com/k-k1/agent-fleet/issues/2180), [#2177](https://github.com/k-k1/agent-fleet/issues/2177))
 - **[エージェント]** ログイン更新のロック待ちをあきらめた claude がすぐ再開する ([#2231](https://github.com/k-k1/agent-fleet/issues/2231))
-- **[アイドル停止]** バックグラウンド作業がワークスペースを起こしておくのは最長 2 時間（`background_hold_max`）。マネージドの cursor・kiro・codex・opencode のターンも 1 時間動きがなければ起こし続けない（ツール実行中は除く） ([#2338](https://github.com/k-k1/agent-fleet/issues/2338), [#1942](https://github.com/k-k1/agent-fleet/issues/1942))
+- **[アイドル停止]** バックグラウンド作業がワークスペースを起こしておくのは最長 2 時間（`background_hold_max`）。マネージドの cursor・kiro・codex・opencode のターンも 1 時間動きがなければ起こし続けない（ツール実行中・観測不能時は除く） ([#2338](https://github.com/k-k1/agent-fleet/issues/2338), [#1942](https://github.com/k-k1/agent-fleet/issues/1942))
 - **[kiro]** ターミナルの承認待ちを kiro の記録ファイルから読む ([#2285](https://github.com/k-k1/agent-fleet/issues/2285))
 - **[cursor]** ターミナルセッションがターンごとのトークン使用量を記録する ([#2286](https://github.com/k-k1/agent-fleet/issues/2286))
 - **[セッション]** セッションメニューを区切りごとにまとめた ([#2189](https://github.com/k-k1/agent-fleet/issues/2189))
