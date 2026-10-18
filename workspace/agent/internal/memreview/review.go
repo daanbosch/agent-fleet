@@ -525,9 +525,13 @@ func notifyRun(run *Run, now time.Time) {
 	if !run.NotifyPending || OnQueued == nil {
 		return
 	}
-	// Everything was decided before the notification went out: there is nothing to announce.
-	if n := pendingCount(); n > 0 {
-		if err := OnQueued(run.ID, run.Queued, n); err != nil {
+	// Everything this run proposed was decided before the notification went out: there is nothing
+	// to announce (another run's proposals do not make this one's news).
+	stateMu.Lock()
+	mine := runHasPendingLocked(run.ID)
+	stateMu.Unlock()
+	if mine {
+		if err := OnQueued(run.ID, run.Queued, pendingCount()); err != nil {
 			log.Printf("memory review: the notification for a finished run was not made; it is retried")
 			return
 		}

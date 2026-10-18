@@ -3,7 +3,9 @@ package memreview
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 )
 
 // A run that leaves proposals in the queue says so once, with counts; a run that queues nothing
@@ -125,5 +127,88 @@ func TestAFailedNotificationIsRetriedAndNothingIsAnnouncedWhenAllWasDecided(t *t
 	ReconcileNotices(h2.now)
 	if calls != before || runs()[0].NotifyPending {
 		t.Fatalf("calls %d (was %d), mark %v", calls, before, runs()[0].NotifyPending)
+	}
+}
+
+// A run whose notification is still owed is the only record of it, so pruning the old runs must not
+// take it while one of its proposals waits - however many newer runs there are - and it goes back to
+// the ordinary retention once the notification is made or its proposals are all decided.
+func TestPruningKeepsARunWhoseNotificationIsOwed(t *testing.T) {
+	failing := true
+	var announced []string
+	OnQueued = func(run string, _, _ int) error {
+		if failing {
+			return errors.New("outbox full")
+		}
+		announced = append(announced, run)
+		return nil
+	}
+	t.Cleanup(func() { OnQueued = nil })
+
+	h := newHarness(t)
+	res, err := h.reviewer().Review(context.Background(), h.req(TriggerAuto, turns(4)))
+	if err != nil || res.Queued != 1 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	flood := func() {
+		for i := 0; i < keepTerminalRuns+20; i++ {
+			r := Run{ID: fmt.Sprintf("newer%03d", i), Key: "other", State: StateDone, Last: 1}
+			_ = saveRun(&r, h.now.Add(time.Hour+time.Duration(i)*time.Second))
+		}
+		_ = moveWatermark("other", 1, h.now)
+		pruneRuns(h.now)
+	}
+	flood()
+	if _, ok := runStore.Read(res.RunID); !ok {
+		t.Fatal("the run that still owes its notification was pruned")
+	}
+	failing = false
+	ReconcileNotices(h.now)
+	if len(announced) != 1 || announced[0] != res.RunID {
+		t.Fatalf("announced = %v", announced)
+	}
+	// Made: the run is ordinary history again and goes with the rest.
+	flood()
+	if _, ok := runStore.Read(res.RunID); ok {
+		t.Fatal("a run with nothing owed was kept past the retention limit")
+	}
+
+	// Decided before it could be announced: the mark protects nothing.
+	failing = true
+	h2 := newHarness(t)
+	res2, err := h2.reviewer().Review(context.Background(), h2.req(TriggerAuto, turns(4)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range Pending() {
+		if err := Reject(p.ID, h2.now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h = h2
+	flood()
+	if _, ok := runStore.Read(res2.RunID); ok {
+		t.Fatal("a run whose proposals were all decided was kept by its mark")
+	}
+}
+
+// Another run's proposals waiting does not make this run's old notification news.
+func TestAnotherRunsProposalsDoNotRenewAnOldNotification(t *testing.T) {
+	var announced []string
+	OnQueued = func(run string, _, _ int) error { announced = append(announced, run); return nil }
+	t.Cleanup(func() { OnQueued = nil })
+	queueEnv(t)
+	now := time.Now()
+	old := Run{ID: "oldrun", Key: "k1", State: StateDone, Queued: 1, NotifyPending: true}
+	_ = saveRun(&old, now)
+	if _, err := enqueue(prop("a", "n1", "text")); err != nil { // another run's ("run") proposal
+		t.Fatal(err)
+	}
+	ReconcileNotices(now)
+	if len(announced) != 0 {
+		t.Fatalf("announced = %v", announced)
+	}
+	if r, _ := runStore.Read("oldrun"); r.NotifyPending {
+		t.Fatal("the mark stayed")
 	}
 }

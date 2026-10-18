@@ -233,6 +233,13 @@ func pruneRuns(now time.Time) {
 		if !r.Terminal() {
 			continue
 		}
+		// A run whose notification is still owed is the only record of it (ReconcileNotices reads
+		// it), so it stays while one of its own proposals is waiting. That bounds the exception:
+		// the queue holds at most MaxPending proposals, and a mark whose proposals were all decided
+		// no longer protects its run.
+		if r.NotifyPending && runHasPendingLocked(r.ID) {
+			continue
+		}
 		if kept++; kept <= keepTerminalRuns {
 			continue
 		}
