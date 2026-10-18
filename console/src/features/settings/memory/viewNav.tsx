@@ -73,12 +73,23 @@ export function ViewNav({
 }) {
   const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
 
-  // jsdom has no scrollIntoView.
+  const rowRef = useRef<HTMLDivElement>(null);
+
+  // Scrolls the row itself, never an ancestor: scrollIntoView would also move the dialog body
+  // vertically when the view changes from somewhere down the page.
   useEffect(() => {
-    tabRefs.current[value]?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    const row = rowRef.current;
+    const tab = tabRefs.current[value];
+    if (!row || !tab) return;
+    const r = row.getBoundingClientRect();
+    const b = tab.getBoundingClientRect();
+    if (b.left < r.left) row.scrollLeft += b.left - r.left;
+    else if (b.right > r.right) row.scrollLeft += b.right - r.right;
   }, [value]);
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    // Leave modified keys (browser/OS shortcuts) and IME composition (keyCode 229) alone.
+    if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey || e.nativeEvent.isComposing || e.keyCode === 229) return;
     const at = views.findIndex((v) => v.key === value);
     let next: number;
     switch (e.key) {
@@ -100,12 +111,12 @@ export function ViewNav({
     e.preventDefault();
     const key = views[next].key;
     onChange(key);
-    tabRefs.current[key]?.focus();
+    tabRefs.current[key]?.focus({ preventScroll: true });
   };
 
   return (
     <div className="mem-viewnav">
-      <div className="mem-viewnav-tabs" role="tablist" aria-label={label} onKeyDown={onKeyDown}>
+      <div className="mem-viewnav-tabs" ref={rowRef} role="tablist" aria-label={label} onKeyDown={onKeyDown}>
         {views.map((v) => (
           <button
             key={v.key}

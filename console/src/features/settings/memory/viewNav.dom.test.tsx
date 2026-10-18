@@ -96,16 +96,43 @@ describe("ViewNav", () => {
     expect(onPick).not.toHaveBeenCalled();
   });
 
-  it("scrolls the selected tab into view on mount and on change when scrollIntoView exists", async () => {
+  it("ignores modified keys and IME composition", async () => {
+    const onPick = vi.fn();
+    await mount(onPick);
+    const first = tabs()[0];
+    first.focus();
+    for (const mod of [{ ctrlKey: true }, { altKey: true }, { metaKey: true }, { shiftKey: true }, { isComposing: true }]) {
+      for (const key of ["ArrowRight", "End"]) {
+        const ev = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...mod });
+        await act(async () => {
+          first.dispatchEvent(ev);
+        });
+        expect(ev.defaultPrevented).toBe(false);
+      }
+    }
+    const ime = new KeyboardEvent("keydown", { key: "ArrowRight", keyCode: 229, bubbles: true, cancelable: true });
+    await act(async () => {
+      first.dispatchEvent(ime);
+    });
+    expect(ime.defaultPrevented).toBe(false);
+    expect(onPick).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(first);
+    expect(tabs()[0].getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("scrolls only the tab row, never an ancestor, and focuses without scrolling", async () => {
     const spy = vi.fn();
     Element.prototype.scrollIntoView = spy;
     try {
       await mount();
-      expect(spy).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
-      spy.mockClear();
+      const row = host!.querySelector<HTMLElement>("[role=tablist]")!;
+      row.getBoundingClientRect = () => ({ left: 0, right: 100 }) as DOMRect;
+      tabs()[1].getBoundingClientRect = () => ({ left: 80, right: 160 }) as DOMRect;
+      const focus = vi.spyOn(tabs()[1], "focus");
       await press(tabs()[0], "ArrowRight");
-      expect(spy).toHaveBeenCalledTimes(1);
-      expect(spy.mock.contexts[0]).toBe(tabs()[1]);
+      expect(row.scrollLeft).toBe(60);
+      expect(spy).not.toHaveBeenCalled();
+      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
     } finally {
       delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
     }

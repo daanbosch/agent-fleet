@@ -307,13 +307,8 @@
   gap: 4px;
   flex-wrap: nowrap;
   overflow-x: auto;
-  scroll-snap-type: x proximity;
-  scrollbar-width: none;
+  scrollbar-width: thin;
   border-bottom: 1px solid var(--border);
-}
-
-.mem-viewnav-tabs::-webkit-scrollbar {
-  display: none;
 }
 
 .mem-viewnav-tab {
@@ -325,7 +320,6 @@
   color: var(--muted);
   white-space: nowrap;
   flex: none;
-  scroll-snap-align: nearest;
 }
 
 .mem-viewnav-tab.active {
