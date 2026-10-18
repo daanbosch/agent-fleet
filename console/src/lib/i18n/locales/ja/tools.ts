@@ -860,7 +860,7 @@ export const tools = {
   "mem.view_settings": "設定",
   "mem.view_history": "履歴",
   "mem.view_targets": "対象",
-  "mem.view_transfer": "持ち出し / 取り込み",
+  "mem.view_transfer": "書き出し・取り込み",
   "mem.status_on": "オン",
   "mem.status_off": "オフ",
   "mem.status_count": "メモリ {n} 件",
@@ -891,6 +891,8 @@ export const tools = {
   "mem.codex_enabled": "Codex のメモリ機能をオンにしました。次に Codex が動くと履歴の対象になります。",
   "mem.codex_disabled_toast": "Codex のメモリ機能をオフにしました。取得済みの履歴は残ります。",
   "mem.history_empty": "スナップショットはまだありません。",
+  "mem.history_failed": "スナップショットを読み込めませんでした: {msg}",
+  "mem.history_retry": "再試行",
   "mem.n_files": "{n} ファイル",
   "mem.jump_at": "日時指定",
   "mem.jump_go": "この日時時点へ",
@@ -1244,7 +1246,7 @@ export const tools = {
   "mem.restored": "戻しました（更新{written}・削除{deleted}）",
   "mem.restore_nochange": "すでにその時点と同じ内容でした",
 
-  // --- 持ち出し / 取り込み（docs/log/39 P3）---
+  // --- Export / import (docs/log/39 P3) ---
   "mem.export_format_bundle": "bundle（全履歴）",
   "mem.export_format_tar": "tar.gz（最新のみ）",
   "mem.export_do": "書き出す",

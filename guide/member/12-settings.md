@@ -496,7 +496,7 @@ refused.
 Version control over the memory an agent accumulates by itself (claude's auto-memory, codex's memories), so
 "it learned something it shouldn't have" and "when did this go wrong" are fixable after the fact. This is separate from
 [Agent memory](#agent-memory), which is Agent Fleet's own shared memory. The page shows the last snapshot, whether
-automatic snapshots are on and **Snapshot now** at the top, over three views: **History · Targets · Export / import**.
+automatic snapshots are on and **Snapshot now** at the top, over three views: **History · Targets · Export & import**.
 The view you leave open is remembered. It needs the running workspace.
 
 #### History
@@ -519,9 +519,9 @@ The view you leave open is remembered. It needs the running workspace.
 - **Automatic snapshots**: taken a few minutes after an agent stops (nothing is stored if nothing changed).
   "Snapshot now" takes one by hand. On some deployments the operator has disabled automatic snapshots.
 
-#### Export / import
+#### Export & import (Memory snapshots)
 
-- **Export / import**: bundle (full history) or tar.gz (latest only). If what you are about to export looks
+- **Export & import**: bundle (full history) or tar.gz (latest only). If what you are about to export looks
   like it contains secrets, you are warned and asked to confirm first.
   - **Agent Fleet memory from a bundle**: restoring or importing a bundle here never writes Agent Fleet memory
     (the restore has no secret scan). When the bundle you picked carries some, a line under it says "This bundle

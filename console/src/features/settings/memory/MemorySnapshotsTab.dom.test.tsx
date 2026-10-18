@@ -1,6 +1,6 @@
-// The Memory snapshots entry (ADR 0022): a status header over History / Targets / Export-import.
+// The Memory snapshots entry (ADR 0022): a status header over History / Targets / Export & import.
 // Pinned here: where each control lives after the split (the codex memories toggle and Automatic
-// snapshots in Targets, Restore this point in History, the bundle export in Export / import),
+// snapshots in Targets, Restore this point in History, the bundle export in Export & import),
 // view switching, the remembered view, deep links, and that none of Agent Fleet's own memory
 // controls came along.
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
@@ -85,6 +85,144 @@ afterEach(() => {
   startWs.mockClear();
 });
 
+describe("MemorySnapshotsTab diff pane without a selection", () => {
+  const loadingText = t("common.loading");
+  const diffPane = () => host!.querySelector(".mem-diff");
+  const setValue = async (el: HTMLInputElement, v: string) => {
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value")!.set!.call(el, v);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  };
+  const rootsOk = {
+    roots: [{ kind: "claude", label: "Claude", scopes: true, files: 3, bytes: 100, projects: [] }],
+    inactive: [],
+    auto: true,
+    autoLocked: false,
+    lastSnapshot: "",
+  };
+  const stub = (snapshots: Promise<unknown> | unknown, diff?: Promise<unknown>) =>
+    api.mockImplementation((path: string) => {
+      if (path.startsWith("api/agents/memory/roots")) return Promise.resolve(rootsOk);
+      if (path.startsWith("api/agents/memory/snapshots")) return Promise.resolve(snapshots);
+      return diff ?? Promise.resolve({ diff: "" });
+    });
+
+  it("shows no loading text next to 'No snapshots yet' when the history is empty", async () => {
+    stub({ snapshots: [] });
+    await mount();
+    expect(text()).toContain(t("mem.history_empty"));
+    expect(text()).not.toContain(loadingText);
+    expect(diffPane()?.textContent ?? "").toBe("");
+  });
+
+  it("shows the load error, not 'No snapshots yet', when the history list failed to load", async () => {
+    stub({ error: "boom" });
+    await mount();
+    expect(text()).toContain(t("mem.history_failed", { msg: "boom" }));
+    expect(text()).not.toContain(t("mem.history_empty"));
+    expect(text()).not.toContain(loadingText);
+    expect(host!.querySelector(".mem-diff-head")).toBeNull();
+    expect(diffPane()?.textContent ?? "").toBe("");
+  });
+
+  it("re-requests the history on Retry and lists what comes back", async () => {
+    stub({ error: "boom" });
+    await mount();
+    const calls = () => api.mock.calls.filter((c) => String(c[0]).startsWith("api/agents/memory/snapshots")).length;
+    const before = calls();
+    stub({ snapshots: [{ rev: "r1", short: "r1", at: "2026-10-04T10:00:00Z", subject: "s", trigger: "auto", kinds: ["claude"], projects: [], files: 3 }] });
+    const retry = Array.from(host!.querySelectorAll<HTMLButtonElement>("button")).find(
+      (b) => b.textContent === t("mem.history_retry"),
+    )!;
+    await act(async () => retry.click());
+    await flush();
+    expect(calls()).toBe(before + 1);
+    expect(text()).not.toContain(t("mem.history_failed", { msg: "boom" }));
+    expect(host!.querySelector(".mem-snap")).not.toBeNull();
+  });
+
+  it("disables the date jump while the list error is shown, so no row and diff appear beside it", async () => {
+    stub({ error: "boom" });
+    await mount();
+    await setValue(host!.querySelector<HTMLInputElement>('input[type="datetime-local"]')!, "2026-10-03T13:00");
+    const go = Array.from(host!.querySelectorAll<HTMLButtonElement>("button")).find(
+      (b) => b.textContent === t("mem.jump_go"),
+    )!;
+    expect(go.disabled).toBe(true);
+    await act(async () => go.click());
+    expect(api.mock.calls.some((c) => String(c[0]).includes("before="))).toBe(false);
+    expect(host!.querySelector(".mem-diff-head")).toBeNull();
+  });
+
+  it("drops a date jump that returns after the list reload failed", async () => {
+    const snap = { rev: "r1", short: "r1", at: "2026-10-04T10:00:00Z", subject: "s", trigger: "auto", kinds: ["claude"], projects: [], files: 3 };
+    let listFails = false;
+    let resolveJump!: (v: unknown) => void;
+    api.mockImplementation((path: string) => {
+      if (path.startsWith("api/agents/memory/roots")) return Promise.resolve(rootsOk);
+      if (path.includes("before=")) return new Promise((r) => (resolveJump = r));
+      if (path.startsWith("api/agents/memory/snapshots"))
+        return Promise.resolve(listFails ? { error: "boom" } : { snapshots: [] });
+      return Promise.resolve({ diff: "" });
+    });
+    apiJSON.mockResolvedValue({ committed: true });
+    await mount();
+    await setValue(host!.querySelector<HTMLInputElement>('input[type="datetime-local"]')!, "2026-10-03T13:00");
+    const btn = (label: string) =>
+      Array.from(host!.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent === label)!;
+    await act(async () => btn(t("mem.jump_go")).click()); // in flight
+    listFails = true;
+    await act(async () => btn(t("mem.snapshot_now")).click()); // reload fails
+    await flush();
+    expect(text()).toContain(t("mem.history_failed", { msg: "boom" }));
+    await act(async () => resolveJump({ snapshots: [snap] }));
+    await flush();
+    expect(text()).toContain(t("mem.history_failed", { msg: "boom" }));
+    expect(host!.querySelector(".mem-diff-head")).toBeNull();
+    expect(host!.querySelector(".mem-snap")).toBeNull();
+  });
+
+  it("keeps 'No snapshots yet' for a successful empty list, without a retry", async () => {
+    stub({ snapshots: [] });
+    await mount();
+    expect(text()).toContain(t("mem.history_empty"));
+    expect(text()).not.toContain(t("mem.history_retry"));
+  });
+
+  it("still shows the loading text while a selected snapshot's diff is being fetched", async () => {
+    let resolve!: (v: unknown) => void;
+    const pending = new Promise((r) => (resolve = r));
+    stub(
+      { snapshots: [{ rev: "r1", short: "r1", at: "2026-10-04T10:00:00Z", subject: "s", trigger: "auto", kinds: ["claude"], projects: [], files: 3 }] },
+      pending,
+    );
+    await mount();
+    expect(diffPane()!.textContent).toContain(loadingText);
+    await act(async () => resolve({ diff: "" }));
+    await flush();
+    expect(diffPane()!.textContent).not.toContain(loadingText);
+  });
+
+  it("shows a diff, not the loading text, when only hidden Agent Fleet rows exist", async () => {
+    stub({ snapshots: [{ rev: "f1", short: "f1", at: "2026-10-04T10:00:00Z", subject: "s", trigger: "agent-memory", kinds: ["claude"], projects: [], files: 1 }] });
+    await mount();
+    expect(host!.querySelector(".mem-diff-head code")!.textContent).toBe("f1");
+    expect(diffPane()!.textContent).not.toContain(loadingText);
+  });
+
+  it("shows no loading text when a remount finds the history emptied", async () => {
+    stub({ snapshots: [{ rev: "r1", short: "r1", at: "2026-10-04T10:00:00Z", subject: "s", trigger: "auto", kinds: ["claude"], projects: [], files: 3 }] });
+    await mount();
+    expect(host!.querySelector(".mem-diff-head code")).not.toBeNull();
+    stub({ snapshots: [] });
+    unmount();
+    await mount();
+    expect(host!.querySelector(".mem-diff-head")).toBeNull();
+    expect(text()).not.toContain(loadingText);
+  });
+});
+
 describe("MemorySnapshotsTab", () => {
   it("opens on History with Restore this point, and no other view's controls", async () => {
     await mount();
@@ -150,7 +288,7 @@ describe("MemorySnapshotsTab", () => {
     expect(text()).not.toContain(t("mem.restore"));
   });
 
-  it("puts the bundle export under Export / import", async () => {
+  it("puts the bundle export under Export & import", async () => {
     await mount();
     await goto("transfer");
     expect(text()).toContain(t("mem.export_do"));

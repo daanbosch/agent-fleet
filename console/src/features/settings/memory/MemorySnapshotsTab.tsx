@@ -10,7 +10,7 @@
 // History (the snapshot list on the left, the selected row's diff on the right, then the restore
 // panel: pick a scope, then a confirm dialog; rows left by Agent Fleet's own memory writes are
 // hidden unless asked, since Agent memory > Changes lists them), Targets (root overview, codex memories toggle,
-// automatic capture) and Export / import (P3: bundle = full history, tar.gz = latest only; import
+// automatic capture) and Export & import (P3: bundle = full history, tar.gz = latest only; import
 // replaces the selected scope). The diff uses the same <Diff> as the SCM commit pane, so there is
 // one way a diff looks rather than two.
 //
@@ -18,7 +18,7 @@
 // applies (docs/log/39 ★2). Every action on this screen is therefore undoable, and the
 // confirm-dialog wording is written on that assumption.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, apiJSON, errDetail, errText, isTransientErr } from "../../../core/api/client.ts";
 import { useRetryLoad } from "../../../lib/retryLoad.ts";
 import { useWorkspaceStore, wsStartBusy } from "../../../core/store/workspace.ts";
@@ -68,6 +68,10 @@ export function MemorySnapshotsTab() {
   const [data, setData] = useState<RootsPayload | null>(null);
   const [snaps, setSnaps] = useState<Snapshot[] | null>(null);
   const [err, setErr] = useState("");
+  // The snapshot list failing is not an empty history: it gets its own message and a retry.
+  const [snapErr, setSnapErr] = useState("");
+  // Mirror of snapErr for a jump already in flight, whose closure still holds the old value.
+  const snapErrRef = useRef("");
   const [reload, setReload] = useState(0);
   const [busy, setBusy] = useState(false);
 
@@ -97,6 +101,8 @@ export function MemorySnapshotsTab() {
       }
       setErr("");
       setData(r);
+      snapErrRef.current = s?.error ? errText(s.error) : "";
+      setSnapErr(snapErrRef.current);
       setSnaps(s?.error ? [] : (s?.snapshots ?? []));
       return true;
     },
@@ -187,6 +193,8 @@ export function MemorySnapshotsTab() {
     const iso = new Date(at).toISOString();
     const res = await api("api/agents/memory/snapshots?limit=1&before=" + encodeURIComponent(iso));
     const hit = res?.snapshots?.[0];
+    // The list failed to reload while this jump was out: selecting now would show a row beside the error.
+    if (snapErrRef.current) return;
     if (!hit) {
       toast(tr("mem.jump_none"));
       return;
@@ -371,7 +379,8 @@ export function MemorySnapshotsTab() {
                     value={at}
                     onChange={(e) => setAt(e.target.value)}
                   />
-                  <button type="button" disabled={!at} onClick={() => void jumpTo()}>
+                  {/* A jump would select a row beside the list error; Retry is the way back. */}
+                  <button type="button" disabled={!at || !!snapErr} onClick={() => void jumpTo()}>
                     {tr("mem.jump_go")}
                   </button>
                 </label>
@@ -384,6 +393,13 @@ export function MemorySnapshotsTab() {
                 <ul className="mem-list">
                   {snaps === null ? (
                     <li className="muted pad">{tr("common.loading")}</li>
+                  ) : snapErr ? (
+                    <li className="mem-warn pad">
+                      <span>{tr("mem.history_failed", { msg: snapErr })}</span>{" "}
+                      <button type="button" className="linklike" onClick={() => setReload((n) => n + 1)}>
+                        {tr("mem.history_retry")}
+                      </button>
+                    </li>
                   ) : snaps.length === 0 ? (
                     <li className="muted pad">{tr("mem.history_empty")}</li>
                   ) : (
@@ -440,11 +456,13 @@ export function MemorySnapshotsTab() {
                       </button>
                     </div>
                   )}
-                  {diff === null ? (
-                    <pre className="diff muted">{tr("common.loading")}</pre>
-                  ) : (
-                    <Diff text={diff} embedded wrap />
-                  )}
+                  {/* Nothing selected means nothing is being fetched: the loading text would never end. */}
+                  {sel &&
+                    (diff === null ? (
+                      <pre className="diff muted">{tr("common.loading")}</pre>
+                    ) : (
+                      <Diff text={diff} embedded wrap />
+                    ))}
                 </div>
               </div>
             </section>
@@ -462,7 +480,7 @@ export function MemorySnapshotsTab() {
           </>
         )}
 
-        {/* Export / import */}
+        {/* Export & import */}
         {view === "transfer" && (
           <TransferSection busy={busy} setBusy={setBusy} onApplied={() => setReload((n) => n + 1)} />
         )}
