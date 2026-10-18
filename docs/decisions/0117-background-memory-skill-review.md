@@ -42,8 +42,9 @@ What the tree already provides, read for this record:
   third party's text and can be talked into fetching a URL cannot. Titles, branch names, reply
   chips and translations already use the route.
 - **A frozen ledger enum.** A new consumer needs a `Feature*` constant in
-  `internal/usagex/ledger.go`, a row in 0029 §2 (as a dated note), and Console catalogue and
-  colour entries; `usage_features_catalog_test.go` fails when they drift.
+  `internal/usagex/ledger.go`, the value in the first `| feature |` row of 0029 §2 and a Console ja catalogue entry (colours
+  and the AI-assist row also exist but are not enforced); `usage_features_catalog_test.go` fails
+  when the first two drift.
 - **A turn-end signal.** The Agent's per-session status record (`internal/status`) carries
   `TurnEnd`, `TurnEndAt` and `TurnEndReason`, written by the claude and codex hooks, the opencode
   plugin and managed drivers; the four hook-less TUI kinds are observed by polling the sessions
@@ -88,7 +89,7 @@ What the tree already provides, read for this record:
      between queueing and the first publish applies or skips what is recorded and never re-asks the
      model for that window. The watermark moves to the window end when the run is finished,
      including a run that produced no operations, only pending ones, or only no-ops; a malformed
-     reply finishes the run as failed and moves it only after the attempt budget of decision 8 is
+     reply finishes the run as failed and moves it only after the attempt budget of decision 3 is
      spent. Two operations in one run on the same target are collapsed to the last before queueing.
 2. **The input is a redacted window, built by AF.** The helper sees: the unreviewed turns (a
    character budget, newest kept, proposed 40,000 characters), the project's current
@@ -98,8 +99,11 @@ What the tree already provides, read for this record:
    (transcript turn, index line, memory body) *before* the window is cut to its budget, because a
    cut can split a key into two pieces that no rule matches. The 0022 scanner
    (`memoryScanContent`) is not a redactor: it returns a masked hint and a line number, merges
-   same-rule hits on a line and stops at 20 findings. So the input is built by dropping every line
-   or field with any finding, or by a redactor that returns every span; a string with a NUL byte, or
+   same-rule hits on a line and stops at 20 findings. Because the cap would let a 21st secret through after
+   the first 20 are dropped, the input is built in exactly one of three ways: (a) any single finding
+   discards the whole input field; (b) each line is scanned on its own and a line with a finding is
+   dropped; or (c) a redactor that enumerates every span. Reaching the cap discards the whole field.
+   A string with a NUL byte, or
    a scan that errors, is not sent. The same scan covers every field of the reply before it is
    stored, not only the memory body: reason, evidence and queue metadata too. Tool output
    and fetched pages are marked as data in the prompt. This is a mitigation, not a boundary:
@@ -114,7 +118,7 @@ What the tree already provides, read for this record:
    gets its own deny-all configuration, and when that configuration cannot be written or verified
    the backend is skipped, never run with the default (fail closed). A backend that cannot give
    that guarantee does not run the review. Making this true for opencode, codex and agy is a
-   required part of P1; until then claude is the only backend that qualifies. the transcript therefore
+   required part of P1; until then claude is the only backend that qualifies. The transcript therefore
    goes to whichever provider the member already uses for assistant features. The feature gets a
    row in Settings → AI assist like the other one-shot features, where the member can pin the
    agent and model. The ledger enum, the Console catalogue, the colours and a dated note in 0029 §2
@@ -206,8 +210,11 @@ What the tree already provides, read for this record:
      the attempt budget of decision 3 and, in `auto` mode, the daily run cap of P3.
    - concurrent reviews of the same project: the store lock and the revision check serialise;
      the loser's proposal goes stale.
-   - the workspace stops mid-run: the run is lost, the watermark is unmoved, the next wake-up
-     repeats it. The ledger row is written by a deferred call after the model answers, so a stop or
+   - the workspace stops or crashes mid-run: the next wake-up resumes from the run record of
+     decision 1, by what it holds. Not yet dispatched: dispatch. Dispatched, answer unknown: retry
+     only within the attempt budget of decision 3, the earlier attempt counted as "cost unknown".
+     Answer or queue saved: the helper is not called again; recovery applies or skips what is
+     recorded. The watermark moves only as decision 1 says. The ledger row is written by a deferred call after the model answers, so a stop or
      crash between billing and the answer leaves no row, and an abnormal exit may leave tokens
      unknown. The run record of decision 1 therefore stores a durable attempt entry before dispatch,
      and recovery links it to the usage row if one exists or marks the attempt as "cost
