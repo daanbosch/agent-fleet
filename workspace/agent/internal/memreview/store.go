@@ -242,7 +242,7 @@ func pruneRuns(now time.Time) {
 	gcDecidedLocked()
 	for _, s := range []interface {
 		sweepStaging(time.Duration, time.Time)
-	}{runStore, watermarkStore, dailyStore, pendingStore, rejectedStore, decidedStore} {
+	}{runStore, watermarkStore, dailyStore, pendingStore, rejectedStore, decidedStore, releaseStore} {
 		s.sweepStaging(time.Hour, now)
 	}
 }

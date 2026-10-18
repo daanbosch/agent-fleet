@@ -69,14 +69,17 @@ type StatusResponse struct {
 	Mode    string `json:"mode"`
 	Enabled bool   `json:"enabled"`
 	Pending int    `json:"pending"`
-	Session *Info  `json:"session,omitempty"`
+	// ReleasePending counts releases of rejected hashes that are owed and not done (a forgotten
+	// memory whose hashes could not be removed yet); it is retried every wake-up.
+	ReleasePending int   `json:"releasePending,omitempty"`
+	Session        *Info `json:"session,omitempty"`
 }
 
 // HandleStatus is GET /agents/memory-review?session=<name>: the review's mode and, for the named
 // session, whether a review is running and how the last one ended. Counts and states only: no
 // proposal text and no model output.
 func HandleStatus(w http.ResponseWriter, r *http.Request) {
-	out := StatusResponse{Mode: uiprefs.MemoryReview(), Enabled: uiprefs.MemoryReviewEnabled(), Pending: pendingCount()}
+	out := StatusResponse{Mode: uiprefs.MemoryReview(), Enabled: uiprefs.MemoryReviewEnabled(), Pending: pendingCount(), ReleasePending: ReleasePending()}
 	if name := r.URL.Query().Get("session"); name != "" {
 		if !session.ValidName(name) {
 			httpx.WriteErr(w, http.StatusBadRequest, "bad_request", "session is not a valid session name")

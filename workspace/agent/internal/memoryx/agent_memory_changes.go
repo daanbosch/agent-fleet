@@ -516,6 +516,10 @@ func agentMemRevert(req agentMemRevertReq, now time.Time) (agentMemWriteResult, 
 			}
 			return agentMemWriteResult{}, memoryErrf(http.StatusConflict, errCodeMemoryConflict, "the memory is already gone")
 		}
+		base, err := forgetIntent(scopeDir, name)
+		if err != nil {
+			return agentMemWriteResult{}, err
+		}
 		if err := agentMemWriteTomb(scopeDir, name, floor); err != nil {
 			return agentMemWriteResult{}, err
 		}
@@ -528,6 +532,7 @@ func agentMemRevert(req agentMemRevertReq, now time.Time) (agentMemWriteResult, 
 			return agentMemWriteResult{}, err
 		}
 		agentMemClearUsage(scopeDir, name)
+		forgetDone(scopeDir, name, base)
 		return agentMemWriteResult{Name: name, Scope: scope, Revision: agentMemRevOf(live, liveOK), Commit: rev, Deleted: true}, nil
 	}
 

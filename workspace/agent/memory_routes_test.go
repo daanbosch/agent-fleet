@@ -81,6 +81,11 @@ func TestMemberWriteRoutesRequireTheMark(t *testing.T) {
 		"/agents/memory/entries/project-move",
 		"/agents/memory/snapshots",
 		"/agents/memory/import/apply",
+		"/agents/memory-review/proposals/list",
+		"/agents/memory-review/proposals/approve",
+		"/agents/memory-review/proposals/reject",
+		"/agents/memory-review/proposals/reject-all",
+		"/agents/memory-review/runs/revert",
 	} {
 		req := httptest.NewRequest(http.MethodPost, p, strings.NewReader(`{}`))
 		req.Header.Set("Authorization", "Bearer agent-token")
@@ -107,11 +112,22 @@ func TestMemberWriteRoutesAdmitAMarkedRequest(t *testing.T) {
 		"/agents/memory/entries/project-move",
 		"/agents/memory/import/apply",
 		"/agents/memory/snapshots",
+		"/agents/memory-review/proposals/list",
+		"/agents/memory-review/proposals/approve",
+		"/agents/memory-review/proposals/reject",
+		"/agents/memory-review/proposals/reject-all",
+		"/agents/memory-review/runs/revert",
 	} {
-		req := httptest.NewRequest(http.MethodPost, p, strings.NewReader(`{}`))
+		// reject-all with an empty body would reject the whole queue; a malformed run id is
+		// the validation error that proves the request got past the mark without touching it.
+		body := `{}`
+		if p == "/agents/memory-review/proposals/reject-all" {
+			body = `{"run":"nope"}`
+		}
+		req := httptest.NewRequest(http.MethodPost, p, strings.NewReader(body))
 		req.Header.Set("Authorization", "Bearer agent-token")
 		req.Header.Set("Content-Type", "application/json")
-		s.Sign(req, []byte(`{}`))
+		s.Sign(req, []byte(body))
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)
 		// A snapshot of an empty body is no validation error: it may succeed or fail on the
@@ -122,7 +138,12 @@ func TestMemberWriteRoutesAdmitAMarkedRequest(t *testing.T) {
 			}
 			continue
 		}
-		if w.Code != http.StatusBadRequest || strings.Contains(w.Body.String(), "member_origin") {
+		// The queue list takes no input: it answers 200 past the mark.
+		want := http.StatusBadRequest
+		if p == "/agents/memory-review/proposals/list" {
+			want = http.StatusOK
+		}
+		if w.Code != want || strings.Contains(w.Body.String(), "member_origin") {
 			t.Errorf("%s with a mark: %d %s", p, w.Code, w.Body)
 		}
 	}

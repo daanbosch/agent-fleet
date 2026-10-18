@@ -43,7 +43,12 @@ func TestMemberOriginWireVector(t *testing.T) {
 // The CP signs exactly these routes, and each is a relayed route of the real mux.
 func TestMemberOriginRoutesAreTheMemberWrites(t *testing.T) {
 	want := []string{
+		"POST /api/agents/memory-review/proposals/approve",
+		"POST /api/agents/memory-review/proposals/list",
+		"POST /api/agents/memory-review/proposals/reject",
+		"POST /api/agents/memory-review/proposals/reject-all",
 		"POST /api/agents/memory-review/run",
+		"POST /api/agents/memory-review/runs/revert",
 		"POST /api/agents/memory/af-import",
 		"POST /api/agents/memory/auto-sync",
 		"POST /api/agents/memory/entries/member-save",
