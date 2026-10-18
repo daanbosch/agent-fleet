@@ -890,6 +890,8 @@ export const tools: Record<keyof typeof jaTools, string> = {
   "mem.codex_enabled": "Codex memories enabled. They join the history the next time Codex runs.",
   "mem.codex_disabled_toast": "Codex memories disabled. Snapshots already taken are kept.",
   "mem.history_empty": "No snapshots yet.",
+  "mem.history_failed": "Could not load the snapshots: {msg}",
+  "mem.history_retry": "Retry",
   "mem.n_files": "{n} files",
   "mem.jump_at": "Point in time",
   "mem.jump_go": "Go to this time",

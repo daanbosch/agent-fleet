@@ -110,11 +110,37 @@ describe("MemorySnapshotsTab diff pane without a selection", () => {
     expect(diffPane()?.textContent ?? "").toBe("");
   });
 
-  it("shows no loading text when the history list failed to load", async () => {
+  it("shows the load error, not 'No snapshots yet', when the history list failed to load", async () => {
     stub({ error: "boom" });
     await mount();
-    expect(text()).toContain(t("mem.history_empty"));
+    expect(text()).toContain(t("mem.history_failed", { msg: "boom" }));
+    expect(text()).not.toContain(t("mem.history_empty"));
     expect(text()).not.toContain(loadingText);
+    expect(host!.querySelector(".mem-diff-head")).toBeNull();
+    expect(diffPane()?.textContent ?? "").toBe("");
+  });
+
+  it("re-requests the history on Retry and lists what comes back", async () => {
+    stub({ error: "boom" });
+    await mount();
+    const calls = () => api.mock.calls.filter((c) => String(c[0]).startsWith("api/agents/memory/snapshots")).length;
+    const before = calls();
+    stub({ snapshots: [{ rev: "r1", short: "r1", at: "2026-10-04T10:00:00Z", subject: "s", trigger: "auto", kinds: ["claude"], projects: [], files: 3 }] });
+    const retry = Array.from(host!.querySelectorAll<HTMLButtonElement>("button")).find(
+      (b) => b.textContent === t("mem.history_retry"),
+    )!;
+    await act(async () => retry.click());
+    await flush();
+    expect(calls()).toBe(before + 1);
+    expect(text()).not.toContain(t("mem.history_failed", { msg: "boom" }));
+    expect(host!.querySelector(".mem-snap")).not.toBeNull();
+  });
+
+  it("keeps 'No snapshots yet' for a successful empty list, without a retry", async () => {
+    stub({ snapshots: [] });
+    await mount();
+    expect(text()).toContain(t("mem.history_empty"));
+    expect(text()).not.toContain(t("mem.history_retry"));
   });
 
   it("still shows the loading text while a selected snapshot's diff is being fetched", async () => {

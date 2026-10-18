@@ -68,6 +68,8 @@ export function MemorySnapshotsTab() {
   const [data, setData] = useState<RootsPayload | null>(null);
   const [snaps, setSnaps] = useState<Snapshot[] | null>(null);
   const [err, setErr] = useState("");
+  // The snapshot list failing is not an empty history: it gets its own message and a retry.
+  const [snapErr, setSnapErr] = useState("");
   const [reload, setReload] = useState(0);
   const [busy, setBusy] = useState(false);
 
@@ -97,6 +99,7 @@ export function MemorySnapshotsTab() {
       }
       setErr("");
       setData(r);
+      setSnapErr(s?.error ? errText(s.error) : "");
       setSnaps(s?.error ? [] : (s?.snapshots ?? []));
       return true;
     },
@@ -384,6 +387,13 @@ export function MemorySnapshotsTab() {
                 <ul className="mem-list">
                   {snaps === null ? (
                     <li className="muted pad">{tr("common.loading")}</li>
+                  ) : snapErr ? (
+                    <li className="mem-warn pad">
+                      <span>{tr("mem.history_failed", { msg: snapErr })}</span>{" "}
+                      <button type="button" className="linklike" onClick={() => setReload((n) => n + 1)}>
+                        {tr("mem.history_retry")}
+                      </button>
+                    </li>
                   ) : snaps.length === 0 ? (
                     <li className="muted pad">{tr("mem.history_empty")}</li>
                   ) : (

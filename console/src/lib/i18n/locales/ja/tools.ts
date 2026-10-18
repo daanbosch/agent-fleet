@@ -891,6 +891,8 @@ export const tools = {
   "mem.codex_enabled": "Codex のメモリ機能をオンにしました。次に Codex が動くと履歴の対象になります。",
   "mem.codex_disabled_toast": "Codex のメモリ機能をオフにしました。取得済みの履歴は残ります。",
   "mem.history_empty": "スナップショットはまだありません。",
+  "mem.history_failed": "スナップショットを読み込めませんでした: {msg}",
+  "mem.history_retry": "再試行",
   "mem.n_files": "{n} ファイル",
   "mem.jump_at": "日時指定",
   "mem.jump_go": "この日時時点へ",
