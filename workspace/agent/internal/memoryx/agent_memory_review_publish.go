@@ -1,0 +1,477 @@
+package memoryx
+
+// The write half of the background memory review (ADR 0117 decisions 5 and 6): publishing one
+// approved proposal, undoing a whole run, and the reads the approval screen needs. The review
+// engine (internal/memreview) decides what to publish and when; everything that touches the store,
+// its lock, its scan and its history stays here, so a proposal takes exactly the path an agent's
+// memory_save takes (revision check, secret scan, one commit) and nothing else.
+//
+// Who may call this is not decided here. The only callers are the member-origin routes of
+// internal/memreview; no af MCP tool reaches them (ADR 0113).
+
+import (
+	"errors"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
+)
+
+const (
+	// ReviewAuthorKind is the author kind of a published proposal. agentMemKindRe admits it, so
+	// the change list shows it like any other author.
+	ReviewAuthorKind = "review"
+
+	reviewRunTrailer      = "AF-Review-Run"
+	reviewProposalTrailer = "AF-Review-Proposal"
+)
+
+// reviewIDRe is the form of run and proposal ids (20 hex characters). They go into commit
+// messages, so nothing else is accepted.
+var reviewIDRe = regexp.MustCompile(`^[0-9a-f]{20}$`)
+
+// ValidReviewID says whether s has the form of a run or a proposal id.
+func ValidReviewID(s string) bool { return reviewIDRe.MatchString(s) }
+
+// The reasons a proposal is not published. Each leaves the store as it was.
+const (
+	// ReviewStale: the memory is not at the revision the proposal was made against, or no longer
+	// exists, or now exists although the proposal creates it.
+	ReviewStale = "stale"
+	// ReviewForgotten: a create would revive a memory that was forgotten (or that existed once).
+	ReviewForgotten = "forgotten"
+	// ReviewSecret: the store's scan refused the text.
+	ReviewSecret = "secret"
+	// ReviewInvalid: the store's own limits refused it, or its project cannot be established.
+	ReviewInvalid = "invalid"
+)
+
+// ReviewRefusal is why a proposal was not published. Msg names a rule, never a value.
+type ReviewRefusal struct {
+	Kind string
+	Msg  string
+}
+
+func (e *ReviewRefusal) Error() string {
+	return "review proposal not published (" + e.Kind + "): " + e.Msg
+}
+
+// errReviewRevival is the refusal of a create over a name that was forgotten. It is returned from
+// inside the store lock and turned into a ReviewRefusal on the way out.
+var errReviewRevival = errors.New("the memory was forgotten or existed before; a review does not bring it back")
+
+// ReviewProposal is one approved operation as the store needs it.
+type ReviewProposal struct {
+	ID, RunID string
+	// Session is the reviewed session: the author session of the commit, even if it is gone.
+	Session   string
+	Op        string // create | update | forget
+	Scope     string // project | user
+	ProjectID string // the project's store id, for scope project
+	Name      string
+	Type      string
+	// Description and Body are the new text (not for a forget).
+	Description  string
+	Body         string
+	BaseRevision int
+}
+
+// ReviewPublished is the outcome of PublishReview. Already says the proposal had been published by
+// an earlier call (a retry after a stop), so nothing was written now.
+type ReviewPublished struct {
+	Commit   string
+	Revision int
+	Deleted  bool
+	Already  bool
+}
+
+// PublishReview publishes one approved proposal through agentMemSave / agentMemForget as author
+// kind "review", the reviewed session as author session, with the run and proposal ids as
+// trailers. A create is refused over a forgotten name, checked inside the same lock as the save.
+// A retry of a proposal that was published but not yet marked decided finds its commit by the
+// proposal trailer and writes nothing: this is what makes approval idempotent across a stop.
+func PublishReview(p ReviewProposal, now time.Time) (ReviewPublished, error) {
+	invalid := func(msg string) error { return &ReviewRefusal{Kind: ReviewInvalid, Msg: msg} }
+	switch {
+	case !reviewIDRe.MatchString(p.ID) || !reviewIDRe.MatchString(p.RunID):
+		return ReviewPublished{}, invalid("proposal or run id is malformed")
+	case !session.ValidName(p.Session):
+		return ReviewPublished{}, invalid("session is not a valid session name")
+	case p.Op != "create" && p.Op != "update" && p.Op != "forget":
+		return ReviewPublished{}, invalid("op must be create, update or forget")
+	case p.Scope != agentMemScopeProject && p.Scope != agentMemScopeUser:
+		return ReviewPublished{}, invalid("scope must be project or user")
+	case !agentMemValidName(p.Name):
+		return ReviewPublished{}, invalid("name is not a valid memory name")
+	case p.Scope == agentMemScopeProject && !agentMemValidProjectID(p.ProjectID):
+		return ReviewPublished{}, invalid("project is not a project id")
+	}
+	if commit, err := reviewProposalCommit(p.ID); err != nil {
+		return ReviewPublished{}, err
+	} else if commit != "" {
+		return ReviewPublished{Commit: commit, Already: true}, nil
+	}
+	c, err := reviewCaller(p)
+	if err != nil {
+		return ReviewPublished{}, err
+	}
+	var res agentMemWriteResult
+	switch p.Op {
+	case "create", "update":
+		c.noRevival = p.Op == "create"
+		c.keepKinds = p.Op == "update"
+		res, err = agentMemSave(c, agentMemSaveReq{
+			Session: p.Session, Scope: p.Scope, Name: p.Name, Description: p.Description, Type: p.Type,
+			Body: p.Body, Revision: p.BaseRevision,
+		}, now)
+	default:
+		res, err = agentMemForget(c, agentMemForgetReq{
+			Session: p.Session, Scope: p.Scope, Name: p.Name, Revision: p.BaseRevision,
+		}, now)
+	}
+	if err != nil {
+		return ReviewPublished{}, reviewRefusal(err)
+	}
+	return ReviewPublished{Commit: res.Commit, Revision: res.Revision, Deleted: res.Deleted}, nil
+}
+
+// reviewCaller is the store caller for a proposal: kind review, the reviewed session as author,
+// and the project the proposal names. The session is looked up only to describe a project that has
+// no memory yet (a first memory brings the project's record along); an existing project is read
+// from the store, so a session that is gone or has moved on does not strand its proposals.
+func reviewCaller(p ReviewProposal) (agentMemCaller, error) {
+	c := agentMemCaller{Session: p.Session, Kind: ReviewAuthorKind,
+		trailers: []string{reviewRunTrailer + ": " + p.RunID, reviewProposalTrailer + ": " + p.ID}}
+	if p.Scope != agentMemScopeProject {
+		return c, nil
+	}
+	if rc, err := agentMemResolveCaller(p.Session); err == nil && rc.Project != nil && rc.Project.ID == p.ProjectID {
+		c.Project = rc.Project
+		return c, nil
+	}
+	if _, err := agentMemCheckDir("projects/"+p.ProjectID, false); err != nil {
+		if os.IsNotExist(err) {
+			return c, &ReviewRefusal{Kind: ReviewInvalid, Msg: "the proposal's project is not known to this workspace any more"}
+		}
+		return c, err
+	}
+	c.Project = agentMemProjectInfo(p.ProjectID)
+	return c, nil
+}
+
+// reviewRefusal sorts a store error into the reasons a proposal can be left unpublished. Anything
+// else (git, the disk) is returned as it is: it is not the proposal's fault and a retry may work.
+func reviewRefusal(err error) error {
+	var se *agentMemSecretErr
+	var ue *memoryUserErr
+	switch {
+	case errors.As(err, &se):
+		return &ReviewRefusal{Kind: ReviewSecret, Msg: "the store's secret scan refused the text"}
+	case errors.Is(err, errReviewRevival):
+		return &ReviewRefusal{Kind: ReviewForgotten, Msg: errReviewRevival.Error()}
+	case errors.As(err, &ue) && (ue.Code == errCodeMemoryConflict || ue.Code == errCodeMemoryNotFound):
+		return &ReviewRefusal{Kind: ReviewStale, Msg: "the memory is not as it was when the review looked at it"}
+	case errors.As(err, &ue) && ue.Status < 500:
+		return &ReviewRefusal{Kind: ReviewInvalid, Msg: ue.Msg}
+	}
+	return err
+}
+
+// agentMemRefuseRevival is the rule of ADR 0117 decision 5, with agentMemMu held: a memory that has
+// a tombstone, or any change in the history, is not created again by a review.
+// agentMemSave would continue the tombstone's revision and delete the tombstone.
+func agentMemRefuseRevival(rel, name string) error {
+	tomb, err := agentMemTombRevision(rel, name)
+	if err != nil {
+		return err
+	}
+	if tomb > 0 {
+		return errReviewRevival
+	}
+	if !memoryHasCommits() {
+		return nil
+	}
+	last, err := agentMemLatestChange(rel + "/" + name + ".md")
+	if err != nil {
+		return err
+	}
+	if last != "" {
+		return errReviewRevival
+	}
+	return nil
+}
+
+// reviewTrailerCommit finds the newest commit on main whose message carries trailer key = value
+// as an agent-memory change by the review, or "". git's --grep only narrows the candidates.
+func reviewTrailerCommit(key, value string) (string, error) {
+	agentMemMu.RLock()
+	defer agentMemMu.RUnlock()
+	if !memoryHasCommits() {
+		return "", nil
+	}
+	log, err := memoryGitRun("log", memoryBranch, "-F", "--grep="+key+": "+value,
+		"--format=%H"+memoryFldSep+"%B"+memoryRecSep)
+	if err != nil {
+		return "", err
+	}
+	for _, rec := range strings.Split(log, memoryRecSep) {
+		f := strings.SplitN(strings.TrimSpace(rec), memoryFldSep, 2)
+		if len(f) < 2 {
+			continue
+		}
+		tr := agentMemTrailers(f[1])
+		if tr["AF-Trigger"] == memoryTriggerAgentMemory && tr[key] == value && tr["AF-Author-Kind"] == ReviewAuthorKind {
+			return f[0], nil
+		}
+	}
+	return "", nil
+}
+
+func reviewProposalCommit(id string) (string, error) {
+	return reviewTrailerCommit(reviewProposalTrailer, id)
+}
+
+// ReviewTargetState is what the store holds for the memory a proposal is about.
+type ReviewTargetState struct {
+	Exists   bool
+	Revision int
+	Type     string
+	// Description and Body are the live text, empty when Withheld.
+	Description string
+	Body        string
+	// Withheld: the file exists but fails the store's scan or cannot be read, so its text is not
+	// returned.
+	Withheld bool
+	// Forgotten: a tombstone says the memory was forgotten.
+	Forgotten bool
+}
+
+// ReviewTarget reads the live state of one memory for the approval screen. It counts no use and
+// writes nothing; a project that has no memory yet reads as an absent memory.
+func ReviewTarget(scope, projectID, name string) (ReviewTargetState, error) {
+	if err := agentMemCheckName(name); err != nil {
+		return ReviewTargetState{}, err
+	}
+	var c agentMemCaller
+	rel := "user"
+	switch scope {
+	case agentMemScopeUser:
+		c = agentMemMember
+	case agentMemScopeProject:
+		if !agentMemValidProjectID(projectID) {
+			return ReviewTargetState{}, memoryErrf(http.StatusBadRequest, errCodeMemoryBadRequest, "project is not a project id")
+		}
+		rel = "projects/" + projectID
+		var err error
+		if c, err = agentMemMemberCaller(scope, projectID); err != nil {
+			var ue *memoryUserErr
+			if errors.As(err, &ue) && ue.Code == errCodeMemoryNotFound {
+				return ReviewTargetState{}, nil
+			}
+			return ReviewTargetState{}, err
+		}
+	default:
+		return ReviewTargetState{}, memoryErrf(http.StatusBadRequest, errCodeMemoryBadRequest, "scope must be project or user")
+	}
+	agentMemMu.RLock()
+	defer agentMemMu.RUnlock()
+	out := ReviewTargetState{}
+	if tomb, err := agentMemTombRevision(rel, name); err == nil && tomb > 0 {
+		out.Forgotten = true
+	}
+	l, ok, err := agentMemLoadOne(c, scope, name)
+	if err != nil {
+		// A file that cannot be read is withheld, not an error of the screen.
+		return ReviewTargetState{Exists: true, Withheld: true, Forgotten: out.Forgotten}, nil
+	}
+	if !ok {
+		return out, nil
+	}
+	out.Exists = true
+	if l.Withheld {
+		out.Withheld = true
+		return out, nil
+	}
+	out.Revision, out.Type, out.Description, out.Body = l.Entry.Revision, l.Entry.Type, l.Entry.Description, l.Entry.Body
+	return out, nil
+}
+
+// ReviewProjectDisplay is the display name of a project for the approval screen, or its id when
+// the store's record is missing or fails the scan.
+func ReviewProjectDisplay(id string) string {
+	if !agentMemValidProjectID(id) {
+		return ""
+	}
+	agentMemMu.RLock()
+	defer agentMemMu.RUnlock()
+	return agentMemProjectInfo(id).Display
+}
+
+// Results of one commit of a run when it is reverted.
+const (
+	ReviewRevertDone     = "reverted"
+	ReviewRevertAlready  = "already"  // an earlier revert of this run undid it
+	ReviewRevertConflict = "conflict" // left alone, see the reason
+	ReviewRevertFailed   = "failed"   // the store could not do it now; running the revert again retries
+)
+
+// The reasons a commit of a run is a conflict.
+const (
+	// ReviewConflictEdited: the commit is no longer the memory's newest change.
+	ReviewConflictEdited = "edited"
+	// ReviewConflictBlocked: it is the newest, and the revert still refused (history purged, the
+	// text to restore fails the scan, the file differs from the commit).
+	ReviewConflictBlocked = "blocked"
+)
+
+// ReviewRevertItem is one commit of a run.
+type ReviewRevertItem struct {
+	Commit    string `json:"commit"`
+	Op        string `json:"op"`
+	Scope     string `json:"scope"`
+	ProjectID string `json:"projectId,omitempty"`
+	Name      string `json:"name"`
+	Result    string `json:"result"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// ReviewRevertReport is what reverting a run did, commit by commit.
+type ReviewRevertReport struct {
+	Run   string             `json:"run"`
+	Items []ReviewRevertItem `json:"items"`
+}
+
+// RevertReviewRun undoes the commits a review run published, each as a new revert commit by the
+// member (ADR 0117 decision 5). A commit is reverted only while it is still its memory's newest
+// change and the memory is exactly as it left it; one edited since is left and reported, never
+// overwritten. Nothing rewrites history, and running it again retries only what is left.
+func RevertReviewRun(runID string, now time.Time) (ReviewRevertReport, error) {
+	if !reviewIDRe.MatchString(runID) {
+		return ReviewRevertReport{}, memoryErrf(http.StatusBadRequest, errCodeMemoryBadRequest, "run is not a run id")
+	}
+	cands, err := reviewRunCommits(runID)
+	if err != nil {
+		return ReviewRevertReport{}, err
+	}
+	out := ReviewRevertReport{Run: runID, Items: []ReviewRevertItem{}}
+	for _, cd := range cands {
+		it := ReviewRevertItem{Commit: cd.commit, Op: cd.op, Scope: cd.scope, ProjectID: cd.projectID, Name: cd.name}
+		switch state, err := reviewRevertState(cd); {
+		case err != nil:
+			it.Result = ReviewRevertFailed
+		case state == ReviewRevertAlready:
+			it.Result = ReviewRevertAlready
+		case state == ReviewConflictEdited:
+			it.Result, it.Reason = ReviewRevertConflict, ReviewConflictEdited
+		default:
+			_, err := agentMemRevert(agentMemRevertReq{Commit: cd.commit}, now)
+			var ue *memoryUserErr
+			var se *agentMemSecretErr
+			switch {
+			case err == nil:
+				it.Result = ReviewRevertDone
+			case errors.As(err, &ue) && ue.Status < 500, errors.As(err, &se):
+				it.Result, it.Reason = ReviewRevertConflict, ReviewConflictBlocked
+			default:
+				it.Result = ReviewRevertFailed
+			}
+		}
+		out.Items = append(out.Items, it)
+	}
+	return out, nil
+}
+
+type reviewRunCommit struct {
+	commit, op, scope, projectID, name, rel string
+}
+
+// reviewRunCommits lists the commits carrying the run id, newest first. A commit counts only when
+// it is an agent-memory change authored by the review whose path is well-formed and whose name and
+// project pass the scan, the conditions the change list applies.
+func reviewRunCommits(runID string) ([]reviewRunCommit, error) {
+	agentMemMu.RLock()
+	defer agentMemMu.RUnlock()
+	if !memoryHasCommits() {
+		return nil, nil
+	}
+	log, err := memoryGitRun("log", memoryBranch, "-F", "--grep="+reviewRunTrailer+": "+runID,
+		"--format=%H"+memoryFldSep+"%B"+memoryRecSep)
+	if err != nil {
+		return nil, err
+	}
+	var out []reviewRunCommit
+	for _, rec := range strings.Split(log, memoryRecSep) {
+		f := strings.SplitN(strings.TrimSpace(rec), memoryFldSep, 2)
+		if len(f) < 2 || !agentMemCommitRe.MatchString(f[0]) {
+			continue
+		}
+		tr := agentMemTrailers(f[1])
+		if tr["AF-Trigger"] != memoryTriggerAgentMemory || tr[reviewRunTrailer] != runID || tr["AF-Author-Kind"] != ReviewAuthorKind {
+			continue
+		}
+		rel, scope, pid, name, ok := agentMemParseRepoPath(tr["AF-Memory"])
+		if !ok || !agentMemCleanText(name+"\n"+pid) {
+			continue
+		}
+		out = append(out, reviewRunCommit{commit: f[0], op: tr["AF-Op"], scope: scope, projectID: pid, name: name, rel: rel})
+	}
+	return out, nil
+}
+
+// reviewRevertState says ReviewRevertAlready when a revert commit of cd exists, ReviewConflictEdited
+// when cd is no longer its memory's newest change, and "" when it may be reverted.
+func reviewRevertState(cd reviewRunCommit) (string, error) {
+	agentMemMu.RLock()
+	defer agentMemMu.RUnlock()
+	log, err := memoryGitRun("log", memoryBranch, "-F", "--grep=AF-Revert-Of: "+cd.commit, "--format=%B"+memoryRecSep)
+	if err != nil {
+		return "", err
+	}
+	for _, rec := range strings.Split(log, memoryRecSep) {
+		tr := agentMemTrailers(rec)
+		if tr["AF-Trigger"] == memoryTriggerAgentMemory && tr["AF-Revert-Of"] == cd.commit && tr["AF-Op"] == "revert" {
+			return ReviewRevertAlready, nil
+		}
+	}
+	latest, err := agentMemLatestChange(cd.rel)
+	if err != nil {
+		return "", err
+	}
+	if latest != cd.commit {
+		return ReviewConflictEdited, nil
+	}
+	return "", nil
+}
+
+// forgottenHook is told when a memory has been forgotten (a forget committed, a creation undone, a
+// memory moved out of its project), so the review can release the rejected proposals it remembered
+// about it. It is called with the store lock held: it must not call back into this package.
+var forgottenHook atomic.Pointer[func(scope, projectID, name string)]
+
+// SetForgottenHook installs the hook; nil removes it.
+func SetForgottenHook(f func(scope, projectID, name string)) {
+	if f == nil {
+		forgottenHook.Store(nil)
+		return
+	}
+	forgottenHook.Store(&f)
+}
+
+// notifyForgotten reports a forgotten memory of the scope directory rel ("user" or
+// "projects/<id>").
+func notifyForgotten(rel, name string) {
+	f := forgottenHook.Load()
+	if f == nil {
+		return
+	}
+	scope, pid := agentMemScopeUser, ""
+	if id, ok := strings.CutPrefix(filepath.ToSlash(rel), "projects/"); ok {
+		scope, pid = agentMemScopeProject, id
+	}
+	(*f)(scope, pid, name)
+}

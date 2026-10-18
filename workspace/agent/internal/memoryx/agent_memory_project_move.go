@@ -775,6 +775,7 @@ func agentMemMoveOne(plan agentMemMovePlan, it agentMemMoveItem, now time.Time) 
 		return res, err
 	}
 	agentMemClearUsage(fromRel, it.Name)
+	notifyForgotten(fromRel, it.Name)
 	if res.Commit == "" {
 		res.Commit = rev
 	}

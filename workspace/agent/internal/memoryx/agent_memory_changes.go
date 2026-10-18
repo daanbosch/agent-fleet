@@ -528,6 +528,7 @@ func agentMemRevert(req agentMemRevertReq, now time.Time) (agentMemWriteResult, 
 			return agentMemWriteResult{}, err
 		}
 		agentMemClearUsage(scopeDir, name)
+		notifyForgotten(scopeDir, name)
 		return agentMemWriteResult{Name: name, Scope: scope, Revision: agentMemRevOf(live, liveOK), Commit: rev, Deleted: true}, nil
 	}
 
