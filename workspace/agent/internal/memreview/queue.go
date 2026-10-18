@@ -21,7 +21,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/k-k1/agent-fleet/workspace/agent/internal/fstore"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/memoryx"
 )
 
@@ -48,8 +47,13 @@ type rejection struct {
 }
 
 var (
-	pendingStore  = fstore.JSON[Proposal](stateRoot, "pending", ".json")
-	rejectedStore = fstore.JSON[rejection](stateRoot, "rejected", ".json")
+	pendingStore  = store[Proposal]{"pending"}
+	rejectedStore = store[rejection]{"rejected"}
+	// decidedStore remembers, by proposal id and without any text, that a proposal got a decision.
+	// A run that stopped after queueing some proposals replays its queueing on restart; without
+	// this marker an approved or rejected proposal would come back as a new pending one. The
+	// value is the run id, so the marker can go when that run has ended (gcDecidedLocked).
+	decidedStore = store[string]{"decided"}
 )
 
 // OpHash identifies the content of an operation: what it would do to which memory, with which
@@ -72,6 +76,7 @@ func proposalID(runID string, i int) string {
 const (
 	EnqueuedNew      = "queued"
 	EnqueuedExisting = "existing" // the same proposal is already there (a resumed run)
+	SkippedDecided   = "decided"  // this very proposal already got a decision (a replay)
 	SkippedRejected  = "rejected" // the member already rejected this exact idea
 	SkippedDuplicate = "duplicate"
 )
@@ -90,13 +95,22 @@ func enqueue(p Proposal) (string, error) {
 	if _, ok := pendingStore.Read(p.ID); ok {
 		return EnqueuedExisting, nil
 	}
+	if _, ok := decidedStore.Read(p.ID); ok {
+		return SkippedDecided, nil
+	}
 	if _, ok := rejectedStore.Read(p.Hash); ok {
 		return SkippedRejected, nil
 	}
-	for _, id := range listKeys(pendingStore.Dir(), ".json") {
+	keys := pendingStore.keys()
+	for _, id := range keys {
 		if q, ok := pendingStore.Read(id); ok && q.Hash == p.Hash {
 			return SkippedDuplicate, nil
 		}
+	}
+	// Only a proposal that would be NEW needs room; the skips above do not. The bound is checked
+	// here, inside the lock that inserts, so no reply can overshoot it.
+	if len(keys) >= MaxPending {
+		return "", ErrQueueFull
 	}
 	if err := pendingStore.Write(p.ID, p); err != nil {
 		return "", err
@@ -113,7 +127,7 @@ func Pending() []Proposal {
 
 func listPendingLocked() []Proposal {
 	var out []Proposal
-	for _, id := range listKeys(pendingStore.Dir(), ".json") {
+	for _, id := range pendingStore.keys() {
 		if p, ok := pendingStore.Read(id); ok {
 			out = append(out, p)
 		}
@@ -131,7 +145,7 @@ func listPendingLocked() []Proposal {
 func pendingCount() int {
 	stateMu.Lock()
 	defer stateMu.Unlock()
-	return len(listKeys(pendingStore.Dir(), ".json"))
+	return len(pendingStore.keys())
 }
 
 // Decision values for Decide.
@@ -140,9 +154,14 @@ const (
 	DecisionReject  = "reject"
 )
 
-// Decide removes a proposal from the queue. Its text is gone either way; a rejection leaves the
-// hash behind (see the file comment). Approving here does not publish anything: P2 owns that and
-// calls this after it has applied the proposal.
+// Decide removes a proposal from the queue. Its text is gone either way (and the error says when
+// it is not: the caller retries); a rejection leaves the hash behind (see the file comment).
+// Approving here does not publish anything: P2 owns that and calls this after it has applied the
+// proposal.
+//
+// The order is what makes a stop harmless: the rejection hash, then the decided marker, then the
+// text's removal. A stop after the marker leaves a pending file that a retry of Decide removes,
+// and a run replaying its queueing skips the proposal either way.
 func Decide(id, decision string, now time.Time) error {
 	if decision != DecisionApprove && decision != DecisionReject {
 		return errors.New("decision must be approve or reject")
@@ -159,23 +178,43 @@ func Decide(id, decision string, now time.Time) error {
 			return err // the text stays until the hash is safe
 		}
 	}
-	pendingStore.Remove(id)
-	return nil
+	if err := decidedStore.Write(id, p.RunID); err != nil {
+		return err
+	}
+	return pendingStore.Remove(id)
+}
+
+// gcDecidedLocked drops the decided markers whose run has ended (or is gone): only an open run can
+// replay its queueing.
+func gcDecidedLocked() {
+	for _, id := range decidedStore.keys() {
+		runID, _ := decidedStore.Read(id)
+		if r, ok := runStore.Read(runID); !ok || r.Terminal() {
+			_ = decidedStore.Remove(id)
+		}
+	}
 }
 
 // ForgetMemory releases the rejected hashes of a memory that has been forgotten, so a later review
-// may propose it again. projectID is "" for the user scope.
-func ForgetMemory(scope, name, projectID string) int {
+// may propose it again, and returns how many it released. projectID is "" for the user scope. A
+// hash it could not remove is not counted and the first such error is returned.
+func ForgetMemory(scope, name, projectID string) (int, error) {
 	stateMu.Lock()
 	defer stateMu.Unlock()
 	n := 0
-	for _, h := range listKeys(rejectedStore.Dir(), ".json") {
+	var first error
+	for _, h := range rejectedStore.keys() {
 		if r, ok := rejectedStore.Read(h); ok && r.Scope == scope && r.Name == name && r.ProjectID == projectID {
-			rejectedStore.Remove(h)
+			if err := rejectedStore.Remove(h); err != nil {
+				if first == nil {
+					first = err
+				}
+				continue
+			}
 			n++
 		}
 	}
-	return n
+	return n, first
 }
 
 // Rejected reports whether the member rejected exactly this idea.

@@ -364,7 +364,7 @@ func TestReviewWithoutADenyAllBackendSpendsNothing(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 	run := onlyRun(t)
-	if run.State != StateClaimed || run.used() != 0 || CallsToday(h.now) != 0 || Watermark("sess-key") != 0 {
+	if run.State != StateClaimed || run.used() != 0 || run.Unsent != 1 || CallsToday(h.now) != 0 || Watermark("sess-key") != 0 {
 		t.Fatalf("run %+v calls %d", run, CallsToday(h.now))
 	}
 	h.now = h.now.Add(2 * time.Minute)
@@ -588,7 +588,7 @@ func TestReviewDoesNotRerunAFinishedWindowWhoseWatermarkIsLost(t *testing.T) {
 	watermarkStore.Remove(keyHash("sess-key"))
 	// Same turns again: the window is the same, its run is finished.
 	res, err := h.reviewer().Review(context.Background(), h.req(TriggerAuto, turns(4)))
-	if err != nil || h.calls != 1 || Watermark("sess-key") != 4 || res.State != StateDone {
+	if err != nil || h.calls != 1 || Watermark("sess-key") != 4 || res.State != "empty" {
 		t.Fatalf("%+v %v calls %d wm %d", res, err, h.calls, Watermark("sess-key"))
 	}
 }

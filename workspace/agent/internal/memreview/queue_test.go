@@ -69,10 +69,13 @@ func TestQueueRetention(t *testing.T) {
 		t.Fatalf("re-proposal: %q", how)
 	}
 	// A different memory's forget does nothing; this memory's releases the hash.
-	if ForgetMemory("project", "other", "p") != 0 || ForgetMemory("project", "keep-me", "other-project") != 0 || !Rejected(p.Hash) {
+	if n, _ := ForgetMemory("project", "other", "p"); n != 0 {
 		t.Fatal("the hash was released by the wrong forget")
 	}
-	if ForgetMemory("project", "keep-me", "p") != 1 || Rejected(p.Hash) {
+	if n, _ := ForgetMemory("project", "keep-me", "other-project"); n != 0 || !Rejected(p.Hash) {
+		t.Fatal("the hash was released by the wrong forget")
+	}
+	if n, err := ForgetMemory("project", "keep-me", "p"); n != 1 || err != nil || Rejected(p.Hash) {
 		t.Fatal("forgetting the memory did not release its hash")
 	}
 	if how, _ := enqueue(again); how != EnqueuedNew {
@@ -85,7 +88,7 @@ func TestQueueRetention(t *testing.T) {
 	if len(Pending()) != 0 || Rejected(again.Hash) {
 		t.Fatal("approve left something behind")
 	}
-	if left := listKeys(pendingStore.Dir(), ".json"); len(left) != 0 {
+	if left := pendingStore.keys(); len(left) != 0 {
 		t.Fatalf("pending files remain: %v", left)
 	}
 	for _, bad := range []struct{ id, d string }{{"missing", DecisionReject}, {"z", "maybe"}} {
@@ -136,7 +139,7 @@ func TestOldTerminalRunsArePrunedButOpenOnesAreNot(t *testing.T) {
 	}
 	open := Run{ID: "open-oldest", Key: "k2", State: StateClaimed}
 	_ = saveRun(&open, base.Add(-time.Hour))
-	pruneRuns()
+	pruneRuns(time.Now())
 	n := 0
 	for _, r := range runs() {
 		if r.Terminal() {

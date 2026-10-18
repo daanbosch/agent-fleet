@@ -393,10 +393,18 @@ Nothing publishes and nothing triggers a review yet.
   Failure reasons come from a closed vocabulary: nothing a model or a process printed is stored.
 - **Recovery:** a `dispatched` attempt found after a restart is closed as `lost` and linked to its ledger row when
   one exists, else marked cost-unknown, then counted against the budget. An `answered` run is queued without a
-  call, with proposal ids derived from the run, so a stop mid-queueing duplicates nothing. The watermark moves
-  before the run is marked done, so a stop between the two resumes the run instead of re-reviewing the window.
+  call, with proposal ids derived from the run, so a stop mid-queueing duplicates nothing; a proposal that got a
+  decision in the meantime is remembered by id (without text) until the run ends, so the replay does not bring it
+  back. A run ends before the watermark moves, and the next start repairs the watermark from the newest ended
+  run, so a stop between the two cannot make a window reviewable again or shift the next one. The proposal text
+  leaves the run record in the write that ends the run. Every record is written durably (file synced, renamed,
+  directories synced) before it is relied on, and a removal that fails is an error.
 - **Bounds:** one review in flight in the Agent; 250 helper calls per local day (counted and persisted before the
-  call, so a crash over-counts rather than under-counts); at most 100 pending proposals.
+  call, so a crash over-counts rather than under-counts); a call no backend could run does not count and adds no
+  attempt to the record. **At most 100 pending proposals is provisional and NOT among the owner-confirmed P0 caps**
+  (the journal's queue figure is 20 queued sessions, itself a policy assumption); the owner's answer is still
+  needed. The bound holds inside the insert; a reply that does not fit stays `answered` and is queued as room
+  appears, without another call.
 - **Queue retention (decision 8):** pending text is deleted on any decision; a rejection keeps only the content
   hash (operation, scope, name, type, description, body and the project) until the memory is forgotten
   (`ForgetMemory`); a rejected idea and an identical pending one are not queued again.

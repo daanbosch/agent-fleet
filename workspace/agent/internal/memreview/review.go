@@ -12,7 +12,8 @@ package memreview
 //	dispatched  an attempt is recorded       -> the call may have been billed; count it, then retry
 //	                                            only within the budget
 //	answered    the validated reply is kept  -> queue it; the helper is never asked again
-//	done/failed the watermark has moved      -> nothing
+//	done/failed the run has ended            -> nothing; the watermark follows it (and is repaired
+//	                                            from it if a stop came in between)
 //
 // At most one review is in flight in the whole Agent, and at most one run is open per session.
 
@@ -125,6 +126,9 @@ func (r *Reviewer) Review(ctx context.Context, req Request) (Result, error) {
 	run, open := unfinishedRun(req.Key)
 	more := false
 	if !open {
+		if err := repairWatermark(req.Key, now); err != nil {
+			return Result{}, err
+		}
 		wm := Watermark(req.Key)
 		turns, first := trimTurns(req, wm)
 		wins := BuildWindows(turns, first)
@@ -143,16 +147,11 @@ func (r *Reviewer) Review(ctx context.Context, req Request) (Result, error) {
 		}
 		run = Run{ID: runID(req.Key, w.Last), Key: req.Key, Session: req.Session, Trigger: req.Trigger,
 			Base: wm, First: w.First, Last: w.Last, State: StateClaimed, Created: now}
-		if old, ok := loadRun(run.ID); ok {
-			// Claimed before and finished (a watermark that was lost): do not run it twice.
-			_ = moveWatermark(req.Key, old.Last, now)
-			return Result{RunID: old.ID, State: old.State, Failure: old.Failure, Watermark: Watermark(req.Key)}, nil
-		}
 		if err := saveRun(&run, now); err != nil {
 			return Result{}, err
 		}
 		r.stage("claimed")
-		pruneRuns()
+		pruneRuns(now)
 	}
 	res, err := r.advance(ctx, &run, req)
 	if err == nil && res.Terminal() {
@@ -243,7 +242,11 @@ func (r *Reviewer) advance(ctx context.Context, run *Run, req Request) (Result, 
 	case callErr != nil && ctx.Err() != nil:
 		return Result{}, ctx.Err() // stopped mid-call: the record stays "dispatched" for recovery
 	case errors.Is(callErr, chatx.ErrDenyAllUnavailable):
-		at.Outcome = OutcomeNotSent // nothing reached a model: no attempt spent, no call counted
+		// Nothing reached a model: no attempt spent, no call counted. The attempt written before
+		// the call is taken back and only a counter remains, so an unusable pin cannot grow the
+		// record by one entry every backoff.
+		run.Attempts = run.Attempts[:len(run.Attempts)-1]
+		run.Unsent++
 		refundCall(now)
 		run.State, run.NotBefore = StateClaimed, now.Add(r.backoff())
 		if err := saveRun(run, now); err != nil {
@@ -258,12 +261,12 @@ func (r *Reviewer) advance(ctx context.Context, run *Run, req Request) (Result, 
 	if perr != nil {
 		var re *ReplyError
 		if errors.As(perr, &re) && re.Kind == ReplySecret {
-			at.Outcome = OutcomeSecret // not retried: the helper echoed something it was shown
+			at.Outcome, at.EndedAt = OutcomeSecret, now // not retried: the helper echoed something it was shown
 			return r.fail(run, "reply refused by the secret scan")
 		}
 		return r.retryOrFail(run, at, OutcomeMalformed, "the reply was dropped", now)
 	}
-	at.Outcome = OutcomeAnswered
+	at.Outcome, at.EndedAt = OutcomeAnswered, now
 	run.Ops, run.ProjectID, run.State = ops, snap.ProjectID, StateAnswered
 	if err := saveRun(run, now); err != nil {
 		return Result{}, err
@@ -275,7 +278,7 @@ func (r *Reviewer) advance(ctx context.Context, run *Run, req Request) (Result, 
 // retryOrFail ends an attempt that produced nothing usable: the run goes back to "claimed" with a
 // backoff while budget remains, and is parked as failed (watermark moved) when it does not.
 func (r *Reviewer) retryOrFail(run *Run, at *Attempt, outcome, failure string, now time.Time) (Result, error) {
-	at.Outcome = outcome
+	at.Outcome, at.EndedAt = outcome, now
 	if run.used() >= MaxAttempts {
 		return r.fail(run, failure)
 	}
@@ -288,11 +291,22 @@ func (r *Reviewer) retryOrFail(run *Run, at *Attempt, outcome, failure string, n
 
 // settleLost closes an attempt that was dispatched and never answered in this process: it is
 // linked to its usage row when the ledger has one, and marked cost-unknown when it does not.
+//
+// The ledger stamps a row with the second the call finished, the attempt with the instant it
+// started, so the search starts at the start's second. When the attempt before it ended in that
+// same second its row (stamped no later than its end) could be mistaken for this one's, so the
+// search then starts one second later: a call that finished within a second of starting is not
+// a case worth risking the wrong row for.
 func (r *Reviewer) settleLost(run *Run) {
-	at := &run.Attempts[len(run.Attempts)-1]
+	n := len(run.Attempts) - 1
+	at := &run.Attempts[n]
 	at.Outcome = OutcomeLost
+	since := at.StartedAt.Truncate(time.Second)
+	if n > 0 && !run.Attempts[n-1].EndedAt.IsZero() && run.Attempts[n-1].EndedAt.Truncate(time.Second).Equal(since) {
+		since = since.Add(time.Second)
+	}
 	if r.Ledger != nil {
-		if spend, found := r.Ledger(run.Session, at.StartedAt); found {
+		if spend, found := r.Ledger(run.Session, since); found {
 			at.Cost, at.Spend = "linked", spend
 			return
 		}
@@ -300,9 +314,15 @@ func (r *Reviewer) settleLost(run *Run) {
 	at.Cost = "unknown"
 }
 
-// finish queues the validated operations, moves the watermark and ends the run. It is safe to
-// repeat after a stop at any of its steps: proposals have derived ids, the watermark only moves
-// forward, and the run is marked done last.
+// finish queues the validated operations and ends the run. It is safe to repeat after a stop at
+// any of its steps: proposals have derived ids, one that already got a decision is skipped, and
+// the run is marked done only once everything is queued. When the queue has no room it stops with
+// ErrQueueFull and the run stays `answered`, so nothing of the reply is lost and the helper is not
+// asked again; the rest is queued when room appears.
+//
+// The run ends before the watermark moves (repairWatermark closes the gap after a stop), and the
+// proposal text leaves the run record in the same write that ends it: from then on the queue is
+// the only place it lives, and a decision deletes it there.
 func (r *Reviewer) finish(run *Run) (Result, error) {
 	now := r.Now()
 	res := Result{RunID: run.ID, State: StateDone, Ops: len(run.Ops)}
@@ -321,13 +341,17 @@ func (r *Reviewer) finish(run *Run) (Result, error) {
 		}
 	}
 	r.stage("enqueued")
-	if err := moveWatermark(run.Key, run.Last, now); err != nil {
-		return Result{}, err
-	}
-	run.State = StateDone
+	run.State, run.Queued, run.Skipped, run.Ops = StateDone, res.Queued, res.Skipped, nil
 	if err := saveRun(run, now); err != nil {
 		return Result{}, err
 	}
+	r.stage("ended")
+	if err := moveWatermark(run.Key, run.Last, now); err != nil {
+		return Result{}, err
+	}
+	stateMu.Lock()
+	gcDecidedLocked()
+	stateMu.Unlock()
 	res.Watermark = Watermark(run.Key)
 	return res, nil
 }
@@ -341,31 +365,47 @@ func scopeProject(run *Run, op Op) string {
 	return ""
 }
 
-// fail parks the run: the watermark moves past its window (it is not offered again) and the run
-// ends with a reason from a closed vocabulary.
+// fail parks the run. The ending is saved FIRST, in one write with the attempt's outcome, so a stop
+// or a failed write after it can never make a later start take the attempt for a lost one and call
+// again (a refused reply is not retried); the watermark then moves past the window, and
+// repairWatermark does it on the next start if this process stopped before.
 func (r *Reviewer) fail(run *Run, reason string) (Result, error) {
 	now := r.Now()
-	if err := moveWatermark(run.Key, run.Last, now); err != nil {
+	run.State, run.Failure, run.Ops = StateFailed, reason, nil
+	if err := saveRun(run, now); err != nil {
 		return Result{}, err
 	}
-	run.State, run.Failure = StateFailed, reason
-	if err := saveRun(run, now); err != nil {
+	r.stage("ended")
+	if err := moveWatermark(run.Key, run.Last, now); err != nil {
 		return Result{}, err
 	}
 	return Result{RunID: run.ID, State: StateFailed, Failure: reason, Watermark: Watermark(run.Key)}, nil
 }
 
-// ledgerSpend looks for the usage row of an attempt that started at since.
+// ledgerSpend looks for the usage row of an attempt: the first memory.review row of the session
+// stamped at or after since, and every other row of the same call (a call that used several models
+// is split over several rows), summed.
 func ledgerSpend(session string, since time.Time) (int, bool) {
+	var first *usagex.Record
+	spend := 0
 	for _, day := range []string{since.UTC().Format("2006-01-02"), since.UTC().Add(24 * time.Hour).Format("2006-01-02")} {
 		for _, row := range usagex.ReadDay(day) {
 			if row.Feature != usagex.FeatureMemoryReview || row.Ref != session {
 				continue
 			}
-			if ts, err := time.Parse(time.RFC3339, row.TS); err == nil && !ts.Before(since) {
-				return row.Spend, true
+			if first == nil {
+				ts, err := time.Parse(time.RFC3339, row.TS)
+				if err != nil || ts.Before(since) {
+					continue
+				}
+				first = &row
+				spend += row.Spend
+				continue
+			}
+			if first.Call != "" && row.Call == first.Call {
+				spend += row.Spend
 			}
 		}
 	}
-	return 0, false
+	return spend, first != nil
 }

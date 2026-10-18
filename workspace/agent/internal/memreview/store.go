@@ -10,26 +10,25 @@ package memreview
 //	daily.json                the calls made today
 //	pending/, rejected/       the proposal queue (queue.go)
 //
-// Writes go through fstore, which stages and renames, so a reader (or a restart) sees the old
-// record or the new one, never half of one.
+// Writes are durable (durable.go): synced before they are relied on, so a record written before a
+// call is still there after the host fails, and a reader or a restart sees the old record or the
+// new one, never half of one.
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/k-k1/agent-fleet/workspace/agent/internal/fstore"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 )
 
-// The bounds of ADR 0117 decision 3, confirmed with the P0 caps.
+// The bounds of ADR 0117 decision 3. Attempts and the daily cap are the owner-confirmed P0 caps;
+// MaxPending is not (see below).
 const (
 	// MaxAttempts is one call and at most one retry for a window.
 	MaxAttempts = 2
@@ -37,6 +36,9 @@ const (
 	// loop sized from one heavy-use sample (P0), not a budget; the budgets UI is P3's.
 	DailyCallCap = 250
 	// MaxPending bounds the proposal queue: a review that nobody reads must not grow it forever.
+	// UNCONFIRMED: the owner's confirmed P0 caps (docs/log/134 section 6) include no number for
+	// pending proposals, only "queued sessions: 20" as a policy assumption. 100 is this
+	// implementation's provisional reading and needs the owner's answer (see the ADR 0117 note).
 	MaxPending = 100
 	// DefaultBackoff is the wait after a transient failure before the same run is tried again.
 	DefaultBackoff = 5 * time.Minute
@@ -61,7 +63,6 @@ const (
 	OutcomeFailed     = "call-failed" // the call returned an error
 	OutcomeMalformed  = "malformed"   // the reply was dropped whole (shape, size, evidence...)
 	OutcomeSecret     = "secret"      // the reply echoed something the scan refuses
-	OutcomeNotSent    = "not-sent"    // no backend could run deny-all; nothing reached a model
 	OutcomeLost       = "lost"        // dispatched, and the process ended before the answer was kept
 )
 
@@ -70,6 +71,8 @@ type Attempt struct {
 	N         int       `json:"n"`
 	StartedAt time.Time `json:"startedAt"`
 	Outcome   string    `json:"outcome"`
+	// EndedAt is when the attempt got its outcome (zero for a lost one, which never did).
+	EndedAt time.Time `json:"endedAt,omitempty"`
 	// Cost says what is known of a lost attempt's cost: "linked" when a ledger row for it was
 	// found (Spend is its tokens), "unknown" when none was (the call may or may not have been
 	// billed). Empty for an attempt that ended normally: the ledger has its row.
@@ -85,14 +88,22 @@ type Run struct {
 	Trigger string `json:"trigger"` // auto | manual
 	// Base is the watermark when the run was claimed; First and Last are the turn numbers the
 	// window shows. Last is the window end the run is keyed by and the watermark moves to.
-	Base      int       `json:"base"`
-	First     int       `json:"first"`
-	Last      int       `json:"last"`
-	State     string    `json:"state"`
-	Attempts  []Attempt `json:"attempts,omitempty"`
-	Ops       []Op      `json:"ops,omitempty"`
-	ProjectID string    `json:"projectId,omitempty"`
-	Failure   string    `json:"failure,omitempty"`
+	Base     int       `json:"base"`
+	First    int       `json:"first"`
+	Last     int       `json:"last"`
+	State    string    `json:"state"`
+	Attempts []Attempt `json:"attempts,omitempty"`
+	// Ops are the validated reply, kept only while queueing is unfinished: a run that has ended
+	// carries no proposal text (the queue owns it, and deletes it on a decision).
+	Ops       []Op   `json:"ops,omitempty"`
+	ProjectID string `json:"projectId,omitempty"`
+	// Queued and Skipped are what queueing did, as counts.
+	Queued  int    `json:"queued,omitempty"`
+	Skipped int    `json:"skipped,omitempty"`
+	Failure string `json:"failure,omitempty"`
+	// Unsent counts the times no backend could run the review without tools; those calls never
+	// reached a model, so they are a counter and not attempts.
+	Unsent    int       `json:"unsent,omitempty"`
 	NotBefore time.Time `json:"notBefore,omitempty"`
 	Created   time.Time `json:"created"`
 	Updated   time.Time `json:"updated"`
@@ -101,17 +112,8 @@ type Run struct {
 // Terminal reports whether nothing more happens to the run.
 func (r Run) Terminal() bool { return r.State == StateDone || r.State == StateFailed }
 
-// used counts the attempts that spent budget: everything that reached, or may have reached, a
-// model. A call that was never sent (no deny-all backend) is free.
-func (r Run) used() int {
-	n := 0
-	for _, a := range r.Attempts {
-		if a.Outcome != OutcomeNotSent {
-			n++
-		}
-	}
-	return n
-}
+// used counts the attempts that spent budget: each reached, or may have reached, a model.
+func (r Run) used() int { return len(r.Attempts) }
 
 // runID is keyed by the session identity and the fixed window end, so two triggers cannot claim
 // the same window and a restart finds the same run.
@@ -140,9 +142,9 @@ var (
 func stateRoot() string { return filepath.Join(paths.ClaudeConfigDir(), "af-memory-review") }
 
 var (
-	runStore       = fstore.JSON[Run](stateRoot, "runs", ".json")
-	watermarkStore = fstore.JSON[watermark](stateRoot, "watermark", ".json")
-	dailyStore     = fstore.JSON[daily](stateRoot, "", ".json")
+	runStore       = store[Run]{"runs"}
+	watermarkStore = store[watermark]{"watermark"}
+	dailyStore     = store[daily]{""}
 
 	// stateMu orders every read-modify-write of the files above inside this process. The Agent is
 	// their only writer.
@@ -187,13 +189,6 @@ func saveRun(r *Run, now time.Time) error {
 	return runStore.Write(r.ID, *r)
 }
 
-// loadRun reads one run.
-func loadRun(id string) (Run, bool) {
-	stateMu.Lock()
-	defer stateMu.Unlock()
-	return runStore.Read(id)
-}
-
 // runs lists every run record, newest first.
 func runs() []Run {
 	stateMu.Lock()
@@ -203,7 +198,7 @@ func runs() []Run {
 
 func listRunsLocked() []Run {
 	var out []Run
-	for _, id := range listKeys(runStore.Dir(), ".json") {
+	for _, id := range runStore.keys() {
 		if r, ok := runStore.Read(id); ok {
 			out = append(out, r)
 		}
@@ -223,8 +218,9 @@ func unfinishedRun(key string) (Run, bool) {
 	return Run{}, false
 }
 
-// pruneRuns keeps the newest terminal records; an open run is never removed.
-func pruneRuns() {
+// pruneRuns keeps the newest terminal records, drops decided markers nothing can replay any more
+// and sweeps staged files a killed writer left behind. An open run is never removed.
+func pruneRuns(now time.Time) {
 	stateMu.Lock()
 	defer stateMu.Unlock()
 	kept := 0
@@ -233,9 +229,30 @@ func pruneRuns() {
 			continue
 		}
 		if kept++; kept > keepTerminalRuns {
-			runStore.Remove(r.ID)
+			_ = runStore.Remove(r.ID)
 		}
 	}
+	gcDecidedLocked()
+	for _, s := range []interface {
+		sweepStaging(time.Duration, time.Time)
+	}{runStore, watermarkStore, dailyStore, pendingStore, rejectedStore, decidedStore} {
+		s.sweepStaging(time.Hour, now)
+	}
+}
+
+// repairWatermark moves the watermark to the end of the newest ended run: a run is ended before
+// the watermark moves, so a stop between the two must not make the window reviewable again.
+func repairWatermark(key string, now time.Time) error {
+	last := 0
+	for _, r := range runs() {
+		if r.Key == key && r.Terminal() && r.Last > last {
+			last = r.Last
+		}
+	}
+	if last == 0 {
+		return nil
+	}
+	return moveWatermark(key, last, now)
 }
 
 // consumeCall counts one helper call against today's cap and persists the count before the call
@@ -275,19 +292,4 @@ func CallsToday(now time.Time) int {
 		return 0
 	}
 	return d.Calls
-}
-
-// listKeys lists the keys (file names without ext) of a store directory, skipping the staging area.
-func listKeys(dir, ext string) []string {
-	ents, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for _, e := range ents {
-		if name, ok := strings.CutSuffix(e.Name(), ext); ok && e.Type().IsRegular() {
-			out = append(out, name)
-		}
-	}
-	return out
 }
