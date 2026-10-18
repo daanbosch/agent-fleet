@@ -31,7 +31,7 @@ From 0.24.0, a line that came from a GitHub issue ends with its number, linked t
 - **[plans]** Review a revised plan again in the same reviewer; review a carried plan in another session ([#2219](https://github.com/k-k1/agent-fleet/issues/2219), [#2211](https://github.com/k-k1/agent-fleet/issues/2211))
 - **[agents]** An expired Claude login in the assistant chat offers Re-authenticate and Retry; Re-authenticate opens the agent's card ([#2180](https://github.com/k-k1/agent-fleet/issues/2180), [#2177](https://github.com/k-k1/agent-fleet/issues/2177))
 - **[agents]** claude resumes sooner after giving up on a held login-refresh lock ([#2231](https://github.com/k-k1/agent-fleet/issues/2231))
-- **[idle stop]** Background work holds a workspace for at most 2 hours (`background_hold_max`); stuck Managed cursor, kiro, codex and opencode turns stop holding it ([#2338](https://github.com/k-k1/agent-fleet/issues/2338), [#1942](https://github.com/k-k1/agent-fleet/issues/1942))
+- **[idle stop]** Background work holds a workspace for at most 2 hours (`background_hold_max`); a Managed cursor, kiro, codex or opencode turn silent for an hour stops holding it (a running tool still holds) ([#2338](https://github.com/k-k1/agent-fleet/issues/2338), [#1942](https://github.com/k-k1/agent-fleet/issues/1942))
 - **[kiro]** Terminal approval prompts are read from kiro's recorder ([#2285](https://github.com/k-k1/agent-fleet/issues/2285))
 - **[cursor]** Terminal sessions record per-turn token usage ([#2286](https://github.com/k-k1/agent-fleet/issues/2286))
 - **[sessions]** The session menu is grouped into sections ([#2189](https://github.com/k-k1/agent-fleet/issues/2189))
@@ -49,6 +49,7 @@ From 0.24.0, a line that came from a GitHub issue ends with its number, linked t
 - **[preview]** On a phone the WS bar's port preview buttons spilled out of the popover ([#2308](https://github.com/k-k1/agent-fleet/issues/2308))
 - **[native]** The user guide did not open on a native install without a rootfs ([#2315](https://github.com/k-k1/agent-fleet/issues/2315))
 - **[preview]** Malformed host names under the preview domain reached the Console instead of 404 ([#2240](https://github.com/k-k1/agent-fleet/issues/2240))
+- **[agent memory]** Snapshot history stayed on "Loading…" or read a failed load as empty; it now offers Retry ([#2344](https://github.com/k-k1/agent-fleet/issues/2344), [#2347](https://github.com/k-k1/agent-fleet/issues/2347), [#2349](https://github.com/k-k1/agent-fleet/issues/2349))
 - **[settings › toolchains]** `bkt` was missing ([#2179](https://github.com/k-k1/agent-fleet/issues/2179))
 - **[ECS]** The missing-EFS-backup warning stayed after a backup plan was added ([#2063](https://github.com/k-k1/agent-fleet/issues/2063), [#2066](https://github.com/k-k1/agent-fleet/issues/2066))
 
