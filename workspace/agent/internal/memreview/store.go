@@ -228,7 +228,13 @@ func pruneRuns(now time.Time) {
 		if !r.Terminal() {
 			continue
 		}
-		if kept++; kept > keepTerminalRuns {
+		if kept++; kept <= keepTerminalRuns {
+			continue
+		}
+		// An ended run is the evidence repairWatermark works from until the session's watermark has
+		// reached its window: pruning it first would let a stop between the ending and the watermark
+		// make the window reviewable again.
+		if w, _ := watermarkStore.Read(keyHash(r.Key)); w.Turn >= r.Last {
 			_ = runStore.Remove(r.ID)
 		}
 	}

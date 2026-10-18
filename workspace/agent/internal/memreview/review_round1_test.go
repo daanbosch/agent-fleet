@@ -188,7 +188,15 @@ func TestWritesAreSyncedInOrderAndAFailedSyncStopsTheCall(t *testing.T) {
 	if err := runStore.Write("r1", Run{ID: "r1"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(events) < 4 || events[0] != "file" || events[1] != "rename" || !strings.HasPrefix(events[2], "dir:") {
+	// The directories created on the way are synced first; then the order is file, rename, dirs.
+	at := -1
+	for i, e := range events {
+		if e == "file" {
+			at = i
+			break
+		}
+	}
+	if at < 0 || len(events) < at+3 || events[at+1] != "rename" || !strings.HasPrefix(events[at+2], "dir:") {
 		t.Fatalf("events = %v", events)
 	}
 	if _, err := os.Stat(filepath.Join(runStore.Dir(), "r1.json")); err != nil {
@@ -386,10 +394,10 @@ func TestLedgerLinkHandlesSecondPrecisionAndSplitCalls(t *testing.T) {
 		return usagex.Record{TS: ts.UTC().Format(time.RFC3339), Call: call, Feature: usagex.FeatureMemoryReview, Ref: "sess", Spend: spend, Kind: "claude"}
 	}
 	if err := usagex.AppendRows([]usagex.Record{
-		row(start.Add(-time.Hour), "old", 999),        // an earlier call of the same session
-		row(start.Truncate(time.Second), "mine", 100), // same second as the start, before the start instant
-		row(start.Truncate(time.Second), "mine", 20),  // the same call's second model
-		row(start.Add(time.Minute), "later", 7000),    // a later call
+		row(start.Add(-time.Hour), "old", 999),                         // an earlier call of the same session
+		row(start.Truncate(time.Second), "mine", 100),                  // same second as the start, before the start instant
+		row(start.Truncate(time.Second), "mine", 20),                   // the same call's second model
+		row(start.Add(ledgerAttemptWindow+time.Minute), "later", 7000), // a later call, outside the window
 		{TS: start.Format(time.RFC3339), Call: "x", Feature: usagex.FeatureTitleSession, Ref: "sess", Spend: 5},
 	}); err != nil {
 		t.Fatal(err)
@@ -401,6 +409,13 @@ func TestLedgerLinkHandlesSecondPrecisionAndSplitCalls(t *testing.T) {
 	if _, ok := ledgerSpend("other-session", start.Truncate(time.Second)); ok {
 		t.Error("another session's row matched")
 	}
+	// Two calls in the window: which one is the attempt's cannot be told, so none is linked.
+	if err := usagex.AppendRows([]usagex.Record{row(start.Add(time.Minute), "second-call", 50)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ledgerSpend("sess", start.Truncate(time.Second)); ok {
+		t.Error("an ambiguous window was linked")
+	}
 
 	// settleLost starts the search at the attempt's second, or one later when the attempt before
 	// it ended within that second.
@@ -408,7 +423,7 @@ func TestLedgerLinkHandlesSecondPrecisionAndSplitCalls(t *testing.T) {
 		return int(since.Unix() % 1000), true
 	}}
 	run := &Run{Session: "sess", Attempts: []Attempt{
-		{N: 1, StartedAt: start.Add(-time.Minute), EndedAt: start.Add(100 * time.Millisecond), Outcome: OutcomeMalformed},
+		{N: 1, StartedAt: start.Add(-time.Minute), EndedAt: start.Add(-100 * time.Millisecond), Outcome: OutcomeMalformed},
 		{N: 2, StartedAt: start, Outcome: OutcomeDispatched},
 	}}
 	r.settleLost(run)

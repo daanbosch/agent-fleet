@@ -20,6 +20,7 @@ package memreview
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -237,6 +238,7 @@ func (r *Reviewer) advance(ctx context.Context, run *Run, req Request) (Result, 
 
 	ctx = usagex.WithTag(ctx, usagex.Tag{Feature: usagex.FeatureMemoryReview, Trigger: req.Trigger, Ref: run.Session})
 	reply, callErr := r.Call(ctx, in.Persona, in.Prompt)
+	now = r.Now() // when the call ended: EndedAt is read off this, not off the start
 	at := &run.Attempts[len(run.Attempts)-1]
 	switch {
 	case callErr != nil && ctx.Err() != nil:
@@ -290,19 +292,20 @@ func (r *Reviewer) retryOrFail(run *Run, at *Attempt, outcome, failure string, n
 }
 
 // settleLost closes an attempt that was dispatched and never answered in this process: it is
-// linked to its usage row when the ledger has one, and marked cost-unknown when it does not.
+// linked to its usage row when the ledger can say which row is its, and marked cost-unknown when it
+// cannot. Linking the wrong row is worse than linking none, so doubt means unknown.
 //
 // The ledger stamps a row with the second the call finished, the attempt with the instant it
-// started, so the search starts at the start's second. When the attempt before it ended in that
-// same second its row (stamped no later than its end) could be mistaken for this one's, so the
-// search then starts one second later: a call that finished within a second of starting is not
-// a case worth risking the wrong row for.
+// started, so the search starts at the start's second. An earlier attempt of the same session (in
+// this run or an earlier one) that ended in that very second could own a row stamped in it too, so
+// then the search starts one second later. A call that finished within a second of starting is
+// not a case worth risking the wrong row for.
 func (r *Reviewer) settleLost(run *Run) {
 	n := len(run.Attempts) - 1
 	at := &run.Attempts[n]
 	at.Outcome = OutcomeLost
 	since := at.StartedAt.Truncate(time.Second)
-	if n > 0 && !run.Attempts[n-1].EndedAt.IsZero() && run.Attempts[n-1].EndedAt.Truncate(time.Second).Equal(since) {
+	if end := latestEnd(run, at.StartedAt); !end.IsZero() && end.Truncate(time.Second).Equal(since) {
 		since = since.Add(time.Second)
 	}
 	if r.Ledger != nil {
@@ -312,6 +315,26 @@ func (r *Reviewer) settleLost(run *Run) {
 		}
 	}
 	at.Cost = "unknown"
+}
+
+// latestEnd is the latest time an attempt of the run's session ended before limit, across every
+// run the record still holds (the current run's earlier attempts included).
+func latestEnd(run *Run, limit time.Time) time.Time {
+	var latest time.Time
+	consider := func(as []Attempt) {
+		for _, a := range as {
+			if !a.EndedAt.IsZero() && !a.EndedAt.After(limit) && a.EndedAt.After(latest) {
+				latest = a.EndedAt
+			}
+		}
+	}
+	for _, other := range runs() {
+		if other.Session == run.Session && other.ID != run.ID {
+			consider(other.Attempts)
+		}
+	}
+	consider(run.Attempts)
+	return latest
 }
 
 // finish queues the validated operations and ends the run. It is safe to repeat after a stop at
@@ -327,7 +350,7 @@ func (r *Reviewer) finish(run *Run) (Result, error) {
 	now := r.Now()
 	res := Result{RunID: run.ID, State: StateDone, Ops: len(run.Ops)}
 	for i, op := range run.Ops {
-		p := Proposal{ID: proposalID(run.ID, i), RunID: run.ID, Session: run.Session, Op: op, Created: run.Created}
+		p := Proposal{ID: proposalID(run.ID, i), RunID: run.ID, Index: i, Session: run.Session, Op: op, Created: run.Created}
 		p.Hash = OpHash(scopeProject(run, op), op)
 		p.ProjectID = scopeProject(run, op)
 		how, err := enqueue(p)
@@ -382,30 +405,39 @@ func (r *Reviewer) fail(run *Run, reason string) (Result, error) {
 	return Result{RunID: run.ID, State: StateFailed, Failure: reason, Watermark: Watermark(run.Key)}, nil
 }
 
-// ledgerSpend looks for the usage row of an attempt: the first memory.review row of the session
-// stamped at or after since, and every other row of the same call (a call that used several models
-// is split over several rows), summed.
+// ledgerAttemptWindow is how long after an attempt started its usage row can appear in the
+// search; a helper call is bounded far below it.
+const ledgerAttemptWindow = 10 * time.Minute
+
+// ledgerSpend looks for the usage row of one attempt: the memory.review rows of the session
+// stamped from since on, grouped by call (a call that used several models is split over several
+// rows). Exactly one such call means it is the attempt's, and its rows are summed; none means
+// there is no row; several mean it cannot be told which is the attempt's, and that is reported as
+// not found.
 func ledgerSpend(session string, since time.Time) (int, bool) {
-	var first *usagex.Record
-	spend := 0
+	spend := map[string]int{} // by call id; a row with none is a call of its own
+	var order []string
 	for _, day := range []string{since.UTC().Format("2006-01-02"), since.UTC().Add(24 * time.Hour).Format("2006-01-02")} {
-		for _, row := range usagex.ReadDay(day) {
+		for i, row := range usagex.ReadDay(day) {
 			if row.Feature != usagex.FeatureMemoryReview || row.Ref != session {
 				continue
 			}
-			if first == nil {
-				ts, err := time.Parse(time.RFC3339, row.TS)
-				if err != nil || ts.Before(since) {
-					continue
-				}
-				first = &row
-				spend += row.Spend
+			ts, err := time.Parse(time.RFC3339, row.TS)
+			if err != nil || ts.Before(since) || ts.After(since.Add(ledgerAttemptWindow)) {
 				continue
 			}
-			if first.Call != "" && row.Call == first.Call {
-				spend += row.Spend
+			key := row.Call
+			if key == "" {
+				key = fmt.Sprintf("%s#%d", day, i)
 			}
+			if _, seen := spend[key]; !seen {
+				order = append(order, key)
+			}
+			spend[key] += row.Spend
 		}
 	}
-	return spend, first != nil
+	if len(order) != 1 {
+		return 0, false
+	}
+	return spend[order[0]], true
 }

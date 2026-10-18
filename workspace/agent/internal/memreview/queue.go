@@ -26,8 +26,10 @@ import (
 
 // Proposal is one queued operation with what applying it later needs.
 type Proposal struct {
-	ID      string `json:"id"`
-	RunID   string `json:"runId"`
+	ID    string `json:"id"`
+	RunID string `json:"runId"`
+	// Index is the operation's position in its run's reply (the id derives from it).
+	Index   int    `json:"index"`
 	Session string `json:"session"`
 	// ProjectID is the project of the reviewed session when the operation is project-scoped.
 	ProjectID string    `json:"projectId,omitempty"`
@@ -181,7 +183,25 @@ func Decide(id, decision string, now time.Time) error {
 	if err := decidedStore.Write(id, p.RunID); err != nil {
 		return err
 	}
+	// The run that queued the proposal may still hold its text (it stopped, or is waiting for room
+	// for the rest of its reply): that copy goes before the proposal's own file does, so a decision
+	// that reports success has left no copy anywhere.
+	if err := scrubRunOp(p); err != nil {
+		return err
+	}
 	return pendingStore.Remove(id)
+}
+
+// scrubRunOp blanks the text of one operation in a run that has not ended, keeping what the replay
+// needs (which operation it was, to skip it by its decided marker).
+func scrubRunOp(p Proposal) error {
+	r, ok := runStore.Read(p.RunID)
+	if !ok || r.Terminal() || p.Index < 0 || p.Index >= len(r.Ops) {
+		return nil
+	}
+	op := r.Ops[p.Index]
+	r.Ops[p.Index] = Op{Op: op.Op, Scope: op.Scope, Name: op.Name}
+	return runStore.Write(r.ID, r)
 }
 
 // gcDecidedLocked drops the decided markers whose run has ended (or is gone): only an open run can

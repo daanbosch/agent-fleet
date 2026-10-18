@@ -52,7 +52,7 @@ func (s store[T]) Write(key string, v T) error {
 		return err
 	}
 	dir := s.Dir()
-	if err := os.MkdirAll(s.staging(), 0o700); err != nil {
+	if err := mkdirAllSynced(s.staging()); err != nil {
 		return err
 	}
 	f, err := os.CreateTemp(s.staging(), key+".*") // mode 0600
@@ -74,7 +74,7 @@ func (s store[T]) Write(key string, v T) error {
 		_ = os.Remove(tmp)
 		return werr
 	}
-	for _, d := range []string{dir, s.staging(), filepath.Dir(dir)} {
+	for _, d := range []string{dir, s.staging()} {
 		if err := fsOps.syncDir(d); err != nil {
 			return err
 		}
@@ -107,6 +107,9 @@ func (s store[T]) Remove(key string) error {
 				return rerr
 			}
 		}
+		if serr := fsOps.syncDir(s.staging()); serr != nil && !os.IsNotExist(serr) {
+			return serr
+		}
 	}
 	if serr := fsOps.syncDir(s.Dir()); serr != nil && !os.IsNotExist(serr) {
 		return serr
@@ -136,9 +139,45 @@ func (s store[T]) sweepStaging(age time.Duration, now time.Time) {
 	if err != nil {
 		return
 	}
+	removed := false
 	for _, e := range ents {
 		if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) > age {
-			_ = os.Remove(filepath.Join(s.staging(), e.Name()))
+			if os.Remove(filepath.Join(s.staging(), e.Name())) == nil {
+				removed = true
+			}
 		}
 	}
+	if removed {
+		_ = fsOps.syncDir(s.staging())
+	}
+}
+
+// mkdirAllSynced creates dir and every missing ancestor and makes each new directory entry
+// durable: every directory it created, and the existing directory the chain hangs from. Creating
+// them without that can lose the whole chain, a state root included, to a host failure that comes
+// after the first record in it was reported written.
+func mkdirAllSynced(dir string) error {
+	var created []string
+	for d := dir; ; d = filepath.Dir(d) {
+		if _, err := os.Stat(d); err == nil {
+			created = append(created, d) // the first directory that already existed
+			break
+		}
+		created = append(created, d)
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if len(created) == 1 {
+		return nil // nothing was created
+	}
+	for _, d := range created {
+		if err := fsOps.syncDir(d); err != nil {
+			return err
+		}
+	}
+	return nil
 }

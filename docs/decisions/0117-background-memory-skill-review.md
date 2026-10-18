@@ -395,10 +395,14 @@ Nothing publishes and nothing triggers a review yet.
   one exists, else marked cost-unknown, then counted against the budget. An `answered` run is queued without a
   call, with proposal ids derived from the run, so a stop mid-queueing duplicates nothing; a proposal that got a
   decision in the meantime is remembered by id (without text) until the run ends, so the replay does not bring it
-  back. A run ends before the watermark moves, and the next start repairs the watermark from the newest ended
-  run, so a stop between the two cannot make a window reviewable again or shift the next one. The proposal text
+  back, and a decision also blanks that operation's text in a run that has not ended, so a decision that reports
+  success leaves no copy. A run ends before the watermark moves, and the next start repairs the watermark from the
+  newest ended run, so a stop between the two cannot make a window reviewable again or shift the next one; an
+  ended run is not pruned until its session's watermark has reached its window. The proposal text
   leaves the run record in the write that ends the run. Every record is written durably (file synced, renamed,
-  directories synced) before it is relied on, and a removal that fails is an error.
+  directories synced, every newly created directory included) before it is relied on, and a removal that fails is
+  an error. A lost attempt is linked to a usage row only when exactly one call of the session falls in its window
+  and no earlier attempt could own that second; otherwise it is cost-unknown.
 - **Bounds:** one review in flight in the Agent; 250 helper calls per local day (counted and persisted before the
   call, so a crash over-counts rather than under-counts); a call no backend could run does not count and adds no
   attempt to the record. **At most 100 pending proposals is provisional and NOT among the owner-confirmed P0 caps**
