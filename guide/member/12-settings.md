@@ -259,8 +259,21 @@ phone the view names become a drop-down.
 
 #### Memories
 
-- **Pinned memories**: above Browse memories, every memory with how often agents have read it. **Pin** one and it
-  is always listed first in the index agents read when they start work, ahead of everything else. The rest
+- **List and detail**: the left side lists the memories of **All scopes** (the default: the user-wide scope and every
+  project together, each row tagged with where it lives) or of one scope (**User-wide**, which every project receives,
+  or one project), with their author, last update, how often agents read them and a **pinned** marker. The chips
+  **All**, **Pinned** and **Forgotten** narrow it. Search matches the name, description, type and author at once and,
+  after a short pause, the body, ranked like the agents' `memory_search`; searching is not a use and does not change how
+  often a memory is read. Pick a row and the right side shows that memory: its text, scope, type, author, last update
+  and how often agents read it, with **Edit**, **Pin** / **Unpin**, **Forget this memory** and, under **More actions**
+  (⋯), **Purge history…**. **New memory** (in the scope on screen; the user-wide scope while all scopes are shown) and
+  **Edit** open a form in the same place. The scope, the chip and the memory you picked are remembered while you move
+  between views, and forgotten when you reload the page. On a phone the list and the detail are two screens: picking a
+  row opens the detail, and **Back to the list** (or Escape) returns. A memory whose name or text looks like a
+  secret is never listed, only counted.
+
+- **Pinned memories**: **Pin** one in the detail pane and it is always listed first in the index agents read when they
+  start work, ahead of everything else; **Unpin** takes it back. The **Pinned** chip lists them. The rest
   of the index is ordered by kind (feedback and user memories first), then by how often agents read it (a
   read or a search hit that was returned counts), then by recency. Pins share the index's size limit: if
   the pinned ones alone do not fit, the last of them drop to the names-only list and the agent is told so,
@@ -269,27 +282,25 @@ phone the view names become a drop-down.
   memory holds every word it returns the ones that hold some and says so. A pin is recorded as a change by you ("pin changed") and can be
   reverted; an agent's later update of a pinned memory keeps the pin, and the af memory tools offer agents no way to pin or unpin.
 
-- **Browse memories**: under the pinned memories, the memories of **All scopes** (the default: the user-wide scope and every project together, each row tagged with where it lives) or of one scope (**User-wide**, which every project receives, or one project), with their
-  author, last update, how often agents read them and whether they are pinned. Search matches the name,
-  description, type and author at once and, after a short pause, the body, ranked like the agents' `memory_search`;
-  searching is not a use and does not change how often a memory is read. **View** shows a memory's text. **Forget** removes it from
-  every agent's view, and **Forgotten memories** lists those you can **Restore** (the text comes back as it
-  was before; if it now looks like a secret, restore it from the Changes view, where you can confirm).
-  Both are the same revert and forget as in the Changes view, recorded as made by you and undoable. Forget works on any listed memory: its newest change is looked
-  up when you press it, however old. **Forgotten memories** lists every memory forgotten in the scope you have selected (all scopes by default), however long ago,
-  up to 300 at a time (pick one scope to see the rest). With a very large number of forgotten memories (over about
-  2000) the oldest are not checked: the list says so, may then be missing some, and the hidden count is a minimum. A memory whose
-  name or text looks like a secret is never listed, only counted. **New memory** (in the scope on screen; the user-wide
-  scope while all scopes are shown) and **Edit** on a memory's text write it by hand: the same revision check
-  and secret scan as an agent's save, recorded as written by you and undoable from the Changes view. A
-  memory can be written into a project only once that project holds memory. An edit keeps the kinds the
-  memory was limited to. The Control Plane signs pin, revert, forget and save, and the workspace accepts
+- **Forget, Restore and history**: **Forget this memory** removes it from every agent's view. The **Forgotten** chip
+  lists the ones you can **Restore**, on the row or in the detail pane (the text comes back as it was before; if it now
+  looks like a secret, restore it from the Changes view, where you can confirm). Both are the same revert and forget as in
+  the Changes view, recorded as made by you and undoable. Forget works on any listed memory: its newest change is looked
+  up when you press it, however old. **Forgotten** lists every memory forgotten in the scope you have selected (all scopes
+  by default), however long ago, up to 300 at a time (pick one scope to see the rest). With a very large number of
+  forgotten memories (over about 2000) the oldest are not checked: the list says so, may then be missing some, and the
+  hidden count is a minimum. **History of this memory**, at the bottom of the detail pane, lists that memory's own
+  changes; pick one to see its diff, as in the Changes view. It is read from the newest 300 changes of all memories, so
+  for a memory last changed long ago it can be incomplete: it then says so, and **See all in Changes** opens the Changes
+  view. Saves are the same revision check and secret scan as an agent's save, recorded as written by you and undoable from
+  the Changes view. A memory can be written into a project only once that project holds memory. An edit keeps the kinds
+  the memory was limited to. The Control Plane signs pin, revert, forget and save, and the workspace accepts
   them only with that signature, so a session in the workspace cannot make them as you. A workspace started
   before this was available refuses them until you restart it, and for about half a minute after a
   workspace starts they ask you to try again in a minute.
 
 - **Purge history…**: **Forget** only hides a memory; its earlier text stays in the history and in every export.
-  **Purge history…** (on a memory row and on a forgotten one) deletes a memory's past revisions from this
+  **Purge history…** (under **More actions** in a memory's detail pane, and in a forgotten memory's row and detail pane) deletes a memory's past revisions from this
   workspace for good. A dialog first lists what will be rewritten, without showing any text: how many of the
   memory's change records go, how many other snapshots carry a past revision, which histories are touched
   (the main history, imported histories, rescue copies of an earlier history) and what the secret scan

@@ -92,7 +92,7 @@ describe("MemoryTab views", () => {
       t("mem.view_settings"),
     ]);
     expect(selectedTab()).toBe("memories");
-    expect(headings()).toEqual([t("mem.pin_title"), t("mem.br_title")]);
+    expect(headings()).toEqual([t("mem.br_title")]);
     expect(switchRow(t("mem.af_switch"))).toBeUndefined();
   });
 

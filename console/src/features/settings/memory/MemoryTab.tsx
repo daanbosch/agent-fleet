@@ -61,7 +61,7 @@ export function MemoryTab() {
         ) : view === "importexport" ? (
           <ImportExportView reload={reload} onChanged={bump} />
         ) : (
-          <MemoriesView reload={reload} onChanged={bump} />
+          <MemoriesView reload={reload} onChanged={bump} onOpenChanges={() => setView("changes")} />
         )}
       </div>
     </div>
