@@ -102,9 +102,11 @@ describe("MemoryTab views", () => {
     expect(headings()).toEqual([t("mem.af_changes_title")]);
 
     await goto("importexport");
+    // The hub: one card per source; the wizards open from their Start buttons.
     expect(headings()).toEqual([
       t("mem.ci_title"),
       t("mem.mi_title"),
+      t("mem.bi_title"),
       t("mem.ce_title"),
       t("mem.pm_title"),
     ]);
@@ -132,7 +134,9 @@ describe("MemoryTab views", () => {
       await goto(v);
       expect(text(), v).not.toContain(t("mem.snapshot_now"));
       expect(text(), v).not.toContain(t("mem.auto_label"));
-      expect(text(), v).not.toContain(t("mem.export_do"));
+      // The hub's "Export" group heading is not the snapshot export button.
+      const buttons = Array.from(host!.querySelectorAll("[role=tabpanel] button")).map((b) => b.textContent);
+      expect(buttons, v).not.toContain(t("mem.export_do"));
     }
   });
 
