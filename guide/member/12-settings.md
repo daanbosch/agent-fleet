@@ -328,6 +328,13 @@ findings and asked to confirm.
 
 #### Import & export
 
+Import & export is a hub of cards, one per source, in three groups: **Import** (Import from Claude Code, Import
+from muse, Agent Fleet memory in this bundle), **Export** (Write back to Claude Code) and **Maintenance** (Move
+memories of a project that no longer exists). **Start** opens that source's wizard in place of the hub. Every wizard
+has the same frame: a step line (**Source**, **Preview**, **Confirm**, **Apply**, **Result**), the preview grouped by
+status with a count per group, and **Cancel** (disabled while an apply is running), which becomes **Back to Import &
+export** once it has finished.
+
 - **Import from Claude Code**: brings the memory Claude Code kept for a project into Agent
   Fleet memory, once. Pick a project and you see what would happen before anything is written: **new**,
   **newer in Claude** (will overwrite the Agent Fleet copy, even one you edited since; both times are shown),
@@ -373,6 +380,22 @@ findings and asked to confirm.
   and `af-memory muse-import --scope personal --into-user [--dry-run]`. The imports are
   gated by the same switch and the same secret scan as the Console.
 
+- **Agent Fleet memory in this bundle**: brings in the Agent Fleet memory a memory bundle carries. Restoring a
+  bundle in Memory snapshots never writes it (the restore has no secret scan). **Start** asks for a bundle file
+  as the wizard's source (a tar.gz holds none and is turned away), then previews it and imports it on its own.
+  Each project in the bundle is matched to a
+  project here by its identity, or, when that differs (another path), by the one project here with the same
+  repository address; a project with no match, or two, is listed and not imported. The user-wide memories
+  are always offered. Every memory is shown as **new**, **already here**, **different here, kept** (a
+  memory of that name exists here: it is never replaced), **forgotten here, not brought back** (also when
+  only the history remembers it), **possible secret, skipped** (every part of the file is scanned, with no
+  override) or **cannot be imported**. Only the latest text comes across, with the agent limits it had; the
+  bundle's history does not. What is **reset**: the revision (each memory starts at the next number here),
+  the author (unknown, as for the Claude import), the dates (the time of the import) and the pin; the origin
+  is recorded in the memory's source (`bundle:<import id>:<project>/<name>@<bundle revision>`) and in the
+  commit (`AF-Bundle-Import`, `AF-Bundle-Source`), so each import shows in Agent memory > Changes and can be
+  reverted there. It works with the switch on or off, answers only your own request, and is recorded in the
+  audit log.
 - **Write back to Claude Code**: the other direction, by hand and for one project at a
   time. Turning the switch off already writes every project back by itself (see above); use this to
   resolve a conflict it left, or after switching Claude Code's memory back on anyway. It copies what was
@@ -495,21 +518,10 @@ The view you leave open is remembered. It needs the running workspace.
 
 - **Export / import**: bundle (full history) or tar.gz (latest only). If what you are about to export looks
   like it contains secrets, you are warned and asked to confirm first.
-  - **Agent Fleet memory from a bundle**: restoring or importing a bundle never writes Agent Fleet memory (the
-    restore has no secret scan). After you pick a **bundle** (not a tar.gz) a panel under it, **Agent Fleet
-    memory in this bundle**, previews it and imports it on its own. Each project in the bundle is matched to a
-    project here by its identity, or, when that differs (another path), by the one project here with the same
-    repository address; a project with no match, or two, is listed and not imported. The user-wide memories
-    are always offered. Every memory is shown as **new**, **already here**, **different here, kept** (a
-    memory of that name exists here: it is never replaced), **forgotten here, not brought back** (also when
-    only the history remembers it), **possible secret, skipped** (every part of the file is scanned, with no
-    override) or **cannot be imported**. Only the latest text comes across, with the agent limits it had; the
-    bundle's history does not. What is **reset**: the revision (each memory starts at the next number here),
-    the author (unknown, as for the Claude import), the dates (the time of the import) and the pin; the origin
-    is recorded in the memory's source (`bundle:<import id>:<project>/<name>@<bundle revision>`) and in the
-    commit (`AF-Bundle-Import`, `AF-Bundle-Source`), so each import shows in Agent memory > Changes and can be
-    reverted there. It works with the switch on or off, answers only your own request, and is recorded in the
-    audit log.
+  - **Agent Fleet memory from a bundle**: restoring or importing a bundle here never writes Agent Fleet memory
+    (the restore has no secret scan). When the bundle you picked carries some, a line under it says "This bundle
+    also contains Agent Fleet memory — import it in Agent memory › Import & export." (with an **Open Import &
+    export** link); the import itself is **Agent Fleet memory in this bundle** under Agent memory > Import & export.
 
 ---
 
