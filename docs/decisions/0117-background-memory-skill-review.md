@@ -31,11 +31,16 @@ What the tree already provides, read for this record:
   trees) is not a write path any more: while the switch is on claude's native writer is off
   (0108 decision 6 step 2), and codex's native memory is off by default.
 - **A cheap helper-turn route.** `chatx.OneShotHeadless(ctx, feature, tier, persona, prompt, model)`
-  picks a backend (a per-feature pin, else the shared priority order claude → codex → opencode),
-  runs it headless, and records one ledger row from inside (`usagex.RecordCall`) tagged by the
-  caller's `usagex.Tag{Feature, Trigger, Ref}`. The claude backend runs with `--tools ""` and
-  `--no-session-persistence`; codex with `--ephemeral`. Titles, branch names, reply chips and
-  translations already use it.
+  picks a backend (a per-feature pin, else the shared priority order — currently claude, codex,
+  opencode, cursor, agy; muse is reachable by pin only), runs it headless, and records one ledger
+  row from inside (`usagex.RecordCall`) tagged by the caller's `usagex.Tag{Feature, Trigger, Ref}`.
+  **It is not a tool-less call on every backend.** claude runs with `--tools ""` and
+  `--no-session-persistence`, but codex's `--ephemeral` only skips persistence; opencode's
+  one-shot config (`OpencodeOneShotConfig`) denies edit and bash but not read or web access, and
+  falls back to no config at all when it cannot be written; agy's one-shot allows `read_url`. The
+  suggestion features accept that because their output is a short label; a review that reads a
+  third party's text and can be talked into fetching a URL cannot. Titles, branch names, reply
+  chips and translations already use the route.
 - **A frozen ledger enum.** A new consumer needs a `Feature*` constant in
   `internal/usagex/ledger.go`, a row in 0029 §2 (as a dated note), and Console catalogue and
   colour entries; `usage_features_catalog_test.go` fails when they drift.
@@ -62,20 +67,41 @@ What the tree already provides, read for this record:
    beside it.** The loop wakes periodically and at Agent start, and considers a session when all
    of these hold: the review switch is on and AF memory (`agentMemory`) is on; the session has a
    transcript (`Caps().CanTranscript`, which excludes shell and ssm); its status shows a real
-   turn end (`TurnEnd`, not an idle AF merely assumes) at least a settle time ago (proposed 120 s,
+   turn end (see below, not an idle AF merely assumes) at least a settle time ago (proposed 120 s,
    longer than the title's 45 s because a review is dearer); at least K new turns exist after the
    session's persisted watermark (proposed K = 10, echoing hermes' "every 10 turns"); and the
-   session is not itself a review. The watermark (the transcript position last reviewed) is stored
-   beside the store and advances only when a run finishes, so a crash or a stop re-runs the same
-   window. A failure backs off with the title suggestion's doubling shape. Any kind with a
-   transcript is eligible, scheduled and spawned sessions included; they are where unattended
-   experience accumulates.
+   session is not itself a review. Any kind with a transcript is eligible, scheduled and spawned
+   sessions included; they are where unattended experience accumulates.
+   - **Turn-end evidence.** The status record's `TurnEnd` is not enough: for agy, copilot, cursor
+     and kiro it is not set unless a Console or driver polls (`sessionx/turn_end_poll.go` only
+     records the end on a sessions-list poll, and `lastTurnEndAt` also adopts a separate
+     `ObservedTurnEnd` store), so an unattended TUI session stays `working` in the status record.
+     The loop therefore polls the live source of those kinds itself and accepts as evidence either
+     `TurnEnd` or an `ObservedTurnEnd` bound to the same record revision. It must not call
+     `PersistTurnEnd` to record what it saw: that would consume the gate the completion
+     notification uses.
+   - **A run is claimed and recoverable.** A run is keyed by the session identity and a fixed window
+     end (the transcript position when it is claimed), recorded durably *before* the helper is
+     called, so a manual and an automatic trigger cannot claim the same window and a restart resumes
+     the same run instead of inferring the window again. The run record holds the state of the
+     helper call, the queued proposals and which operations have been applied; recovery after a stop
+     between queueing and the first publish applies or skips what is recorded and never re-asks the
+     model for that window. The watermark moves to the window end when the run is finished,
+     including a run that produced no operations, only pending ones, or only no-ops; a malformed
+     reply finishes the run as failed and moves it only after the attempt budget of decision 8 is
+     spent. Two operations in one run on the same target are collapsed to the last before queueing.
 2. **The input is a redacted window, built by AF.** The helper sees: the unreviewed turns (a
    character budget, newest kept, proposed 40,000 characters), the project's current
    `memory_index` lines, and the full bodies of up to five existing memories ranked by keyword
    overlap with the window (the `memory_search` ranking), so that "patch rather than create"
-   and "read before write" are structural, not hoped for. Before the call every string passes the
-   0022 secret rules; a hit is replaced by a placeholder in the window, never sent. Tool output
+   and "read before write" are structural, not hoped for. Redaction happens on each fully decoded input string
+   (transcript turn, index line, memory body) *before* the window is cut to its budget, because a
+   cut can split a key into two pieces that no rule matches. The 0022 scanner
+   (`memoryScanContent`) is not a redactor: it returns a masked hint and a line number, merges
+   same-rule hits on a line and stops at 20 findings. So the input is built by dropping every line
+   or field with any finding, or by a redactor that returns every span; a string with a NUL byte, or
+   a scan that errors, is not sent. The same scan covers every field of the reply before it is
+   stored, not only the memory body: reason, evidence and queue metadata too. Tool output
    and fetched pages are marked as data in the prompt. This is a mitigation, not a boundary:
    the transcript can contain content a third party wrote (a web page, an issue), and the
    gate in decision 6 exists for that reason.
@@ -83,18 +109,32 @@ What the tree already provides, read for this record:
    weak, with a new ledger feature `memory.review`.** Trigger `auto` (or `manual` for "Review
    now"), `Ref` the reviewed session's name, so the ledger can show what each session's review
    cost and the usage view can show review as its own column. The backend is the feature's pin or
-   the shared order, **not necessarily the reviewed session's kind**; the transcript therefore
+   the shared order, **not necessarily the reviewed session's kind**, and **only a backend that can
+   be run with every tool, MCP server, file and network access denied is allowed**: the review
+   gets its own deny-all configuration, and when that configuration cannot be written or verified
+   the backend is skipped, never run with the default (fail closed). A backend that cannot give
+   that guarantee does not run the review. Making this true for opencode, codex and agy is a
+   required part of P1; until then claude is the only backend that qualifies. the transcript therefore
    goes to whichever provider the member already uses for assistant features. The feature gets a
    row in Settings → AI assist like the other one-shot features, where the member can pin the
    agent and model. The ledger enum, the Console catalogue, the colours and a dated note in 0029 §2
-   land in one commit (the test enforces it). Per-run bounds: one call, one retry at most, output
-   capped (proposed 5 operations, 8 KiB each).
+   land in one commit. `usage_features_catalog_test.go` enforces two of them: the Console ja
+   catalogue entry, and that the value appears in the first `| feature |` row of 0029 §2. A note
+   under the table does not satisfy the second, so the change either appends the value to that
+   row with a dated note saying why (the way earlier amendments did) or extends the test to read
+   dated additions; it does not edit the frozen text otherwise. The colours and the AI-assist row
+   are not enforced by it. Per-run bounds are mandatory from P1, not P3: a finite attempt budget
+   per window (one call, at most one retry, then the run is parked as failed and the window is
+   not offered again until new turns arrive), total input and output caps that include the index
+   lines and the bodies of decision 2 (each of which can be 200 KiB), and one shared in-flight
+   limit across sessions. Only the numbers wait for P0 and the owner (proposed: output 5
+   operations of 8 KiB each).
 4. **The model proposes; AF applies.** The reply is a JSON list of operations — memory
    `create` / `update` / `forget`, and later skill operations (decision 7) — each with the target
    name, the new text, a one-line reason, and the turn indexes that are its evidence. AF parses and
    validates it (names, limits of 0108 decision 3, base revision from the input it built); a
-   malformed reply is dropped whole. The helper never touches a file and has no tools, so a
-   confused or injected helper can produce only text that AF then checks. Write targets:
+   malformed reply is dropped whole. Given the backend contract of decision 3 (no tools, no
+   files, no network), a confused or injected helper can produce only text that AF then checks. Write targets:
    - **Memory, every kind: the AF store**, through the same `agentMemSave` / `agentMemForget`
      path as the af MCP tools, scoped by the *reviewed session's* project (0108 decision 2) with
      the user scope for kind-independent facts. The reviewed session's kind needs no write
@@ -109,9 +149,18 @@ What the tree already provides, read for this record:
    proposal is an ordinary one-commit publish, authored `review` (a value the existing
    `agentMemKindRe` already admits) with the reviewed session as author session and a
    `AF-Review-Run: <id>` trailer. The change list shows it, per-change revert and forget work as
-   they do, and "revert this run" reverts every commit that carries the id as new commits. Nothing
-   rewrites history. A proposal rejected by the member is remembered by content hash so the same
-   idea is not proposed again; a forgotten memory is never revived (the 0108 tombstone).
+   they do, and "revert this run" reverts the commits that carry the id as new commits. Nothing
+   rewrites history. The existing revert only accepts a memory's newest change, so each commit of
+   the run is reverted only if it is still that memory's latest change at the moment of the
+   revert; one that a member or agent has edited since is left as it is and reported as a
+   conflict, never overwritten. A run with several operations can therefore be rolled back
+   partially; running the revert again retries only what is still revertible. A proposal rejected by the member is remembered by content hash so the same
+   idea is not proposed again; a forgotten memory is never revived by a review. `agentMemSave` does not give that for free: a
+   create at revision 0 on a name that no longer exists is allowed, continues the tombstone's
+   revision and deletes the tombstone. A review `create` is therefore refused when a tombstone or
+   a past existence of the name is found, checked inside the same store lock as the save, and
+   checked again when a queued proposal is approved or an `auto` one is applied (the forget may
+   have happened in between).
 6. **The approval gate: proposals queue by default; publishing directly is a separate, later,
    member-chosen mode.** Three values of a per-user setting `memoryReview`: `off` (default),
    `propose`, `auto`. 0108 decision 8 argued against an approval queue because every session
@@ -153,12 +202,16 @@ What the tree already provides, read for this record:
    - a secret in a proposal: refused by the existing scan, as for an agent's write; the helper is
      not retried.
    - stale base revision, name clash: the proposal is marked stale, never merged.
-   - churn (the same proposal each window): the rejected-hash memory of decision 5, plus the
-     per-day run cap of decision 9's P3.
+   - churn (the same proposal each window): the rejected-hash memory of decision 5, plus
+     the attempt budget of decision 3 and, in `auto` mode, the daily run cap of P3.
    - concurrent reviews of the same project: the store lock and the revision check serialise;
      the loser's proposal goes stale.
    - the workspace stops mid-run: the run is lost, the watermark is unmoved, the next wake-up
-     repeats it; the cost already incurred stays in the ledger.
+     repeats it. The ledger row is written by a deferred call after the model answers, so a stop or
+     crash between billing and the answer leaves no row, and an abnormal exit may leave tokens
+     unknown. The run record of decision 1 therefore stores a durable attempt entry before dispatch,
+     and recovery links it to the usage row if one exists or marks the attempt as "cost
+     unknown" in the Console; the ADR does not promise that every cost is in the ledger.
    - a review of a review: helper calls are not sessions and have no transcript, so they are
      never reviewed.
    - the helper's text echoes the transcript into the pending queue: the queue file is a
@@ -167,15 +220,17 @@ What the tree already provides, read for this record:
 9. **Phases.** Sizes are estimates.
    - **P0, S (#2319): measure.** Transcript sizes per idle window, the cost of one helper turn,
      and the volume of hand-run proposals on a real workspace; correct the proposed caps.
-   - **P1, M (#2320): engine without publish.** Loop, watermark, redacted input, helper turn
-     with `memory.review` in the ledger, validation, the pending queue, the `memoryReview`
-     setting (`off` / `propose`), "Review now". Includes the ledger enum, catalogue and AI-assist
-     row.
+   - **P1, M (#2320): engine without publish.** Loop with its own turn-end polling, the run
+     claim and recovery record, redacted input, a deny-all backend contract that fails closed, the
+     helper turn with `memory.review` in the ledger and a durable attempt record, validation, the
+     pending queue, the mandatory attempt, input/output and in-flight bounds (numbers pending
+     P0), the `memoryReview` setting (`off` / `propose`), "Review now". Includes the ledger
+     enum, catalogue, 0029 row and AI-assist row.
    - **P2, M (#2321): approval UI and publish.** The pending list in Settings → Agent memory,
-     approve / reject, the notification, the `review` author and run id, "revert this run", the
-     rejected-hash memory.
+     approve / reject, the notification, the `review` author and run id, "revert this run" with
+     its conflict reporting, the rejected-hash memory, and the tombstone re-check at approval.
    - **P3, S (#2322): `auto` mode and budgets.** Only after the owner answers open questions 1
-     and 2; includes the daily run cap and per-run token cap.
+     and 2; adds the daily run cap on top of the bounds P1 already enforces.
    - **P4, L (#2323): learned skills.** Store, scan, always-gated approval, distribution to the
      four roots with the distinct prefix and marker.
 
