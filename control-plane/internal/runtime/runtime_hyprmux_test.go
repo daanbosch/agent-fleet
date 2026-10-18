@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -144,4 +145,76 @@ func listShimSessions(t *testing.T, endpoint, token string) int {
 		t.Fatal(err)
 	}
 	return len(body.Sessions)
+}
+
+// An orphan shim from an earlier CP is still alive, but it answers on another port, so this
+// runtime's endpoint is dead. Start must replace it rather than report "starting" forever.
+func TestHyprmuxStartReplacesOrphanThatNeverAnswers(t *testing.T) {
+	shim := buildHyprmuxShimForTest(t)
+	registry, err := filepath.Abs(filepath.Join("..", "..", "..", "workspace", "hyprmux-shim", "testdata", "sessions-v4.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := t.TempDir()
+	t.Setenv("AF_HYPRMUX_SHIM", shim)
+	t.Setenv("AF_HYPRMUX_REGISTRY", registry)
+	t.Setenv("AF_HYPRMUX_LOGS", logs)
+	f, err := NewFactory("hyprmux-host", Config{AuthMode: "dev"})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+	ws := Workspace{ContainerName: "hyprmux-host", DataDir: t.TempDir(), AgentPort: freeLoopbackPortForTest(t), AgentToken: "test-token"}
+
+	orphanPID := startOrphanShim(t, shim, registry, logs)
+	if err := os.WriteFile(filepath.Join(ws.DataDir, hyprmuxPidFile), []byte(strconv.Itoa(orphanPID)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rt := f.New(ws, SecretKeys{}, nil)
+	ctx := context.Background()
+	t.Cleanup(func() { _ = rt.Stop(context.Background()) })
+	if got := rt.State(ctx); got != "starting" {
+		t.Fatalf("with an unanswering orphan: State=%q, want starting", got)
+	}
+	if err := rt.Start(ctx); err != nil {
+		t.Fatalf("Start over an orphan: %v", err)
+	}
+	if got := rt.State(ctx); got != "running" {
+		t.Fatalf("after Start over an orphan: State=%q, want running", got)
+	}
+	if pid := readPidFile(filepath.Join(ws.DataDir, hyprmuxPidFile)); pid == orphanPID {
+		t.Fatalf("Start adopted the orphan pid %d", pid)
+	}
+	if pidAlive(orphanPID, shim) {
+		t.Fatalf("orphan pid %d still alive after Start", orphanPID)
+	}
+}
+
+// startOrphanShim runs a real shim that answers on a loopback port of its own. The port is
+// picked and then released before the shim binds it, so another process can take it in
+// between; that bind race is retried rather than reported as a fault in the code under test.
+func startOrphanShim(t *testing.T, shim, registry, logs string) int {
+	t.Helper()
+	for range 3 {
+		port := freeLoopbackPortForTest(t)
+		cmd := exec.Command(shim)
+		cmd.Env = []string{
+			"HYPRMUX_SHIM_ADDR=127.0.0.1:" + port,
+			"HYPRMUX_SHIM_TOKEN=orphan-token",
+			"HYPRMUX_REGISTRY=" + registry,
+			"HYPRMUX_AGENT_LOGS=" + logs,
+		}
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start orphan: %v", err)
+		}
+		go func() { _ = cmd.Wait() }()
+		t.Cleanup(func() { _ = cmd.Process.Kill() })
+		if err := WaitAgentHealthy(context.Background(), "http://127.0.0.1:"+port, hyprmuxReadyWait); err == nil {
+			return cmd.Process.Pid
+		}
+		_ = cmd.Process.Kill()
+	}
+	t.Fatal("orphan shim never answered on its own port")
+	return 0
 }

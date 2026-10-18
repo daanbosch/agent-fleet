@@ -21,6 +21,7 @@ import (
 const (
 	hyprmuxReadyWait = 5 * time.Second
 	hyprmuxStopGrace = 5 * time.Second
+	hyprmuxKillWait  = 2 * time.Second
 	hyprmuxPidFile   = "shim.pid"
 	hyprmuxLogFile   = "shim.log"
 )
@@ -127,8 +128,17 @@ func (h *hyprmuxRuntime) State(ctx context.Context) string {
 // (a port in use, an unreadable registry) and must surface at once.
 func (h *hyprmuxRuntime) Start(ctx context.Context) error {
 	switch h.State(ctx) {
-	case "running", "starting":
+	case "running":
 		return nil
+	case "starting":
+		if err := WaitAgentHealthy(ctx, h.Endpoint(), hyprmuxReadyWait); err == nil {
+			return nil
+		}
+		// A live pid that never answers on this port is an orphan from an earlier CP. It is
+		// replaced once below rather than adopted as "starting" forever.
+		if err := h.Stop(ctx); err != nil {
+			return err
+		}
 	}
 	_ = os.Remove(h.pidFile())
 	if err := os.MkdirAll(h.dataDir, 0o755); err != nil {
@@ -145,6 +155,9 @@ func (h *hyprmuxRuntime) Start(ctx context.Context) error {
 		"HYPRMUX_SHIM_TOKEN=" + h.token,
 		"HYPRMUX_REGISTRY=" + h.registry,
 		"HYPRMUX_AGENT_LOGS=" + h.logsDir,
+		// The hyprmux CLI finds its state under HOME and is looked up on PATH.
+		"HOME=" + os.Getenv("HOME"),
+		"PATH=" + os.Getenv("PATH"),
 	}
 	cmd.Stdout = logf
 	cmd.Stderr = logf
@@ -167,7 +180,8 @@ func (h *hyprmuxRuntime) Start(ctx context.Context) error {
 }
 
 // Stop sends SIGTERM (the shim shuts down its listener on it) and escalates to SIGKILL
-// after hyprmuxStopGrace.
+// after hyprmuxStopGrace. A shim that survives SIGKILL for hyprmuxKillWait is an error, and
+// its pid file stays so the next Start can see it.
 func (h *hyprmuxRuntime) Stop(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -175,19 +189,26 @@ func (h *hyprmuxRuntime) Stop(ctx context.Context) error {
 	pid := readPidFile(h.pidFile())
 	if pid > 0 && pidAlive(pid, h.shimBin) {
 		_ = syscall.Kill(pid, syscall.SIGTERM)
-		deadline := time.Now().Add(hyprmuxStopGrace)
-		for pidAlive(pid, h.shimBin) && time.Now().Before(deadline) {
-			time.Sleep(50 * time.Millisecond)
-		}
-		if pidAlive(pid, h.shimBin) {
+		if !waitPidGone(pid, h.shimBin, hyprmuxStopGrace) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
-			for pidAlive(pid, h.shimBin) {
-				time.Sleep(10 * time.Millisecond)
+			if !waitPidGone(pid, h.shimBin, hyprmuxKillWait) {
+				return fmt.Errorf("hyprmux shim pid %d survived SIGKILL", pid)
 			}
 		}
 	}
 	removePidFileIfPID(h.pidFile(), pid)
 	return nil
+}
+
+func waitPidGone(pid int, shimBin string, within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for pidAlive(pid, shimBin) {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return true
 }
 
 // Destroy stops the shim and removes its pid file and log. The registry and the agent logs
