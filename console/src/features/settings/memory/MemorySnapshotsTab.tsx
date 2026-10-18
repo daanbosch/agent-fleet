@@ -8,7 +8,8 @@
 //
 // A status header (last snapshot, automatic on/off, Snapshot now) sits over three views:
 // History (the snapshot list on the left, the selected row's diff on the right, then the restore
-// panel: pick a scope, then a confirm dialog), Targets (root overview, codex memories toggle,
+// panel: pick a scope, then a confirm dialog; rows left by Agent Fleet's own memory writes are
+// hidden unless asked, since Agent memory > Changes lists them), Targets (root overview, codex memories toggle,
 // automatic capture) and Export / import (P3: bundle = full history, tar.gz = latest only; import
 // replaces the selected scope). The diff uses the same <Diff> as the SCM commit pane, so there is
 // one way a diff looks rather than two.
@@ -36,6 +37,7 @@ import type { RestoreScopeState } from "./memoryRestore.tsx";
 import { RestorePanel } from "./memoryRestore.tsx";
 import { TransferSection } from "./memoryTransfer.tsx";
 import { ViewNav, useSectionView, type ViewDef } from "./viewNav.tsx";
+import { useSettingsUI, lastSnapshotsShowAf, rememberSnapshotsShowAf } from "../store.ts";
 
 // Trigger label. The trailer value the Agent returns (auto/manual/pre-restore/restore/import/agent-memory)
 // is used as the key directly and an unknown value is printed raw, so adding a new trigger
@@ -46,6 +48,10 @@ const triggerLabel = (trigger: string): string =>
 // Why a root is inactive. Same rule as the trigger label: an unknown reason is printed raw,
 // so a new reason from the Agent does not break the screen.
 const reasonLabel = (reason: string): string => tMaybe("mem.reason_" + reason) ?? reason ?? "";
+
+// The trigger of the snapshot an Agent Fleet memory write leaves. Agent memory > Changes already
+// lists those writes, so History hides them unless asked.
+const AF_TRIGGER = "agent-memory";
 
 export const SNAPSHOTS_SECTION = "memorysnapshots";
 export const SNAPSHOT_VIEWS = ["history", "targets", "transfer"] as const;
@@ -73,6 +79,8 @@ export function MemorySnapshotsTab() {
   // The restore panel. null = closed.
   const [scope, setScope] = useState<RestoreScopeState | null>(null);
   const [view, setView] = useSectionView(SNAPSHOTS_SECTION, VIEWS, "history");
+  const [showAf, setShowAf] = useState(lastSnapshotsShowAf);
+  const openSettings = useSettingsUI((s) => s.openSettings);
 
   const load = useCallback(
     async (signal: AbortSignal) => {
@@ -102,8 +110,14 @@ export function MemorySnapshotsTab() {
       setSel("");
       return;
     }
-    setSel((cur) => (cur && snaps.some((s) => s.rev === cur) ? cur : snaps[0].rev));
-  }, [snaps]);
+    // Fall back to the newest row that is listed; only when every row is hidden take a hidden one,
+    // so the pane never sits empty over a non-empty history.
+    setSel((cur) =>
+      cur && snaps.some((s) => s.rev === cur)
+        ? cur
+        : (snaps.find((s) => showAf || s.trigger !== AF_TRIGGER) ?? snaps[0]).rev,
+    );
+  }, [snaps, showAf]);
 
   // The selected row's diff (with no "from", the change that snapshot introduced).
   useEffect(() => {
@@ -238,6 +252,23 @@ export function MemorySnapshotsTab() {
   }
 
   const selected = snaps?.find((s) => s.rev === sel) ?? null;
+  // The selected row is always listed, hidden or not: a jump, or the toggle turned off while a
+  // hidden row is open, must not take away the row whose diff and Restore this point are on screen.
+  const listed = (s: Snapshot) => showAf || s.trigger !== AF_TRIGGER || s.rev === sel;
+  // The rows in order, each run of hidden ones folded into one count.
+  const rows: ({ snap: Snapshot } | { hidden: number; key: string })[] = [];
+  for (const s of snaps ?? []) {
+    if (listed(s)) rows.push({ snap: s });
+    else {
+      const last = rows[rows.length - 1];
+      if (last && "hidden" in last) last.hidden++;
+      else rows.push({ hidden: 1, key: "hidden-" + s.rev });
+    }
+  }
+  const toggleAf = (on: boolean) => {
+    setShowAf(on);
+    rememberSnapshotsShowAf(on);
+  };
 
   const defs: ViewDef[] = [
     { key: "history", label: tr("mem.view_history") },
@@ -344,6 +375,10 @@ export function MemorySnapshotsTab() {
                     {tr("mem.jump_go")}
                   </button>
                 </label>
+                <label className="mem-jump">
+                  <input type="checkbox" checked={showAf} onChange={(e) => toggleAf(e.target.checked)} />
+                  <span>{tr("mem.hist_show_af")}</span>
+                </label>
               </div>
               <div className="mem-body">
                 <ul className="mem-list">
@@ -352,26 +387,37 @@ export function MemorySnapshotsTab() {
                   ) : snaps.length === 0 ? (
                     <li className="muted pad">{tr("mem.history_empty")}</li>
                   ) : (
-                    snaps.map((s) => (
-                      <li key={s.rev}>
-                        <button
-                          type="button"
-                          className={"mem-snap" + (s.rev === sel ? " active" : "")}
-                          aria-current={s.rev === sel ? "true" : undefined}
-                          onClick={() => setSel(s.rev)}
-                        >
-                          <span className="mem-snap-when">{fmtDateTime(s.at, DATETIME_FULL)}</span>
-                          <span className={"mem-badge trig-" + s.trigger}>{triggerLabel(s.trigger)}</span>
-                          <span className="mem-snap-what muted">
-                            {s.projects.length > 0
-                              ? s.projects.map((p) => p.display).join(tr("common.list_sep"))
-                              : s.kinds.join(tr("common.list_sep"))}
-                            {" · "}
-                            {tr("mem.n_files", { n: s.files })}
-                          </span>
-                        </button>
-                      </li>
-                    ))
+                    rows.map((row) =>
+                      "hidden" in row ? (
+                        <li key={row.key} className="mem-snap-hidden muted pad">
+                          <span>{tr("mem.hist_af_hidden", { n: row.hidden })}</span>{" "}
+                          <button type="button" className="linklike" onClick={() => openSettings("memory:changes")}>
+                            {tr("mem.hist_af_changes")}
+                          </button>
+                        </li>
+                      ) : (
+                        <li key={row.snap.rev}>
+                          <button
+                            type="button"
+                            className={"mem-snap" + (row.snap.rev === sel ? " active" : "")}
+                            aria-current={row.snap.rev === sel ? "true" : undefined}
+                            onClick={() => setSel(row.snap.rev)}
+                          >
+                            <span className="mem-snap-when">{fmtDateTime(row.snap.at, DATETIME_FULL)}</span>
+                            <span className={"mem-badge trig-" + row.snap.trigger}>
+                              {triggerLabel(row.snap.trigger)}
+                            </span>
+                            <span className="mem-snap-what muted">
+                              {row.snap.projects.length > 0
+                                ? row.snap.projects.map((p) => p.display).join(tr("common.list_sep"))
+                                : row.snap.kinds.join(tr("common.list_sep"))}
+                              {" · "}
+                              {tr("mem.n_files", { n: row.snap.files })}
+                            </span>
+                          </button>
+                        </li>
+                      ),
+                    )
                   )}
                 </ul>
                 <div className="mem-diff">

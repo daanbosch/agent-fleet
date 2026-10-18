@@ -881,3 +881,7 @@ records the structure the maintainer chose; the decisions above are unchanged an
   point" belongs to snapshots alone. That label change is a later step and not part of this one.
 
 Follow-ups: #2324.
+
+Update (2026-10-18, #2324 PR 4): the label landed as "Unforget" (`mem.br_unforget`, ja 忘却を取り消す). The same pass
+hid the `agent memory` rows in Memory snapshots > History behind "Show Agent Fleet memory writes", since Agent memory >
+Changes lists those writes already.
