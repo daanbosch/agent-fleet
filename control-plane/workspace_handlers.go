@@ -802,6 +802,12 @@ type sessionWire struct {
 	// "shell"), which only picks the badge's wording. Dropping it here would not hide the
 	// badge, just silently pin every session to the generic "running in background" wording.
 	BackgroundBusyReason string `json:"backgroundBusyReason,omitempty"`
+	// BackgroundSince / BackgroundAgeSec pass through when the current background-busy period
+	// began (RFC3339) and its age on the Agent's clock, the value the reaper compares with
+	// background_hold_max. Dropped here, a dev server's wrapper shell holds the Workspace
+	// forever (#2338). Not persisted to the DB mirror.
+	BackgroundSince  string `json:"backgroundSince,omitempty"`
+	BackgroundAgeSec int    `json:"backgroundAgeSec,omitempty"`
 	// ProgressAt passes through the Agent's last sign of progress for a busy row (RFC3339).
 	// Dropped here, the reaper never sees it and a frozen "working" row holds the Workspace
 	// forever. Not persisted to the DB mirror (a stopped workspace has no busy row).

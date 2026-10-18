@@ -330,7 +330,10 @@ Control Plane が配信時に同梱の画像を塗り替えるので、環境ご
   「今から使う」が明確な操作（セッションの作成・fork・再開、持ち越し質問への回答、SSM ノード探索）
   のときだけ自動で起こします。**ターミナルを開いても起動しませんし、閲覧や Console のリロードでも
   起動しません**（「停止しています。起動してください」を返します）。開きっぱなしのタブが Workspace を
-  温め続けることはありません。
+  温め続けることはありません。バックグラウンド作業（アイドルのセッションが起動した開発サーバや
+  `run_in_background` のタスク）が Workspace を抱える時間は最大 **2 時間**です
+  （`AF_BACKGROUND_HOLD_MAX`、テナント単位は `background_hold_max`。`0` で無制限）。超えると
+  Workspace を起こし続ける理由から外れます。本当に長いジョブを残すには「自動停止しない」ピンを使います。
   資源の節約に有効です。env の意味は `deploy/compose/.env.example`、仕組みは
   `docs/build/09-deploy.ja.md` §9.4。ターミナルの claude / agy / codex / cursor / copilot / kiro / opencode セッションが「作業中」と表示されて
   Workspace を起こし続けるのは、生きている兆候がある間だけです。出力・状態の変化・実行中の
