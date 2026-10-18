@@ -88,6 +88,12 @@ afterEach(() => {
 describe("MemorySnapshotsTab diff pane without a selection", () => {
   const loadingText = t("common.loading");
   const diffPane = () => host!.querySelector(".mem-diff");
+  const setValue = async (el: HTMLInputElement, v: string) => {
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value")!.set!.call(el, v);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  };
   const rootsOk = {
     roots: [{ kind: "claude", label: "Claude", scopes: true, files: 3, bytes: 100, projects: [] }],
     inactive: [],
@@ -134,6 +140,19 @@ describe("MemorySnapshotsTab diff pane without a selection", () => {
     expect(calls()).toBe(before + 1);
     expect(text()).not.toContain(t("mem.history_failed", { msg: "boom" }));
     expect(host!.querySelector(".mem-snap")).not.toBeNull();
+  });
+
+  it("disables the date jump while the list error is shown, so no row and diff appear beside it", async () => {
+    stub({ error: "boom" });
+    await mount();
+    await setValue(host!.querySelector<HTMLInputElement>('input[type="datetime-local"]')!, "2026-10-03T13:00");
+    const go = Array.from(host!.querySelectorAll<HTMLButtonElement>("button")).find(
+      (b) => b.textContent === t("mem.jump_go"),
+    )!;
+    expect(go.disabled).toBe(true);
+    await act(async () => go.click());
+    expect(api.mock.calls.some((c) => String(c[0]).includes("before="))).toBe(false);
+    expect(host!.querySelector(".mem-diff-head")).toBeNull();
   });
 
   it("keeps 'No snapshots yet' for a successful empty list, without a retry", async () => {

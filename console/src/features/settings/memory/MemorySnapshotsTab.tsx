@@ -374,7 +374,8 @@ export function MemorySnapshotsTab() {
                     value={at}
                     onChange={(e) => setAt(e.target.value)}
                   />
-                  <button type="button" disabled={!at} onClick={() => void jumpTo()}>
+                  {/* A jump would select a row beside the list error; Retry is the way back. */}
+                  <button type="button" disabled={!at || !!snapErr} onClick={() => void jumpTo()}>
                     {tr("mem.jump_go")}
                   </button>
                 </label>
