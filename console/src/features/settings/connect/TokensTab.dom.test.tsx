@@ -39,6 +39,8 @@ describe("TokensTab what-this-token-can-do section", () => {
       expect(text).toContain(tool);
     }
     expect(text).toContain(t("tokens.can_stopped"));
+    // A write token with “Read only” is refused by the Agent, so the write line must name the setting.
+    expect(t("tokens.can_memory_write")).toMatch(/Read and write|読み書き/);
 
     const link = Array.from(host.querySelectorAll("button")).find((b) => b.textContent === t("tokens.can_memory_setting_link"));
     expect(link).toBeTruthy();
