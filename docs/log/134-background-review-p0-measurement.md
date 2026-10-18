@@ -3,8 +3,8 @@
 status: **Measured (2026-10-18).** ADR 0117 (decisions 1–3 and 9) proposed a 120 s settle, K = 10
 turns, a 40,000-character input, 5 output operations of 8 KiB, one review in flight and a daily
 run cap, none of them measured. This journal replaces those proposals with figures from one real
-workspace and recommends corrected caps (section 6). The caps are **recommendations awaiting the
-owner's confirmation**; the ADR text is unchanged and carries a dated note that points here.
+workspace and recommends corrected caps (section 6). **The owner confirmed the caps on 2026-10-18** and P1
+(#2320) builds to them; the ADR text is unchanged and carries a dated note that points here.
 Sizes come from the claude and codex transcripts of one development workspace; the helper cost
 comes from three hand-run calls. Both are small and unrepresentative in ways listed in section 7.
 
@@ -323,8 +323,10 @@ tried.
 
 ## 6. Corrected caps
 
-All values are **recommendations awaiting the owner's confirmation** (ADR 0117 open question 2
-says the numbers are confirmed after P0).
+All values were **confirmed by the owner on 2026-10-18** (ADR 0117 open question 2 said the
+numbers are confirmed after P0). The daily cap and the queue bound remain policy assumptions from
+one heavy-use sample, to be revisited from P1 traffic (#2333); the index and body sizes remain
+assumptions for P1 to confirm.
 
 | Proposal (ADR 0117) | Measured basis | Recommended |
 |---|---|---|
@@ -348,5 +350,4 @@ says the numbers are confirmed after P0).
 - Three helper calls. Cost per run is a fit to three points plus a floor call.
 
 Follow-ups: #2320 (P1 owns the thinking and MCP controls of the findings above and the
-deny-all contract), #2333 (the measurements section 5 lists as not done); #2319 stays open until
-the owner confirms the caps.
+deny-all contract), #2333 (the measurements section 5 lists as not done).

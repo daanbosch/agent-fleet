@@ -318,7 +318,8 @@ questions and the decisions stay as written; this records the answers.
 
 **Note (2026-10-18, #2319): phase P0 measured the proposed caps; the figures and the recommended caps are in
 `docs/log/134-background-review-p0-measurement.md`.** Nothing above is rewritten, and the caps below are
-**recommendations awaiting the owner's confirmation**; P1 does not start before that.
+**confirmed by the owner on 2026-10-18**, and P1 (#2320) builds to them. The daily cap and the queue bound remain
+policy assumptions from one heavy-use sample, to be revisited from P1 traffic (#2333).
 
 - **What a turn is:** a displayable transcript row (about 12 per user prompt), so K = 10 means roughly one review per
   prompt.
