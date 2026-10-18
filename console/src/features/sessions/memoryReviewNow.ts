@@ -13,8 +13,8 @@ interface ReviewStatus {
     running?: boolean;
     // How the last "Review now" ended (written every time one ends, even when there was nothing to
     // review): "done", "empty", "unreadable", or the code of the refusal that stopped it.
-    manual?: { at: string; outcome: string };
-    last?: { state: string; queued: number; at: string };
+    // Totals over every window that review worked through (counts only).
+    manual?: { at: string; outcome: string; windows?: number; queued?: number; failed?: number };
   };
 }
 
@@ -52,6 +52,9 @@ export async function reviewSessionNow(name: string, notify: Notify, sleep: (ms:
     const s = st?.session;
     if (!s || s.running) continue;
     if (!s.manual || s.manual.at === prevAt) continue; // this review has not ended yet
+    const queued = s.manual.queued ?? 0;
+    // What the windows before a refusal already queued is not lost with it.
+    if (queued > 0) notify(t("srow.memory_review_queued", { n: queued }), { kind: "success" });
     if (s.manual.outcome === "empty") {
       notify(t("srow.memory_review_empty"), { kind: "info" });
       return;
@@ -64,10 +67,9 @@ export async function reviewSessionNow(name: string, notify: Notify, sleep: (ms:
       notify(t(REFUSAL[s.manual.outcome] ?? "srow.memory_review_unknown"));
       return;
     }
-    if (!s.last) notify(t("srow.memory_review_none"), { kind: "info" });
-    else if (s.last.state !== "done") notify(t("srow.memory_review_failed"), { kind: "warn" });
-    else if (s.last.queued > 0) notify(t("srow.memory_review_queued", { n: s.last.queued }), { kind: "success" });
-    else notify(t("srow.memory_review_none"), { kind: "info" });
+    // Some windows may have got nothing usable, whatever the others queued.
+    if ((s.manual.failed ?? 0) > 0) notify(t("srow.memory_review_failed"), { kind: "warn" });
+    else if (queued === 0) notify(t("srow.memory_review_none"), { kind: "info" });
     return;
   }
 }

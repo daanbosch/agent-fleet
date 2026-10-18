@@ -426,43 +426,59 @@ func (l *Loop) ReviewNow(name string) error {
 // reviewManually works through the windows of one manual review and says how it ended: "done",
 // "empty" (nothing new after the watermark), "unreadable" (the transcript could not be read), or
 // the refusal code of the error that stopped it.
-func (l *Loop) reviewManually(ctx context.Context, c Candidate) string {
+func (l *Loop) reviewManually(ctx context.Context, c Candidate) ManualInfo {
 	turns, err := l.Source.Turns(c)
 	if err != nil {
 		log.Printf("memory review: %s: transcript unreadable", c.Name)
-		return "unreadable"
+		return ManualInfo{Outcome: "unreadable"}
 	}
-	outcome := "done"
+	out := ManualInfo{Outcome: "done"}
 	for i := 0; i < maxWindowsPerTrigger; i++ {
 		res, err := l.Reviewer.Review(ctx, Request{Key: c.Key, Session: c.Name, Trigger: TriggerManual, Turns: turns, FirstNumber: 1})
 		switch {
 		case err != nil:
-			return refusalCode(err)
+			out.Outcome = refusalCode(err) // what the earlier windows queued stays in the counts
+			return out
 		case res.State == "empty":
 			if i == 0 {
-				outcome = "empty"
+				out.Outcome = "empty"
 			}
-			return outcome
-		case !res.Terminal() || !res.More:
-			return outcome
+			return out
+		}
+		out.Windows++
+		out.Queued += res.Queued
+		out.Skipped += res.Skipped
+		if res.State != StateDone {
+			out.Failed++ // parked, or waiting to retry
+		}
+		if !res.Terminal() || !res.More {
+			return out
 		}
 	}
-	return outcome
+	return out
 }
 
-// ManualInfo is how the last "Review now" of a session ended.
+// ManualInfo is how the last "Review now" of a session ended: the outcome, and the totals over
+// every window that review worked through (counts only; the last run alone says nothing of the
+// others). A refusal part way keeps what the earlier windows queued.
 type ManualInfo struct {
 	At      time.Time `json:"at"`
 	Outcome string    `json:"outcome"`
+	Windows int       `json:"windows"`
+	Queued  int       `json:"queued"`
+	Skipped int       `json:"skipped"`
+	// Failed counts the windows that ended without a usable reply (parked, or waiting to retry).
+	Failed int `json:"failed"`
 }
 
-func (l *Loop) setManual(name, outcome string) {
+func (l *Loop) setManual(name string, info ManualInfo) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.manual == nil {
 		l.manual = map[string]ManualInfo{}
 	}
-	l.manual[name] = ManualInfo{At: l.now(), Outcome: outcome}
+	info.At = l.now()
+	l.manual[name] = info
 }
 
 // refusalCode is the closed vocabulary Status reports.

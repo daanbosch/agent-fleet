@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -67,6 +68,10 @@ func newLoopHarness(t *testing.T) *loopHarness {
 	lp := &Loop{Reviewer: h.reviewer(), Source: src, Enabled: func() bool { return h.enabled },
 		Now: func() time.Time { return h.now }, Settle: DefaultSettle, Interval: time.Hour, Lookback: DefaultLookback,
 		running: map[string]bool{}, wake: make(chan struct{}, 1)}
+	// Whatever the test started is stopped and joined before the harness's own cleanups restore
+	// HOME and CLAUDE_CONFIG_DIR (cleanups run last-in first-out): a goroutine left over would
+	// write into the next test's state directory.
+	t.Cleanup(func() { lp.Shutdown(30 * time.Second) })
 	return &loopHarness{harness: h, src: src, loop: lp}
 }
 
@@ -390,8 +395,12 @@ func TestStartTicksAtOnceAndStopsWithItsContext(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	cancel()
-	time.Sleep(100 * time.Millisecond)
-	// Wake after cancel must not block.
+	// The loop's goroutine is joined, not waited for by the clock: Shutdown returns when it is done.
+	lh.loop.Shutdown(30 * time.Second)
+	if lh.loop.Running("a") {
+		t.Fatal("a review is still running after Shutdown")
+	}
+	// Wake after the loop has ended must not block.
 	lh.loop.Wake()
 	lh.loop.Wake()
 }
@@ -483,5 +492,96 @@ func TestShutdownCancelsTheHelperCallOfBothPaths(t *testing.T) {
 			}
 			_ = c
 		})
+	}
+}
+
+// A manual review over several windows reports the total, not the last run's: a first window that
+// queued a proposal followed by an empty one is not "nothing worth keeping", and a refusal part way
+// keeps what was already queued.
+func TestManualReviewTotalsEveryWindow(t *testing.T) {
+	long := func() []transcript.Turn {
+		var ts []transcript.Turn
+		for i := 0; i < 50; i++ {
+			ts = append(ts, user(fmt.Sprintf("t%02d ", i)+repeat("x", 1200)))
+		}
+		return ts
+	}
+	late := `{"ops":[{"op":"create","scope":"project","name":"late-note","type":"user","description":"d","body":"b","reason":"r","evidence":[50]}]}`
+	for name, tc := range map[string]struct {
+		replies []func() (string, error)
+		want    ManualInfo
+	}{
+		"first window queues, second is empty": {
+			[]func() (string, error){say(goodReply("early-note")), say(`{"ops":[]}`)},
+			ManualInfo{Outcome: "done", Windows: 2, Queued: 1},
+		},
+		"only the second window queues": {
+			[]func() (string, error){say(`{"ops":[]}`), say(late)},
+			ManualInfo{Outcome: "done", Windows: 2, Queued: 1},
+		},
+		"a refusal in the second window keeps the first's proposal": {
+			[]func() (string, error){say(goodReply("early-note")), fail(fmt.Errorf("%w: probe", chatx.ErrDenyAllUnavailable))},
+			ManualInfo{Outcome: "no_backend", Windows: 1, Queued: 1},
+		},
+		"a window that gets nothing usable is counted": {
+			[]func() (string, error){say(goodReply("early-note")), say("not json")},
+			ManualInfo{Outcome: "done", Windows: 2, Queued: 1, Failed: 1},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			lh := newLoopHarness(t)
+			lh.add("long", 5*time.Second, long())
+			lh.replies = tc.replies
+			if err := lh.loop.ReviewNow("long"); err != nil {
+				t.Fatal(err)
+			}
+			waitIdle(t, lh.loop, "long")
+			got := lh.loop.Status("long").Manual
+			if got == nil {
+				t.Fatal("no manual outcome")
+			}
+			got.At = time.Time{}
+			if *got != tc.want {
+				t.Fatalf("manual = %+v, want %+v", *got, tc.want)
+			}
+		})
+	}
+}
+
+// Shutdown returns only once the loop's goroutine is done with its wake-up, so a test (or the
+// Agent) never has work running past it.
+type slowSource struct {
+	fakeSource
+	entered chan struct{}
+	release chan struct{}
+	done    atomic.Bool
+}
+
+func (s *slowSource) Candidates() []Candidate {
+	select {
+	case s.entered <- struct{}{}:
+	default:
+	}
+	<-s.release
+	s.done.Store(true)
+	return nil
+}
+
+func TestShutdownWaitsForTheWakeUpInFlight(t *testing.T) {
+	lh := newLoopHarness(t)
+	src := &slowSource{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	lh.loop.Source = src
+	lh.loop.Start(context.Background())
+	<-src.entered
+	// With a budget too short for the stuck wake-up, Shutdown gives up and says nothing is joined.
+	lh.loop.Shutdown(20 * time.Millisecond)
+	if src.done.Load() {
+		t.Fatal("the wake-up finished before it was released")
+	}
+	// With room, it waits for the wake-up to finish.
+	go func() { time.Sleep(50 * time.Millisecond); close(src.release) }()
+	lh.loop.Shutdown(10 * time.Second)
+	if !src.done.Load() {
+		t.Fatal("Shutdown returned while the wake-up was still running")
 	}
 }

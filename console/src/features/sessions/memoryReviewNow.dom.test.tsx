@@ -35,9 +35,9 @@ describe("reviewSessionNow", () => {
 
   it("says how a finished review ended: proposals queued", async () => {
     apiMock
-      .mockResolvedValueOnce(status({ running: false, manual: manual("T0", "done"), last: { state: "done", queued: 0, at: "T0" } })) // before
+      .mockResolvedValueOnce(status({ running: false, manual: manual("T0", "done") })) // before
       .mockResolvedValueOnce(status({ running: true, manual: manual("T0", "done") })) // still running
-      .mockResolvedValueOnce(status({ running: false, manual: manual("T1", "done"), last: { state: "done", queued: 2, at: "T1" } }));
+      .mockResolvedValueOnce(status({ running: false, manual: { ...manual("T1", "done"), windows: 1, queued: 2 } }));
     apiJSONMock.mockResolvedValue({ started: true });
     await reviewSessionNow("a", notify, noSleep);
     expect(notify).toHaveBeenNthCalledWith(1, t("srow.memory_review_started"), { kind: "info" });
@@ -46,19 +46,48 @@ describe("reviewSessionNow", () => {
 
   it("does not take the previous review's outcome for this one", async () => {
     apiMock
-      .mockResolvedValueOnce(status({ running: false, manual: manual("T0", "done"), last: { state: "done", queued: 5, at: "T0" } }))
-      .mockResolvedValueOnce(status({ running: false, manual: manual("T0", "done"), last: { state: "done", queued: 5, at: "T0" } })) // not ended yet
-      .mockResolvedValueOnce(status({ running: false, manual: manual("T1", "done"), last: { state: "done", queued: 0, at: "T1" } }));
+      .mockResolvedValueOnce(status({ running: false, manual: { ...manual("T0", "done"), queued: 5 } }))
+      .mockResolvedValueOnce(status({ running: false, manual: { ...manual("T0", "done"), queued: 5 } })) // not ended yet
+      .mockResolvedValueOnce(status({ running: false, manual: { ...manual("T1", "done"), windows: 1, queued: 0 } }));
     apiJSONMock.mockResolvedValue({ started: true });
     await reviewSessionNow("a", notify, noSleep);
     expect(notify).toHaveBeenLastCalledWith(t("srow.memory_review_none"), { kind: "info" });
   });
 
-  // A session with nothing new writes no run record at all: the manual outcome is what ends the wait.
+  // The totals are over every window the review worked through, not the last run's: a first window
+  // that queued a proposal followed by an empty one is not "nothing worth keeping".
+  it("reports the total over several windows, and keeps what was queued before a refusal", async () => {
+    apiMock
+      .mockResolvedValueOnce(status({ running: false }))
+      .mockResolvedValueOnce(status({ running: false, manual: { ...manual("T1", "done"), windows: 2, queued: 1 } }));
+    apiJSONMock.mockResolvedValue({ started: true });
+    await reviewSessionNow("a", notify, noSleep);
+    expect(notify).toHaveBeenLastCalledWith(t("srow.memory_review_queued", { n: 1 }), { kind: "success" });
+    expect(notify).not.toHaveBeenCalledWith(t("srow.memory_review_none"), expect.anything());
+
+    notify.mockReset();
+    apiMock.mockReset();
+    apiMock
+      .mockResolvedValueOnce(status({ running: false }))
+      .mockResolvedValueOnce(status({ running: false, manual: { ...manual("T1", "daily_cap"), windows: 1, queued: 2 } }));
+    await reviewSessionNow("a", notify, noSleep);
+    expect(notify).toHaveBeenCalledWith(t("srow.memory_review_queued", { n: 2 }), { kind: "success" });
+    expect(notify).toHaveBeenLastCalledWith(t("srow.memory_review_daily_cap"));
+
+    notify.mockReset();
+    apiMock.mockReset();
+    apiMock
+      .mockResolvedValueOnce(status({ running: false }))
+      .mockResolvedValueOnce(status({ running: false, manual: { ...manual("T1", "done"), windows: 2, queued: 1, failed: 1 } }));
+    await reviewSessionNow("a", notify, noSleep);
+    expect(notify).toHaveBeenCalledWith(t("srow.memory_review_queued", { n: 1 }), { kind: "success" });
+    expect(notify).toHaveBeenLastCalledWith(t("srow.memory_review_failed"), { kind: "warn" });
+  });
+
   it("answers a review that found nothing new, without a run record changing", async () => {
     apiMock
-      .mockResolvedValueOnce(status({ running: false, manual: manual("T0", "done"), last: { state: "done", queued: 1, at: "T0" } }))
-      .mockResolvedValueOnce(status({ running: false, manual: manual("T1", "empty"), last: { state: "done", queued: 1, at: "T0" } }));
+      .mockResolvedValueOnce(status({ running: false, manual: manual("T0", "done") }))
+      .mockResolvedValueOnce(status({ running: false, manual: manual("T1", "empty") }));
     apiJSONMock.mockResolvedValue({ started: true });
     await reviewSessionNow("a", notify, noSleep);
     expect(notify).toHaveBeenLastCalledWith(t("srow.memory_review_empty"), { kind: "info" });
@@ -74,17 +103,13 @@ describe("reviewSessionNow", () => {
     expect(notify).toHaveBeenLastCalledWith(t("srow.memory_review_unreadable"), { kind: "warn" });
   });
 
-  it("says a failed or retrying run got nothing", async () => {
-    for (const state of ["failed", "claimed"]) {
-      notify.mockReset();
-      apiMock.mockReset();
-      apiMock
-        .mockResolvedValueOnce(status({ running: false }))
-        .mockResolvedValueOnce(status({ running: false, manual: manual("T1", "done"), last: { state, queued: 0, at: "T1" } }));
-      apiJSONMock.mockResolvedValue({ started: true });
-      await reviewSessionNow("a", notify, noSleep);
-      expect(notify).toHaveBeenLastCalledWith(t("srow.memory_review_failed"), { kind: "warn" });
-    }
+  it("says a review whose windows got nothing usable failed", async () => {
+    apiMock
+      .mockResolvedValueOnce(status({ running: false }))
+      .mockResolvedValueOnce(status({ running: false, manual: { ...manual("T1", "done"), windows: 1, failed: 1 } }));
+    apiJSONMock.mockResolvedValue({ started: true });
+    await reviewSessionNow("a", notify, noSleep);
+    expect(notify).toHaveBeenLastCalledWith(t("srow.memory_review_failed"), { kind: "warn" });
   });
 
   it("names the reason a review stopped", async () => {

@@ -455,7 +455,9 @@ approval screen, which the setting's own text says.
   the CP now puts on every relayed settings write. Turning the review off, or any other change, needs nothing.
 - **"Review now" always answers.** How the last manual review ended (`done`, `empty` for nothing new after the
   watermark, `unreadable`, or the code of the refusal that stopped it) is part of the status, so a review that
-  changes no run record can still be waited for.
+  changes no run record can still be waited for. It also totals the windows, proposals queued and failed windows over
+  every window that review worked through, so a first window's proposal is not lost behind an empty second one or
+  a refusal part way.
 - **Shutdown** stops the loop taking work and cancels the helper call in flight, automatic or manual, so no CLI is
   left behind; the interrupted attempt stays `dispatched` for the next start to settle.
 
