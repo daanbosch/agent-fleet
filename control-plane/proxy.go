@@ -86,6 +86,10 @@ func auditActionTarget(r *http.Request) (action, target string, ok bool) {
 			// Only a commit id is copied into the ledger: the hint is free text the Agent never
 			// reads, so anything else is recorded as an empty target.
 			return "memory.entry.revert", auditCommitHint(q.Get("commit")), true
+		case p == "/api/agents/memory-review/run":
+			// ADR 0117: the member starts a review of one session now. The Console repeats the
+			// session name in the query; only a name-shaped value is recorded, never a body.
+			return "memory.review.run", auditSessionNameHint(q.Get("session")), true
 		case p == "/api/agents/memory/entries/pin":
 			// #1703: the member pins or unpins a memory. The Console repeats the project id in the query;
 			// only an id-shaped value is recorded, never the free-text memory name.
@@ -591,6 +595,16 @@ var agentMemProjectIDRe = regexp.MustCompile(`^[a-z0-9._-]{1,40}-[0-9a-f]{12}$`)
 // auditProjectHint keeps a project-id-shaped audit hint and drops anything else.
 func auditProjectHint(s string) string {
 	if agentMemProjectIDRe.MatchString(s) {
+		return s
+	}
+	return ""
+}
+
+var auditSessionNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,40}$`)
+
+// auditSessionNameHint keeps a session-name-shaped audit hint and drops anything else.
+func auditSessionNameHint(s string) string {
+	if auditSessionNameRe.MatchString(s) {
 		return s
 	}
 	return ""

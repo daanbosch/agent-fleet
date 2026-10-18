@@ -943,6 +943,10 @@ func registerAgentEnvRoutes(mux *http.ServeMux, cfg config) {
 	mux.HandleFunc("POST /api/agents/memory/entries/revert", rest)
 	mux.HandleFunc("GET /api/agents/memory/entries/list", rest)
 	mux.HandleFunc("POST /api/agents/memory/entries/pin", rest)
+	// The background memory review (ADR 0117): the member's "Review now" for one session, and the
+	// review's status. The CP signs the run (member_origin.go) and audits it (proxy.go).
+	mux.HandleFunc("GET /api/agents/memory-review", rest)
+	mux.HandleFunc("POST /api/agents/memory-review/run", rest)
 	// The member's create/edit (#1997). The CP signs it, pin and revert (member_origin.go).
 	mux.HandleFunc("POST /api/agents/memory/entries/member-save", rest)
 	mux.HandleFunc("GET /api/agents/memory/entries/member-read", rest)

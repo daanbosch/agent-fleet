@@ -4,6 +4,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/afdb"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/fleetgraph"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/memoryx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memreview"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/sessionsearch"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/sessionx"
 	"net/http"
@@ -514,6 +515,12 @@ func buildMux() *http.ServeMux {
 	mux.HandleFunc("GET /agents/memory/entries/changes", memoryx.HandleAgentMemoryChanges)
 	mux.HandleFunc("GET /agents/memory/entries/diff", memoryx.HandleAgentMemoryChangeDiff)
 	mux.Handle("POST /agents/memory/entries/revert", memberorigin.Require(memoryx.MemberWriteMaxRequest, http.HandlerFunc(memoryx.HandleAgentMemoryRevert)))
+	// The background memory review (ADR 0117): the member's "Review now" for a session, which
+	// spends tokens and sends an excerpt to a model provider, so it answers only a member-origin
+	// mark; and its status, which reads only counts and states. Outside /agents/memory/ on
+	// purpose: these are not memory tools and no MCP tool reaches them.
+	mux.Handle("POST /agents/memory-review/run", memberorigin.Require(memreview.RunMaxRequest, http.HandlerFunc(memreview.HandleRun)))
+	mux.HandleFunc("GET /agents/memory-review", memreview.HandleStatus)
 	// The member's list of every memory, and the pin (#1703). No MCP tool
 	// reaches the pin route.
 	mux.HandleFunc("GET /agents/memory/entries/list", memoryx.HandleAgentMemoryList)

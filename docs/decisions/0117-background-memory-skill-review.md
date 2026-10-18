@@ -415,3 +415,35 @@ Nothing publishes and nothing triggers a review yet.
   (`ForgetMemory`); a rejected idea and an identical pending one are not queued again.
 
 Follow-ups: #2320 (part C), #2321, #2322.
+
+**Note (2026-10-18, #2320): part C of P1 (the trigger, "Review now" and the setting's control) fixes these
+readings.** Still nothing publishes: proposals only accumulate in the pending queue until P2 (#2321) adds the
+approval screen, which the setting's own text says.
+
+- **The loop** wakes at Agent start and every minute (and when the switch is turned on), and checks the switch
+  (`agentMemory` and `memoryReview`) at every wake-up and again before each call. It considers a session with a
+  transcript that is not archived, whose newest turn ended at least 300 s ago, with at least 30 new turns or
+  3 new user prompts after its watermark (a displayable row counts as a turn; compaction summaries do not). A run
+  that is open is resumed whatever the thresholds say. At most 5 sessions and 10 windows per trigger are handled
+  per wake-up; a global limit (no deny-all backend, daily cap, full queue, another review in flight) ends the
+  wake-up and is logged once an hour.
+- **Turn-end evidence** is the status store's own: a persisted `TurnEnd` (the hook kinds and the managed
+  drivers), or, for agy, copilot, cursor and kiro, which report nothing, an end the loop observed itself by
+  polling the kind's live source and recording it with `status.RecordTurnEnd`, bound to the status record's
+  revision. It never persists an idle, so the completion notification's gate is untouched. A kind with a
+  transcript and neither (a muse TUI session, say) gets no automatic review: it fails closed, and "Review now"
+  works for it.
+- **Cost guards that are P1 assumptions:** only sessions whose last turn ended within 48 hours are looked at
+  automatically (turning the setting on must not spend the daily cap on every old session at once; older ones are
+  left to "Review now"), and a turn end that was looked at is remembered durably so a restart does not parse
+  every transcript again. A session is identified by its status id and creation time, so a recreated session does
+  not inherit the old watermark.
+- **"Review now"** (`POST /agents/memory-review/run`) is a member action: it answers only the Control Plane's
+  member-origin mark (ADR 0113), the CP signs and audits it (`memory.review.run`, session-name hint only), and it
+  starts the review in the background and answers 202; `GET /agents/memory-review?session=` reports counts and
+  states, never text. It ignores the settle time, the thresholds and the backoff and nothing else.
+- **The setting** is in Settings > Agent memory > Settings and discloses that a redacted excerpt goes to the
+  provider the AI-assist setting picks for the feature, which may differ from the session's own, that it costs
+  tokens, and that nothing is saved unapproved. The AI-assist card appears while the setting is on.
+
+Follow-ups: #2321, #2322.

@@ -1,0 +1,64 @@
+// "Suggest memories now" for one session (ADR 0117, "Review now"). The Agent starts the review in
+// the background and answers at once (a review is a model call), so this asks it to start, then
+// watches the session's review status until it is not running any more and says how it ended.
+// The member-origin mark that lets this request through is put on it by the Control Plane.
+import { api, apiJSON, errText } from "../../core/api/client.ts";
+import { t } from "../../lib/i18n/index.ts";
+import type { MsgKey } from "../../lib/i18n/index.ts";
+
+type Notify = (message: string, opts?: { kind?: "error" | "warn" | "info" | "success" }) => void;
+
+interface ReviewStatus {
+  session?: {
+    running?: boolean;
+    refused?: string;
+    last?: { state: string; queued: number; at: string };
+  };
+}
+
+const POLL_MS = 3000;
+const POLL_MAX = 60;
+
+// The Agent's error codes, and the refusal words its status uses, as member-facing text.
+const REFUSAL: Record<string, MsgKey> = {
+  memory_review_off: "srow.memory_review_off",
+  disabled: "srow.memory_review_off",
+  memory_review_busy: "srow.memory_review_busy",
+  busy: "srow.memory_review_busy",
+  daily_cap: "srow.memory_review_daily_cap",
+  queue_full: "srow.memory_review_queue_full",
+  no_backend: "srow.memory_review_no_backend",
+};
+
+const statusPath = (name: string) => "api/agents/memory-review?session=" + encodeURIComponent(name);
+
+export async function reviewSessionNow(name: string, notify: Notify, sleep: (ms: number) => Promise<void> = delay): Promise<void> {
+  const before: ReviewStatus | null = await api(statusPath(name)).catch(() => null);
+  const prevAt = before?.session?.last?.at ?? "";
+  const res = await apiJSON("api/agents/memory-review/run?session=" + encodeURIComponent(name), "POST", { session: name }).catch(
+    () => ({ error: { code: "unreachable" } }),
+  );
+  if (res?.error) {
+    const key = REFUSAL[res.error.code ?? ""];
+    notify(key ? t(key) : t("srow.memory_review_unknown") + ": " + errText(res.error));
+    return;
+  }
+  notify(t("srow.memory_review_started"), { kind: "info" });
+  for (let i = 0; i < POLL_MAX; i++) {
+    await sleep(POLL_MS);
+    const st: ReviewStatus | null = await api(statusPath(name)).catch(() => null);
+    const s = st?.session;
+    if (!s || s.running) continue;
+    if (s.refused) {
+      notify(t(REFUSAL[s.refused] ?? "srow.memory_review_unknown"));
+      return;
+    }
+    if (!s.last || s.last.at === prevAt) continue; // this run has not written its record yet
+    if (s.last.state !== "done") notify(t("srow.memory_review_failed"), { kind: "warn" });
+    else if (s.last.queued > 0) notify(t("srow.memory_review_queued", { n: s.last.queued }), { kind: "success" });
+    else notify(t("srow.memory_review_none"), { kind: "info" });
+    return;
+  }
+}
+
+const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));

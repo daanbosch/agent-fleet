@@ -53,6 +53,9 @@ const (
 // that is not here never carries a mark, so adding a member route to the Agent without adding it
 // here leaves it refused rather than open.
 var memberOriginRoutes = map[string]bool{
+	// "Review now" for one session (ADR 0117): it spends tokens and sends an excerpt to a model
+	// provider, so a session's own AGENT_TOKEN must not be able to start it.
+	"POST /api/agents/memory-review/run":           true,
 	"POST /api/agents/memory/entries/pin":          true,
 	"POST /api/agents/memory/entries/revert":       true,
 	"POST /api/agents/memory/entries/member-save":  true,
