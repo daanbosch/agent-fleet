@@ -315,3 +315,24 @@ questions and the decisions stay as written; this records the answers.
    worth its cost.
 6. Retention: pending proposal text is deleted on decision; a rejected proposal's hash is kept until the memory
    it concerned is forgotten.
+
+**Note (2026-10-18, #2319): phase P0 measured the proposed caps; the figures and the recommended caps are in
+`docs/log/134-background-review-p0-measurement.md`.** Nothing above is rewritten, and the caps below are
+**recommendations awaiting the owner's confirmation**; P1 does not start before that.
+
+- **What a turn is:** a displayable transcript row (about 12 per user prompt), so K = 10 means roughly one review per
+  prompt.
+- **Settle:** 300 s instead of 120 s (gaps inside a response exceed 120 s in 0.03–0.14 % of cases; at 300 s 23 % fewer
+  runs and 38–40 % of windows still see further activity within ten minutes).
+- **Trigger:** 30 turns or 3 user prompts, whichever comes first (a prompt count alone leaves 37–50 % of sessions
+  unreviewed).
+- **Input:** keep 40,000 characters for the window, built from text, tool labels and tool results clipped to 500
+  characters; a longer window is split and reviewed oldest-first rather than cut to the newest part. Index and memory
+  bodies were not sized (assumption for P1: 12,000 characters of index, 2,000 per body).
+- **Output:** 5 operations, 4 KiB per operation text, 16 KiB per reply (observed: 0, 0 and 3 operations of up to
+  1.2 KiB).
+- **In flight:** one, unchanged. **Daily run cap:** 200 runs per workspace (measured maximum 184 with the recommended
+  trigger, $0.003–0.006 per run at the Short tier).
+- **Tier:** `OneShotShort` stays (it resolves to `claude-haiku-5-5` on claude, the only tool-less backend); 1 of 3
+  hand-run proposals was plausibly useful. The one-shot environment's `MAX_THINKING_TOKENS=0` did not stop hidden
+  thinking, which was 74–97 % of the output tokens.
