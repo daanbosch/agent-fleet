@@ -375,6 +375,11 @@ export interface Settings {
   // missing-key answer: what one session saves is read by every kind in later sessions, so it is
   // turned on knowingly. The Console's change list works whatever this is set to.
   agentMemory: boolean;
+  // AF memory for an agent outside Agent Fleet, through the Control Plane's /mcp (#1988): "off",
+  // "read" or "write". Separate from agentMemory: that governs sessions in the workspace, this a
+  // client on another machine, whose model then sees the memory text. Default "off", like the
+  // Agent's own missing-key answer (uiprefs.ExternalMemory).
+  externalMemory: ExternalMemoryMode;
   // How many children ONE session may have at a time (ADR 0073 decision 6, AgentsTab > Session).
   // Per parent, not per workspace: two parents at the ceiling is twice that many agents.
   //
@@ -1186,6 +1191,7 @@ const DEFAULTS: Settings = {
   sessionFleetSpawn: false, // opt-in (ADR 0073) — lets a session spend host resources unattended
   sessionSearch: true, // opt-out (ADR 0110) — read-only, and the Agent treats a missing key as on
   agentMemory: false, // opt-in (ADR 0108) — what one session saves reaches every kind later
+  externalMemory: "off", // opt-in (#1988) — memory text leaves the workspace for an outside client's model
   sessionSpawnChildLimit: 3, // the value the limit had while it was a constant (ADR 0073 decision 6)
   sessionStoppedArchiveDays: 0, // the deployment default (ADR 0097)
   sessionSpendCapUsd: 0, // no budget (#1054)
@@ -1528,6 +1534,7 @@ function load(): Settings {
       // Map the legacy model-list values (go-first / hide-zen / all) onto the three billing routes.
       opencodeCatalog: migrateOpencodeCatalog(saved.opencodeCatalog),
       agentMemory: normalizeAgentMemory(saved.agentMemory),
+      externalMemory: normalizeExternalMemory(saved.externalMemory),
     };
   } catch {
     return { ...DEFAULTS };
@@ -1537,6 +1544,13 @@ function load(): Settings {
 /** AF memory is on only for a boolean true, the Agent's own reading (uiprefs.AgentMemory). */
 export function normalizeAgentMemory(value: unknown): boolean {
   return value === true;
+}
+
+export type ExternalMemoryMode = "off" | "read" | "write";
+
+/** Anything but "read" or "write" is off, the Agent's own reading (uiprefs.ExternalMemory). */
+export function normalizeExternalMemory(value: unknown): ExternalMemoryMode {
+  return value === "read" || value === "write" ? value : "off";
 }
 
 export function normalizeClaudeCustomModels(value: unknown): string[] {
@@ -1944,6 +1958,7 @@ const AGENT_DEFAULTED = new Set<keyof Settings>([
   // account would show it on for another whose server copy lacks the key, and the next save of
   // any setting would switch it on there.
   "agentMemory",
+  "externalMemory", // #1988: missing ⇒ off (uiprefs.ExternalMemory), for the same reason
 ]);
 
 // Accumulated data — unlike toggles and colors these settings build up over time and cannot be
@@ -2169,6 +2184,10 @@ export async function hydrateUIPrefs(): Promise<boolean> {
   // as on would show one thing and enforce another.
   if (merged.agentMemory !== normalizeAgentMemory(merged.agentMemory)) {
     merged.agentMemory = normalizeAgentMemory(merged.agentMemory);
+    changed = true;
+  }
+  if (merged.externalMemory !== normalizeExternalMemory(merged.externalMemory)) {
+    merged.externalMemory = normalizeExternalMemory(merged.externalMemory);
     changed = true;
   }
   const customClaude = normalizeClaudeCustomModels(merged.claudeCustomModels);

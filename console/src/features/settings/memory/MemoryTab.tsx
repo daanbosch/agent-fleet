@@ -33,7 +33,7 @@ import type { RestoreBody } from "./memoryRestore.tsx";
 import type { RestoreScopeState } from "./memoryRestore.tsx";
 import { RestorePanel } from "./memoryRestore.tsx";
 import { TransferSection } from "./memoryTransfer.tsx";
-import { AgentMemorySection, AgentMemorySwitch } from "./memoryChanges.tsx";
+import { AgentMemorySection, AgentMemorySwitch, ExternalMemorySwitch } from "./memoryChanges.tsx";
 
 // Trigger label. The trailer value the Agent returns (auto/manual/pre-restore/restore/import/agent-memory)
 // is used as the key directly and an unknown value is printed raw, so adding a new trigger
@@ -232,6 +232,7 @@ export function MemoryTab() {
             <h3>{tr("mem.af_title")}</h3>
           </div>
           <AgentMemorySwitch />
+          <ExternalMemorySwitch />
         </section>
       </div>
     );

@@ -262,6 +262,20 @@ Version control over the memory an agent accumulates by itself (claude's auto-me
   agent and session, what), newest first. On a memory's newest change you can **revert it** (the earlier text
   comes back) or **forget the memory**; either is recorded as a new change, so it can be undone too. If the text
   you bring back looks like a secret, you are shown the masked findings and asked to confirm.
+  - **From outside Agent Fleet** (setting "Use Agent Fleet memory from outside Agent Fleet", **off by default**
+    and independent of the switch above): lets your own agent on another machine (Claude Code or Claude Desktop
+    with an MCP token, see Operate > Secure) use this memory through the Control Plane's `/mcp`. Choose **Read
+    only** to allow `memory_projects` (lists project ids), `memory_index`, `memory_search` and `memory_read`
+    with a read-scoped token, or **Read and write** to also allow `memory_save` and `memory_forget` with a
+    write-scoped token. A project is named by the `project` argument (from `memory_projects`); a project must
+    already hold memory, and new projects are started from inside the workspace. Saves go through the same
+    revision check, secret scan and limits, and show in the list as written by `external` (the client's
+    self-declared name is kept in the commit message for information only). Each external save and forget is
+    also recorded in the audit log with the project id (never the memory's name). The memory text reaches that
+    client's model, outside the workspace's egress controls: the secret scan stops credentials, not customer
+    names or internal context. The workspace has to be running; a stopped one answers that it must be started
+    first. The setting is a per-member one, and a deployment that does not serve `/mcp` (`AF_MCP_ENABLED`)
+    has no outside access at all.
   - **Pinned memories**: above the list, every memory with how often agents have read it. **Pin** one and it
     is always listed first in the index agents read when they start work, ahead of everything else. The rest
     of the index is ordered by kind (feedback and user memories first), then by how often agents read it (a

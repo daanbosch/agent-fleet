@@ -12,8 +12,8 @@ import { useRetryLoad } from "../../../lib/retryLoad.ts";
 import { useToast } from "../../../ui/ToastProvider.tsx";
 import { useConfirm } from "../../../ui/ConfirmProvider.tsx";
 import { Diff } from "../../scm/GitDiff.tsx";
-import { OnOff, Row } from "../parts/controls.tsx";
-import { useSettings } from "../../../lib/settings.ts";
+import { Choice, OnOff, Row } from "../parts/controls.tsx";
+import { setSetting, useSettings } from "../../../lib/settings.ts";
 import { useT, tMaybe } from "../../../lib/i18n/index.ts";
 import { fmtDateTime, DATETIME_FULL } from "../../../lib/intl.ts";
 import { ClaudeImportPanel } from "./memoryClaudeImport.tsx";
@@ -44,6 +44,29 @@ export function AgentMemorySwitch() {
       <AutoSyncPanel />
       <p className="muted ds-note">{tr("mem.af_switch_note")}</p>
       {!enabled && <p className="muted ds-note">{tr("mem.af_switch_off_export")}</p>}
+    </>
+  );
+}
+
+// ExternalMemorySwitch is the outside-client setting (ui-prefs externalMemory, default off). Like
+// the sessions' switch it is a ui-pref and stays reachable while the workspace is stopped.
+export function ExternalMemorySwitch() {
+  const tr = useT();
+  const mode = useSettings().externalMemory;
+  return (
+    <>
+      <Row label={tr("mem.ext_switch")}>
+        <Choice
+          value={mode}
+          options={[
+            ["off", tr("mem.ext_off")],
+            ["read", tr("mem.ext_read")],
+            ["write", tr("mem.ext_write")],
+          ]}
+          onChange={(v) => setSetting("externalMemory", v)}
+        />
+      </Row>
+      <p className="muted ds-note">{tr("mem.ext_switch_note")}</p>
     </>
   );
 }
@@ -175,6 +198,7 @@ export function AgentMemorySection({ reload, onChanged }: { reload: number; onCh
       {/* The list, the diff and the way back below work with the switch either way; only the
           import's confirm needs it on. */}
       <AgentMemorySwitch />
+      <ExternalMemorySwitch />
       {loadErr && <p className="mem-warn">{loadErr}</p>}
       {withheld > 0 && <p className="mem-warn">{tr("mem.af_withheld", { n: withheld })}</p>}
       <MemoryPinsPanel reload={reload + mine} onChanged={() => setMine((n) => n + 1)} />

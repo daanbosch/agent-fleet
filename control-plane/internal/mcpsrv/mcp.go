@@ -173,13 +173,14 @@ func (a API) HandleMCP(w http.ResponseWriter, r *http.Request) {
 func (a API) dispatchMCPHTTP(r *http.Request, prin *mcpPrincipal, req rpcRequest) (*rpcResponse, int) {
 	p := parseParamsMeta(req.Params)
 	era := eraOf(p)
+	ctx := withMCPCall(r.Context(), mcpCallInfo{patID: prin.patID, client: mcpClientName(r, p)})
 	if !era.Stateless {
-		return a.dispatchMCP(r.Context(), prin, req), http.StatusOK
+		return a.dispatchMCP(ctx, prin, req), http.StatusOK
 	}
 	if resp, status := validateStateless(r, req, p, era); resp != nil {
 		return resp, status
 	}
-	resp := a.dispatchMCP(r.Context(), prin, req)
+	resp := a.dispatchMCP(ctx, prin, req)
 	if resp != nil && resp.Error != nil && resp.Error.Code == rpcMethodNotFound {
 		return resp, http.StatusNotFound
 	}
@@ -685,7 +686,7 @@ func memberTools() []mcpTool {
 // mcpToolCall before any admin tool runs.
 func (a API) toolsFor(ctx context.Context, prin *mcpPrincipal) []mcpTool {
 	var out []mcpTool
-	for _, t := range memberTools() {
+	for _, t := range append(memberTools(), memoryTools()...) {
 		if a.cp.ScopeRank(prin.scope) >= a.cp.ScopeRank(t.minScope) {
 			out = append(out, t)
 		}
