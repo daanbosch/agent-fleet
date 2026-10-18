@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -180,7 +181,7 @@ func TestMemberOriginRoutesAgreeWithTheControlPlane(t *testing.T) {
 	var agent []string
 	for _, line := range strings.Split(string(golden), "\n") {
 		method, path, ok := strings.Cut(strings.TrimSpace(line), " ")
-		if !ok || method != http.MethodPost || !strings.HasPrefix(path, "/agents/memory/") {
+		if !ok || method != http.MethodPost || !(strings.HasPrefix(path, "/agents/memory/") || strings.HasPrefix(path, "/agents/memory-review/")) {
 			continue
 		}
 		req := httptest.NewRequest(method, path, strings.NewReader("not json"))
@@ -191,6 +192,9 @@ func TestMemberOriginRoutesAgreeWithTheControlPlane(t *testing.T) {
 			agent = append(agent, method+" "+path)
 		}
 	}
+	// A conditional requirement is not a route that always wants a mark: the settings write asks
+	// for one only when it arms the memory review (TestAPrefsWriteThatArmsTheMemoryReview...).
+	cp = slices.DeleteFunc(cp, func(r string) bool { return r == "PUT /env/ui-prefs" })
 	sort.Strings(cp)
 	sort.Strings(agent)
 	if strings.Join(cp, "\n") != strings.Join(agent, "\n") {

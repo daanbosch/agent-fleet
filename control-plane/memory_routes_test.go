@@ -31,6 +31,8 @@ func TestMemoryRoutesProxiedByCP(t *testing.T) {
 		{"POST", "/api/agents/memory/entries/revert", "POST /api/agents/memory/entries/revert"},
 		{"GET", "/api/agents/memory/entries/list", "GET /api/agents/memory/entries/list"},
 		{"POST", "/api/agents/memory/entries/pin", "POST /api/agents/memory/entries/pin"},
+		{"GET", "/api/agents/memory-review", "GET /api/agents/memory-review"},
+		{"POST", "/api/agents/memory-review/run", "POST /api/agents/memory-review/run"},
 		{"POST", "/api/agents/memory/entries/member-save", "POST /api/agents/memory/entries/member-save"},
 		{"GET", "/api/agents/memory/entries/purge-preview", "GET /api/agents/memory/entries/purge-preview"},
 		{"POST", "/api/agents/memory/entries/purge", "POST /api/agents/memory/entries/purge"},
@@ -112,6 +114,15 @@ func TestMemorySnapshotIsAudited(t *testing.T) {
 	action, target, ok = auditActionTarget(req)
 	if !ok || action != "memory.entry.pin" || target != "agent-fleet-0123456789ab" {
 		t.Fatalf("auditActionTarget = (%q, %q, ok=%v), want memory.entry.pin/agent-fleet-0123456789ab", action, target, ok)
+	}
+	// "Review now" is audited with a session-name-shaped hint only.
+	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory-review/run?session=my_session-1", nil)
+	if action, target, ok = auditActionTarget(req); !ok || action != "memory.review.run" || target != "my_session-1" {
+		t.Fatalf("auditActionTarget(review run) = (%q, %q, ok=%v)", action, target, ok)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory-review/run?session=%2Fhome%2Fdev+secret", nil)
+	if action, target, ok = auditActionTarget(req); !ok || action != "memory.review.run" || target != "" {
+		t.Fatalf("auditActionTarget(review run, odd hint) = (%q, %q, ok=%v)", action, target, ok)
 	}
 	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/entries/pin", nil)
 	if action, target, ok = auditActionTarget(req); !ok || action != "memory.entry.pin" || target != "" {
