@@ -440,11 +440,13 @@ export function MemorySnapshotsTab() {
                       </button>
                     </div>
                   )}
-                  {diff === null ? (
-                    <pre className="diff muted">{tr("common.loading")}</pre>
-                  ) : (
-                    <Diff text={diff} embedded wrap />
-                  )}
+                  {/* Nothing selected means nothing is being fetched: the loading text would never end. */}
+                  {sel &&
+                    (diff === null ? (
+                      <pre className="diff muted">{tr("common.loading")}</pre>
+                    ) : (
+                      <Diff text={diff} embedded wrap />
+                    ))}
                 </div>
               </div>
             </section>

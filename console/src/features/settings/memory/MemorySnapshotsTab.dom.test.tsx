@@ -85,6 +85,71 @@ afterEach(() => {
   startWs.mockClear();
 });
 
+describe("MemorySnapshotsTab diff pane without a selection", () => {
+  const loadingText = t("common.loading");
+  const diffPane = () => host!.querySelector(".mem-diff");
+  const rootsOk = {
+    roots: [{ kind: "claude", label: "Claude", scopes: true, files: 3, bytes: 100, projects: [] }],
+    inactive: [],
+    auto: true,
+    autoLocked: false,
+    lastSnapshot: "",
+  };
+  const stub = (snapshots: Promise<unknown> | unknown, diff?: Promise<unknown>) =>
+    api.mockImplementation((path: string) => {
+      if (path.startsWith("api/agents/memory/roots")) return Promise.resolve(rootsOk);
+      if (path.startsWith("api/agents/memory/snapshots")) return Promise.resolve(snapshots);
+      return diff ?? Promise.resolve({ diff: "" });
+    });
+
+  it("shows no loading text next to 'No snapshots yet' when the history is empty", async () => {
+    stub({ snapshots: [] });
+    await mount();
+    expect(text()).toContain(t("mem.history_empty"));
+    expect(text()).not.toContain(loadingText);
+    expect(diffPane()?.textContent ?? "").toBe("");
+  });
+
+  it("shows no loading text when the history list failed to load", async () => {
+    stub({ error: "boom" });
+    await mount();
+    expect(text()).toContain(t("mem.history_empty"));
+    expect(text()).not.toContain(loadingText);
+  });
+
+  it("still shows the loading text while a selected snapshot's diff is being fetched", async () => {
+    let resolve!: (v: unknown) => void;
+    const pending = new Promise((r) => (resolve = r));
+    stub(
+      { snapshots: [{ rev: "r1", short: "r1", at: "2026-10-04T10:00:00Z", subject: "s", trigger: "auto", kinds: ["claude"], projects: [], files: 3 }] },
+      pending,
+    );
+    await mount();
+    expect(diffPane()!.textContent).toContain(loadingText);
+    await act(async () => resolve({ diff: "" }));
+    await flush();
+    expect(diffPane()!.textContent).not.toContain(loadingText);
+  });
+
+  it("shows a diff, not the loading text, when only hidden Agent Fleet rows exist", async () => {
+    stub({ snapshots: [{ rev: "f1", short: "f1", at: "2026-10-04T10:00:00Z", subject: "s", trigger: "agent-memory", kinds: ["claude"], projects: [], files: 1 }] });
+    await mount();
+    expect(host!.querySelector(".mem-diff-head code")!.textContent).toBe("f1");
+    expect(diffPane()!.textContent).not.toContain(loadingText);
+  });
+
+  it("shows no loading text when a remount finds the history emptied", async () => {
+    stub({ snapshots: [{ rev: "r1", short: "r1", at: "2026-10-04T10:00:00Z", subject: "s", trigger: "auto", kinds: ["claude"], projects: [], files: 3 }] });
+    await mount();
+    expect(host!.querySelector(".mem-diff-head code")).not.toBeNull();
+    stub({ snapshots: [] });
+    unmount();
+    await mount();
+    expect(host!.querySelector(".mem-diff-head")).toBeNull();
+    expect(text()).not.toContain(loadingText);
+  });
+});
+
 describe("MemorySnapshotsTab", () => {
   it("opens on History with Restore this point, and no other view's controls", async () => {
     await mount();
