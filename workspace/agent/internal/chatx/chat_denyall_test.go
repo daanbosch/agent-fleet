@@ -175,6 +175,22 @@ func TestOneShotDenyAllRefusesAProbeItCannotTrust(t *testing.T) {
 		"no result":         {Out: lines(initClean)},
 		"an error result":   {Out: lines(initClean, `{"type":"result","subtype":"error","is_error":true,"num_turns":0,"result":"x","total_cost_usd":0}`)},
 		"reached the model": {Out: lines(initClean, runResult)},
+		// Evidence has to be present: a missing or null field is unknown, not zero.
+		"a bare result":                    {Out: lines(initClean, `{"type":"result"}`)},
+		"null measurements":                {Out: lines(initClean, `{"type":"result","subtype":"success","is_error":null,"num_turns":null,"total_cost_usd":null,"usage":{}}`)},
+		"no is_error":                      {Out: lines(initClean, `{"type":"result","subtype":"success","num_turns":0,"total_cost_usd":0,"usage":{}}`)},
+		"no num_turns":                     {Out: lines(initClean, `{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0,"usage":{}}`)},
+		"no cost":                          {Out: lines(initClean, `{"type":"result","subtype":"success","is_error":false,"num_turns":0,"usage":{}}`)},
+		"no usage":                         {Out: lines(initClean, `{"type":"result","subtype":"success","is_error":false,"num_turns":0,"total_cost_usd":0}`)},
+		"an error subtype that looks free": {Out: lines(initClean, `{"type":"result","subtype":"error_max_turns","is_error":false,"num_turns":0,"total_cost_usd":0,"usage":{}}`)},
+		"tokens at zero turns and cost":    {Out: lines(initClean, `{"type":"result","subtype":"success","is_error":false,"num_turns":0,"total_cost_usd":0,"usage":{"input_tokens":100,"output_tokens":1}}`)},
+		"input tokens only":                {Out: lines(initClean, `{"type":"result","subtype":"success","is_error":false,"num_turns":0,"total_cost_usd":0,"usage":{"input_tokens":100}}`)},
+		"cache tokens only":                {Out: lines(initClean, `{"type":"result","subtype":"success","is_error":false,"num_turns":0,"total_cost_usd":0,"usage":{"cache_read_input_tokens":5}}`)},
+		"per-model usage":                  {Out: lines(initClean, `{"type":"result","subtype":"success","is_error":false,"num_turns":0,"total_cost_usd":0,"usage":{},"modelUsage":{"m":{}}}`)},
+		// A later local-looking result must not erase the evidence of an earlier paid one.
+		"a model result then a local one": {Out: lines(initClean, runResult, probeResult)},
+		"a local result then a model one": {Out: lines(initClean, probeResult, runResult)},
+		"activity after the result":       {Out: lines(initClean, probeResult, assistText)},
 	}
 	for name, probe := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -235,11 +251,13 @@ func TestOneShotDenyAllNeverQuotesWhatTheProbePrinted(t *testing.T) {
 // a config written meanwhile): the call's own stream is checked and its reply thrown away.
 func TestOneShotDenyAllDiscardsAReplyFromARunThatHadOrUsedTools(t *testing.T) {
 	for name, run := range map[string]fakeRun{
-		"a tool in the init":   {Out: lines(`{"type":"system","subtype":"init","tools":["Bash"],"mcp_servers":[]}`, runResult)},
-		"a server in the init": {Out: lines(`{"type":"system","subtype":"init","tools":[],"mcp_servers":[{"name":"x"}]}`, runResult)},
-		"a tool call":          {Out: lines(initClean, `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}`, runResult)},
-		"no init":              {Out: lines(runResult)},
-		"split inits":          {Out: lines(`{"type":"system","subtype":"init","tools":[]}`, `{"type":"system","subtype":"init","mcp_servers":[]}`, runResult)},
+		"a tool in the init":                 {Out: lines(`{"type":"system","subtype":"init","tools":["Bash"],"mcp_servers":[]}`, runResult)},
+		"a server in the init":               {Out: lines(`{"type":"system","subtype":"init","tools":[],"mcp_servers":[{"name":"x"}]}`, runResult)},
+		"a tool call":                        {Out: lines(initClean, `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}`, runResult)},
+		"no init":                            {Out: lines(runResult)},
+		"a result that does not say success": {Out: lines(initClean, `{"type":"result","result":"FAKE-REPLY"}`)},
+		"two results":                        {Out: lines(initClean, runResult, runResult)},
+		"split inits":                        {Out: lines(`{"type":"system","subtype":"init","tools":[]}`, `{"type":"system","subtype":"init","mcp_servers":[]}`, runResult)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			denyAllEnv(t)
@@ -314,7 +332,7 @@ func TestOneShotDenyAllWithoutAQualifyingBackend(t *testing.T) {
 
 func TestParseClaudeStreamKeepsTheResultAndDistrustsAnythingOdd(t *testing.T) {
 	s := parseClaudeStream([]byte(lines(initClean, assistText, runResult)))
-	if !s.initSeen || s.bad != "" || !s.resultSeen || s.result.Result != "FAKE-REPLY" || s.numTurns != 1 {
+	if !s.initSeen || s.bad != "" || !s.resultSeen || s.result.Result != "FAKE-REPLY" || s.facts.numTurns == nil || *s.facts.numTurns != 1 {
 		t.Fatalf("%+v", s)
 	}
 	// Other system events and unrelated fields called "tools" or "message" are not violations.

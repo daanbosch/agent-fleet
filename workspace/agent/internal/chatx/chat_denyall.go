@@ -163,7 +163,9 @@ func OneShotDenyAll(ctx context.Context, feature string, tier OneShotTier, perso
 		// error that reaches logs and run records.
 		return "", fmt.Errorf("claude execution failed (%s)", exitSummary(runErr))
 	}
-	if !ev.resultSeen || r.IsError {
+	// Success is evidence, not the absence of an error flag: a result that does not say so is
+	// not a reply.
+	if !ev.resultSeen || ev.facts.subtype != "success" || ev.facts.isError == nil || *ev.facts.isError || r.IsError {
 		return "", errors.New("claude returned an invalid response/error")
 	}
 	call.OK = true
@@ -195,10 +197,9 @@ func verifyClaudeDenyAll(ctx context.Context, persona, model string) error {
 		return fail("the probe printed no init event")
 	case ev.bad != "":
 		return fail("claude would run with %s", ev.bad)
-	case !ev.resultSeen || ev.result.IsError:
-		return fail("the probe did not end in a successful result")
-	case ev.numTurns != 0 || ev.result.TotalCostUSD != 0:
-		return fail("the probe reached the model, so it did not stay a local command")
+	}
+	if why := ev.notLocal(); why != "" {
+		return fail("the probe is not proven to be a local command (%s)", why)
 	}
 	return nil
 }
@@ -219,8 +220,52 @@ type claudeStream struct {
 	bad         string
 	resultSeen  bool
 	result      claudeResult
-	numTurns    int
+	results     int
 	permDenials int
+	facts       resultFacts
+}
+
+// resultFacts are the fields of the (first) result event the probe is judged by. Pointers keep
+// "absent or null" apart from zero: a missing num_turns is unknown, not 0.
+type resultFacts struct {
+	subtype    string
+	isError    *bool
+	numTurns   *int
+	cost       *float64
+	usage      *ClaudeUsage
+	modelUsage int
+}
+
+// notLocal says why the stream is not positive proof of a command the CLI answered by itself, ""
+// when it is: exactly one result, subtype success, is_error false, zero turns, zero cost, zero
+// tokens and no per-model usage - every one of them present, none assumed from a missing field.
+func (s claudeStream) notLocal() string {
+	f := s.facts
+	switch {
+	case s.results == 0:
+		return "no result"
+	case s.results > 1:
+		return "more than one result"
+	case f.subtype != "success":
+		return "the result is not a success"
+	case f.isError == nil || *f.isError:
+		return "is_error is not false"
+	case f.numTurns == nil:
+		return "num_turns is not reported"
+	case *f.numTurns != 0:
+		return "it took a model turn"
+	case f.cost == nil:
+		return "total_cost_usd is not reported"
+	case *f.cost != 0:
+		return "it cost money"
+	case f.usage == nil:
+		return "usage is not reported"
+	case f.usage.InputTokens != 0 || f.usage.OutputTokens != 0 || f.usage.CacheCreationInputTokens != 0 || f.usage.CacheReadInputTokens != 0:
+		return "it used tokens"
+	case f.modelUsage != 0:
+		return "it reports per-model usage"
+	}
+	return ""
 }
 
 // streamHead is the part of an event every line is read for. The lists and the nested objects stay
@@ -233,7 +278,6 @@ type streamHead struct {
 	MCPServers        json.RawMessage   `json:"mcp_servers"`
 	Message           json.RawMessage   `json:"message"`
 	Event             json.RawMessage   `json:"event"`
-	NumTurns          int               `json:"num_turns"`
 	PermissionDenials []json.RawMessage `json:"permission_denials"`
 }
 
@@ -264,6 +308,9 @@ func parseClaudeStream(out []byte) claudeStream {
 			distrust("an unreadable event")
 			continue
 		}
+		if s.results > 0 {
+			distrust("activity after the result") // a result is terminal
+		}
 		switch h.Type {
 		case "system":
 			if h.Subtype != "init" {
@@ -293,12 +340,26 @@ func parseClaudeStream(out []byte) claudeStream {
 			if !s.initSeen {
 				distrust("a result before the init event")
 			}
+			s.results++
+			if s.results > 1 {
+				distrust("more than one result")
+				continue
+			}
 			var r claudeResult
-			if json.Unmarshal(line, &r) != nil {
+			var rs struct {
+				Subtype    string                     `json:"subtype"`
+				IsError    *bool                      `json:"is_error"`
+				NumTurns   *int                       `json:"num_turns"`
+				Cost       *float64                   `json:"total_cost_usd"`
+				Usage      *ClaudeUsage               `json:"usage"`
+				ModelUsage map[string]json.RawMessage `json:"modelUsage"`
+			}
+			if json.Unmarshal(line, &r) != nil || json.Unmarshal(line, &rs) != nil {
 				distrust("an unreadable result")
 				continue
 			}
-			s.result, s.resultSeen, s.numTurns, s.permDenials = r, true, h.NumTurns, len(h.PermissionDenials)
+			s.result, s.resultSeen, s.permDenials = r, true, len(h.PermissionDenials)
+			s.facts = resultFacts{rs.Subtype, rs.IsError, rs.NumTurns, rs.Cost, rs.Usage, len(rs.ModelUsage)}
 			if s.permDenials > 0 {
 				distrust("a tool attempt (permission denials)")
 			}
