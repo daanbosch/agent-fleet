@@ -492,17 +492,24 @@ Console half (P2b) follows. The decisions above are unchanged.
   directory, the history cannot), is `forgotten`, checked inside the store lock of the save. Neither writes anything. The
   proposal stays in the queue, marked, with its text, because the member still has to decide; rejecting it removes the text
   and keeps the hash like any rejection (a stale idea is not offered again unchanged). The list computes the state from the
-  live store with the same rule approval applies (history included, not only the tombstone), so a proposal made stale by an
+  live store with the same rule approval applies (history included, not only the tombstone, also when the project's whole
+  directory is gone), so a proposal made stale by an
   edit shows as stale before anyone presses approve; a reason an approval attempt recorded and the store cannot show again
   (secret, unknown project, forgotten) is kept.
 - **Rejected hashes are released, durably.** P1 kept the hash until the memory is forgotten but nothing told the queue when
-  that happened. `memoryx` now calls two hooks around a forget, an undone creation or a move out of a project: before the
-  commit, the review writes down that a release is owed (only when a rejection about that memory exists, so a forget never
-  depends on the review's directory); after it, the review releases and strikes the note. A release that fails, or a stop
-  between the commit and the hook, leaves the note, and every wake-up of the loop (also while the review is off) finishes
-  it: a note for a memory that still exists means the forget never committed and is dropped. Only rejections made up to the
-  note's time are released; one made after the forget is about the memory as it is then. Notes still owed are counted in
-  the status (`releasePending`).
+  that happened. `memoryx` now calls two hooks around a forget, an undone creation or a move out of a project (all three
+  paths alike). Before the commit, the review writes down, durably, that a release is owed, one note per forget (keyed by
+  the memory's newest change at that moment, `base`) and only when a rejection about that memory exists; if the note cannot
+  be made durable the hook refuses and the forget does not happen, because a commit nothing could recover the release from
+  is worse than a forget that is tried again. With no rejection nothing is written, so a forget does not depend on the
+  review's directory. After the commit the review releases and strikes the note. A release that fails, or a stop between
+  the commit and the hook, leaves the note, and every wake-up of the loop (also while the review is off) finishes it. Whether
+  a note's forget committed is read from the memory's history (a forget, or a revert that deleted it, newer than `base`),
+  never from whether the memory exists, since an explicit save may have re-created it; a forget that did not commit owes
+  nothing and its note is dropped, and a base that is no longer in the history leaves the note in place (visible, not
+  guessed). The reconcile acts only on the note it read: a newer one under the same key is left alone. Only rejections made
+  up to a note's time are released; one made after the forget is about the memory as it is then. Notes still owed are
+  counted in the status (`releasePending`).
 - **"Revert this run"** reverts, as new commits by the member with `AF-Revert-Of`, each commit carrying the run id that is
   still its memory's newest change and whose memory is exactly as it left it. The answer is per commit: `reverted`,
   `already` (an earlier revert of this run undid it), `conflict` (`edited`: a later change exists; `blocked`: the revert

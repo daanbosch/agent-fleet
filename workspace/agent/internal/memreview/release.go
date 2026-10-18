@@ -15,6 +15,7 @@ package memreview
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"log"
 	"time"
 
@@ -22,16 +23,20 @@ import (
 )
 
 type releaseIntent struct {
-	Scope     string    `json:"scope"`
-	Name      string    `json:"name"`
-	ProjectID string    `json:"projectId,omitempty"`
-	At        time.Time `json:"at"`
+	Scope     string `json:"scope"`
+	Name      string `json:"name"`
+	ProjectID string `json:"projectId,omitempty"`
+	// Base is the memory's newest change when the forget began. It tells this forget from any other
+	// of the same name: one intent per forget, so a second attempt cannot overwrite what the first
+	// still owes, and memoryx.ReviewForgetCommitted can say whether this forget committed.
+	Base string    `json:"base,omitempty"`
+	At   time.Time `json:"at"`
 }
 
 var releaseStore = store[releaseIntent]{"releasing"}
 
-func releaseKey(scope, projectID, name string) string {
-	h := sha256.Sum256([]byte(scope + "\x00" + projectID + "\x00" + name))
+func releaseKey(scope, projectID, name, base string) string {
+	h := sha256.Sum256([]byte(scope + "\x00" + projectID + "\x00" + name + "\x00" + base))
 	return hex.EncodeToString(h[:])[:24]
 }
 
@@ -49,37 +54,43 @@ func hasRejectionsLocked(scope, projectID, name string) bool {
 	return false
 }
 
-// noteForgetIntent runs before a forget commits. With nothing remembered about the memory there is
-// nothing owed and nothing is written, so a forget does not depend on this package's directory.
-func noteForgetIntent(scope, projectID, name string) {
+// errIntent is why a forget is refused: the owed release could not be made durable. Nothing in it
+// names the memory.
+var errIntent = errors.New("could not record a release of rejected proposals")
+
+// noteForgetIntent runs before a forget commits. With nothing remembered about the memory nothing is
+// owed and nothing is written, so a forget does not depend on this package's directory. When
+// something is owed and the note cannot be made durable the forget is refused (memoryx): a commit
+// that nothing could recover the release from is worse than a forget that has to be tried again.
+func noteForgetIntent(scope, projectID, name, base string) error {
 	stateMu.Lock()
 	defer stateMu.Unlock()
 	if !hasRejectionsLocked(scope, projectID, name) {
-		return
+		return nil
 	}
-	in := releaseIntent{Scope: scope, Name: name, ProjectID: projectID, At: time.Now()}
-	if err := releaseStore.Write(releaseKey(scope, projectID, name), in); err != nil {
+	in := releaseIntent{Scope: scope, Name: name, ProjectID: projectID, Base: base, At: time.Now()}
+	if err := releaseStore.Write(releaseKey(scope, projectID, name, base), in); err != nil {
 		log.Printf("memory review: could not record a release of rejected proposals")
+		return errIntent
 	}
+	return nil
 }
 
-// noteForgotten runs after a forget committed.
-func noteForgotten(scope, projectID, name string) {
+// noteForgotten runs after a forget committed: it releases what this forget's intent covers
+// (everything remembered so far when there is none) and strikes the intent only when that worked.
+func noteForgotten(scope, projectID, name, base string) {
 	stateMu.Lock()
 	defer stateMu.Unlock()
-	finishReleaseLocked(scope, projectID, name)
+	key := releaseKey(scope, projectID, name, base)
+	in, owed := releaseStore.Read(key)
+	if !owed {
+		in = releaseIntent{Scope: scope, Name: name, ProjectID: projectID} // zero At: every rejection
+	}
+	finishLocked(key, in, owed)
 }
 
-// finishReleaseLocked releases what the memory's intent covers (everything remembered so far when
-// there is none) and strikes the intent only when that worked.
-func finishReleaseLocked(scope, projectID, name string) {
-	key := releaseKey(scope, projectID, name)
-	in, owed := releaseStore.Read(key)
-	var cutoff time.Time // zero: every rejection
-	if owed {
-		cutoff = in.At
-	}
-	if _, err := releaseLocked(scope, name, projectID, cutoff); err != nil {
+func finishLocked(key string, in releaseIntent, owed bool) {
+	if _, err := releaseLocked(in.Scope, in.Name, in.ProjectID, in.At); err != nil {
 		log.Printf("memory review: releasing rejected proposals failed; it is retried")
 		return
 	}
@@ -90,33 +101,48 @@ func finishReleaseLocked(scope, projectID, name string) {
 	}
 }
 
-// ReconcileReleases finishes the releases that are still owed. It reads the store to tell a forget
-// that committed from one that did not.
+// ReconcileReleases finishes the releases that are still owed. Whether each forget committed is
+// asked of the memory's history (memoryx.ReviewForgetCommitted), not of whether the memory exists:
+// an explicit save may have re-created it since. A forget that never committed leaves nothing owed.
 func ReconcileReleases() {
+	type owedIntent struct {
+		key string
+		in  releaseIntent
+	}
+	var owed []owedIntent
 	stateMu.Lock()
-	keys := releaseStore.keys()
-	var owed []releaseIntent
-	for _, k := range keys {
+	for _, k := range releaseStore.keys() {
 		if in, ok := releaseStore.Read(k); ok {
-			owed = append(owed, in)
+			owed = append(owed, owedIntent{k, in})
 		}
 	}
 	stateMu.Unlock()
-	for _, in := range owed {
-		st, err := memoryx.ReviewTarget(in.Scope, in.ProjectID, in.Name)
+	for _, o := range owed {
+		committed, err := memoryx.ReviewForgetCommitted(o.in.Scope, o.in.ProjectID, o.in.Name, o.in.Base)
 		if err != nil {
-			continue // cannot tell; the intent stays
+			continue // cannot tell; the intent stays and is visible in the status
 		}
-		stateMu.Lock()
-		if st.Exists {
-			if err := releaseStore.Remove(releaseKey(in.Scope, in.ProjectID, in.Name)); err != nil {
-				log.Printf("memory review: could not drop an obsolete release")
-			}
-		} else {
-			finishReleaseLocked(in.Scope, in.ProjectID, in.Name)
-		}
-		stateMu.Unlock()
+		settleIntent(o.key, o.in, committed)
 	}
+}
+
+// settleIntent acts on the snapshot in only if the stored intent is still that one: the lock was
+// let go while the history was read, and a newer intent under the same key (a retried forget) is not
+// this snapshot's to remove.
+func settleIntent(key string, in releaseIntent, committed bool) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	cur, ok := releaseStore.Read(key)
+	if !ok || !cur.At.Equal(in.At) {
+		return
+	}
+	if !committed {
+		if err := releaseStore.Remove(key); err != nil {
+			log.Printf("memory review: could not drop an obsolete release")
+		}
+		return
+	}
+	finishLocked(key, in, true)
 }
 
 // ReleasePending is how many releases are owed and not done: a failure the member can see.

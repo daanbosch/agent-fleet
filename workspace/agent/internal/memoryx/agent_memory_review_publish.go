@@ -272,7 +272,13 @@ func ReviewTarget(scope, projectID, name string) (ReviewTargetState, error) {
 		if c, err = agentMemMemberCaller(scope, projectID); err != nil {
 			var ue *memoryUserErr
 			if errors.As(err, &ue) && ue.Code == errCodeMemoryNotFound {
-				return ReviewTargetState{}, nil
+				// No directory for the project: the memory is absent, but the history may still
+				// know the name (a lost directory takes the tombstone with it).
+				agentMemMu.RLock()
+				defer agentMemMu.RUnlock()
+				out := ReviewTargetState{}
+				out.Forgotten = errors.Is(agentMemRefuseRevival(rel, name), errReviewRevival)
+				return out, nil
 			}
 			return ReviewTargetState{}, err
 		}
@@ -455,13 +461,16 @@ func reviewRevertState(cd reviewRunCommit) (string, error) {
 }
 
 // ForgetHooks tell the review that a memory is going away or has gone, so it can release the
-// rejected proposals it remembered about it. Intent is called before the forget is committed (the
-// review writes down that a release is owed, so a stop or a failure after the commit cannot lose
-// it); Done after the commit succeeded. Both are called with the store lock held and must not call
-// back into this package. A forget that then fails to commit leaves an intent for a memory that
-// still exists, which the review drops.
+// rejected proposals it remembered about it. Intent is called before the forget is committed and
+// may refuse it: the review has to write down, durably, that a release is owed before the memory
+// goes, or a stop after the commit would leave nothing to recover from; an error from Intent stops
+// the forget with nothing changed. Done is called after the commit. base is the memory's newest
+// change before the forget ("" if it had none): it identifies which forget the intent is about, so a
+// later re-creation or a second forget is not mistaken for it (ReviewForgetCommitted). Both are
+// called with the store lock held and must not call back into this package.
 type ForgetHooks struct {
-	Intent, Done func(scope, projectID, name string)
+	Intent func(scope, projectID, name, base string) error
+	Done   func(scope, projectID, name, base string)
 }
 
 var forgetHooks atomic.Pointer[ForgetHooks]
@@ -469,20 +478,91 @@ var forgetHooks atomic.Pointer[ForgetHooks]
 // SetForgetHooks installs the hooks; nil removes them.
 func SetForgetHooks(h *ForgetHooks) { forgetHooks.Store(h) }
 
-// notifyForgetIntent and notifyForgotten report a forgotten memory of the scope directory rel
-// ("user" or "projects/<id>").
-func notifyForgetIntent(rel, name string) {
-	if h := forgetHooks.Load(); h != nil && h.Intent != nil {
+// forgetIntent runs the Intent hook for a forget of the memory in the scope directory rel ("user"
+// or "projects/<id>"), with agentMemMu held, and returns the base the Done call must carry.
+func forgetIntent(rel, name string) (string, error) {
+	h := forgetHooks.Load()
+	if h == nil {
+		return "", nil
+	}
+	base := ""
+	if memoryHasCommits() {
+		var err error
+		if base, err = agentMemLatestChange(rel + "/" + name + ".md"); err != nil {
+			return "", err
+		}
+	}
+	if h.Intent != nil {
 		scope, pid := reviewScopeOf(rel)
-		h.Intent(scope, pid, name)
+		if err := h.Intent(scope, pid, name, base); err != nil {
+			return "", memoryErrf(http.StatusInternalServerError, errCodeMemorySnapshotFailed,
+				"the memory review could not record the release of its rejected proposals for this memory, so it was not forgotten; try again")
+		}
+	}
+	return base, nil
+}
+
+// forgetDone runs the Done hook after the forget committed.
+func forgetDone(rel, name, base string) {
+	if h := forgetHooks.Load(); h != nil && h.Done != nil {
+		scope, pid := reviewScopeOf(rel)
+		h.Done(scope, pid, name, base)
 	}
 }
 
-func notifyForgotten(rel, name string) {
-	if h := forgetHooks.Load(); h != nil && h.Done != nil {
-		scope, pid := reviewScopeOf(rel)
-		h.Done(scope, pid, name)
+// ReviewForgetCommitted says whether the memory was deleted by a change newer than base, the newest
+// change it had when a forget began (ForgetHooks). It is the evidence a pending release works from:
+// the memory existing again says nothing, since an explicit save may have re-created it after the
+// forget. An error means it cannot tell (base is not in the history any more, git failed).
+func ReviewForgetCommitted(scope, projectID, name, base string) (bool, error) {
+	rel := "user"
+	switch {
+	case scope == agentMemScopeProject && agentMemValidProjectID(projectID):
+		rel = "projects/" + projectID
+	case scope != agentMemScopeUser:
+		return false, errors.New("not a memory")
 	}
+	if !agentMemValidName(name) {
+		return false, errors.New("not a memory")
+	}
+	path := rel + "/" + name + ".md"
+	agentMemMu.RLock()
+	defer agentMemMu.RUnlock()
+	if !memoryHasCommits() {
+		return false, nil
+	}
+	log, err := memoryGitRun("log", memoryBranch, "-F", "--grep=AF-Memory: "+agentMemRepoPrefix+"/"+path,
+		"--format=%H"+memoryFldSep+"%B"+memoryRecSep)
+	if err != nil {
+		return false, err
+	}
+	for _, rec := range strings.Split(log, memoryRecSep) {
+		f := strings.SplitN(strings.TrimSpace(rec), memoryFldSep, 2)
+		if len(f) < 2 {
+			continue
+		}
+		tr := agentMemTrailers(f[1])
+		if tr["AF-Trigger"] != memoryTriggerAgentMemory || tr["AF-Memory"] != agentMemRepoPrefix+"/"+path {
+			continue
+		}
+		if f[0] == base {
+			return false, nil // reached the change the forget started from: nothing deleted it since
+		}
+		switch tr["AF-Op"] {
+		case "forget":
+			return true, nil
+		case "revert":
+			if _, exists, err := agentMemBlob(f[0], path); err != nil {
+				return false, err
+			} else if !exists {
+				return true, nil
+			}
+		}
+	}
+	if base != "" {
+		return false, errors.New("the change a forget started from is no longer in the history")
+	}
+	return false, nil
 }
 
 func reviewScopeOf(rel string) (scope, projectID string) {

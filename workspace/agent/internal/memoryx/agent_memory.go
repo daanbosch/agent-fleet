@@ -1107,7 +1107,10 @@ func agentMemForget(c agentMemCaller, req agentMemForgetReq, now time.Time) (age
 			"the memory is at revision %d, not %d; read it again before forgetting it", cur.Entry.Revision, req.Revision)
 	}
 	repoRel := rel + "/" + req.Name + ".md"
-	notifyForgetIntent(rel, req.Name)
+	base, err := forgetIntent(rel, req.Name)
+	if err != nil {
+		return agentMemWriteResult{}, err
+	}
 	if err := agentMemWriteTomb(rel, req.Name, cur.Entry.Revision); err != nil {
 		return agentMemWriteResult{}, err
 	}
@@ -1117,7 +1120,7 @@ func agentMemForget(c agentMemCaller, req agentMemForgetReq, now time.Time) (age
 		return agentMemWriteResult{}, err
 	}
 	agentMemClearUsage(rel, req.Name)
-	notifyForgotten(rel, req.Name)
+	forgetDone(rel, req.Name, base)
 	return agentMemWriteResult{Name: req.Name, Scope: req.Scope, Revision: cur.Entry.Revision, Commit: rev, Deleted: true}, nil
 }
 

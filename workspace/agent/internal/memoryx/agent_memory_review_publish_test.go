@@ -412,14 +412,24 @@ func TestRevertedReviewCreationStaysGone(t *testing.T) {
 }
 
 // The forget hooks are told about every way a memory goes away, the intent before the commit and
-// the done after it, with the scope and project.
+// the done after it, with the scope, project and the base the forget started from.
 func TestForgetHooksReportEveryForget(t *testing.T) {
 	_, _, _ = agentMemTestEnv(t)
 	type ev struct{ phase, scope, pid, name string }
 	var got []ev
+	bases := map[string]string{}
 	SetForgetHooks(&ForgetHooks{
-		Intent: func(scope, pid, name string) { got = append(got, ev{"intent", scope, pid, name}) },
-		Done:   func(scope, pid, name string) { got = append(got, ev{"done", scope, pid, name}) },
+		Intent: func(scope, pid, name, base string) error {
+			got = append(got, ev{"intent", scope, pid, name})
+			bases[name] = base
+			return nil
+		},
+		Done: func(scope, pid, name, base string) {
+			got = append(got, ev{"done", scope, pid, name})
+			if base != bases[name] || base == "" {
+				t.Errorf("done carries base %q, intent had %q", base, bases[name])
+			}
+		},
 	})
 	t.Cleanup(func() { SetForgetHooks(nil) })
 	now := time.Now()
@@ -463,6 +473,104 @@ func TestForgetHooksReportEveryForget(t *testing.T) {
 	}
 }
 
+// An Intent that refuses stops the forget before it changes anything, on all three paths that
+// forget a memory: the forget itself, the undo of a creation, and the move out of a project.
+func TestARefusedForgetIntentStopsEveryForgetPath(t *testing.T) {
+	home, _, _ := agentMemTestEnv(t)
+	now := time.Now()
+	c := agentMemCallerT(t, "claude-main")
+	for _, n := range []string{"f1", "r1"} {
+		if _, err := agentMemSave(c, agentMemSaveReq{Name: n, Description: "d", Type: "project", Body: "b"}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	orphan, to := moveOrphan(t, home, "m1")
+	SetForgetHooks(&ForgetHooks{Intent: func(string, string, string, string) error { return errors.New("no") }})
+	t.Cleanup(func() { SetForgetHooks(nil) })
+	before := commitCount(t)
+
+	if _, err := agentMemForget(c, agentMemForgetReq{Name: "f1", Revision: 1}, now); err == nil {
+		t.Error("forget went ahead")
+	}
+	var create string
+	for _, x := range agentMemChangesT(t) {
+		if x.Name == "r1" {
+			create = x.Commit
+		}
+	}
+	if _, err := agentMemRevert(agentMemRevertReq{Commit: create}, now); err == nil {
+		t.Error("undo of a creation went ahead")
+	}
+	if commitCount(t) != before {
+		t.Error("a refused forget committed something")
+	}
+	// A move copies the memory to its new project first and forgets the source second; the refusal
+	// stops it at the second step, which is the existing "stopped" outcome, source untouched.
+	_, res, _ := moveDo(t, orphan, to, "", "m1")
+	if res.Stopped != "m1" {
+		t.Errorf("the move out of the project went ahead: %+v", res)
+	}
+	if _, ok := projectNames(t, orphan)["m1"]; !ok {
+		t.Error("the memory left its project")
+	}
+	for _, n := range []string{"f1", "r1"} {
+		if _, err := agentMemRead(c, "project", n); err != nil {
+			t.Errorf("%s is gone: %v", n, err)
+		}
+	}
+}
+
+// ReviewForgetCommitted answers from the history: a forget that committed counts even when the
+// memory was saved again afterwards, and one that did not commit does not count however the
+// memory has changed since.
+func TestReviewForgetCommittedReadsTheHistory(t *testing.T) {
+	_, _, _ = agentMemTestEnv(t)
+	now := time.Now()
+	c := agentMemCallerT(t, "claude-main")
+	pid := c.Project.ID
+	base := ""
+	SetForgetHooks(&ForgetHooks{Intent: func(_, _, _, b string) error { base = b; return nil }})
+	t.Cleanup(func() { SetForgetHooks(nil) })
+	if _, err := agentMemSave(c, agentMemSaveReq{Name: "a", Description: "d", Type: "project", Body: "v1"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agentMemSave(c, agentMemSaveReq{Name: "a", Description: "d", Type: "project", Body: "v2", Revision: 1}, now); err != nil {
+		t.Fatal(err)
+	}
+	// A forget that was begun and not committed: the base is the update, and an edit follows.
+	if _, err := agentMemForget(c, agentMemForgetReq{Name: "a", Revision: 1}, now); err == nil {
+		t.Fatal("a forget at a stale revision went through")
+	}
+	staleBase := base
+	if _, err := agentMemSave(c, agentMemSaveReq{Name: "a", Description: "d", Type: "project", Body: "v3", Revision: 2}, now); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReviewForgetCommitted("project", pid, "a", staleBase); err != nil || got {
+		t.Fatalf("no forget committed, got %v %v", got, err)
+	}
+	// A real forget, then the name is saved again.
+	if _, err := agentMemForget(c, agentMemForgetReq{Name: "a", Revision: 3}, now); err != nil {
+		t.Fatal(err)
+	}
+	forgetBase := base
+	if _, err := agentMemSave(c, agentMemSaveReq{Name: "a", Description: "d", Type: "project", Body: "again"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReviewForgetCommitted("project", pid, "a", forgetBase); err != nil || !got {
+		t.Fatalf("the committed forget was not seen after a re-creation: %v %v", got, err)
+	}
+	// A base that is not in the history (it was purged) with no forget to be seen: it cannot tell.
+	if _, err := agentMemSave(c, agentMemSaveReq{Name: "b", Description: "d", Type: "project", Body: "v1"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReviewForgetCommitted("project", pid, "b", "0123456789abcdef0123456789abcdef01234567"); err == nil {
+		t.Fatal("a base that is not in the history was taken as an answer")
+	}
+	if _, err := ReviewForgetCommitted("project", pid, "../x", ""); err == nil {
+		t.Fatal("a bad name was accepted")
+	}
+}
+
 // The screen's view of a create agrees with approval: a name the history knows is forgotten even
 // when its tombstone is gone.
 func TestReviewTargetForgottenSeesTheHistoryWhenTheTombstoneIsLost(t *testing.T) {
@@ -480,6 +588,29 @@ func TestReviewTargetForgottenSeesTheHistoryWhenTheTombstoneIsLost(t *testing.T)
 	}
 	if st, _ := ReviewTarget("project", c.Project.ID, "a"); st.Exists || !st.Forgotten {
 		t.Fatalf("state = %+v, want forgotten by history", st)
+	}
+	if st, _ := ReviewTarget("project", c.Project.ID, "never-was"); st.Forgotten {
+		t.Fatalf("a name that never existed reads as forgotten: %+v", st)
+	}
+}
+
+// Losing the whole project directory takes the memory and its tombstone with it; the history still
+// knows the name, and the screen must say so before anyone presses approve.
+func TestReviewTargetForgottenSeesTheHistoryWhenTheProjectDirectoryIsLost(t *testing.T) {
+	_, _, _ = agentMemTestEnv(t)
+	now := time.Now()
+	c := agentMemCallerT(t, "claude-main")
+	if _, err := agentMemSave(c, agentMemSaveReq{Name: "a", Description: "d", Type: "project", Body: "v1"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agentMemForget(c, agentMemForgetReq{Name: "a", Revision: 1}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(agentMemDir(), "projects", c.Project.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := ReviewTarget("project", c.Project.ID, "a"); err != nil || st.Exists || !st.Forgotten {
+		t.Fatalf("state = %+v %v, want forgotten by history", st, err)
 	}
 	if st, _ := ReviewTarget("project", c.Project.ID, "never-was"); st.Forgotten {
 		t.Fatalf("a name that never existed reads as forgotten: %+v", st)
