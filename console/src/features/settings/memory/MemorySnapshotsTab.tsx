@@ -96,7 +96,12 @@ export function MemorySnapshotsTab() {
       if (signal.aborted) return true;
       if (isTransientErr(r) || isTransientErr(s)) return false;
       if (r?.error) {
-        setErr(errText(r.error));
+        // A failed roots request is a failed History too: leaving `snaps` null would read "Loading…" for good.
+        const msg = errText(r.error);
+        setErr(msg);
+        snapErrRef.current = msg;
+        setSnapErr(msg);
+        setSnaps([]);
         return true;
       }
       setErr("");
@@ -318,7 +323,15 @@ export function MemorySnapshotsTab() {
         {view === "targets" && (
           <section className="mem-section">
             {!data ? (
-              <p className="muted pad">{tr("common.loading")}</p>
+              err ? (
+                <p className="mem-warn pad">
+                  <button type="button" className="linklike" onClick={() => setReload((n) => n + 1)}>
+                    {tr("mem.history_retry")}
+                  </button>
+                </p>
+              ) : (
+                <p className="muted pad">{tr("common.loading")}</p>
+              )
             ) : data.roots.length === 0 && !data.inactive?.length ? (
               <p className="muted pad">{tr("mem.no_roots")}</p>
             ) : (

@@ -183,6 +183,62 @@ describe("MemorySnapshotsTab diff pane without a selection", () => {
     expect(host!.querySelector(".mem-snap")).toBeNull();
   });
 
+  describe("when the roots request fails", () => {
+    const one = { rev: "r1", short: "r1", at: "2026-10-04T10:00:00Z", subject: "s", trigger: "auto", kinds: ["claude"], projects: [], files: 3 };
+    const count = (prefix: string) => api.mock.calls.filter((c) => String(c[0]).startsWith(prefix)).length;
+    const stubRoots = (roots: unknown) =>
+      api.mockImplementation((path: string) => {
+        if (path.startsWith("api/agents/memory/roots")) return Promise.resolve(roots);
+        if (path.startsWith("api/agents/memory/snapshots")) return Promise.resolve({ snapshots: [one] });
+        return Promise.resolve({ diff: "" });
+      });
+    const retryBtn = () =>
+      Array.from(host!.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent === t("mem.history_retry"))!;
+
+    it("does not leave the history on 'Loading…'", async () => {
+      stubRoots({ error: "boom" });
+      await mount();
+      expect(text()).toContain(t("mem.history_failed", { msg: "boom" }));
+      expect(text()).not.toContain(loadingText);
+      expect(host!.querySelector(".mem-diff-head")).toBeNull();
+      expect(host!.querySelector(".mem-status")!.textContent).not.toContain(loadingText);
+    });
+
+    it("recovers on Retry: roots and the list are re-read and the list shows", async () => {
+      stubRoots({ error: "boom" });
+      await mount();
+      stubRoots(rootsOk);
+      await act(async () => retryBtn().click());
+      await flush();
+      expect(text()).not.toContain(t("mem.history_failed", { msg: "boom" }));
+      expect(host!.querySelector(".mem-snap")).not.toBeNull();
+      expect(host!.querySelector(".mem-warn")).toBeNull();
+    });
+
+    it("requests once per load, with no loop, and disables the date jump", async () => {
+      stubRoots({ error: "boom" });
+      await mount();
+      await flush();
+      expect(count("api/agents/memory/roots")).toBe(1);
+      expect(count("api/agents/memory/snapshots")).toBe(1);
+      const input = host!.querySelector<HTMLInputElement>("input[type=datetime-local]")!;
+      await setValue(input, "2026-10-04T12:00");
+      const go = Array.from(host!.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent === t("mem.jump_go"))!;
+      expect(go.disabled).toBe(true);
+    });
+
+    it("shows a Retry, not 'Loading…', under Targets", async () => {
+      stubRoots({ error: "boom" });
+      await mount();
+      await goto("targets");
+      expect(text()).not.toContain(loadingText);
+      stubRoots(rootsOk);
+      await act(async () => retryBtn().click());
+      await flush();
+      expect(text()).toContain("Claude");
+    });
+  });
+
   it("keeps 'No snapshots yet' for a successful empty list, without a retry", async () => {
     stub({ snapshots: [] });
     await mount();
