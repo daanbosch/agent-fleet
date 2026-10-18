@@ -715,3 +715,30 @@ Agent memory に戻し、CP は `memory.entry.save` として監査する。印�
   ピン留め、使用回数。出所は `source`（`bundle:<取り込み ID>:<スコープのディレクトリ>/<名前>@<元のリビジョン>`）と `source_hash`、そして 2 つの
   コミットトレーラー（`AF-Bundle-Import`、`AF-Bundle-Source`）に残すので、取り込みはメンバーによる `import` の変更として変更一覧に出て、そこで
   元に戻せる。バンドルの履歴は取り込まず、`refs/imports` に（削除されるまで）残る。
+
+## ノート（2026-10-18）：Agent Fleet の外にいるメンバー自身のエージェントが `/mcp` からストアを使う（#1988）
+
+決定 4 はツールを Workspace 内の af サーバーに置いています。メンバーは Workspace の外（手元のマシンの Claude Code /
+Desktop）でもエージェントを動かし、CP の `/mcp` 用の PAT を持っています。このノートはその入口を足すもので、上の決定は変えません。
+
+- **ツール。** `memory_projects`・`memory_index`・`memory_search`・`memory_read`（read スコープの PAT）と
+  `memory_save`・`memory_forget`（write スコープの PAT）。実装は `control-plane/internal/mcpsrv/mcp_memory.go`。それぞれ
+  Agent の `/agents/memory/external/*` に中継し、そこでツール本来の読み取り・検索・保存・忘却を再利用します。リビジョン確認
+  （決定 4）、秘密情報の検査（決定 9）、1 コミットでの公開は変わりません。
+- **呼び出し元とプロジェクト。** 外のクライアントにはセッションがないので、プロジェクト ID は自分で渡し
+  （`memory_projects` で得る）、書き手の種類は `external`、セッションは不明として記録します。プロジェクトはすでにメモリを持つ
+  ものに限ります（Console と同じ。新しいプロジェクトの root を取れる作業コピーがないため）。クライアントが自称する MCP の
+  `clientInfo`（なければ User-Agent）は整形したうえでコミットトレーラー `AF-External-Client` に参考情報としてだけ残し、判断には使いません。
+  特定の `kinds` に限ったメモリは `external` には見せません。読み取りは使用回数に数えます（#1703）。
+- **オプトイン。** メンバーごとの ui-pref `externalMemory` 1 つで、`off`（既定）・`read`・`write` の 3 状態。`agentMemory` とは
+  別で、どちらか片方だけオンにできます。外からの書き込みは内側のすべての種類に読まれ（決定 8 のリスクの、書き手が
+  Workspace の外にいる版）、読んだ本文は Workspace の egress 制御の外にあるモデルに届くため、`write` は `read` の上に置く
+  意図的な 2 段目です。Agent が呼び出しごとに強制するので、PAT が設定を超えることはありません。ツールの一覧は PAT のスコープだけで
+  決まります（設定は CP が持たず、停止中の Workspace には尋ねられないため）。断るときは変えるべき Console の設定を示します。
+- **監査。** Agent には CP の台帳への経路がありませんが、この呼び出しは CP を通るので、成功した外からの保存と忘却を
+  `memory.entry.save` / `memory.entry.forget`（実行者の種類 `mcp`、PAT の ID、対象は ID の形をしているときだけプロジェクト ID）
+  として記録します。メモリ名は自由記述なので台帳には写しません。Workspace 内で行う書き込みは、決定 8 のとおり CP では監査しないままです。
+- **停止中の Workspace。** Workspace が起動していないので Console で起動するよう答えます。ツール呼び出しのために起動することは別の問いです。
+- **限界。** 新しい Agent のルートは、ツール用のルートと同じく `AGENT_TOKEN` を持つ者に答えます（決定 8）。門番は署名ではなく設定です。
+  Console 自身のリクエスト用である member-origin マーク（[0113](0113-member-origin-mark.md)）は付きません。テナント単位の管理者スイッチはなく、
+  `AF_MCP_ENABLED` が配備全体の `/mcp` を止めます。フォローアップ：#2318。

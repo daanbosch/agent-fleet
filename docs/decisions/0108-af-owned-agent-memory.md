@@ -826,3 +826,36 @@ It does not touch the generic paths, which keep skipping `af/`.
   (`bundle:<import id>:<scope dir>/<name>@<source revision>`) and `source_hash`, and in two commit trailers
   (`AF-Bundle-Import`, `AF-Bundle-Source`), so each import is an `import` change by the member in the changes
   list and can be reverted there. The bundle's history is not imported; it stays under `refs/imports` until pruned.
+
+## Note (2026-10-18): the member's own agent outside Agent Fleet reaches the store through `/mcp` (#1988)
+
+Decision 4 puts the tools on the af server inside the workspace. A member also runs agents outside it
+(Claude Code or Desktop on their own machine) and holds a PAT for the CP's `/mcp`. This note adds that door;
+no decision above changes.
+
+- **Tools.** `memory_projects`, `memory_index`, `memory_search`, `memory_read` (read-scoped PAT) and
+  `memory_save`, `memory_forget` (write-scoped PAT), in `control-plane/internal/mcpsrv/mcp_memory.go`. Each proxies to
+  the Agent's `/agents/memory/external/*` routes, which reuse the tools' own read, search, save and forget: the
+  revision check (decision 4), the secret scan (decision 9) and the one-commit publish are unchanged.
+- **Caller and project.** An outside caller has no session, so it passes the project id itself (from
+  `memory_projects`) and the author kind is recorded as `external`, the session as unknown. A project must already
+  hold memory, as for the Console: there is no working copy to take a new project's root from. The client's
+  self-declared MCP `clientInfo` (else the User-Agent) is sanitised and kept as an `AF-External-Client` commit
+  trailer, for information only; nothing is decided by it. A memory limited to certain `kinds` is not shown to
+  `external`. Reads count as uses (#1703).
+- **Opt-in.** One per-member ui-pref, `externalMemory`: `off` (default), `read`, `write`. It is separate from
+  `agentMemory`: either can be on without the other. `write` is a second, deliberate step above `read`, because a
+  write from outside is read by every kind inside (decision 8's risk, with a writer outside the workspace) and
+  read text reaches an outside model beyond the workspace's egress controls. The Agent enforces it on every call,
+  so a PAT cannot outrun the setting. The tools are listed by PAT scope only: the CP does not hold the setting and
+  a stopped workspace cannot be asked, so a refusal names the Console setting to change.
+- **Audit.** The Agent has no channel to the CP's ledger, but these calls pass through the CP, so a successful
+  external save and forget is recorded as `memory.entry.save` / `memory.entry.forget` with actor kind `mcp`, the
+  PAT id, and the project id as the target when it has the shape of one. The memory name is free text and is
+  never copied. This does not change decision 8 for writes made inside the workspace, which stay unaudited at the CP.
+- **Stopped workspace.** The tools answer that the workspace is not running and must be started in the Console.
+  Starting it for a tool call is a separate question.
+- **Limits.** The new Agent routes answer anything holding `AGENT_TOKEN`, as the tools' routes do (decision 8); the
+  setting, not a signature, is what gates them. They do not carry the member-origin mark
+  ([0113](0113-member-origin-mark.md)), which is for the Console's own requests. There is no tenant-level admin
+  switch; `AF_MCP_ENABLED` still turns `/mcp` off for a whole deployment. Follow-ups: #2318.
