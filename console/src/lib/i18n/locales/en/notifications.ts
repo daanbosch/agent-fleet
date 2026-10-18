@@ -124,7 +124,7 @@ export const notifications: Record<keyof typeof jaNotifications, string> = {
   "notif.memory_sync.import.title": "Agent memory switched on: some files were not imported",
   "notif.memory_sync.catch_up.title": "Agent memory caught up: some files were not imported",
   "notif.memory_sync.write_back.title": "Agent memory switched off: some files were not written back",
-  "notif.memory_sync.body": "{n} files need a look ({conflicts} conflicts, {secrets} with a secret). They are listed on Settings > Agent memory.",
+  "notif.memory_sync.body": "{n} files need a look ({conflicts} conflicts, {secrets} with a secret). They are listed on Settings > Agent memory > Settings.",
   "notif.memory_sync.import.speech": "Agent memory is on. Some of Claude Code memory files were not imported.",
   "notif.memory_sync.catch_up.speech": "Agent memory caught up with Claude Code. Some files were not imported.",
   "notif.memory_sync.write_back.speech": "Agent memory is off. Some files were not written back to Claude Code.",

@@ -29,7 +29,8 @@ value you set is not the value in force, look one layer out.
 | Keyboard | shortcuts and rebinding |
 | Agents | connecting each agent, its default model, models to exclude, per-agent behaviour; llama.cpp on / off and your own llama-server connection; Muse Code install and sign-in; the Session group (messages between sessions, starting sessions from sessions and children per session, past-session search, image generation) |
 | Agent instructions | text added to every agent you start in this workspace |
-| Agent memory | version management, rollback, import / export of an agent's memory; the change list of Agent Fleet's own shared memory, with revert and forget |
+| Agent memory | Agent Fleet's own shared memory, in four views: Memories (browse, pin, forget, purge), Changes (the change list, with revert and forget), Import & export (from Claude Code and muse, write back to Claude Code, project move) and Settings (the sessions' switch with the sync status, outside access) |
+| Memory snapshots | version management of each agent kind's own memory, in three views: History (with restore), Targets (the roots, codex memories, automatic snapshots) and Export / import |
 | Assistant | the assistant chat's agent and model |
 | AI assistance | default agent/models for titles, branch names, reply/edit suggestions, plan updates and translation; per-feature on/off plus per-feature agent/model override |
 | Agent usage | your token spend, by feature, agent and model |

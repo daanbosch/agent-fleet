@@ -122,7 +122,7 @@ export const notifications = {
   "notif.memory_sync.import.title": "メモリをオンにしました。取り込めなかったファイルがあります",
   "notif.memory_sync.catch_up.title": "メモリの追い取り込みをしました。取り込めなかったファイルがあります",
   "notif.memory_sync.write_back.title": "メモリをオフにしました。書き戻せなかったファイルがあります",
-  "notif.memory_sync.body": "確認が必要なファイルが {n} 件あります（競合 {conflicts} 件、秘密情報あり {secrets} 件）。設定 > Agent Fleet のメモリに一覧があります。",
+  "notif.memory_sync.body": "確認が必要なファイルが {n} 件あります（競合 {conflicts} 件、秘密情報あり {secrets} 件）。設定 > エージェントメモリ > 設定 に一覧があります。",
   "notif.memory_sync.import.speech": "メモリをオンにしました。Claude Code のメモリに取り込めなかったファイルがあります。",
   "notif.memory_sync.catch_up.speech": "Claude Code のメモリを追って取り込みました。取り込めなかったファイルがあります。",
   "notif.memory_sync.write_back.speech": "メモリをオフにしました。Claude Code に書き戻せなかったファイルがあります。",

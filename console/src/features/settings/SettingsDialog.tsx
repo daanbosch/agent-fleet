@@ -54,6 +54,7 @@ import { BackupTab } from "./workspace/BackupTab.tsx";
 import { NotificationsTab } from "./personal/NotificationsTab.tsx";
 import { LimitBoardView } from "../limits/LimitBoardView.tsx";
 import { MemoryTab } from "./memory/MemoryTab.tsx";
+import { MemorySnapshotsTab } from "./memory/MemorySnapshotsTab.tsx";
 // The usage tab is a thin wrapper around the features/usage view, kept independent of the modal
 // so the same view can be promoted to a pane unchanged (docs/log/46 §5).
 import { UsageView } from "../usage/UsageView.tsx";
@@ -91,6 +92,9 @@ export const GROUPS: { key: string; label: string; items: [string, string][] }[]
       // and one accumulated by the agent. That its bytes live in the workspace does not
       // place it — the instructions are stored Agent-side too.
       ["memory", "set.tab_memory"],
+      // Two objects, two entries (#2324): "memory" is Agent Fleet's own shared memory (ADR 0108),
+      // this one is the version control of each kind's native memory (ADR 0022).
+      ["memorysnapshots", "set.tab_memory_snapshots"],
     ],
   },
   {
@@ -251,6 +255,7 @@ export function SettingsDialog() {
                 runtime, so even a deployment with no AWS bill knows when it was running. */}
             {section === "uptime" && <MyUptimeView />}
             {section === "memory" && <MemoryTab />}
+            {section === "memorysnapshots" && <MemorySnapshotsTab />}
             {section === "machine" && <MachineTab />}
             {section === "env" && <EnvTab />}
             {section === "database" && <DatabaseTab />}

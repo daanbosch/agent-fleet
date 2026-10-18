@@ -182,7 +182,7 @@ export const settings = {
   "agents.session_search": "過去セッションの検索",
   "agents.note_session_search":
     "セッションが、このワークスペースの過去のセッション（停止・アーカイブ済みを含む全種別）の会話を全文検索できるようにします（search_sessions）。読み取りのみで、索引に入るのは会話の本文だけです。ツールの出力や思考は入りません。コマンドパレットの「会話」はこの設定に関係なく使えます。オンにした分は次に起動するセッションから使えるようになり、オフは保存した時点で起動中のセッションの検索も断ります。既定ではオンです。",
-  "agents.note_agent_memory_moved": "Agent Fleet のメモリ（全種類のエージェントが af の memory_* ツールで共有するメモリ）のオン・オフは、設定 → エージェントメモリ にあります。",
+  "agents.note_agent_memory_moved": "Agent Fleet のメモリ（全種類のエージェントが af の memory_* ツールで共有するメモリ）のオン・オフは、設定 → エージェントメモリ → 設定 にあります。",
   "agents.image_generation": "画像生成",
   "agents.note_image_generation":
     "セッションがプロンプトから画像を生成できるようにします（generate_image ツール）。接続済み CLI の画像生成を使い、生成のたびにそのプランの利用枠を消費します。次に起動するセッションから反映されます。既定ではオフです。",
@@ -618,6 +618,7 @@ export const settings = {
   "set.tab_keys": "キー操作",
   "set.tab_usage": "エージェント使用量",
   "set.tab_memory": "エージェントメモリ",
+  "set.tab_memory_snapshots": "メモリのスナップショット",
   "set.tab_machine": "マシン",
   "set.tab_env": "ツールチェーン",
   "set.tab_database": "データベース",

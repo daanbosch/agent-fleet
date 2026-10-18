@@ -198,10 +198,6 @@ export function TransferSection({
 
   return (
     <section className="mem-section">
-      <div className="mem-head">
-        <h3>{tr("mem.transfer_title")}</h3>
-      </div>
-
       {/* Export */}
       <div className="mem-transfer">
         <div className="mem-scope">

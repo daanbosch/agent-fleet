@@ -1,4 +1,4 @@
-// AgentMemorySection — the member's after-the-fact view of AF-owned agent memory (ADR 0108
+// AgentChangesPanel — the member's after-the-fact view of AF-owned agent memory (ADR 0108
 // decision 8). Agents publish their writes without approval, so this is where a bad memory is
 // found (who, when, what) and undone. Undoing never rewrites history: the Agent writes the
 // earlier state back as a new change by the member.
@@ -16,13 +16,7 @@ import { Choice, OnOff, Row } from "../parts/controls.tsx";
 import { setSetting, useSettings } from "../../../lib/settings.ts";
 import { useT, tMaybe } from "../../../lib/i18n/index.ts";
 import { fmtDateTime, DATETIME_FULL } from "../../../lib/intl.ts";
-import { ClaudeImportPanel } from "./memoryClaudeImport.tsx";
 import { AutoSyncPanel, useFlipAgentMemory } from "./memoryAutoSync.tsx";
-import { ProjectMovePanel } from "./memoryProjectMove.tsx";
-import { MuseImportPanel } from "./memoryMuseImport.tsx";
-import { ClaudeExportPanel } from "./memoryClaudeExport.tsx";
-import { MemoryPinsPanel } from "./memoryPins.tsx";
-import { MemoryBrowserPanel } from "./memoryBrowser.tsx";
 import type { ChangeDiff, MemoryChange, SecretFinding } from "./memoryTypes.ts";
 
 // An unknown op from a newer Agent is printed raw rather than breaking the row.
@@ -71,7 +65,7 @@ export function ExternalMemorySwitch() {
   );
 }
 
-export function AgentMemorySection({ reload, onChanged }: { reload: number; onChanged: () => void }) {
+export function AgentChangesPanel({ reload, onChanged }: { reload: number; onChanged: () => void }) {
   const tr = useT();
   const toast = useToast();
   const askConfirm = useConfirm();
@@ -190,19 +184,11 @@ export function AgentMemorySection({ reload, onChanged }: { reload: number; onCh
   const selected = changes?.find((c) => c.commit === sel) ?? null;
 
   return (
-    <section className="mem-section">
-      <div className="mem-head">
-        <h3>{tr("mem.af_title")}</h3>
-      </div>
-      <p className="muted ds-hint">{tr("mem.af_intro")}</p>
-      {/* The list, the diff and the way back below work with the switch either way; only the
-          import's confirm needs it on. */}
-      <AgentMemorySwitch />
-      <ExternalMemorySwitch />
+    <div className="mem-changes">
+      <h4>{tr("mem.af_changes_title")}</h4>
+      <p className="muted ds-hint">{tr("mem.af_changes_hint")}</p>
       {loadErr && <p className="mem-warn">{loadErr}</p>}
       {withheld > 0 && <p className="mem-warn">{tr("mem.af_withheld", { n: withheld })}</p>}
-      <MemoryPinsPanel reload={reload + mine} onChanged={() => setMine((n) => n + 1)} />
-      <MemoryBrowserPanel reload={reload + mine} onChanged={() => setMine((n) => n + 1)} />
       <div className="mem-body">
         <ul className="mem-list">
           {changes === null ? (
@@ -276,10 +262,6 @@ export function AgentMemorySection({ reload, onChanged }: { reload: number; onCh
             ))}
         </div>
       </div>
-      <ClaudeImportPanel reload={reload} onChanged={() => setMine((n) => n + 1)} />
-      <MuseImportPanel reload={reload} onChanged={() => setMine((n) => n + 1)} />
-      <ClaudeExportPanel reload={reload} />
-      <ProjectMovePanel reload={reload} onChanged={() => setMine((n) => n + 1)} />
-    </section>
+    </div>
   );
 }

@@ -289,7 +289,7 @@ export function notificationWording(n: NotificationWordingInput): { title: strin
   if (n.kind === "memory-sync") {
     // The Agent memory switch carried claude's native memory across by itself (#1972) and the run
     // left files the member has to look at. The subject is the workspace, so the counts are the
-    // whole message; the files are listed on Settings > Agent memory, never in the payload.
+    // whole message; the files are listed on Settings > Agent memory > Settings, never in the payload.
     const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
     const params = { n: num(n.payload.leftovers), conflicts: num(n.payload.conflicts), secrets: num(n.payload.secrets) };
     const body = t("notif.memory_sync.body", params);
