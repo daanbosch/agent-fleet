@@ -462,3 +462,42 @@ approval screen, which the setting's own text says.
   left behind; the interrupted attempt stays `dispatched` for the next start to settle.
 
 Follow-ups: #2321, #2322.
+
+**Note (2026-10-19, #2321): phase P2a (the Agent and Control Plane half of approval) fixes these readings.** The
+Console half (P2b) follows. The decisions above are unchanged.
+
+- **Who may decide.** Approve, reject, reject all and "revert this run" (`POST /agents/memory-review/proposals/approve`,
+  `…/proposals/reject`, `…/proposals/reject-all`, `…/runs/revert`) answer only a request carrying the Control Plane's
+  member-origin mark (ADR 0113); the CP signs and audits them (`memory.review.approve`, `.reject`, `.reject_all`,
+  `.revert_run`; the hint is a 20-hex proposal or run id and nothing else). The handlers check the mark themselves as well
+  as through the wrapper, no af MCP tool names these routes (a test keeps it so), and the review loop never calls the
+  functions behind them. The queue itself, `GET /agents/memory-review/proposals`, is readable with AGENT_TOKEN like the
+  change list: it reads, and the text in it has passed the same scan as everything else. The count for a badge is the
+  existing `pending` of `GET /agents/memory-review` (the queue length, stale proposals included, since each still needs a
+  decision); it carries no text.
+- **Approval publishes through `agentMemSave` / `agentMemForget`**, as author kind `review`, the reviewed session as author
+  session (also when it is gone: a project that already has memory is read from the store, one that does not is refused),
+  with `AF-Review-Run: <run id>` and one more trailer, `AF-Review-Proposal: <proposal id>`. The second is what makes a retry
+  harmless: a stop between the commit and the removal of the queue entry leaves the proposal pending, and the next approval
+  finds the commit by that trailer and writes nothing. An `update` keeps the kinds the memory has (the model is not shown
+  them). A secret is refused at approval again, by the store's own scan.
+- **Stale and forgotten.** A base revision that is no longer the memory's, a memory that is gone or has appeared, is
+  `stale`; a `create` over a name with a tombstone, or with any change in the history (the tombstone can be lost with its
+  directory, the history cannot), is `forgotten`, checked inside the store lock of the save. Neither writes anything. The
+  proposal stays in the queue, marked, with its text, because the member still has to decide; rejecting it removes the text
+  and keeps the hash like any rejection (a stale idea is not offered again unchanged). The list computes the state from the
+  live store, so a proposal made stale by an edit shows as stale before anyone presses approve.
+- **Rejected hashes are released.** P1 kept the hash until the memory is forgotten but nothing told the queue when that
+  happened. `memoryx` now calls a hook after a forget, an undone creation or a move out of a project commits, and the Agent
+  installs `memreview.ForgetMemory` on it.
+- **"Revert this run"** reverts, as new commits by the member with `AF-Revert-Of`, each commit carrying the run id that is
+  still its memory's newest change and whose memory is exactly as it left it. The answer is per commit: `reverted`,
+  `already` (an earlier revert of this run undid it), `conflict` (`edited`: a later change exists; `blocked`: the revert
+  itself was refused, for example the earlier history was purged), `failed` (the store could not do it now). Running it
+  again retries only what is left. A creation that is reverted leaves a tombstone, so a later review does not bring it back.
+  The change list's rows do not carry the run id yet: P2b adds it (`reviewRun`) together with the Console type the wire
+  contract test requires, so the Console half and its type land in one change.
+- **Not gated by the `agentMemory` switch.** Like the other member routes, deciding on what is already queued works while
+  the switch is off.
+
+Follow-ups: #2321 (P2b, the Console).
