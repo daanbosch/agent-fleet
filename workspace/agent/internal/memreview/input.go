@@ -4,9 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"sort"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/memoryx"
@@ -20,7 +18,11 @@ const omittedMark = "[omitted: possible secret]"
 // the turns handed to BuildWindows plus its base) rendered and redacted.
 type Window struct {
 	First, Last int
-	Text        string
+	// Numbers are the turns the text actually contains, in order. First..Last also spans rows the
+	// window leaves out (compaction summaries, turns with nothing to read), so only these may be
+	// cited as evidence.
+	Numbers []int
+	Text    string
 	// Omitted counts strings the redaction rule replaced; it is shown to nobody but the logs.
 	Omitted int
 }
@@ -44,13 +46,14 @@ func BuildWindows(turns []transcript.Turn, firstNumber int) []Window {
 	var cur strings.Builder
 	curChars, omitted := 0, 0
 	first, last := 0, 0
+	var numbers []int
 	flush := func() {
 		if last == 0 {
 			return
 		}
-		out = append(out, Window{First: first, Last: last, Text: cur.String(), Omitted: omitted})
+		out = append(out, Window{First: first, Last: last, Numbers: numbers, Text: cur.String(), Omitted: omitted})
 		cur.Reset()
-		curChars, omitted, first, last = 0, 0, 0, 0
+		curChars, omitted, first, last, numbers = 0, 0, 0, 0, nil
 	}
 	for i, t := range turns {
 		if t.Compact {
@@ -63,7 +66,8 @@ func BuildWindows(turns []transcript.Turn, firstNumber int) []Window {
 		}
 		bc := utf8.RuneCountInString(block)
 		if bc > WindowChars {
-			block, bc = clipChars(block, WindowChars), WindowChars
+			block = clipChars(block, WindowChars)
+			bc = utf8.RuneCountInString(block)
 		}
 		if curChars+bc > WindowChars {
 			flush()
@@ -72,6 +76,7 @@ func BuildWindows(turns []transcript.Turn, firstNumber int) []Window {
 			first = n
 		}
 		last = n
+		numbers = append(numbers, n)
 		cur.WriteString(block)
 		curChars += bc
 		omitted += om
@@ -126,17 +131,24 @@ func renderTurn(n int, t transcript.Turn) (string, int) {
 	return head + ":\n" + b.String() + "\n", omitted
 }
 
-// clipChars cuts s to n characters at a rune boundary, marking the cut.
+// cutMark ends a clipped string. It counts toward the limit: a clip to n characters is n characters.
+const cutMark = "…[cut]"
+
+// clipChars cuts s to at most n characters at a rune boundary, ending it with cutMark when it cut.
 func clipChars(s string, n int) string {
 	if utf8.RuneCountInString(s) <= n {
 		return s
 	}
+	keep := n - utf8.RuneCountInString(cutMark)
+	if keep < 0 {
+		keep = 0
+	}
 	i := 0
-	for ; n > 0; n-- {
+	for ; keep > 0; keep-- {
 		_, w := utf8.DecodeRuneInString(s[i:])
 		i += w
 	}
-	return s[:i] + "…[cut]"
+	return s[:i] + cutMark
 }
 
 // Input is everything one helper call is given, plus what validating its reply needs.
@@ -144,14 +156,21 @@ type Input struct {
 	Persona string
 	Prompt  string
 
-	// First and Last are the window's turn numbers; a reply's evidence must fall in the range.
+	// First and Last bound the window; Numbers are the turns it really shows, and the only ones a
+	// reply's evidence may cite.
 	First, Last int
+	Numbers     map[int]bool
 	// Known maps "scope/name" to the revision of EVERY memory the session could see, shown or
-	// not: a create over any of them is refused. Shown is the subset whose text reached the
-	// prompt: only those may be updated or forgotten, since the helper cannot be trusted to
-	// guess a name it was not given. An update's base revision is the one in Known.
-	Known map[string]int
-	Shown map[string]bool
+	// not: a create over any of them is refused. An update's base revision is the one in Known.
+	// The helper cannot be trusted to guess a name it was not given, so a memory can be targeted
+	// only if its text reached the prompt:
+	//   Listed - its index line or its body was shown: it may be forgotten;
+	//   Full   - its WHOLE body was shown, uncut and unredacted: it may be updated, because an
+	//            update replaces the whole memory and a helper that saw half of it would silently
+	//            delete the other half.
+	Known  map[string]int
+	Listed map[string]bool
+	Full   map[string]bool
 
 	// Counts for the logs; none of them carries text.
 	IndexShown, IndexOmitted, BodiesShown, Redacted int
@@ -165,7 +184,11 @@ func MemoryKey(scope, name string) string { return scope + "/" + name }
 // Everything is judged by memoryx.ReviewTextProblem before it is cut, and a memory whose text
 // fails is simply not shown (it stays in Known so a create cannot collide with it).
 func BuildInput(w Window, snap memoryx.ReviewSnapshot) Input {
-	in := Input{Persona: Persona, First: w.First, Last: w.Last, Known: map[string]int{}, Shown: map[string]bool{}}
+	in := Input{Persona: Persona, First: w.First, Last: w.Last, Numbers: map[int]bool{},
+		Known: map[string]int{}, Listed: map[string]bool{}, Full: map[string]bool{}}
+	for _, n := range w.Numbers {
+		in.Numbers[n] = true
+	}
 	in.Redacted = w.Omitted
 
 	var index strings.Builder
@@ -187,19 +210,25 @@ func BuildInput(w Window, snap memoryx.ReviewSnapshot) Input {
 		index.WriteString(line)
 		used += c
 		in.IndexShown++
-		in.Shown[MemoryKey(e.Scope, e.Name)] = true
+		in.Listed[MemoryKey(e.Scope, e.Name)] = true
 	}
 
 	var bodies strings.Builder
-	for _, e := range pickBodies(snap.Entries, w.Text) {
+	for _, e := range memoryx.ReviewRank(snap.Entries, w.Text) {
+		if in.BodiesShown == MaxBodies {
+			break
+		}
 		if memoryx.ReviewTextProblem(e.Body) != "" || memoryx.ReviewTextProblem(e.Description) != "" {
 			in.Redacted++
 			continue
 		}
-		fmt.Fprintf(&bodies, "### %s (revision %d)\n%s\n\n", MemoryKey(e.Scope, e.Name), e.Revision,
-			clipChars(strings.TrimSpace(e.Body), BodyChars))
+		body := strings.TrimSpace(e.Body)
+		fmt.Fprintf(&bodies, "### %s (revision %d)\n%s\n\n", MemoryKey(e.Scope, e.Name), e.Revision, clipChars(body, BodyChars))
 		in.BodiesShown++
-		in.Shown[MemoryKey(e.Scope, e.Name)] = true
+		in.Listed[MemoryKey(e.Scope, e.Name)] = true
+		if utf8.RuneCountInString(body) <= BodyChars {
+			in.Full[MemoryKey(e.Scope, e.Name)] = true
+		}
 	}
 
 	nonce := dataNonce(w.Text, index.String(), bodies.String())
@@ -237,57 +266,4 @@ func dataNonce(parts ...string) string {
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))[:16]
-}
-
-// pickBodies returns up to MaxBodies entries whose name or description words occur in the window,
-// best first. memory_search ranks memories by the query words they hold; a window is too long to
-// be a query (every word would have to match), so the overlap runs the other way. Ties keep the
-// index order (pinned, guidance, most used, newest). A deterministic function of its input.
-func pickBodies(entries []memoryx.ReviewEntry, window string) []memoryx.ReviewEntry {
-	low := strings.ToLower(window)
-	type scored struct {
-		e     memoryx.ReviewEntry
-		score int
-		pos   int
-	}
-	var hits []scored
-	for i, e := range entries {
-		s := 0
-		for _, tok := range distinct(strings.FieldsFunc(strings.ToLower(e.Name), isNameSep)) {
-			if utf8.RuneCountInString(tok) >= 3 && strings.Contains(low, tok) {
-				s += 4
-			}
-		}
-		for _, tok := range distinct(strings.Fields(strings.ToLower(e.Description))) {
-			if utf8.RuneCountInString(tok) >= 4 && strings.Contains(low, strings.Trim(tok, ".,;:()[]\"'`")) {
-				s += 2
-			}
-		}
-		if s > 0 && strings.TrimSpace(e.Body) != "" {
-			hits = append(hits, scored{e, s, i})
-		}
-	}
-	sort.SliceStable(hits, func(i, j int) bool { return hits[i].score > hits[j].score })
-	var out []memoryx.ReviewEntry
-	for _, h := range hits {
-		if len(out) == MaxBodies {
-			break
-		}
-		out = append(out, h.e)
-	}
-	return out
-}
-
-func isNameSep(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }
-
-func distinct(in []string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, s := range in {
-		if s != "" && !seen[s] {
-			seen[s] = true
-			out = append(out, s)
-		}
-	}
-	return out
 }

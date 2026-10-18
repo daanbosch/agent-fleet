@@ -356,16 +356,24 @@ turn-end evidence and "Review now". Nothing publishes in any of them. Where the 
   claude 2.1.302: with `CLAUDE_CODE_ENABLE_CFC=1` in the inherited environment, `--strict-mcp-config` with an
   empty config still leaves Claude in Chrome connected with 22 tools (found in review of #2335, fixed with
   `--no-chrome`). The route therefore runs the identical argv and environment with a local slash command
-  first, reads the init event, and refuses to send the transcript unless `tools` and `mcp_servers` are both
-  present and empty; the real run's own init event is checked again and its reply discarded if it lists
-  anything. Only claude qualifies. A feature pin on any other backend fails the review instead of moving the
+  first and reads the stream. Every init event must carry both `tools` and `mcp_servers` as empty lists
+  (judged one by one, so two partial events never add up to a whole one); any unreadable line, any model or
+  tool activity before the init, any tool call or result block and any permission denial distrusts the stream;
+  and the probe must exit cleanly in time with a successful, zero-turn, zero-cost result. Nothing is sent
+  unless all of that holds. The real run's own stream is checked the same way and its reply discarded if it
+  fails. Nothing a probe or a run printed is quoted in an error. Only claude qualifies. A feature pin on any other backend fails the review instead of moving the
   transcript to another vendor; with no pin the shared order is walked past kinds that cannot qualify.
-- **Existing memories are ranked by the window, not the other way round.** `memory_search` needs every query
-  word in a memory; a 40,000-character window is not a query. Names and description words that occur in the
-  window score, ties keep the index order, and the top five bodies are sent.
-- **Reply validation (decision 4).** An `update` or `forget` is accepted only for a memory whose text was
-  shown, with the revision from the input as its base; a `create` is refused over any memory the session could
-  see, shown or not. A secret in any field drops the whole reply, like a malformed one.
+- **Existing memories are ranked with `memory_search`'s scorer, fed by the window.** The same field weights
+  (name over description over body) and the same ordering keys (matched terms, then score, ties in index
+  order) apply, and a memory matching only some terms counts, as in the search's any-term fallback. The terms
+  come from the window: its most frequent words (and, for Japanese, overlapping character pairs), minus those
+  found in most memories, at most 64. The top five bodies are sent.
+- **Reply validation (decision 4).** An `update` is accepted only for a memory whose WHOLE body was shown
+  (uncut, unredacted), because it replaces the whole memory; a `forget` for one whose index line or body was
+  shown. Either carries the revision from the input as its base. A `create` is refused over any memory the
+  session could see, shown or not. Evidence may cite only turns the excerpt really shows (a compaction
+  summary inside the range is not one). Text after the JSON object drops the reply. A secret in any field
+  drops the whole reply, like a malformed one.
 - **`memoryReview` needs `agentMemory` too**, and `auto` reads as `off` until P3 defines it.
 
 Follow-ups: #2320 (B and C), #2321, #2322.

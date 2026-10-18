@@ -10,8 +10,11 @@ import (
 func testInput() Input {
 	return Input{
 		First: 10, Last: 30,
-		Known: map[string]int{"project/old-note": 3, "project/not-shown": 2, "user/style": 1},
-		Shown: map[string]bool{"project/old-note": true, "user/style": true},
+		// 20 is a row the excerpt leaves out (a compaction summary, say): inside the range, not shown.
+		Numbers: map[int]bool{10: true, 12: true, 30: true},
+		Known:   map[string]int{"project/old-note": 3, "project/not-shown": 2, "project/listed-only": 5, "user/style": 1},
+		Listed:  map[string]bool{"project/old-note": true, "project/listed-only": true, "user/style": true},
+		Full:    map[string]bool{"project/old-note": true, "user/style": true},
 	}
 }
 
@@ -54,6 +57,10 @@ func TestParseReplyAcceptsTheDocumentedShapes(t *testing.T) {
 	if ops, err := ParseReply(`{"ops":[]}`, testInput()); err != nil || len(ops) != 0 {
 		t.Fatalf("empty reply: %v %v", ops, err)
 	}
+	// A memory that was only listed can still be forgotten (not updated).
+	if ops, err := ParseReply(reply(op(map[string]any{"op": "forget", "name": "listed-only", "type": nil, "description": nil, "body": nil})), testInput()); err != nil || len(ops) != 1 || ops[0].BaseRevision != 5 {
+		t.Fatalf("forget of a listed memory: %v %v", ops, err)
+	}
 	fenced := "```json\n" + reply(op(nil)) + "\n```"
 	if ops, err := ParseReply(fenced, testInput()); err != nil || len(ops) != 1 {
 		t.Fatalf("fenced reply: %v %v", ops, err)
@@ -66,37 +73,43 @@ func TestParseReplyDropsAMalformedReplyWhole(t *testing.T) {
 		raw  string
 		kind string
 	}{
-		"prose":                {"Sure! here you go", ReplyMalformed},
-		"trailing text":        {reply() + " thanks", ReplyMalformed},
-		"two objects":          {reply() + reply(), ReplyMalformed},
-		"no ops":               {`{}`, ReplyMalformed},
-		"null ops":             {`{"ops":null}`, ReplyMalformed},
-		"unknown top field":    {`{"ops":[],"note":"x"}`, ReplyMalformed},
-		"unknown op field":     {reply(op(map[string]any{"extra": 1})), ReplyMalformed},
-		"wrong type":           {`{"ops":[{"op":1}]}`, ReplyMalformed},
-		"bad op":               {reply(op(map[string]any{"op": "delete"})), ReplyMalformed},
-		"bad scope":            {reply(op(map[string]any{"scope": "session"})), ReplyMalformed},
-		"bad name":             {reply(op(map[string]any{"name": "Not A Slug"})), ReplyMalformed},
-		"name with a dot dot":  {reply(op(map[string]any{"name": "a..b"})), ReplyMalformed},
-		"no reason":            {reply(op(map[string]any{"reason": ""})), ReplyMalformed},
-		"two line reason":      {reply(op(map[string]any{"reason": "a\nb"})), ReplyMalformed},
-		"no evidence":          {reply(op(map[string]any{"evidence": []int{}})), ReplyMalformed},
-		"evidence before":      {reply(op(map[string]any{"evidence": []int{9}})), ReplyMalformed},
-		"evidence after":       {reply(op(map[string]any{"evidence": []int{31}})), ReplyMalformed},
-		"create over existing": {reply(op(map[string]any{"name": "old-note"})), ReplyMalformed},
-		"create over hidden":   {reply(op(map[string]any{"name": "not-shown"})), ReplyMalformed},
-		"update unseen":        {reply(op(map[string]any{"op": "update", "name": "not-shown"})), ReplyMalformed},
-		"update unknown":       {reply(op(map[string]any{"op": "update", "name": "nothing"})), ReplyMalformed},
-		"forget unseen":        {reply(op(map[string]any{"op": "forget", "name": "not-shown", "type": nil, "description": nil, "body": nil})), ReplyMalformed},
-		"forget with a body":   {reply(op(map[string]any{"op": "forget", "name": "old-note"})), ReplyMalformed},
-		"no description":       {reply(op(map[string]any{"description": ""})), ReplyMalformed},
-		"two line description": {reply(op(map[string]any{"description": "a\nb"})), ReplyMalformed},
-		"no body":              {reply(op(map[string]any{"body": ""})), ReplyMalformed},
-		"bad type":             {reply(op(map[string]any{"type": "bogus"})), ReplyMalformed},
-		"no type":              {reply(op(map[string]any{"type": ""})), ReplyMalformed},
-		"six ops":              {reply(op(nil), op(nil), op(nil), op(nil), op(nil), op(nil)), ReplyOversize},
-		"oversize body":        {reply(op(map[string]any{"body": big})), ReplyOversize},
-		"oversize reply":       {reply(op(map[string]any{"reason": strings.Repeat("r", ReplyBytes)})), ReplyOversize},
+		"prose":                          {"Sure! here you go", ReplyMalformed},
+		"trailing text":                  {reply() + " thanks", ReplyMalformed},
+		"trailing brace":                 {reply() + " }", ReplyMalformed},
+		"trailing bracket":               {reply() + " ] unscanned trailing text", ReplyMalformed},
+		"trailing after a good op":       {reply(op(nil)) + " }", ReplyMalformed},
+		"two objects":                    {reply() + reply(), ReplyMalformed},
+		"no ops":                         {`{}`, ReplyMalformed},
+		"null ops":                       {`{"ops":null}`, ReplyMalformed},
+		"unknown top field":              {`{"ops":[],"note":"x"}`, ReplyMalformed},
+		"unknown op field":               {reply(op(map[string]any{"extra": 1})), ReplyMalformed},
+		"wrong type":                     {`{"ops":[{"op":1}]}`, ReplyMalformed},
+		"bad op":                         {reply(op(map[string]any{"op": "delete"})), ReplyMalformed},
+		"bad scope":                      {reply(op(map[string]any{"scope": "session"})), ReplyMalformed},
+		"bad name":                       {reply(op(map[string]any{"name": "Not A Slug"})), ReplyMalformed},
+		"name with a dot dot":            {reply(op(map[string]any{"name": "a..b"})), ReplyMalformed},
+		"no reason":                      {reply(op(map[string]any{"reason": ""})), ReplyMalformed},
+		"two line reason":                {reply(op(map[string]any{"reason": "a\nb"})), ReplyMalformed},
+		"no evidence":                    {reply(op(map[string]any{"evidence": []int{}})), ReplyMalformed},
+		"evidence before":                {reply(op(map[string]any{"evidence": []int{9}})), ReplyMalformed},
+		"evidence after":                 {reply(op(map[string]any{"evidence": []int{31}})), ReplyMalformed},
+		"evidence in a gap":              {reply(op(map[string]any{"evidence": []int{20}})), ReplyMalformed},
+		"one evidence in a gap":          {reply(op(map[string]any{"evidence": []int{12, 20}})), ReplyMalformed},
+		"create over existing":           {reply(op(map[string]any{"name": "old-note"})), ReplyMalformed},
+		"create over hidden":             {reply(op(map[string]any{"name": "not-shown"})), ReplyMalformed},
+		"update unseen":                  {reply(op(map[string]any{"op": "update", "name": "not-shown"})), ReplyMalformed},
+		"update of a memory only listed": {reply(op(map[string]any{"op": "update", "name": "listed-only"})), ReplyMalformed},
+		"update unknown":                 {reply(op(map[string]any{"op": "update", "name": "nothing"})), ReplyMalformed},
+		"forget unseen":                  {reply(op(map[string]any{"op": "forget", "name": "not-shown", "type": nil, "description": nil, "body": nil})), ReplyMalformed},
+		"forget with a body":             {reply(op(map[string]any{"op": "forget", "name": "old-note"})), ReplyMalformed},
+		"no description":                 {reply(op(map[string]any{"description": ""})), ReplyMalformed},
+		"two line description":           {reply(op(map[string]any{"description": "a\nb"})), ReplyMalformed},
+		"no body":                        {reply(op(map[string]any{"body": ""})), ReplyMalformed},
+		"bad type":                       {reply(op(map[string]any{"type": "bogus"})), ReplyMalformed},
+		"no type":                        {reply(op(map[string]any{"type": ""})), ReplyMalformed},
+		"six ops":                        {reply(op(nil), op(nil), op(nil), op(nil), op(nil), op(nil)), ReplyOversize},
+		"oversize body":                  {reply(op(map[string]any{"body": big})), ReplyOversize},
+		"oversize reply":                 {reply(op(map[string]any{"reason": strings.Repeat("r", ReplyBytes)})), ReplyOversize},
 	}
 	for name, tc := range cases {
 		ops, err := ParseReply(tc.raw, testInput())

@@ -1,38 +1,74 @@
 package chatx
 
 // The deny-all one-shot route (chat_denyall.go). A fake `claude` on PATH stands in for the CLI:
-// it logs every invocation (argv and the first stdin line), prints an init event whose tool and
-// MCP lists the test chooses, and answers with a result event. Nothing here starts a real CLI.
+// it logs every invocation (argv and the first stdin line) and prints whatever stream, stderr and
+// exit status the test scripted for the probe (the first invocation) and for the real run (every
+// later one). Nothing here starts a real CLI.
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/usagex"
 )
 
 const secretPrompt = "TRANSCRIPT-MARKER please summarise"
 
-// fakeDenyAllClaude installs a fake claude. probeInit and runInit are the JSON lists spliced into
-// the init event of the first (the probe) and every later invocation, e.g.
-// `"tools":[],"mcp_servers":[]`. It returns the directory holding the invocation log.
-func fakeDenyAllClaude(t *testing.T, probeInit, runInit string) string {
+const (
+	initClean   = `{"type":"system","subtype":"init","tools":[],"mcp_servers":[],"model":"fake"}`
+	probeResult = `{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":"local","total_cost_usd":0,"usage":{}}`
+	runResult   = `{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"FAKE-REPLY","total_cost_usd":0.001,"usage":{"input_tokens":10,"output_tokens":2}}`
+	assistText  = `{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}`
+)
+
+func lines(ls ...string) string { return strings.Join(ls, "\n") + "\n" }
+
+// fakeRun scripts one invocation.
+type fakeRun struct {
+	Out    string
+	Stderr string
+	Exit   int
+	Sleep  int // seconds
+}
+
+var (
+	cleanProbe = fakeRun{Out: lines(initClean, probeResult)}
+	cleanRun   = fakeRun{Out: lines(initClean, assistText, runResult)}
+)
+
+// fakeDenyAllClaude installs a fake claude and returns the directory holding the invocation log.
+func fakeDenyAllClaude(t *testing.T, probe, run fakeRun) string {
 	t.Helper()
-	bin := t.TempDir()
-	logDir := t.TempDir()
+	bin, logDir := t.TempDir(), t.TempDir()
+	for i, r := range []fakeRun{probe, run} {
+		k := i + 1
+		must := func(name, body string) {
+			if err := os.WriteFile(filepath.Join(logDir, fmt.Sprintf("%s.%d", name, k)), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		must("script.out", r.Out)
+		must("script.err", r.Stderr)
+		must("script.exit", fmt.Sprint(r.Exit))
+		must("script.sleep", fmt.Sprint(r.Sleep))
+	}
 	script := `#!/bin/sh
 LOG="` + logDir + `"
 n=$(cat "$LOG/count" 2>/dev/null || echo 0)
 n=$((n+1)); echo $n > "$LOG/count"
+k=$n; [ $k -gt 2 ] && k=2
 echo "$*" > "$LOG/argv.$n"
 head -n 1 > "$LOG/stdin.$n"
-if [ "$n" = 1 ]; then INIT='` + probeInit + `'; else INIT='` + runInit + `'; fi
-echo '{"type":"system","subtype":"init",'"$INIT"',"model":"fake"}'
-echo '{"type":"result","subtype":"success","is_error":false,"result":"FAKE-REPLY","total_cost_usd":0.001,"usage":{"input_tokens":10,"output_tokens":2}}'
+sleep "$(cat "$LOG/script.sleep.$k")"
+cat "$LOG/script.out.$k"
+cat "$LOG/script.err.$k" >&2
+exit "$(cat "$LOG/script.exit.$k")"
 `
 	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -70,12 +106,16 @@ func readLog(t *testing.T, logDir, name string) string {
 	return string(b)
 }
 
+func runDenyAll(t *testing.T) (string, error) {
+	t.Helper()
+	return OneShotDenyAll(context.Background(), usagex.FeatureMemoryReview, OneShotShort, "persona", secretPrompt)
+}
+
 func TestOneShotDenyAllRunsAfterAProbeThatShowsNothing(t *testing.T) {
 	denyAllEnv(t)
-	clean := `"tools":[],"mcp_servers":[]`
-	logDir := fakeDenyAllClaude(t, clean, clean)
+	logDir := fakeDenyAllClaude(t, cleanProbe, cleanRun)
 
-	reply, err := OneShotDenyAll(context.Background(), usagex.FeatureMemoryReview, OneShotShort, "persona", secretPrompt)
+	reply, err := runDenyAll(t)
 	if err != nil {
 		t.Fatalf("OneShotDenyAll: %v", err)
 	}
@@ -104,21 +144,43 @@ func TestOneShotDenyAllRunsAfterAProbeThatShowsNothing(t *testing.T) {
 }
 
 // The reviewer's finding on #2335: strict MCP alone leaves Claude in Chrome connected when the
-// environment enables it. A flag is not evidence, so a probe that lists tools or servers stops
-// the call before the transcript is handed over.
-func TestOneShotDenyAllRefusesWhenTheProbeListsToolsOrServers(t *testing.T) {
-	cases := map[string]string{
-		"tools":            `"tools":["mcp__claude-in-chrome__navigate"],"mcp_servers":[]`,
-		"servers":          `"tools":[],"mcp_servers":[{"name":"claude-in-chrome","status":"connected"}]`,
-		"no tools field":   `"mcp_servers":[]`,
-		"no servers field": `"tools":[]`,
-		"empty event":      `"x":1`,
+// environment enables it. A flag is not evidence, so a probe that cannot be trusted stops the call
+// before the transcript is handed over. Each case is a stream the probe must refuse.
+func TestOneShotDenyAllRefusesAProbeItCannotTrust(t *testing.T) {
+	toolUse := `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{}}]}}`
+	cases := map[string]fakeRun{
+		"lists a tool":       {Out: lines(`{"type":"system","subtype":"init","tools":["mcp__claude-in-chrome__navigate"],"mcp_servers":[]}`, probeResult)},
+		"lists a server":     {Out: lines(`{"type":"system","subtype":"init","tools":[],"mcp_servers":[{"name":"claude-in-chrome"}]}`, probeResult)},
+		"no tools field":     {Out: lines(`{"type":"system","subtype":"init","mcp_servers":[]}`, probeResult)},
+		"no servers field":   {Out: lines(`{"type":"system","subtype":"init","tools":[]}`, probeResult)},
+		"null lists":         {Out: lines(`{"type":"system","subtype":"init","tools":null,"mcp_servers":null}`, probeResult)},
+		"list of wrong type": {Out: lines(`{"type":"system","subtype":"init","tools":"none","mcp_servers":[]}`, probeResult)},
+		"empty event":        {Out: lines(`{"type":"system","subtype":"init"}`, probeResult)},
+		// Two inits that each lack what the other has must not add up to a clean one.
+		"lists split over two inits": {Out: lines(`{"type":"system","subtype":"init","tools":[]}`, `{"type":"system","subtype":"init","mcp_servers":[]}`, probeResult)},
+		"clean init then a bare one": {Out: lines(initClean, `{"type":"system","subtype":"init"}`, probeResult)},
+		"no init":                    {Out: lines(probeResult)},
+		"a line that is not JSON":    {Out: lines(initClean, "plain text", probeResult)},
+		"a truncated event":          {Out: lines(initClean, `{"type":"assistant","mess`, probeResult)},
+		// What the run did contradicts what it said it had.
+		"a tool call after a clean init": {Out: lines(initClean, toolUse, probeResult)},
+		"a tool result":                  {Out: lines(initClean, `{"type":"user","message":{"content":[{"type":"tool_result","content":"x"}]}}`, probeResult)},
+		"an mcp block":                   {Out: lines(initClean, `{"type":"assistant","message":{"content":[{"type":"mcp_tool_use"}]}}`, probeResult)},
+		"a streamed tool call":           {Out: lines(initClean, `{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use"}}}`, probeResult)},
+		"activity before the init":       {Out: lines(assistText, initClean, probeResult)},
+		"a permission denial":            {Out: lines(initClean, `{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":"x","total_cost_usd":0,"permission_denials":[{"tool_name":"Bash"}]}`)},
+		// The probe must be a clean, local, successful run.
+		"exits non-zero after a clean init":            {Out: lines(initClean), Exit: 3},
+		"exits non-zero after a clean init and result": {Out: lines(initClean, probeResult), Exit: 3},
+		"no result":         {Out: lines(initClean)},
+		"an error result":   {Out: lines(initClean, `{"type":"result","subtype":"error","is_error":true,"num_turns":0,"result":"x","total_cost_usd":0}`)},
+		"reached the model": {Out: lines(initClean, runResult)},
 	}
-	for name, init := range cases {
+	for name, probe := range cases {
 		t.Run(name, func(t *testing.T) {
 			denyAllEnv(t)
-			logDir := fakeDenyAllClaude(t, init, `"tools":[],"mcp_servers":[]`)
-			reply, err := OneShotDenyAll(context.Background(), usagex.FeatureMemoryReview, OneShotShort, "persona", secretPrompt)
+			logDir := fakeDenyAllClaude(t, probe, cleanRun)
+			reply, err := runDenyAll(t)
 			if !errors.Is(err, ErrDenyAllUnavailable) {
 				t.Fatalf("err = %v, want ErrDenyAllUnavailable", err)
 			}
@@ -135,17 +197,71 @@ func TestOneShotDenyAllRefusesWhenTheProbeListsToolsOrServers(t *testing.T) {
 	}
 }
 
-// The probe can pass and the real run still differ (an account connector that appears in between,
-// a config written meanwhile): the call's own init event is checked and its reply thrown away.
-func TestOneShotDenyAllDiscardsAReplyFromARunThatHadTools(t *testing.T) {
+// A probe that does not finish in time proves nothing, even if it printed a clean init first.
+func TestOneShotDenyAllRefusesAProbeThatTimesOut(t *testing.T) {
 	denyAllEnv(t)
-	logDir := fakeDenyAllClaude(t, `"tools":[],"mcp_servers":[]`, `"tools":["Bash"],"mcp_servers":[]`)
-	reply, err := OneShotDenyAll(context.Background(), usagex.FeatureMemoryReview, OneShotShort, "persona", secretPrompt)
-	if err == nil || reply != "" {
-		t.Fatalf("reply = %q, err = %v: a run with tools must not return a reply", reply, err)
+	old := denyAllProbeBudget
+	denyAllProbeBudget = 300 * time.Millisecond
+	t.Cleanup(func() { denyAllProbeBudget = old })
+	logDir := fakeDenyAllClaude(t, fakeRun{Out: lines(initClean, probeResult), Sleep: 4}, cleanRun)
+	if _, err := runDenyAll(t); !errors.Is(err, ErrDenyAllUnavailable) {
+		t.Fatalf("err = %v", err)
 	}
-	if invocations(t, logDir) != 2 {
-		t.Fatal("expected the probe and the call")
+	if invocations(t, logDir) != 1 {
+		t.Fatal("the transcript run started after a probe that timed out")
+	}
+}
+
+// The probe is not given the transcript, but a CLI's config, endpoint and auth errors can still
+// carry secrets: whatever it printed stays out of the error.
+func TestOneShotDenyAllNeverQuotesWhatTheProbePrinted(t *testing.T) {
+	for name, probe := range map[string]fakeRun{
+		"no init, stderr": {Stderr: "PRIVATE-CONFIG-SECRET", Exit: 3},
+		"init, stderr":    {Out: lines(initClean), Stderr: "PRIVATE-CONFIG-SECRET", Exit: 3},
+		"stdout noise":    {Out: lines("PRIVATE-CONFIG-SECRET")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			denyAllEnv(t)
+			fakeDenyAllClaude(t, probe, cleanRun)
+			_, err := runDenyAll(t)
+			if !errors.Is(err, ErrDenyAllUnavailable) || strings.Contains(err.Error(), "PRIVATE-CONFIG-SECRET") {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
+
+// The probe can pass and the real run still differ (an account connector that appears in between,
+// a config written meanwhile): the call's own stream is checked and its reply thrown away.
+func TestOneShotDenyAllDiscardsAReplyFromARunThatHadOrUsedTools(t *testing.T) {
+	for name, run := range map[string]fakeRun{
+		"a tool in the init":   {Out: lines(`{"type":"system","subtype":"init","tools":["Bash"],"mcp_servers":[]}`, runResult)},
+		"a server in the init": {Out: lines(`{"type":"system","subtype":"init","tools":[],"mcp_servers":[{"name":"x"}]}`, runResult)},
+		"a tool call":          {Out: lines(initClean, `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}`, runResult)},
+		"no init":              {Out: lines(runResult)},
+		"split inits":          {Out: lines(`{"type":"system","subtype":"init","tools":[]}`, `{"type":"system","subtype":"init","mcp_servers":[]}`, runResult)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			denyAllEnv(t)
+			logDir := fakeDenyAllClaude(t, cleanProbe, run)
+			reply, err := runDenyAll(t)
+			if err == nil || reply != "" {
+				t.Fatalf("reply = %q, err = %v: such a run must not return a reply", reply, err)
+			}
+			if invocations(t, logDir) != 2 {
+				t.Fatal("expected the probe and the call")
+			}
+		})
+	}
+}
+
+// A failed run that was given the transcript must not put what the process printed into its error.
+func TestOneShotDenyAllErrorsDoNotQuoteStderr(t *testing.T) {
+	denyAllEnv(t)
+	fakeDenyAllClaude(t, cleanProbe, fakeRun{Out: lines(initClean), Stderr: "STDERR-ECHO transcript text", Exit: 3})
+	_, err := runDenyAll(t)
+	if err == nil || strings.Contains(err.Error(), "STDERR-ECHO") || !strings.Contains(err.Error(), "exit status 3") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
@@ -156,10 +272,9 @@ func TestOneShotDenyAllNeverMovesAPinnedFeatureToAnotherVendor(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Cleanup(SetHeadlessAvailableForTest("claude", true))
 	t.Cleanup(SetHeadlessAvailableForTest("codex", true))
-	clean := `"tools":[],"mcp_servers":[]`
-	logDir := fakeDenyAllClaude(t, clean, clean)
+	logDir := fakeDenyAllClaude(t, cleanProbe, cleanRun)
 
-	_, err := OneShotDenyAll(context.Background(), usagex.FeatureMemoryReview, OneShotShort, "persona", secretPrompt)
+	_, err := runDenyAll(t)
 	if !errors.Is(err, ErrDenyAllUnavailable) {
 		t.Fatalf("err = %v, want ErrDenyAllUnavailable", err)
 	}
@@ -174,10 +289,9 @@ func TestOneShotDenyAllSkipsKindsThatCannotQualify(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	t.Cleanup(SetHeadlessAvailableForTest("claude", true))
 	t.Cleanup(SetHeadlessAvailableForTest("codex", true))
-	clean := `"tools":[],"mcp_servers":[]`
-	logDir := fakeDenyAllClaude(t, clean, clean)
+	logDir := fakeDenyAllClaude(t, cleanProbe, cleanRun)
 
-	if _, err := OneShotDenyAll(context.Background(), usagex.FeatureMemoryReview, OneShotShort, "persona", secretPrompt); err != nil {
+	if _, err := runDenyAll(t); err != nil {
 		t.Fatalf("err = %v", err)
 	}
 	if invocations(t, logDir) != 2 {
@@ -191,28 +305,34 @@ func TestOneShotDenyAllWithoutAQualifyingBackend(t *testing.T) {
 	for _, k := range []string{"codex", "opencode", "cursor", "agy", "muse"} {
 		t.Cleanup(SetHeadlessAvailableForTest(k, true))
 	}
-	logDir := fakeDenyAllClaude(t, `"tools":[],"mcp_servers":[]`, `"tools":[],"mcp_servers":[]`)
-	_, err := OneShotDenyAll(context.Background(), usagex.FeatureMemoryReview, OneShotShort, "persona", secretPrompt)
+	logDir := fakeDenyAllClaude(t, cleanProbe, cleanRun)
+	_, err := runDenyAll(t)
 	if n := invocations(t, logDir); !errors.Is(err, ErrDenyAllUnavailable) || n != 0 {
 		t.Fatalf("err = %v, invocations = %d", err, n)
 	}
 }
 
-func TestParseClaudeStreamCountsOnlyWhatTheInitEventLists(t *testing.T) {
-	out := []byte(`not json
-{"type":"assistant","message":{"tools":["x"]}}
-{"type":"system","subtype":"init","tools":["a","b"],"mcp_servers":[{"name":"s"}]}
-{"type":"result","result":"R","is_error":false}
-`)
-	s := parseClaudeStream(out)
-	if !s.initSeen || s.tools != 2 || s.mcp != 1 || !s.resultSeen || s.result.Result != "R" {
+func TestParseClaudeStreamKeepsTheResultAndDistrustsAnythingOdd(t *testing.T) {
+	s := parseClaudeStream([]byte(lines(initClean, assistText, runResult)))
+	if !s.initSeen || s.bad != "" || !s.resultSeen || s.result.Result != "FAKE-REPLY" || s.numTurns != 1 {
 		t.Fatalf("%+v", s)
 	}
-	if s.violation() == "" {
-		t.Fatal("two tools must be a violation")
+	// Other system events and unrelated fields called "tools" or "message" are not violations.
+	s = parseClaudeStream([]byte(lines(initClean, `{"type":"system","subtype":"hook_started","tools":"x","message":5}`, `{"type":"rate_limit_event","event":"x"}`, runResult)))
+	if s.bad != "" {
+		t.Fatalf("an unrelated event was distrusted: %q", s.bad)
 	}
-	if (claudeStream{}).violation() == "" {
-		t.Fatal("no evidence must be a violation")
+	for name, out := range map[string]string{
+		"two tools":    lines(`{"type":"system","subtype":"init","tools":["a","b"],"mcp_servers":[]}`),
+		"junk line":    lines(initClean, "{not json"),
+		"empty":        "",
+		"result alone": lines(runResult),
+	} {
+		if s := parseClaudeStream([]byte(out)); s.bad == "" && s.initSeen {
+			t.Errorf("%s: trusted", name)
+		} else if name == "empty" && s.initSeen {
+			t.Errorf("%s: init seen", name)
+		}
 	}
 }
 
@@ -224,23 +344,5 @@ func TestDenyAllKindIsClaudeOnly(t *testing.T) {
 	}
 	if !DenyAllKind("claude") {
 		t.Fatal("claude qualifies")
-	}
-}
-
-// A failed run that was given the transcript must not put what the process printed into its error.
-func TestOneShotDenyAllErrorsDoNotQuoteStderr(t *testing.T) {
-	denyAllEnv(t)
-	bin := t.TempDir()
-	init := `echo '{"type":"system","subtype":"init","tools":[],"mcp_servers":[]}'`
-	script := "#!/bin/sh\nhead -n 1 >/dev/null\n" + init + "\n" +
-		"if [ -f \"" + bin + "/ran\" ]; then echo 'STDERR-ECHO transcript text' >&2; exit 3; fi\n" +
-		"touch \"" + bin + "/ran\"\n"
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
-	_, err := OneShotDenyAll(context.Background(), usagex.FeatureMemoryReview, OneShotShort, "persona", secretPrompt)
-	if err == nil || strings.Contains(err.Error(), "STDERR-ECHO") || !strings.Contains(err.Error(), "exit status 3") {
-		t.Fatalf("err = %v", err)
 	}
 }

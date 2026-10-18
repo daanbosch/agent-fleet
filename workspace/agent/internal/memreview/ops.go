@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"unicode/utf8"
 
@@ -81,7 +82,8 @@ func ParseReply(raw string, in Input) ([]Op, error) {
 	if err := dec.Decode(&env); err != nil {
 		return nil, malformed("not the documented JSON object (%s)", jsonProblem(err))
 	}
-	if dec.More() {
+	// More() only peeks for a value; the stream must be at its end, whatever follows.
+	if _, err := dec.Token(); err != io.EOF {
 		return nil, malformed("text after the JSON object")
 	}
 	if env.Ops == nil {
@@ -136,8 +138,8 @@ func (r rawOp) validate(i int, in Input) (Op, error) {
 		return Op{}, malformed("%s", at(fmt.Sprintf("evidence must cite 1 to %d turns", maxEvidence)))
 	}
 	for _, e := range op.Evidence {
-		if e < in.First || e > in.Last {
-			return Op{}, malformed("%s", at("evidence cites a turn outside the excerpt"))
+		if !in.Numbers[e] {
+			return Op{}, malformed("%s", at("evidence cites a turn the excerpt does not show"))
 		}
 	}
 	key := MemoryKey(op.Scope, op.Name)
@@ -147,8 +149,13 @@ func (r rawOp) validate(i int, in Input) (Op, error) {
 		if known {
 			return Op{}, malformed("%s", at("create over a memory that exists"))
 		}
-	case OpUpdate, OpForget:
-		if !known || !in.Shown[key] {
+	case OpUpdate:
+		if !known || !in.Full[key] {
+			return Op{}, malformed("%s", at("the target's whole text was not shown, so it cannot be replaced"))
+		}
+		op.BaseRevision = rev
+	case OpForget:
+		if !known || !in.Listed[key] {
 			return Op{}, malformed("%s", at("the target was not among the memories shown"))
 		}
 		op.BaseRevision = rev

@@ -79,8 +79,10 @@ func TestBuildWindowsClipsToolResultsAndKeepsText(t *testing.T) {
 	if !strings.Contains(w.Text, "[10] user:\nplease fix the build") {
 		t.Errorf("text lost: %q", w.Text)
 	}
-	if strings.Count(w.Text, "q") != ToolResultChars || !strings.Contains(w.Text, "…[cut]") {
-		t.Errorf("a tool result must be clipped to %d characters, has %d", ToolResultChars, strings.Count(w.Text, "q"))
+	// The cut marker counts toward the limit: the result line holds exactly ToolResultChars.
+	result := lineAfter(t, w.Text, "  result: ")
+	if utf8.RuneCountInString(result) != ToolResultChars || !strings.HasSuffix(result, cutMark) {
+		t.Errorf("a tool result must be clipped to %d characters, has %d", ToolResultChars, utf8.RuneCountInString(result))
 	}
 }
 
@@ -128,8 +130,8 @@ func TestBuildWindowsSplitsOldestFirst(t *testing.T) {
 
 func TestBuildWindowsClipsOneEnormousTurn(t *testing.T) {
 	ws := BuildWindows([]transcript.Turn{user(strings.Repeat("あ", 3*WindowChars))}, 1)
-	if len(ws) != 1 || ws[0].Chars() > WindowChars+len("…[cut]") {
-		t.Fatalf("window chars = %d", ws[0].Chars())
+	if len(ws) != 1 || ws[0].Chars() > WindowChars {
+		t.Fatalf("window chars = %d, the limit includes the cut marker", ws[0].Chars())
 	}
 	if !utf8.ValidString(ws[0].Text) {
 		t.Fatal("the clip split a rune")
@@ -157,8 +159,8 @@ func TestBuildInputKeepsTheIndexWithinItsBudget(t *testing.T) {
 	if n := utf8.RuneCountInString(idx); n > IndexChars+100 { // plus the "N more" note
 		t.Fatalf("index block has %d characters", n)
 	}
-	if len(in.Known) != 400 || len(in.Shown) != in.IndexShown {
-		t.Fatalf("known %d shown %d", len(in.Known), len(in.Shown))
+	if len(in.Known) != 400 || len(in.Listed) != in.IndexShown || len(in.Full) != 0 {
+		t.Fatalf("known %d listed %d full %d", len(in.Known), len(in.Listed), len(in.Full))
 	}
 	if !strings.Contains(idx, fmt.Sprintf("(%d more memories are not listed)", in.IndexOmitted)) {
 		t.Errorf("the omission is not announced")
@@ -179,8 +181,12 @@ func TestBuildInputSendsOnlyOverlappingBodies(t *testing.T) {
 		t.Error("a body with no overlap was sent")
 	}
 	body := between(t, in.Prompt, "existing-memories")
-	if !strings.Contains(body, "project/deploy-pipeline (revision 4)") || strings.Count(body, "z") > BodyChars {
+	if !strings.Contains(body, "project/deploy-pipeline (revision 4)") || utf8.RuneCountInString(lineAfter(t, body, "DEPLOY-BODY")) > BodyChars {
 		t.Errorf("body block = %q", body[:min(200, len(body))])
+	}
+	// The body was cut, so the helper saw half of the memory: it may be forgotten, never replaced.
+	if !in.Listed["project/deploy-pipeline"] || in.Full["project/deploy-pipeline"] {
+		t.Errorf("listed %v full %v", in.Listed, in.Full)
 	}
 }
 
@@ -207,8 +213,13 @@ func TestBuildInputWithholdsAMemoryThatFailsRedaction(t *testing.T) {
 	if _, ok := in.Known["project/deploy-keys"]; !ok {
 		t.Error("the withheld memory must stay known")
 	}
-	if !in.Shown["project/deploy-notes"] {
-		t.Error("the clean memory is shown")
+	if !in.Full["project/deploy-notes"] {
+		t.Error("the clean, short memory is shown whole")
+	}
+	// Its index line is clean, so it may be forgotten; its body never reached the prompt, so it
+	// may not be replaced.
+	if !in.Listed["project/deploy-keys"] || in.Full["project/deploy-keys"] {
+		t.Errorf("listed %v full %v", in.Listed, in.Full)
 	}
 	if in.Redacted == 0 {
 		t.Error("the withholding is counted")
@@ -220,8 +231,8 @@ func TestBuildInputWithholdsAMemoryThatFailsRedaction(t *testing.T) {
 func TestBuildInputDropsAnIndexLineThatFailsRedaction(t *testing.T) {
 	bad := entry("project", "creds", "login with "+fakeKey(), "b", 1)
 	in := BuildInput(Window{First: 1, Last: 1, Text: "[1] user:\nhi\n"}, snapshotOf(bad))
-	if strings.Contains(in.Prompt, "AKIA") || in.Shown["project/creds"] {
-		t.Fatalf("shown = %v", in.Shown)
+	if strings.Contains(in.Prompt, "AKIA") || in.Listed["project/creds"] {
+		t.Fatalf("listed = %v", in.Listed)
 	}
 }
 
@@ -268,4 +279,36 @@ func between(t *testing.T, prompt, name string) string {
 		t.Fatalf("block %s is not closed", name)
 	}
 	return rest[:j]
+}
+
+// lineAfter returns the rest of the line that starts with prefix (prefix excluded).
+func lineAfter(t *testing.T, text, prefix string) string {
+	t.Helper()
+	i := strings.Index(text, prefix)
+	if i < 0 {
+		t.Fatalf("no %q in %q", prefix, text)
+	}
+	rest := text[i+len(prefix):]
+	if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+		rest = rest[:nl]
+	}
+	return rest
+}
+
+// The turns a window shows are the only ones its evidence can cite; the rows it leaves out sit
+// inside First..Last all the same.
+func TestWindowNumbersListOnlyTheTurnsShown(t *testing.T) {
+	ws := BuildWindows([]transcript.Turn{
+		user("one"),
+		{Role: "user", Text: "summary", Compact: true, Parts: []transcript.Part{{Kind: "text", Text: "summary"}}},
+		{Role: "assistant", Parts: []transcript.Part{{Kind: "thinking", Text: "hm"}}},
+		user("four"),
+	}, 1)
+	if len(ws) != 1 || fmt.Sprint(ws[0].Numbers) != "[1 4]" || ws[0].First != 1 || ws[0].Last != 4 {
+		t.Fatalf("windows = %+v", ws)
+	}
+	in := BuildInput(ws[0], snapshotOf())
+	if !in.Numbers[1] || !in.Numbers[4] || in.Numbers[2] || in.Numbers[3] {
+		t.Fatalf("numbers = %v", in.Numbers)
+	}
 }

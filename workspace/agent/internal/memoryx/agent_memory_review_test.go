@@ -123,3 +123,61 @@ func TestValidateReviewMemory(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+func rankNames(es []ReviewEntry) string {
+	var n []string
+	for _, e := range es {
+		n = append(n, e.Name)
+	}
+	return strings.Join(n, ",")
+}
+
+// The ranking is the store's scorer run the other way round: the window supplies the words.
+func TestReviewRank(t *testing.T) {
+	es := []ReviewEntry{
+		{Name: "unrelated", Description: "something else entirely", Body: "nothing here"},
+		{Name: "body-only", Description: "misc notes", Body: "the pipeline is flaky on tuesdays"},
+		{Name: "deploy-pipeline", Description: "how deploys work", Body: "uses the pipeline"},
+		{Name: "second", Description: "pipeline owner", Body: "x"},
+	}
+	window := "[1] user:\nthe deploy pipeline failed again, check the deploy pipeline script\n"
+	// name outweighs description outweighs body; a body-only match still counts; no match is out.
+	if got := rankNames(ReviewRank(es, window)); got != "deploy-pipeline,second,body-only" {
+		t.Fatalf("ranking = %s", got)
+	}
+	if got := ReviewRank(es, ""); len(got) != 0 {
+		t.Fatalf("an empty window ranks %v", got)
+	}
+	// Ties keep the order given.
+	tie := []ReviewEntry{{Name: "aaa-note", Body: "pipeline"}, {Name: "bbb-note", Body: "pipeline"}}
+	if got := rankNames(ReviewRank(tie, "pipeline status")); got != "aaa-note,bbb-note" {
+		t.Fatalf("tie order = %s", got)
+	}
+}
+
+func TestReviewRankMatchesJapaneseWithoutSpaces(t *testing.T) {
+	es := []ReviewEntry{
+		{Name: "unrelated", Description: "別の話", Body: "天気の記録"},
+		{Name: "build-notes", Description: "ビルド手順", Body: "リリースビルドは毎回クリーンから行う"},
+	}
+	got := ReviewRank(es, "[3] user:\nリリースビルドが失敗したので、クリーンビルドからやり直して\n")
+	if rankNames(got) != "build-notes" {
+		t.Fatalf("ranking = %s", rankNames(got))
+	}
+}
+
+// A word found in most memories separates none of them and must not decide the order.
+func TestReviewRankIgnoresWordsEveryMemoryHas(t *testing.T) {
+	var es []ReviewEntry
+	for i := 0; i < 12; i++ {
+		es = append(es, ReviewEntry{Name: "note-" + string(rune('a'+i)), Description: "common words", Body: "this project uses common words"})
+	}
+	es = append(es, ReviewEntry{Name: "special", Description: "rare topic zebra", Body: "zebra crossing"})
+	got := ReviewRank(es, "this project uses common words but the zebra matters")
+	if len(got) == 0 || got[0].Name != "special" {
+		t.Fatalf("ranking = %s", rankNames(got))
+	}
+	if len(got) != 1 {
+		t.Errorf("the ubiquitous words still matched %d other memories", len(got)-1)
+	}
+}

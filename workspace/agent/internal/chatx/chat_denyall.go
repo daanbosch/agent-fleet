@@ -92,7 +92,7 @@ func WarmDenyAllKind() {
 }
 
 // denyAllProbeBudget bounds the probe: it starts a CLI process and talks to no model.
-const denyAllProbeBudget = 45 * time.Second
+var denyAllProbeBudget = 45 * time.Second
 
 // denyAllProbePrompt is a built-in slash command, answered locally by the CLI: measured on
 // 2.1.302 as num_turns 0, zero tokens, zero cost, with the init event printed first. Were a
@@ -155,8 +155,8 @@ func OneShotDenyAll(ctx context.Context, feature string, tier OneShotTier, perso
 		// Without the init event nothing says what the run had, so the reply is not trusted.
 		return "", errors.New("claude deny-all run: no init event, the reply was discarded")
 	}
-	if why := ev.violation(); why != "" {
-		return "", fmt.Errorf("claude deny-all run had %s: the reply was discarded", why)
+	if ev.bad != "" {
+		return "", fmt.Errorf("claude deny-all run had %s: the reply was discarded", ev.bad)
 	}
 	if runErr != nil {
 		// Not cliErr: stderr of a run that was given the transcript is not something to put in an
@@ -171,22 +171,34 @@ func OneShotDenyAll(ctx context.Context, feature string, tier OneShotTier, perso
 }
 
 // verifyClaudeDenyAll runs the one-shot argv for model with a local slash command and checks the
-// init event. Any doubt is a failure.
+// stream. Any doubt is a failure: the process must exit cleanly in time, print an init event that
+// lists nothing, show no model or tool activity, and answer the way a local command does (zero
+// turns, zero cost) - otherwise "/help" did not stay local and the probe proved nothing about a
+// run that carries a transcript. Nothing the process printed is quoted in the error.
 func verifyClaudeDenyAll(ctx context.Context, persona, model string) error {
 	ctx, cancel := context.WithTimeout(ctx, denyAllProbeBudget)
 	defer cancel()
 	cmd := claudeOneShotCmd(ctx, claudeOneShotArgsFormat(persona, model, true))
 	cmd.Stdin = strings.NewReader(denyAllProbePrompt)
+	cmd.WaitDelay = time.Second // a child that outlives the killed CLI must not hold the probe open
 	out, err := cmd.Output()
 	ev := parseClaudeStream(out)
-	if !ev.initSeen {
-		if err != nil {
-			return fmt.Errorf("%w: the probe did not run: %s", ErrDenyAllUnavailable, cliErr(err))
-		}
-		return fmt.Errorf("%w: the probe printed no init event", ErrDenyAllUnavailable)
+	fail := func(format string, args ...any) error {
+		return fmt.Errorf("%w: %s", ErrDenyAllUnavailable, fmt.Sprintf(format, args...))
 	}
-	if why := ev.violation(); why != "" {
-		return fmt.Errorf("%w: claude would run with %s", ErrDenyAllUnavailable, why)
+	switch {
+	case ctx.Err() != nil:
+		return fail("the probe did not finish in time")
+	case err != nil:
+		return fail("the probe failed (%s)", exitSummary(err))
+	case !ev.initSeen:
+		return fail("the probe printed no init event")
+	case ev.bad != "":
+		return fail("claude would run with %s", ev.bad)
+	case !ev.resultSeen || ev.result.IsError:
+		return fail("the probe did not end in a successful result")
+	case ev.numTurns != 0 || ev.result.TotalCostUSD != 0:
+		return fail("the probe reached the model, so it did not stay a local command")
 	}
 	return nil
 }
@@ -199,72 +211,145 @@ func claudeOneShotCmd(ctx context.Context, args []string) *exec.Cmd {
 	return cmd
 }
 
-// claudeStream is what the deny-all route reads off a stream-json run.
+// claudeStream is what the deny-all route reads off a stream-json run. bad is the first reason the
+// stream cannot be trusted ("" when none), decided as the lines go by, so a later line can never
+// make up for an earlier one.
 type claudeStream struct {
-	initSeen   bool
-	toolsKnown bool
-	mcpKnown   bool
-	tools      int
-	mcp        int
-	resultSeen bool
-	result     claudeResult
+	initSeen    bool
+	bad         string
+	resultSeen  bool
+	result      claudeResult
+	numTurns    int
+	permDenials int
 }
 
-// violation says what the init event listed that deny-all forbids, "" when it lists nothing. A
-// field the event does not carry counts as a violation: absence of evidence is not evidence.
-func (s claudeStream) violation() string {
-	switch {
-	case !s.toolsKnown:
-		return "an unreadable tool list"
-	case s.tools > 0:
-		return fmt.Sprintf("%d tools", s.tools)
-	case !s.mcpKnown:
-		return "an unreadable MCP server list"
-	case s.mcp > 0:
-		return fmt.Sprintf("%d MCP servers", s.mcp)
-	}
-	return ""
+// streamHead is the part of an event every line is read for. The lists and the nested objects stay
+// raw: they are decoded only for the event types that must carry them, so an unrelated event with
+// a field of the same name cannot be mistaken for a violation or hide one.
+type streamHead struct {
+	Type              string            `json:"type"`
+	Subtype           string            `json:"subtype"`
+	Tools             json.RawMessage   `json:"tools"`
+	MCPServers        json.RawMessage   `json:"mcp_servers"`
+	Message           json.RawMessage   `json:"message"`
+	Event             json.RawMessage   `json:"event"`
+	NumTurns          int               `json:"num_turns"`
+	PermissionDenials []json.RawMessage `json:"permission_denials"`
 }
 
-// parseClaudeStream reads claude's stream-json output. It keeps only counts and the result
-// object: names of tools and servers are not needed and the text of other events is never kept.
+// parseClaudeStream reads claude's stream-json output, one JSON object per line. It fails closed:
+//   - every init event is judged alone, and must carry BOTH lists as arrays, both empty;
+//   - a line that is not a JSON object, or an event that cannot be read, is a reason to distrust
+//     the stream, not something to skip;
+//   - model or tool activity (an assistant or user message, a stream event, a result) before the
+//     first init contradicts it, and so does any tool_use / tool_result / mcp block anywhere:
+//     what the run says it has is checked against what it did;
+//   - a result that records permission denials means a tool was attempted.
+//
+// Only counts and the result object are kept; the text of other events never is.
 func parseClaudeStream(out []byte) claudeStream {
 	var s claudeStream
+	distrust := func(why string) {
+		if s.bad == "" {
+			s.bad = why
+		}
+	}
 	for _, line := range bytes.Split(out, []byte("\n")) {
 		line = bytes.TrimSpace(line)
-		if len(line) == 0 || line[0] != '{' {
+		if len(line) == 0 {
 			continue
 		}
-		var head struct {
-			Type       string             `json:"type"`
-			Subtype    string             `json:"subtype"`
-			Tools      *[]json.RawMessage `json:"tools"`
-			MCPServers *[]json.RawMessage `json:"mcp_servers"`
-		}
-		if json.Unmarshal(line, &head) != nil {
+		var h streamHead
+		if line[0] != '{' || json.Unmarshal(line, &h) != nil {
+			distrust("an unreadable event")
 			continue
 		}
-		switch {
-		case head.Type == "system" && head.Subtype == "init":
-			// A second init (a resumed run prints one per session) must not clear the first's
-			// verdict: counts only ever add up.
+		switch h.Type {
+		case "system":
+			if h.Subtype != "init" {
+				continue
+			}
 			s.initSeen = true
-			if head.Tools != nil {
-				s.toolsKnown = true
-				s.tools += len(*head.Tools)
+			for _, l := range []struct {
+				raw  json.RawMessage
+				what string
+			}{{h.Tools, "tool"}, {h.MCPServers, "MCP server"}} {
+				var items []json.RawMessage
+				switch {
+				case len(l.raw) == 0 || bytes.Equal(bytes.TrimSpace(l.raw), []byte("null")) || json.Unmarshal(l.raw, &items) != nil:
+					distrust("an init event without a readable " + l.what + " list")
+				case len(items) > 0:
+					distrust(fmt.Sprintf("%d %ss", len(items), l.what))
+				}
 			}
-			if head.MCPServers != nil {
-				s.mcpKnown = true
-				s.mcp += len(*head.MCPServers)
+		case "assistant", "user", "stream_event":
+			if !s.initSeen {
+				distrust("activity before the init event")
 			}
-		case head.Type == "result":
+			if why := toolBlockIn(h); why != "" {
+				distrust(why)
+			}
+		case "result":
+			if !s.initSeen {
+				distrust("a result before the init event")
+			}
 			var r claudeResult
-			if json.Unmarshal(line, &r) == nil {
-				s.result, s.resultSeen = r, true
+			if json.Unmarshal(line, &r) != nil {
+				distrust("an unreadable result")
+				continue
+			}
+			s.result, s.resultSeen, s.numTurns, s.permDenials = r, true, h.NumTurns, len(h.PermissionDenials)
+			if s.permDenials > 0 {
+				distrust("a tool attempt (permission denials)")
 			}
 		}
 	}
 	return s
+}
+
+// toolBlockIn reports a tool call or result inside an assistant, user or stream event ("" when
+// none, or a reason to distrust when the event cannot be read).
+func toolBlockIn(h streamHead) string {
+	isTool := func(t string) bool {
+		return strings.HasSuffix(t, "tool_use") || strings.HasSuffix(t, "tool_result") || strings.HasPrefix(t, "mcp_")
+	}
+	switch h.Type {
+	case "stream_event":
+		var ev struct {
+			ContentBlock struct {
+				Type string `json:"type"`
+			} `json:"content_block"`
+		}
+		if len(h.Event) == 0 || json.Unmarshal(h.Event, &ev) != nil {
+			return "an unreadable stream event"
+		}
+		if isTool(ev.ContentBlock.Type) {
+			return "a tool call"
+		}
+	default:
+		var m struct {
+			Content json.RawMessage `json:"content"`
+		}
+		if len(h.Message) == 0 || json.Unmarshal(h.Message, &m) != nil {
+			return "an unreadable message"
+		}
+		c := bytes.TrimSpace(m.Content)
+		if len(c) == 0 || c[0] != '[' {
+			return "" // a plain string content has no blocks
+		}
+		var blocks []struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(c, &blocks) != nil {
+			return "an unreadable message"
+		}
+		for _, b := range blocks {
+			if isTool(b.Type) {
+				return "a tool call"
+			}
+		}
+	}
+	return ""
 }
 
 // exitSummary says how a process ended without quoting anything it printed.
