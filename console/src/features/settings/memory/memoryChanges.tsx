@@ -18,7 +18,8 @@ import { useT, tMaybe } from "../../../lib/i18n/index.ts";
 import { fmtDateTime, DATETIME_FULL } from "../../../lib/intl.ts";
 import { AutoSyncPanel, useFlipAgentMemory } from "./memoryAutoSync.tsx";
 import { ExternalMemoryHelpLink } from "./ExternalMemoryHelpLink.tsx";
-import type { ChangeDiff, MemoryChange, SecretFinding } from "./memoryTypes.ts";
+import { revertRun } from "./memoryReviewQueue.ts";
+import type { ChangeDiff, MemoryChange, RunRevertReport, SecretFinding } from "./memoryTypes.ts";
 
 // An unknown op from a newer Agent is printed raw rather than breaking the row.
 export const opLabel = (op: string): string => tMaybe("mem.af_op_" + op) ?? op;
@@ -111,6 +112,8 @@ export function AgentChangesPanel({ reload, onChanged }: { reload: number; onCha
   const [sel, setSel] = useState("");
   const [busy, setBusy] = useState(false);
   const [mine, setMine] = useState(0);
+  // What "revert this run" did, kept on screen: a conflict is the member's to look at.
+  const [runReport, setRunReport] = useState<RunRevertReport | null>(null);
 
   const load = useCallback(async (signal: AbortSignal) => {
     const res = await api("api/agents/memory/entries/changes?limit=100");
@@ -200,6 +203,36 @@ export function AgentChangesPanel({ reload, onChanged }: { reload: number; onCha
 
   const selected = changes?.find((c) => c.commit === sel) ?? null;
 
+  // Undoes everything the background review published in one run (ADR 0117 decision 5): each
+  // commit that is still its memory's newest change, as a new change. An edited one is left and
+  // reported below, never overwritten.
+  const undoRun = async (c: MemoryChange) => {
+    if (!c.reviewRun) return;
+    const ok = await askConfirm({
+      title: tr("mem.rv_revert_run_title"),
+      body: <p>{tr("mem.rv_revert_run_body")}</p>,
+      confirmLabel: tr("mem.rv_revert_run"),
+      danger: true,
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const res = await revertRun(c.reviewRun);
+      if (res?.error) {
+        toast(errDetail(res.error));
+        return;
+      }
+      setRunReport(res as RunRevertReport);
+      setMine((n) => n + 1);
+      onChanged();
+    } catch {
+      toast(tr("mem.af_failed"));
+      setMine((n) => n + 1);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="mem-changes">
       <h4>{tr("mem.af_changes_title")}</h4>
@@ -258,11 +291,54 @@ export function AgentChangesPanel({ reload, onChanged }: { reload: number; onCha
                   )}
                 </>
               )}
+              {selected.reviewRun && (
+                <button type="button" disabled={busy} onClick={() => void undoRun(selected)}>
+                  {tr("mem.rv_revert_run")}
+                </button>
+              )}
             </div>
           )}
+          {runReport && <RunReport report={runReport} onClose={() => setRunReport(null)} />}
           {selected && <ChangeDiffBody commit={selected.commit} />}
         </div>
       </div>
+    </div>
+  );
+}
+
+// RunReport says, per commit of the run, what reverting it did. A conflict is a memory someone
+// edited after the review (or whose history cannot be restored): it is left as it is, and named.
+export function RunReport({ report, onClose }: { report: RunRevertReport; onClose: () => void }) {
+  const tr = useT();
+  const count = (r: string) => report.items.filter((i) => i.result === r).length;
+  const left = report.items.filter((i) => i.result === "conflict" || i.result === "failed");
+  return (
+    <div className="mem-run-report" role="status">
+      <p>
+        {tr("mem.rv_run_result", {
+          done: count("reverted"),
+          already: count("already"),
+          left: left.length,
+        })}
+      </p>
+      {left.length > 0 && (
+        <ul>
+          {left.map((i) => (
+            <li key={i.commit}>
+              <code>{i.name}</code>{" "}
+              {i.result === "failed"
+                ? tr("mem.rv_run_failed")
+                : i.reason === "edited"
+                  ? tr("mem.rv_run_edited")
+                  : tr("mem.rv_run_blocked")}
+            </li>
+          ))}
+        </ul>
+      )}
+      {left.length > 0 && <p className="muted ds-hint">{tr("mem.rv_run_again")}</p>}
+      <button type="button" onClick={onClose}>
+        {tr("common.close")}
+      </button>
     </div>
   );
 }

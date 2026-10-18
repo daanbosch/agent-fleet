@@ -521,3 +521,22 @@ Console half (P2b) follows. The decisions above are unchanged.
   the switch is off.
 
 Follow-ups: #2321 (P2b, the Console).
+
+**Note (2026-10-19, #2321): phase P2b (the Console half of approval) fixes these readings.** The decisions above are
+unchanged.
+
+- **Where.** Settings > Agent memory > Changes gets a second part, **Proposed**, beside the published list; both are shown
+  while the review is on or proposals are still waiting (switching the review off does not hide what it already made),
+  and the view opens on **Proposed** when some are waiting. The queue length is the count beside **Changes** in the view
+  bar and beside **Proposed**; a status the Agent could not give reads as unknown, never as 0. There is no banner in the
+  session mirror (owner answer 4).
+- **The notification** is a workspace-level notice `memory-review` with counts only (`queued`, `pending`), raised once per
+  run that leaves proposals in the queue (the same outbox as `memory-sync`, keyed by the run id so a replayed run does not
+  repeat it). It is in the "Other notices" row of the notification settings, and a click opens Settings > Agent memory >
+  Changes.
+- **The run id reaches the change list** as `reviewRun` on the rows of commits the review published, which is what "revert
+  this run" takes; the button is on such a row and reports per commit, naming the memories left as conflicts and why.
+- A proposal that cannot be approved (stale, forgotten, secret, invalid) offers only reject, and a proposal withheld by the
+  Agent shows no name, text, reason or diff.
+
+Follow-ups: none for P2; #2322 and #2323 remain.
