@@ -88,6 +88,11 @@ func toolbarManaged(r *http.Request, cli hyprmuxCLI, id string) (bool, error) {
 	for _, row := range rows {
 		if row.ID == id {
 			return !row.External, nil
+	// Version note: this refusal depends on the hyprmux CLI's session list
+	// emitting `external` (daemon 4d39ea3 or newer). Older CLIs mark every row
+	// unmarked, so an external session would parse as managed here; the shim
+	// therefore requires the CLI to be current (see README) before enabling
+	// continue endpoints.
 		}
 	}
 	return false, nil
