@@ -155,6 +155,34 @@ describe("MemorySnapshotsTab diff pane without a selection", () => {
     expect(host!.querySelector(".mem-diff-head")).toBeNull();
   });
 
+  it("drops a date jump that returns after the list reload failed", async () => {
+    const snap = { rev: "r1", short: "r1", at: "2026-10-04T10:00:00Z", subject: "s", trigger: "auto", kinds: ["claude"], projects: [], files: 3 };
+    let listFails = false;
+    let resolveJump!: (v: unknown) => void;
+    api.mockImplementation((path: string) => {
+      if (path.startsWith("api/agents/memory/roots")) return Promise.resolve(rootsOk);
+      if (path.includes("before=")) return new Promise((r) => (resolveJump = r));
+      if (path.startsWith("api/agents/memory/snapshots"))
+        return Promise.resolve(listFails ? { error: "boom" } : { snapshots: [] });
+      return Promise.resolve({ diff: "" });
+    });
+    apiJSON.mockResolvedValue({ committed: true });
+    await mount();
+    await setValue(host!.querySelector<HTMLInputElement>('input[type="datetime-local"]')!, "2026-10-03T13:00");
+    const btn = (label: string) =>
+      Array.from(host!.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent === label)!;
+    await act(async () => btn(t("mem.jump_go")).click()); // in flight
+    listFails = true;
+    await act(async () => btn(t("mem.snapshot_now")).click()); // reload fails
+    await flush();
+    expect(text()).toContain(t("mem.history_failed", { msg: "boom" }));
+    await act(async () => resolveJump({ snapshots: [snap] }));
+    await flush();
+    expect(text()).toContain(t("mem.history_failed", { msg: "boom" }));
+    expect(host!.querySelector(".mem-diff-head")).toBeNull();
+    expect(host!.querySelector(".mem-snap")).toBeNull();
+  });
+
   it("keeps 'No snapshots yet' for a successful empty list, without a retry", async () => {
     stub({ snapshots: [] });
     await mount();

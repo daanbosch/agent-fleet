@@ -18,7 +18,7 @@
 // applies (docs/log/39 ★2). Every action on this screen is therefore undoable, and the
 // confirm-dialog wording is written on that assumption.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, apiJSON, errDetail, errText, isTransientErr } from "../../../core/api/client.ts";
 import { useRetryLoad } from "../../../lib/retryLoad.ts";
 import { useWorkspaceStore, wsStartBusy } from "../../../core/store/workspace.ts";
@@ -70,6 +70,8 @@ export function MemorySnapshotsTab() {
   const [err, setErr] = useState("");
   // The snapshot list failing is not an empty history: it gets its own message and a retry.
   const [snapErr, setSnapErr] = useState("");
+  // Mirror of snapErr for a jump already in flight, whose closure still holds the old value.
+  const snapErrRef = useRef("");
   const [reload, setReload] = useState(0);
   const [busy, setBusy] = useState(false);
 
@@ -99,7 +101,8 @@ export function MemorySnapshotsTab() {
       }
       setErr("");
       setData(r);
-      setSnapErr(s?.error ? errText(s.error) : "");
+      snapErrRef.current = s?.error ? errText(s.error) : "";
+      setSnapErr(snapErrRef.current);
       setSnaps(s?.error ? [] : (s?.snapshots ?? []));
       return true;
     },
@@ -190,6 +193,8 @@ export function MemorySnapshotsTab() {
     const iso = new Date(at).toISOString();
     const res = await api("api/agents/memory/snapshots?limit=1&before=" + encodeURIComponent(iso));
     const hit = res?.snapshots?.[0];
+    // The list failed to reload while this jump was out: selecting now would show a row beside the error.
+    if (snapErrRef.current) return;
     if (!hit) {
       toast(tr("mem.jump_none"));
       return;
