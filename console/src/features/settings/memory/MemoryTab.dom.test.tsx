@@ -23,7 +23,7 @@ vi.mock("../../../core/store/workspace.ts", () => ({
 }));
 
 const { MemoryTab } = await import("./MemoryTab.tsx");
-const { setSettings, settingsDefaults, getSettings } = await import("../../../lib/settings.ts");
+const { setSettings, settingsDefaults, getSettings, normalizeExternalMemory } = await import("../../../lib/settings.ts");
 const { t } = await import("../../../lib/i18n/index.ts");
 
 let root: Root | null = null;
@@ -63,5 +63,38 @@ describe("MemoryTab while the workspace is stopped", () => {
     // No Agent to ask: no preview, no wake. It reconciles when the workspace starts.
     expect(api).not.toHaveBeenCalled();
     expect(apiJSON).not.toHaveBeenCalled();
+  });
+
+  // #1988: the outside-client setting is off by default, has three states, and needs no Agent and
+  // no confirmation.
+  it("offers the outside-client setting, off by default, without calling the Agent", async () => {
+    setSettings(settingsDefaults());
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => root!.render(<MemoryTab />));
+    const row = Array.from(host.querySelectorAll(".ds-row")).find(
+      (r) => r.querySelector(".ds-label")?.textContent === t("mem.ext_switch"),
+    );
+    expect(row).toBeTruthy();
+    expect(getSettings().externalMemory).toBe("off");
+    const [, read, write] = Array.from(row!.querySelectorAll<HTMLButtonElement>(".seg-btn"));
+    await act(async () => read.click());
+    expect(getSettings().externalMemory).toBe("read");
+    await act(async () => write.click());
+    expect(getSettings().externalMemory).toBe("write");
+    expect(getSettings().agentMemory).toBe(false);
+    expect(askConfirm).not.toHaveBeenCalled();
+    expect(api).not.toHaveBeenCalled();
+  });
+});
+
+// The Agent reads only "read" and "write"; anything else shown as on would show one thing and
+// enforce another.
+describe("normalizeExternalMemory", () => {
+  it("keeps the two on-states and turns everything else off", () => {
+    expect(normalizeExternalMemory("read")).toBe("read");
+    expect(normalizeExternalMemory("write")).toBe("write");
+    for (const v of [undefined, null, "", "on", "WRITE", true, 1, {}]) expect(normalizeExternalMemory(v)).toBe("off");
   });
 });

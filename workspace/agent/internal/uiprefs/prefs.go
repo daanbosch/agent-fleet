@@ -259,6 +259,19 @@ func AgentMemory() bool {
 	return v
 }
 
+// ExternalMemory is the member's setting for agents outside Agent Fleet reaching AF memory through
+// the Control Plane's /mcp (#1988, ui-prefs externalMemory): "off", "read" or "write". Missing or
+// anything else ⇒ "off". It is separate from AgentMemory: that one governs the sessions in this
+// workspace, this one a client on another machine, and text that leaves the workspace's egress
+// controls is why the default is off.
+func ExternalMemory() string {
+	switch v, _ := Read()["externalMemory"].(string); v {
+	case memoryx.ExternalMemoryRead, memoryx.ExternalMemoryWrite:
+		return v
+	}
+	return memoryx.ExternalMemoryOff
+}
+
 // SpawnChildLimit is how many children the user lets one session have at a time (ADR 0073
 // decision 6, ui-prefs sessionSpawnChildLimit). It returns the stored number RAW — 0 for missing
 // or malformed — because the range and the fallback belong to session.NormalizeSpawnChildLimit,
@@ -322,6 +335,7 @@ func init() {
 	// AF memory (ADR 0108) takes the same double gate: the tool set and the Agent routes.
 	mcpreg.AgentMemoryEnabled = AgentMemory
 	memoryx.AgentMemoryEnabled = AgentMemory
+	memoryx.ExternalMemoryMode = ExternalMemory
 	memoryx.AutoSyncWant = AgentMemory
 	imagegen.ProviderOrderPref = ImageProviderOrder
 }

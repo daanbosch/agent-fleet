@@ -125,6 +125,8 @@ type agentMemCaller struct {
 	Session string
 	Kind    string
 	Project *agentMemProject // nil: the session has no working copy, so user scope only
+	// trailers go on the commit of a write this caller makes (the external client's name).
+	trailers []string
 }
 
 // agentMemResolveCaller looks the calling session up. An empty name is an author AF cannot
@@ -1015,9 +1017,9 @@ func agentMemSave(c agentMemCaller, req agentMemSaveReq, now time.Time) (agentMe
 	}
 
 	changes := []agentMemChange{{Rel: repoRel, Data: data}}
-	// The member names a project that already holds memory and has no working copy to describe
-	// it, so the project's record is left as the sessions wrote it.
-	if c.Project != nil && req.Scope == agentMemScopeProject && c.Kind != agentMemMember.Kind {
+	// The member and an external client name a project that already holds memory and have no
+	// working copy to describe it, so the project's record is left as the sessions wrote it.
+	if c.Project != nil && req.Scope == agentMemScopeProject && c.Kind != agentMemMember.Kind && c.Kind != agentMemExternalKind {
 		extra, err := agentMemProjectInfoChange(*c.Project)
 		if err != nil {
 			return agentMemWriteResult{}, err
@@ -1280,7 +1282,7 @@ func agentMemApplyLocked(changes []agentMemChange, op, memRel string, c agentMem
 	msg := fmt.Sprintf("agent-memory: %s %s (%s)\n\nAF-Trigger: %s\nAF-Op: %s\nAF-Memory: %s\nAF-Author-Kind: %s\nAF-Author-Session: %s\n",
 		op, memRel, now.Format(time.RFC3339),
 		trigger, op, agentMemRepoPrefix+"/"+memRel, c.Kind, c.Session)
-	for _, t := range extra {
+	for _, t := range append(extra[:len(extra):len(extra)], c.trailers...) {
 		msg += t + "\n"
 	}
 	var rev string
