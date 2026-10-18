@@ -142,6 +142,7 @@ var (
 	_ runtimeDestroyer = (*ecsRuntime)(nil)
 	_ runtimeDestroyer = (*ecsEC2Runtime)(nil)
 	_ runtimeDestroyer = (*kubeRuntime)(nil)
+	_ runtimeDestroyer = (*hyprmuxRuntime)(nil)
 )
 
 // RuntimeFactory is the single construction seam for the Runtime port. Every call
@@ -229,7 +230,10 @@ func NewFactory(profile string, mcfg Config) (RuntimeFactory, error) {
 		// workspace is a real microVM, so "dev-only" auth restrictions do not
 		// apply the way they force AUTH=dev on native.
 		return newFastVMFactory(mcfg)
+	case "hyprmux-host", "hyprmux":
+		// The read-only hyprmux shim as a host process; see runtime_hyprmux.go.
+		return newHyprmuxFactory(mcfg)
 	default:
-		return nil, fmt.Errorf("unknown AF_RUNTIME profile %q (want local|ecs|ecs-ec2|native|kubernetes|fastvm)", profile)
+		return nil, fmt.Errorf("unknown AF_RUNTIME profile %q (want local|ecs|ecs-ec2|native|kubernetes|fastvm|hyprmux-host)", profile)
 	}
 }
