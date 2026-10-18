@@ -334,6 +334,64 @@ describe("BundleImportWizard", () => {
     expect(api).not.toHaveBeenCalled();
   });
 
+  // What the Console does when the tenant changes: the client's tenant and the store move together.
+  const switchOwner = async (slug: string) => {
+    state.tenant = slug;
+    await act(async () => useTenantStore.setState({ tenant: slug }));
+  };
+
+  it("drops an upload that answers after the tenant changed, and never previews its import id", async () => {
+    let release: (v: unknown) => void = () => {};
+    raw.mockImplementationOnce(() => new Promise((r) => (release = r)));
+    await mountWizard();
+    await upload();
+    await switchOwner("globex");
+    release(reply({ importId: "20261014T093000Z", format: "bundle" }));
+    await flush();
+    expect(api).not.toHaveBeenCalled();
+    expect(host!.querySelector<HTMLInputElement>("input[type=file]")!.disabled).toBe(false);
+    expect(host!.querySelector(".mem-wiz-step.current")?.textContent).toBe(t("mem.wz_step_source"));
+  });
+
+  it("forgets the received import when the owner changes, and unlocks after an apply that outlived it", async () => {
+    raw.mockResolvedValue(reply({ importId: "20261014T093000Z", format: "bundle" }));
+    api.mockResolvedValue(afPreview);
+    await mountWizard();
+    await upload();
+    let release: (v: unknown) => void = () => {};
+    apiJSON.mockImplementationOnce(() => new Promise((r) => (release = r)));
+    const apply = Array.from(host!.querySelectorAll("button")).find((b) => b.textContent === t("mem.bi_apply", { n: 1 }));
+    await act(async () => apply!.click());
+    expect(host!.querySelector<HTMLInputElement>("input[type=file]")!.disabled).toBe(true);
+    await switchOwner("globex");
+    release({ results: [] });
+    await flush();
+    expect(host!.querySelector<HTMLInputElement>("input[type=file]")!.disabled).toBe(false);
+    expect(host!.querySelector(".mem-wiz-step.current")?.textContent).toBe(t("mem.wz_step_source"));
+    expect(host!.textContent).not.toContain(t("mem.bi_apply", { n: 1 }));
+  });
+
+  it("keeps the outcome in the frame: imported, partly skipped, refused and failed", async () => {
+    raw.mockResolvedValue(reply({ importId: "20261014T093000Z", format: "bundle" }));
+    api.mockResolvedValue(afPreview);
+    const outcome = async (resp: () => unknown) => {
+      await mountWizard();
+      await upload();
+      apiJSON.mockImplementationOnce(async () => resp());
+      const apply = Array.from(host!.querySelectorAll("button")).find((b) => b.textContent === t("mem.bi_apply", { n: 1 }));
+      await act(async () => apply!.click());
+      await flush();
+      const text = host!.querySelector(".mem-wiz-result")?.textContent;
+      act(() => root!.unmount());
+      host!.remove();
+      return text;
+    };
+    expect(await outcome(() => ({ results: [{ scope: "src-1", name: "a", result: "imported" }] }))).toBe(t("mem.bi_done", { n: 1, skipped: 0 }));
+    expect(await outcome(() => ({ results: [{ scope: "src-1", name: "a", result: "skipped" }] }))).toBe(t("mem.bi_done_skipped", { n: 0, skipped: 1 }));
+    expect(await outcome(() => ({ error: { message: "refused" } }))).toContain("refused");
+    expect(await outcome(() => { throw new Error("net"); })).toBe(t("mem.bi_failed"));
+  });
+
   it("Cancel leaves the wizard", async () => {
     const close = vi.fn();
     await mountWizard(() => {}, close);

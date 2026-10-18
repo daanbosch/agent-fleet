@@ -6,6 +6,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { WizardFrame, GroupedPreview, WIZARD_STEPS, type WizardStep } from "./memoryWizard.tsx";
+import { useEscLayer } from "../../../lib/escLayer.ts";
 import { t } from "../../../lib/i18n/index.ts";
 
 let root: Root | null = null;
@@ -22,6 +23,12 @@ afterEach(() => {
   root = host = null;
 });
 const buttons = () => Array.from(host!.querySelectorAll("button"));
+
+const Inner = ({ onClose, busy }: { onClose: () => void; busy: boolean }) => (
+  <WizardFrame title="T" step={busy ? "apply" : "confirm"} busy={busy} onClose={onClose}>
+    b
+  </WizardFrame>
+);
 
 describe("WizardFrame", () => {
   it("lists the five steps and marks only the current one", async () => {
@@ -66,6 +73,37 @@ describe("WizardFrame", () => {
     expect(buttons()[0].disabled).toBe(true);
     await act(async () => buttons()[0].click());
     expect(close).not.toHaveBeenCalled();
+  });
+
+  // The Settings dialog's own Escape layer sits underneath the wizard's.
+  const esc = () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  function Under({ outer, children }: { outer: () => void; children: React.ReactNode }) {
+    useEscLayer(outer);
+    return <>{children}</>;
+  }
+
+  // As in Settings: the dialog is open first, the wizard joins the stack on top of it.
+  const mountLater = async (outer: () => void, wizard: React.ReactElement) => {
+    await mount(<Under outer={outer}>{null}</Under>);
+    await act(async () => root!.render(<Under outer={outer}>{wizard}</Under>));
+  };
+
+  it("Escape leaves to the hub when idle without reaching the dialog beneath", async () => {
+    const close = vi.fn();
+    const outer = vi.fn();
+    await mountLater(outer, <Inner onClose={close} busy={false} />);
+    act(() => esc());
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(outer).not.toHaveBeenCalled();
+  });
+
+  it("Escape is consumed while an apply is in flight: neither the wizard nor the dialog closes", async () => {
+    const close = vi.fn();
+    const outer = vi.fn();
+    await mountLater(outer, <Inner onClose={close} busy />);
+    act(() => esc());
+    expect(close).not.toHaveBeenCalled();
+    expect(outer).not.toHaveBeenCalled();
   });
 
   it("draws no leave button without an onClose", async () => {

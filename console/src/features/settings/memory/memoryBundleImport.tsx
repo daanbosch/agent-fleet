@@ -49,7 +49,7 @@ export function BundleAfPanel({
   /** Say so when the bundle holds no Agent Fleet memory, instead of drawing nothing. */
   showEmpty?: boolean;
   /** Where the run is, for the frame around it: idle, in flight, or finished. */
-  onState?: (s: "idle" | "busy" | "done") => void;
+  onState?: (s: "idle" | "busy" | "done", outcome?: string) => void;
 }) {
   const tr = useT();
   const toast = useToast();
@@ -112,6 +112,12 @@ export function BundleAfPanel({
     setProgress({ done: 0, total: todo.length });
     let imported = 0;
     let skipped = 0;
+    // What the member is told, toasted and handed to the frame so it outlasts the toast.
+    let outcome = "";
+    const say = (msg: string, opts?: { kind?: "success" }) => {
+      outcome = msg;
+      toast(msg, opts);
+    };
     try {
       for (let at = 0; at < todo.length; at += BUNDLE_BATCH) {
         if (!live()) return;
@@ -123,7 +129,7 @@ export function BundleAfPanel({
         });
         if (!live()) return;
         if (res?.error) {
-          toast(errDetail(res.error));
+          say(errDetail(res.error));
           return;
         }
         for (const r of (res?.results ?? []) as BundleResult[]) {
@@ -132,17 +138,17 @@ export function BundleAfPanel({
         }
         setProgress({ done: Math.min(at + BUNDLE_BATCH, todo.length), total: todo.length });
       }
-      toast(tr(skipped ? "mem.bi_done_skipped" : "mem.bi_done", { n: imported, skipped }), {
+      say(tr(skipped ? "mem.bi_done_skipped" : "mem.bi_done", { n: imported, skipped }), {
         kind: skipped ? undefined : "success",
       });
     } catch {
       // The request may or may not have reached the Agent: read what is there now.
-      if (live()) toast(tr("mem.bi_failed"));
+      if (live()) say(tr("mem.bi_failed"));
     } finally {
       if (live()) {
         setBusy(false);
         setProgress(null);
-        onState?.("done");
+        onState?.("done", outcome);
         setAgain((n) => n + 1);
         onChanged();
       }
@@ -221,19 +227,37 @@ export function BundleAfPanel({
 export function BundleImportWizard({ onChanged, onClose }: { onChanged: () => void; onClose?: () => void }) {
   const tr = useT();
   const toast = useToast();
+  // Who the wizard belongs to: a change of tenant or user discards the received import id and any
+  // upload still in flight, so an id the Agent minted for one owner is never read under another.
+  const ownerKey = useTenantStore((s) => s.tenant) + "\u0000" + useTenantStore((s) => s.whoami?.user ?? "");
   const fileRef = useRef<HTMLInputElement>(null);
   const [importId, setImportId] = useState("");
   const [uploading, setUploading] = useState(false);
   const [run, setRun] = useState<"idle" | "busy" | "done">("idle");
+  const [result, setResult] = useState<string | null>(null);
   const [err, setErr] = useState("");
-  // A late upload answer for a file picked before the latest one must not set the import id.
-  const seq = useRef(0);
+  // The upload in flight holds the generation it started under; picking another file, a change of
+  // owner or leaving the wizard moves it on, and a late answer is dropped.
+  const gen = useRef(0);
+  useEffect(() => {
+    setImportId("");
+    setUploading(false);
+    setRun("idle");
+    setResult(null);
+    setErr("");
+    return () => {
+      gen.current++;
+    };
+  }, [ownerKey]);
 
   const readFile = async (file: File) => {
-    const mine = ++seq.current;
+    const mine = ++gen.current;
+    const owner = ownerNow();
+    const live = () => gen.current === mine && ownerNow() === owner;
     setUploading(true);
     setImportId("");
     setRun("idle");
+    setResult(null);
     setErr("");
     try {
       const fd = new FormData();
@@ -242,7 +266,7 @@ export function BundleImportWizard({ onChanged, onClose }: { onChanged: () => vo
       // it carries it (ADR 0113).
       const res = await raw("api/agents/memory/import", { method: "POST", headers: { "X-AF-Console": "1" }, body: fd });
       const body = await res.json().catch(() => null);
-      if (mine !== seq.current) return;
+      if (!live()) return;
       if (!res.ok) {
         setErr(body?.error ? errDetail(body.error) : tr("mem.import_failed"));
         return;
@@ -253,12 +277,12 @@ export function BundleImportWizard({ onChanged, onClose }: { onChanged: () => vo
       }
       setImportId(String(body.importId));
     } catch {
-      if (mine === seq.current) {
+      if (live()) {
         setErr(tr("mem.import_failed"));
         toast(tr("mem.import_failed"));
       }
     } finally {
-      if (mine === seq.current) setUploading(false);
+      if (live()) setUploading(false);
       if (fileRef.current) fileRef.current.value = ""; // so the same file can be picked again
     }
   };
@@ -266,7 +290,7 @@ export function BundleImportWizard({ onChanged, onClose }: { onChanged: () => vo
   const busy = uploading || run === "busy";
   const step: WizardStep = run === "busy" ? "apply" : run === "done" ? "result" : importId ? "confirm" : uploading ? "preview" : "source";
   return (
-    <WizardFrame title={tr("mem.bi_title")} intro={tr("mem.bi_intro")} step={step} busy={busy} onClose={onClose}>
+    <WizardFrame title={tr("mem.bi_title")} intro={tr("mem.bi_intro")} step={step} busy={busy} result={result} onClose={onClose}>
       <div className="mem-scope">
         <input
           ref={fileRef}
@@ -283,7 +307,18 @@ export function BundleImportWizard({ onChanged, onClose }: { onChanged: () => vo
       </div>
       {uploading && <p className="muted">{tr("common.loading")}</p>}
       {err && <p className="mem-warn">{err}</p>}
-      {importId && <BundleAfPanel importId={importId} onChanged={onChanged} bare showEmpty onState={setRun} />}
+      {importId && (
+        <BundleAfPanel
+          importId={importId}
+          onChanged={onChanged}
+          bare
+          showEmpty
+          onState={(st, outcome) => {
+            setRun(st);
+            setResult(st === "done" ? (outcome ?? null) : null);
+          }}
+        />
+      )}
     </WizardFrame>
   );
 }

@@ -10,6 +10,7 @@
 import type { ReactNode } from "react";
 import { Button } from "../../../ui/Button.tsx";
 import { useT } from "../../../lib/i18n/index.ts";
+import { useEscLayer } from "../../../lib/escLayer.ts";
 
 export type WizardStep = "source" | "preview" | "confirm" | "apply" | "result";
 export const WIZARD_STEPS: WizardStep[] = ["source", "preview", "confirm", "apply", "result"];
@@ -36,6 +37,12 @@ export function WizardFrame({
 }) {
   const tr = useT();
   const at = WIZARD_STEPS.indexOf(step);
+  // Escape follows Cancel: it leaves to the hub when idle and is consumed while an apply runs. The
+  // layer sits above the Settings dialog's, so it cannot close Settings (and unmount a run in
+  // flight, leaving later batches unsent) behind a disabled Cancel.
+  useEscLayer(() => {
+    if (!busy) onClose?.();
+  }, !!onClose);
   return (
     <section className="mem-wiz" aria-label={title}>
       <h4>{title}</h4>
