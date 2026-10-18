@@ -27,7 +27,17 @@ const STALE_KEYS: Record<string, MsgKey> = {
   invalid: "mem.rv_stale_invalid",
 };
 
-export function ProposedPanel({ reload, onChanged }: { reload: number; onChanged: () => void }) {
+export function ProposedPanel({
+  reload,
+  poll = 0,
+  onChanged,
+}: {
+  reload: number;
+  /** Moves when the status was read again (the queue may have changed in the background, or in
+   *  another tab), which re-reads the list. */
+  poll?: number;
+  onChanged: () => void;
+}) {
   const tr = useT();
   const toast = useToast();
   const askConfirm = useConfirm();
@@ -42,10 +52,12 @@ export function ProposedPanel({ reload, onChanged }: { reload: number; onChanged
     if (signal.aborted) return true;
     if (isTransientErr(res)) return false;
     setLoadErr(res?.error ? errText(res.error) : "");
-    setItems(res?.error ? [] : (res?.proposals ?? []));
+    // A refresh that fails keeps what is on screen, with the failure said, rather than blanking a
+    // list the member may be in the middle of; a first read that fails shows no rows.
+    setItems((prev) => (res?.error ? (prev ?? []) : (res?.proposals ?? [])));
     return true;
   }, []);
-  useRetryLoad(load, [reload, mine]);
+  useRetryLoad(load, [reload, mine, poll]);
 
   useEffect(() => {
     if (!items?.length) {

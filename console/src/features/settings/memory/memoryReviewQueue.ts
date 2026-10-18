@@ -20,9 +20,15 @@ export function readReviewStatus(res: unknown): ReviewStatus | null {
 }
 
 /** Reads the review's status while `active`, again when `reload` changes, on `refresh()`, and
- *  every 30 s. null until the first answer, and whenever the Agent gave none. */
-export function useReviewStatus(active: boolean, reload: number): { status: ReviewStatus | null; refresh: () => void } {
+ *  every 30 s. null until the first answer, and whenever the Agent gave none. `poll` counts the
+ *  answers received: a screen showing the queue re-reads it when it moves, so a count that grew
+ *  (or a proposal swapped for another at the same count) is not left beside a stale list. */
+export function useReviewStatus(
+  active: boolean,
+  reload: number,
+): { status: ReviewStatus | null; poll: number; refresh: () => void } {
   const [status, setStatus] = useState<ReviewStatus | null>(null);
+  const [poll, setPoll] = useState(0);
   const [tick, setTick] = useState(0);
   const refresh = useCallback(() => setTick((n) => n + 1), []);
   const live = useRef(true);
@@ -44,6 +50,7 @@ export function useReviewStatus(active: boolean, reload: number): { status: Revi
         .then((res) => {
           if (cancelled || isTransientErr(res)) return;
           setStatus(readReviewStatus(res));
+          setPoll((n) => n + 1);
         })
         .catch(() => {});
     };
@@ -54,7 +61,7 @@ export function useReviewStatus(active: boolean, reload: number): { status: Revi
       window.clearInterval(t);
     };
   }, [active, reload, tick]);
-  return { status, refresh };
+  return { status, poll, refresh };
 }
 
 // The ids go in the query as well as the body: the CP audit ledger reads the URL only, never the body.

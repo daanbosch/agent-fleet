@@ -38,7 +38,7 @@ export function MemoryTab() {
   const [view, setView] = useSectionView(MEMORY_SECTION, VIEWS, running ? "memories" : "settings", running);
 
   // The background review's queue: its length is the count beside "Changes".
-  const { status: review } = useReviewStatus(running, reload);
+  const { status: review, poll } = useReviewStatus(running, reload);
   const proposed = review?.pending ?? 0;
 
   const defs: ViewDef[] = [
@@ -67,7 +67,7 @@ export function MemoryTab() {
             </Button>
           </EmptyState>
         ) : view === "changes" ? (
-          <ChangesView reload={reload} onChanged={bump} review={review} />
+          <ChangesView reload={reload} onChanged={bump} review={review} poll={poll} />
         ) : view === "importexport" ? (
           <ImportExportView reload={reload} onChanged={bump} />
         ) : (

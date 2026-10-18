@@ -1,7 +1,11 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+
 	"encoding/json"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 	"strings"
 	"testing"
 
@@ -39,5 +43,21 @@ func TestMemoryReviewNoticeCarriesCountsOnlyAndIsRaisedOncePerRun(t *testing.T) 
 	}
 	if strings.Contains(string(b), "0123456789") {
 		t.Fatal("the payload names the run")
+	}
+}
+
+// An outbox that cannot be written is an error the review sees (it keeps the run's pending mark and
+// retries), not a log line.
+func TestMemoryReviewNoticeReportsAnOutboxFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	// The marker directory is a file: PutOnce cannot create it.
+	if err := os.MkdirAll(paths.AgentStateDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(paths.AgentStateDir(), "notification-markers"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := notifyMemoryReview("0123456789abcdef0123", 1, 1); err == nil {
+		t.Fatal("a failed outbox write was reported as success")
 	}
 }

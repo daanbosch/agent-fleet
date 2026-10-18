@@ -11,13 +11,16 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/notice"
 )
 
-func notifyMemoryReview(runID string, queued, pending int) {
+func notifyMemoryReview(runID string, queued, pending int) error {
 	ev := notice.New("memory-review", "", "", "")
 	ev.TargetType = "workspace"
 	ev.Payload["queued"] = queued
 	ev.Payload["pending"] = pending
 	// Once per run: a run replayed after a stop calls this again.
 	if err := notice.PutOnce("memory-review:"+runID, ev); err != nil {
+		// The run keeps its pending mark and the review retries.
 		log.Printf("memory-review notification: %v", err)
+		return err
 	}
+	return nil
 }

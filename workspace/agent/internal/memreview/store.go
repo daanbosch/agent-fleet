@@ -99,9 +99,13 @@ type Run struct {
 	Ops       []Op   `json:"ops,omitempty"`
 	ProjectID string `json:"projectId,omitempty"`
 	// Queued and Skipped are what queueing did, as counts.
-	Queued  int    `json:"queued,omitempty"`
-	Skipped int    `json:"skipped,omitempty"`
-	Failure string `json:"failure,omitempty"`
+	Queued  int `json:"queued,omitempty"`
+	Skipped int `json:"skipped,omitempty"`
+	// NotifyPending is set in the write that ends a run which left proposals in the queue and
+	// cleared once the Console notification for it has been made durable (OnQueued). A stop between
+	// the two leaves it set, and ReconcileNotices finishes the notification.
+	NotifyPending bool   `json:"notifyPending,omitempty"`
+	Failure       string `json:"failure,omitempty"`
 	// Unsent counts the times no backend could run the review without tools; those calls never
 	// reached a model, so they are a counter and not attempts.
 	Unsent    int       `json:"unsent,omitempty"`

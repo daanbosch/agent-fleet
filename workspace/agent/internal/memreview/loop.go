@@ -216,6 +216,7 @@ func (l *Loop) Tick(ctx context.Context) {
 	// Owed releases are finished whether or not the review is on: a rejection must not outlive the
 	// memory it concerned because the member switched the review off.
 	ReconcileReleases()
+	ReconcileNotices(l.now())
 	if !l.enabled() {
 		return
 	}

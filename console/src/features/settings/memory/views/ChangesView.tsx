@@ -15,11 +15,14 @@ export function ChangesView({
   reload,
   onChanged,
   review = null,
+  poll = 0,
 }: {
   reload: number;
   onChanged: () => void;
   /** The review's status (MemoryTab reads it for the nav's count); null while unknown. */
   review?: ReviewStatus | null;
+  /** Counts the status answers; the proposals are read again when it moves. */
+  poll?: number;
 }) {
   const tr = useT();
   const pending = review?.pending ?? 0;
@@ -59,7 +62,7 @@ export function ChangesView({
       </div>
       <div role="tabpanel" id="mem-af-changes-panel" aria-labelledby={`mem-af-changes-tab-${shown}`}>
         {shown === PROPOSED ? (
-          <ProposedPanel reload={reload} onChanged={onChanged} />
+          <ProposedPanel reload={reload} poll={poll} onChanged={onChanged} />
         ) : (
           <AgentChangesPanel reload={reload} onChanged={onChanged} />
         )}
