@@ -23,9 +23,11 @@ type continueReq struct {
 	Mode   string  `json:"mode"`
 }
 
-// continueSession runs `hyprmux session continue-pi`, which starts a new Pi session from this
-// session's transcript and leaves this one running. Only toolbar-managed sessions can be
-// continued; an imported host session is refused before anything spawns.
+// continueSession routes by the source's agent. A Pi session is resumed in place with
+// `hyprmux session resume`, so the prompt becomes its next turn and its profile and mode stay.
+// Any other toolbar-managed session is continued into a new Pi session with
+// `hyprmux session continue-pi`, which leaves the source running. Only toolbar-managed sessions
+// can be continued; an imported host session is refused before anything spawns.
 func (s *server) continueSession(w http.ResponseWriter, r *http.Request) {
 	row, ok := s.findRow(w, r)
 	if !ok {
@@ -49,7 +51,7 @@ func (s *server) continueSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, msg)
 		return
 	}
-	managed, err := toolbarManaged(r, cli, row.ID)
+	source, managed, err := toolbarManaged(r, cli, row.ID)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
@@ -58,12 +60,43 @@ func (s *server) continueSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, fmt.Sprintf("session %s is an imported host session, not toolbar-managed; only toolbar-managed sessions can be continued", row.ID))
 		return
 	}
+	if continueAgents[source.Agent] {
+		resumePiSource(w, r, cli, source, req.Prompt)
+		return
+	}
 	args := []string{"session", "continue-pi", "-json", "-agent=" + req.Agent, "-mode=" + req.Mode}
 	if req.Prompt != nil {
 		args = append(args, "-prompt="+strings.TrimSpace(*req.Prompt))
 	}
 	out, err := cli.Run(r.Context(), append(args, row.ID)...)
 	writeContinued(w, out, err)
+}
+
+// resumePiSource resumes a Pi session in place. Its agent and mode apply only to continue-pi,
+// so they are not sent here. A prompt must be confirmed by the daemon, which an older daemon
+// does not do: it ignores the unknown key, and the shim then refuses rather than report success.
+func resumePiSource(w http.ResponseWriter, r *http.Request, cli hyprmuxCLI, source sessionWireRow, prompt *string) {
+	args := []string{"session", "resume", "-json"}
+	if prompt != nil {
+		args = append(args, "-prompt="+strings.TrimSpace(*prompt))
+	}
+	out, err := cli.Run(r.Context(), append(args, source.ID)...)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "route session resume: "+err.Error())
+		return
+	}
+	var result struct {
+		Prompt bool `json:"prompt"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		writeError(w, http.StatusBadGateway, "route session resume: hyprmux session resume did not answer JSON")
+		return
+	}
+	if prompt != nil && !result.Prompt {
+		writeError(w, http.StatusBadGateway, "route session resume: hyprmux did not confirm the prompt was delivered; upgrade the hyprmux daemon")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"name": source.ID, "title": source.Title, "agent": source.Agent, "route": "session resume"})
 }
 
 func continueRefusal(req continueReq) string {
@@ -78,31 +111,30 @@ func continueRefusal(req continueReq) string {
 	return ""
 }
 
-// toolbarManaged reports whether the CLI's session list has id as a toolbar session. An id the
+// toolbarManaged returns the CLI's session row for id and whether it is toolbar-managed. An id the
 // list does not know, or one flagged external (a manually launched session), is not managed.
-func toolbarManaged(r *http.Request, cli hyprmuxCLI, id string) (bool, error) {
+// Version note: this refusal depends on the hyprmux CLI's session list emitting `external`
+// (daemon 4d39ea3 or newer). Older CLIs mark every row unmarked, so an external session would
+// parse as managed here; the shim therefore requires the CLI to be current (see README) before
+// enabling continue endpoints.
+func toolbarManaged(r *http.Request, cli hyprmuxCLI, id string) (sessionWireRow, bool, error) {
 	rows, err := listSessions(r, cli)
 	if err != nil {
-		return false, err
+		return sessionWireRow{}, false, err
 	}
 	for _, row := range rows {
 		if row.ID == id {
-			return !row.External, nil
-	// Version note: this refusal depends on the hyprmux CLI's session list
-	// emitting `external` (daemon 4d39ea3 or newer). Older CLIs mark every row
-	// unmarked, so an external session would parse as managed here; the shim
-	// therefore requires the CLI to be current (see README) before enabling
-	// continue endpoints.
+			return row, !row.External, nil
 		}
 	}
-	return false, nil
+	return sessionWireRow{}, false, nil
 }
 
 // writeContinued answers with the new session's id, title and agent. The CLI's session also
 // carries the continuation prompt and host paths, which the console does not need.
 func writeContinued(w http.ResponseWriter, out []byte, err error) {
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusBadGateway, "route continue-pi: "+err.Error())
 		return
 	}
 	var created struct {
