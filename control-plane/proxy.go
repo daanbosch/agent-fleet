@@ -90,6 +90,17 @@ func auditActionTarget(r *http.Request) (action, target string, ok bool) {
 			// ADR 0117: the member starts a review of one session now. The Console repeats the
 			// session name in the query; only a name-shaped value is recorded, never a body.
 			return "memory.review.run", auditSessionNameHint(q.Get("session")), true
+		case p == "/api/agents/memory-review/proposals/approve":
+			// ADR 0117: the member publishes one proposed memory. The Console repeats the proposal
+			// id in the query; only an id-shaped value is recorded, never text.
+			return "memory.review.approve", auditReviewIDHint(q.Get("id")), true
+		case p == "/api/agents/memory-review/proposals/reject":
+			return "memory.review.reject", auditReviewIDHint(q.Get("id")), true
+		case p == "/api/agents/memory-review/proposals/reject-all":
+			// The hint is the run whose proposals are rejected, empty for all of them.
+			return "memory.review.reject_all", auditReviewIDHint(q.Get("run")), true
+		case p == "/api/agents/memory-review/runs/revert":
+			return "memory.review.revert_run", auditReviewIDHint(q.Get("run")), true
 		case p == "/api/agents/memory/entries/pin":
 			// #1703: the member pins or unpins a memory. The Console repeats the project id in the query;
 			// only an id-shaped value is recorded, never the free-text memory name.
@@ -605,6 +616,16 @@ var auditSessionNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,40}$`)
 // auditSessionNameHint keeps a session-name-shaped audit hint and drops anything else.
 func auditSessionNameHint(s string) string {
 	if auditSessionNameRe.MatchString(s) {
+		return s
+	}
+	return ""
+}
+
+var auditReviewIDRe = regexp.MustCompile(`^[0-9a-f]{20}$`)
+
+// auditReviewIDHint keeps a review proposal or run id (20 hex characters) and drops anything else.
+func auditReviewIDHint(s string) string {
+	if auditReviewIDRe.MatchString(s) {
 		return s
 	}
 	return ""

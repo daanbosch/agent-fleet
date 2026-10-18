@@ -521,6 +521,17 @@ func buildMux() *http.ServeMux {
 	// purpose: these are not memory tools and no MCP tool reaches them.
 	mux.Handle("POST /agents/memory-review/run", memberorigin.Require(memreview.RunMaxRequest, http.HandlerFunc(memreview.HandleRun)))
 	mux.HandleFunc("GET /agents/memory-review", memreview.HandleStatus)
+	// What the member does with the queue the review fills: the list is read-only; approving
+	// publishes, rejecting and undoing a run change the store, so each answers only the mark.
+	mux.HandleFunc("GET /agents/memory-review/proposals", memreview.HandleProposals)
+	for route, h := range map[string]http.HandlerFunc{
+		"POST /agents/memory-review/proposals/approve":    memreview.HandleApprove,
+		"POST /agents/memory-review/proposals/reject":     memreview.HandleReject,
+		"POST /agents/memory-review/proposals/reject-all": memreview.HandleRejectAll,
+		"POST /agents/memory-review/runs/revert":          memreview.HandleRevertRun,
+	} {
+		mux.Handle(route, memberorigin.Require(memreview.DecideMaxRequest, h))
+	}
 	// The member's list of every memory, and the pin (#1703). No MCP tool
 	// reaches the pin route.
 	mux.HandleFunc("GET /agents/memory/entries/list", memoryx.HandleAgentMemoryList)

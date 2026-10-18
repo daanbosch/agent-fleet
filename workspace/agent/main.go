@@ -305,6 +305,7 @@ func serve() {
 	// is also what resumes a review a restart interrupted. It does nothing while the memory
 	// review is off.
 	memreview.DefaultLoop = memreview.NewLoop(sessionx.MemoryReviewSource{})
+	memoryx.SetForgottenHook(memreview.ReleaseRejections)
 	memreview.DefaultLoop.Start(context.Background())
 
 	// Automatic recovery of a claude session stopped by a rate limit (docs/log/47 §4-4):

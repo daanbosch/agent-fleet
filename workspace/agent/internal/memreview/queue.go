@@ -1,9 +1,9 @@
 package memreview
 
 // The pending queue (ADR 0117 decisions 6 and 8): proposals are files in a directory beside the
-// store, outside the memory repo, so unapproved text is never in the published history. In P1 the
-// queue is only written; deciding (approve, reject) is P2's, but the retention rule is fixed here
-// and tested with the store it belongs to:
+// store, outside the memory repo, so unapproved text is never in the published history. The review
+// writes it; the member decides (approve.go). The retention rule lives here with the store it
+// belongs to:
 //
 //   - pending text is deleted when a decision is made;
 //   - a rejected proposal keeps only its content hash, until the memory it concerned is forgotten;
@@ -36,6 +36,10 @@ type Proposal struct {
 	Op        Op        `json:"op"`
 	Hash      string    `json:"hash"`
 	Created   time.Time `json:"created"`
+	// Stale is why the last approval attempt left the proposal unpublished (a memoryx.Review*
+	// reason); "" while none has. It is a mark for the screen, not a state a decision needs:
+	// approving always asks the store again.
+	Stale string `json:"stale,omitempty"`
 }
 
 // rejection is what survives a rejected proposal: no text, only the hash and which memory it was
@@ -150,6 +154,22 @@ func pendingCount() int {
 	return len(pendingStore.keys())
 }
 
+// ErrNoProposal is the answer for an id that is not in the queue (never was, or already decided).
+var ErrNoProposal = errors.New("no such proposal")
+
+// markStale records why an approval left the proposal unpublished. The text stays: the member still
+// has to decide, and a rejection is what removes it.
+func markStale(id, reason string) error {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	p, ok := pendingStore.Read(id)
+	if !ok || p.Stale == reason {
+		return nil
+	}
+	p.Stale = reason
+	return pendingStore.Write(id, p)
+}
+
 // Decision values for Decide.
 const (
 	DecisionApprove = "approve"
@@ -158,8 +178,8 @@ const (
 
 // Decide removes a proposal from the queue. Its text is gone either way (and the error says when
 // it is not: the caller retries); a rejection leaves the hash behind (see the file comment).
-// Approving here does not publish anything: P2 owns that and calls this after it has applied the
-// proposal.
+// Approving here does not publish anything: Approve (approve.go) calls this after it has published
+// the proposal.
 //
 // The order is what makes a stop harmless: the rejection hash, then the decided marker, then the
 // text's removal. A stop after the marker leaves a pending file that a retry of Decide removes,
@@ -172,7 +192,7 @@ func Decide(id, decision string, now time.Time) error {
 	defer stateMu.Unlock()
 	p, ok := pendingStore.Read(id)
 	if !ok {
-		return errors.New("no such proposal")
+		return ErrNoProposal
 	}
 	if decision == DecisionReject {
 		r := rejection{Hash: p.Hash, Scope: p.Op.Scope, Name: p.Op.Name, ProjectID: p.ProjectID, At: now}

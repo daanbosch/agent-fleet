@@ -33,6 +33,11 @@ func TestMemoryRoutesProxiedByCP(t *testing.T) {
 		{"POST", "/api/agents/memory/entries/pin", "POST /api/agents/memory/entries/pin"},
 		{"GET", "/api/agents/memory-review", "GET /api/agents/memory-review"},
 		{"POST", "/api/agents/memory-review/run", "POST /api/agents/memory-review/run"},
+		{"GET", "/api/agents/memory-review/proposals", "GET /api/agents/memory-review/proposals"},
+		{"POST", "/api/agents/memory-review/proposals/approve", "POST /api/agents/memory-review/proposals/approve"},
+		{"POST", "/api/agents/memory-review/proposals/reject", "POST /api/agents/memory-review/proposals/reject"},
+		{"POST", "/api/agents/memory-review/proposals/reject-all", "POST /api/agents/memory-review/proposals/reject-all"},
+		{"POST", "/api/agents/memory-review/runs/revert", "POST /api/agents/memory-review/runs/revert"},
 		{"POST", "/api/agents/memory/entries/member-save", "POST /api/agents/memory/entries/member-save"},
 		{"GET", "/api/agents/memory/entries/purge-preview", "GET /api/agents/memory/entries/purge-preview"},
 		{"POST", "/api/agents/memory/entries/purge", "POST /api/agents/memory/entries/purge"},
@@ -123,6 +128,23 @@ func TestMemorySnapshotIsAudited(t *testing.T) {
 	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory-review/run?session=%2Fhome%2Fdev+secret", nil)
 	if action, target, ok = auditActionTarget(req); !ok || action != "memory.review.run" || target != "" {
 		t.Fatalf("auditActionTarget(review run, odd hint) = (%q, %q, ok=%v)", action, target, ok)
+	}
+	// The member's decisions on the review's queue are audited with an id-shaped hint only (a
+	// proposal or run id); anything else, text included, is dropped.
+	for _, c := range []struct{ path, action, want string }{
+		{"/api/agents/memory-review/proposals/approve?id=0123456789abcdef0123", "memory.review.approve", "0123456789abcdef0123"},
+		{"/api/agents/memory-review/proposals/approve?id=my+secret+text", "memory.review.approve", ""},
+		{"/api/agents/memory-review/proposals/reject?id=0123456789abcdef0123", "memory.review.reject", "0123456789abcdef0123"},
+		{"/api/agents/memory-review/proposals/reject?id=0123456789ABCDEF0123", "memory.review.reject", ""},
+		{"/api/agents/memory-review/proposals/reject-all?run=0123456789abcdef0123", "memory.review.reject_all", "0123456789abcdef0123"},
+		{"/api/agents/memory-review/proposals/reject-all", "memory.review.reject_all", ""},
+		{"/api/agents/memory-review/runs/revert?run=0123456789abcdef0123", "memory.review.revert_run", "0123456789abcdef0123"},
+		{"/api/agents/memory-review/runs/revert?run=%2Fhome%2Fdev", "memory.review.revert_run", ""},
+	} {
+		req = httptest.NewRequest(http.MethodPost, c.path, nil)
+		if action, target, ok = auditActionTarget(req); !ok || action != c.action || target != c.want {
+			t.Fatalf("auditActionTarget(%s) = (%q, %q, ok=%v), want %s/%q", c.path, action, target, ok, c.action, c.want)
+		}
 	}
 	req = httptest.NewRequest(http.MethodPost, "/api/agents/memory/entries/pin", nil)
 	if action, target, ok = auditActionTarget(req); !ok || action != "memory.entry.pin" || target != "" {
