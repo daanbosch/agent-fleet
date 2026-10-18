@@ -158,6 +158,10 @@ func (h *hyprmuxRuntime) Start(ctx context.Context) error {
 		// The hyprmux CLI finds its state under HOME and is looked up on PATH.
 		"HOME=" + os.Getenv("HOME"),
 		"PATH=" + os.Getenv("PATH"),
+		// The hyprmux CLI reaches the daemon over a user-runtime socket and
+		// refuses to run without XDG_RUNTIME_DIR (write paths like session
+		// continue need it).
+		"XDG_RUNTIME_DIR=" + os.Getenv("XDG_RUNTIME_DIR"),
 	}
 	cmd.Stdout = logf
 	cmd.Stderr = logf
