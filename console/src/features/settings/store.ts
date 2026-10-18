@@ -17,6 +17,7 @@ const TENANT_SECTION_KEY = "af-tenant-section";
 const TENANT_SLUG_KEY = "af-tenant-slug";
 const ADMIN_PLACE_KEY = "af-admin-place";
 const SECTION_VIEWS_KEY = "af-settings-views";
+const SNAPSHOTS_SHOW_AF_KEY = "af-snapshots-show-af";
 
 function readKey(key: string): string {
   try {
@@ -55,6 +56,13 @@ export function rememberSectionView(section: string, view: string): void {
   } catch {
     writeKey(SECTION_VIEWS_KEY, JSON.stringify({ [section]: view }));
   }
+}
+
+/** Whether Memory snapshots > History lists the rows Agent Fleet's own memory writes leave
+ *  (trigger "agent-memory"). Hidden unless the member turned it on. */
+export const lastSnapshotsShowAf = (): boolean => readKey(SNAPSHOTS_SHOW_AF_KEY) === "1";
+export function rememberSnapshotsShowAf(on: boolean): void {
+  writeKey(SNAPSHOTS_SHOW_AF_KEY, on ? "1" : "0");
 }
 
 const lastTenantSection = (): string => readKey(TENANT_SECTION_KEY);

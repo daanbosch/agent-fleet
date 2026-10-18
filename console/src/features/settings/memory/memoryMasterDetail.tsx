@@ -5,7 +5,7 @@
 // start of work), Forget, and in an overflow menu the purge of its past revisions (#1982), plus its
 // own history. Edit and New open in the pane too, so nothing opens off-screen below a long list.
 //
-// Forget and restore are the changes list's own revert route, on the newest change of the memory. A
+// Forget and unforget are the changes list's own revert route, on the newest change of the memory. A
 // forget resolves that change on demand (member-latest) and the forgotten list comes from
 // member-forgotten (the store's tombstones), so neither depends on how many recent changes were
 // loaded. A save goes through member-save, which runs the agents' memory_save checks (revision,
@@ -268,7 +268,7 @@ export function MemoriesMasterDetail({
   const matched = q ? [...fieldRows, ...bodyRows] : inScope;
   const shown = filter === "pinned" ? matched.filter((m) => m.pinned) : matched;
   // The answer may be for the scope shown before a switch while the new one is still loading: a row of
-  // another scope must never be on screen, since its Restore writes that scope.
+  // another scope must never be on screen, since its Unforget writes that scope.
   const goneInScope = forgotten.filter((c) => scope === ALL || scopeKey(c) === scope);
   const whereOf = (m: { scope: string; project?: { display: string } }) =>
     m.scope === "user" ? tr("mem.af_scope_user") : (m.project?.display ?? "");
@@ -279,7 +279,7 @@ export function MemoriesMasterDetail({
     ? goneInScope.filter((c) => `${c.name}\n${whereOf(c)}\n${c.authorKind}\n${c.authorSession}`.toLowerCase().includes(q))
     : goneInScope;
 
-  // The pick must still exist: a scope change, forget, restore or purge can take it away.
+  // The pick must still exist: a scope change, forget, unforget or purge can take it away.
   const key = sel ? selKey(sel) : "";
   const curRow = sel && !sel.gone ? (rows ?? []).find((m) => keyOf(m) === key) : undefined;
   const goneRow = sel?.gone ? goneInScope.find((c) => keyOf(c) === key) : undefined;
@@ -417,7 +417,7 @@ export function MemoriesMasterDetail({
     }
   };
 
-  const restore = async (c: MemoryChange) => {
+  const unforget = async (c: MemoryChange) => {
     setBusy(true);
     try {
       const res = await apiJSON("api/agents/memory/entries/revert?commit=" + encodeURIComponent(c.commit), "POST", {
@@ -425,9 +425,9 @@ export function MemoriesMasterDetail({
         forget: false,
         ack: false,
       });
-      if (res?.error) toast(res.error.code === "memory_secret_detected" ? tr("mem.br_restore_secret") : errDetail(res.error));
+      if (res?.error) toast(res.error.code === "memory_secret_detected" ? tr("mem.br_unforget_secret") : errDetail(res.error));
       else {
-        toast(tr("mem.br_restored", { name: c.name }), { kind: "success" });
+        toast(tr("mem.br_unforgotten", { name: c.name }), { kind: "success" });
         if (key === keyOf(c)) back();
         onChanged();
       }
@@ -657,8 +657,8 @@ export function MemoriesMasterDetail({
                       <button type="button" disabled={busy} onClick={() => setPurging({ ...c, where: whereOf(c) })}>
                         {tr("mem.pg_button")}
                       </button>
-                      <button type="button" disabled={busy} onClick={() => void restore(c)}>
-                        {tr("mem.br_restore")}
+                      <button type="button" disabled={busy} onClick={() => void unforget(c)}>
+                        {tr("mem.br_unforget")}
                       </button>
                     </li>
                   ))
@@ -746,8 +746,8 @@ export function MemoriesMasterDetail({
                     <dd>{who(goneRow)}</dd>
                   </dl>
                   <div className="mem-br-actions">
-                    <button type="button" disabled={busy} onClick={() => void restore(goneRow)}>
-                      {tr("mem.br_restore")}
+                    <button type="button" disabled={busy} onClick={() => void unforget(goneRow)}>
+                      {tr("mem.br_unforget")}
                     </button>
                     <button type="button" disabled={busy} onClick={() => setPurging({ ...goneRow, where: whereOf(goneRow) })}>
                       {tr("mem.pg_button")}

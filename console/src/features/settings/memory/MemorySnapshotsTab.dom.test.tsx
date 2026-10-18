@@ -200,3 +200,118 @@ describe("MemorySnapshotsTab", () => {
     expect(api).not.toHaveBeenCalled();
   });
 });
+
+// History hides the rows Agent Fleet's own memory writes leave (trigger "agent-memory"): Agent
+// memory > Changes already lists them. The hidden ones must stay reachable by date jump and restore.
+describe("MemorySnapshotsTab history filter for Agent Fleet memory writes", () => {
+  const snap = (rev: string, at: string, trigger: string) => ({
+    rev,
+    short: rev,
+    at,
+    subject: "s",
+    trigger,
+    kinds: ["claude"],
+    projects: [],
+    files: 1,
+  });
+  const newest = snap("a1", "2026-10-04T10:00:00Z", "auto");
+  const af1 = snap("f1", "2026-10-04T09:00:00Z", "agent-memory");
+  const af2 = snap("f2", "2026-10-04T08:00:00Z", "agent-memory");
+  const older = snap("m1", "2026-10-04T07:00:00Z", "manual");
+  const hiddenAf = snap("f0", "2026-10-03T12:00:00Z", "agent-memory");
+
+  beforeEach(() => {
+    const base = api.getMockImplementation()!;
+    api.mockImplementation((path: string) => {
+      if (path.startsWith("api/agents/memory/snapshots?limit=1&before="))
+        return Promise.resolve({ snapshots: [hiddenAf] });
+      if (path.startsWith("api/agents/memory/snapshots"))
+        return Promise.resolve({ snapshots: [newest, af1, af2, older] });
+      return base(path);
+    });
+  });
+
+  const rows = () => Array.from(host!.querySelectorAll<HTMLButtonElement>(".mem-snap"));
+  const toggle = () => host!.querySelector<HTMLInputElement>('.mem-jump input[type="checkbox"]')!;
+  const hint = () => host!.querySelector(".mem-snap-hidden");
+  const restoreBtn = () =>
+    Array.from(host!.querySelectorAll<HTMLButtonElement>(".mem-diff-head button")).find(
+      (b) => b.textContent === t("mem.restore"),
+    )!;
+  const setValue = async (el: HTMLInputElement, v: string) => {
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value")!.set!.call(el, v);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  };
+  const jump = async () => {
+    await setValue(host!.querySelector<HTMLInputElement>('input[type="datetime-local"]')!, "2026-10-03T13:00");
+    await act(async () => {
+      Array.from(host!.querySelectorAll<HTMLButtonElement>("button"))
+        .find((b) => b.textContent === t("mem.jump_go"))!
+        .click();
+    });
+    await flush();
+  };
+
+  it("hides the Agent Fleet memory writes by default and leaves a count with a link to Changes", async () => {
+    await mount();
+    expect(rows().map((r) => r.textContent)).toEqual([
+      expect.stringContaining(t("mem.trigger_auto")),
+      expect.stringContaining(t("mem.trigger_manual")),
+    ]);
+    expect(toggle().checked).toBe(false);
+    // The two adjacent writes fold into one hint.
+    expect(host!.querySelectorAll(".mem-snap-hidden")).toHaveLength(1);
+    expect(hint()!.textContent).toContain(t("mem.hist_af_hidden", { n: 2 }));
+    const link = hint()!.querySelector<HTMLButtonElement>("button")!;
+    expect(link.textContent).toBe(t("mem.hist_af_changes"));
+    await act(async () => link.click());
+    expect(useSettingsUI.getState().settingsSection).toBe("memory");
+    expect(useSettingsUI.getState().settingsView).toBe("changes");
+  });
+
+  it("lists them with the toggle on, and remembers the toggle", async () => {
+    await mount();
+    await act(async () => toggle().click());
+    expect(rows()).toHaveLength(4);
+    expect(hint()).toBeNull();
+    expect(localStorage.getItem("af-snapshots-show-af")).toBe("1");
+    unmount();
+    await mount();
+    expect(toggle().checked).toBe(true);
+    expect(rows()).toHaveLength(4);
+  });
+
+  it("reveals a hidden snapshot a date jump lands on, and its Restore this point still opens", async () => {
+    await mount();
+    expect(rows()).toHaveLength(2);
+    await jump();
+    const active = host!.querySelector(".mem-snap.active")!;
+    expect(active.textContent).toContain(t("mem.trigger_agent_memory"));
+    expect(host!.querySelector(".mem-diff-head code")!.textContent).toBe("f0");
+    expect(api).toHaveBeenCalledWith("api/agents/memory/diff?to=f0");
+    await act(async () => restoreBtn().click());
+    expect(host!.textContent).toContain(t("mem.restore_title"));
+    // The toggle itself is untouched: the jump revealed one row, not the filter.
+    expect(toggle().checked).toBe(false);
+  });
+
+  it("keeps a hidden row listed while it is the selected one, and hides it again once another is picked", async () => {
+    await mount();
+    await act(async () => toggle().click());
+    await act(async () => rows()[1].click()); // f1, an Agent Fleet memory write
+    expect(host!.querySelector(".mem-diff-head code")!.textContent).toBe("f1");
+    await act(async () => toggle().click());
+    expect(rows().map((r) => r.querySelector(".mem-snap-when")!.nextSibling!.textContent)).toEqual([
+      t("mem.trigger_auto"),
+      t("mem.trigger_agent_memory"),
+      t("mem.trigger_manual"),
+    ]);
+    expect(host!.querySelector(".mem-diff-head code")!.textContent).toBe("f1");
+    expect(restoreBtn()).toBeTruthy();
+    await act(async () => rows()[0].click());
+    expect(rows()).toHaveLength(2);
+    expect(hint()!.textContent).toContain(t("mem.hist_af_hidden", { n: 2 }));
+  });
+});
