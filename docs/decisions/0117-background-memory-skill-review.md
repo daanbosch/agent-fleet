@@ -406,9 +406,9 @@ Nothing publishes and nothing triggers a review yet.
   earlier attempt of the session was lost in the last ten minutes (its end is unknown); otherwise it is cost-unknown.
 - **Bounds:** one review in flight in the Agent; 250 helper calls per local day (counted and persisted before the
   call, so a crash over-counts rather than under-counts); a call no backend could run does not count and adds no
-  attempt to the record. **At most 100 pending proposals is provisional and NOT among the owner-confirmed P0 caps**
-  (the journal's queue figure is 20 queued sessions, itself a policy assumption); the owner's answer is still
-  needed. The bound holds inside the insert; a reply that does not fit stays `answered` and is queued as room
+  attempt to the record. At most 100 pending proposals (the journal's figure was 20 queued sessions, a policy
+  assumption; the owner was asked for this number and **confirmed it on 2026-10-18**, to be revisited from P1
+  traffic, #2333). The bound holds inside the insert; a reply that does not fit stays `answered` and is queued as room
   appears, without another call.
 - **Queue retention (decision 8):** pending text is deleted on any decision; a rejection keeps only the content
   hash (operation, scope, name, type, description, body and the project) until the memory is forgotten

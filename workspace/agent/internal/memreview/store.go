@@ -27,8 +27,8 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 )
 
-// The bounds of ADR 0117 decision 3. Attempts and the daily cap are the owner-confirmed P0 caps;
-// MaxPending is not (see below).
+// The bounds of ADR 0117 decision 3, all confirmed by the owner (the daily cap and the pending
+// bound remain policy assumptions to be revisited from P1 traffic, #2333).
 const (
 	// MaxAttempts is one call and at most one retry for a window.
 	MaxAttempts = 2
@@ -36,9 +36,8 @@ const (
 	// loop sized from one heavy-use sample (P0), not a budget; the budgets UI is P3's.
 	DailyCallCap = 250
 	// MaxPending bounds the proposal queue: a review that nobody reads must not grow it forever.
-	// UNCONFIRMED: the owner's confirmed P0 caps (docs/log/134 section 6) include no number for
-	// pending proposals, only "queued sessions: 20" as a policy assumption. 100 is this
-	// implementation's provisional reading and needs the owner's answer (see the ADR 0117 note).
+	// Confirmed by the owner on 2026-10-18 (the P0 journal gave only "queued sessions: 20", a
+	// policy assumption, so this number was put to them); revisited from P1 traffic (#2333).
 	MaxPending = 100
 	// DefaultBackoff is the wait after a transient failure before the same run is tried again.
 	DefaultBackoff = 5 * time.Minute
