@@ -27,7 +27,7 @@ type harness struct {
 	prompts []string
 	tags    []usagex.Tag
 	enabled bool
-	ledger  func(string, time.Time) (int, bool)
+	ledger  func(LedgerQuery) LedgerHit
 	project string
 }
 
@@ -429,13 +429,13 @@ func TestReviewResumesAClaimThatNeverCalled(t *testing.T) {
 
 func TestReviewCountsADispatchedAttemptThatNeverAnswered(t *testing.T) {
 	for name, tc := range map[string]struct {
-		ledger func(string, time.Time) (int, bool)
+		ledger func(LedgerQuery) LedgerHit
 		cost   string
 		spend  int
 	}{
 		"no usage row":  {nil, "unknown", 0},
-		"a usage row":   {func(string, time.Time) (int, bool) { return 321, true }, "linked", 321},
-		"row not found": {func(string, time.Time) (int, bool) { return 0, false }, "unknown", 0},
+		"a usage row":   {func(LedgerQuery) LedgerHit { return LedgerHit{Spend: 321, Call: "c1", Found: true} }, "linked", 321},
+		"row not found": {func(LedgerQuery) LedgerHit { return LedgerHit{} }, "unknown", 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)

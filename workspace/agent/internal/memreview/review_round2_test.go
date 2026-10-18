@@ -284,7 +284,7 @@ func TestSettleLostUsesTheCallsEndOfAnEarlierAttemptOfTheSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	var since time.Time
-	r := &Reviewer{Ledger: func(_ string, s time.Time) (int, bool) { since = s; return 0, false }}
+	r := &Reviewer{Ledger: func(q LedgerQuery) LedgerHit { since = q.Since; return LedgerHit{} }}
 	run := &Run{ID: "cur", Session: "sess", Attempts: []Attempt{{N: 1, StartedAt: start, Outcome: OutcomeDispatched}}}
 	r.settleLost(run)
 	if want := start.Truncate(time.Second).Add(time.Second); !since.Equal(want) {

@@ -73,8 +73,8 @@ type Reviewer struct {
 	Snapshot func(session string) (memoryx.ReviewSnapshot, error)
 	// Call makes one deny-all helper call under ctx's usage tag.
 	Call func(ctx context.Context, persona, prompt string) (string, error)
-	// Ledger finds the spend of a lost attempt's usage row, if one was written.
-	Ledger  func(session string, since time.Time) (spend int, found bool)
+	// Ledger finds the usage row of a lost attempt, if one was written.
+	Ledger  func(LedgerQuery) LedgerHit
 	Backoff time.Duration
 
 	// hook is called when a stage has been persisted; tests use it to stop the process there.
@@ -308,13 +308,76 @@ func (r *Reviewer) settleLost(run *Run) {
 	if end := latestEnd(run, at.StartedAt); !end.IsZero() && end.Truncate(time.Second).Equal(since) {
 		since = since.Add(time.Second)
 	}
+	if end, open := latestOpenStart(run, at); open && at.StartedAt.Sub(end) < ledgerAttemptWindow {
+		// An earlier attempt was lost: its end is unknown, so its call may have finished in this
+		// attempt's window and the row cannot be told apart from this attempt's own.
+		at.Cost = "unknown"
+		return
+	}
 	if r.Ledger != nil {
-		if spend, found := r.Ledger(run.Session, since); found {
-			at.Cost, at.Spend = "linked", spend
+		q := LedgerQuery{Session: run.Session, Since: since, Exclude: linkedCalls(run)}
+		if hit := r.Ledger(q); hit.Found {
+			at.Cost, at.Spend, at.Call = "linked", hit.Spend, hit.Call
 			return
 		}
 	}
 	at.Cost = "unknown"
+}
+
+// LedgerQuery asks the ledger for the one call of Session stamped from Since that is not in
+// Exclude (the calls already linked to other attempts).
+type LedgerQuery struct {
+	Session string
+	Since   time.Time
+	Exclude map[string]bool
+}
+
+// LedgerHit is the answer: the call's summed spend and its id.
+type LedgerHit struct {
+	Spend int
+	Call  string
+	Found bool
+}
+
+// linkedCalls are the calls every attempt of the session (in any run) is already linked to.
+func linkedCalls(run *Run) map[string]bool {
+	out := map[string]bool{}
+	add := func(as []Attempt) {
+		for _, a := range as {
+			if a.Call != "" {
+				out[a.Call] = true
+			}
+		}
+	}
+	for _, other := range runs() {
+		if other.Session == run.Session && other.ID != run.ID {
+			add(other.Attempts)
+		}
+	}
+	add(run.Attempts)
+	return out
+}
+
+// latestOpenStart is the start of the latest earlier attempt of the session that was lost (its end
+// is unknown) and began before at.
+func latestOpenStart(run *Run, at *Attempt) (time.Time, bool) {
+	var latest time.Time
+	found := false
+	consider := func(as []Attempt) {
+		for i := range as {
+			a := &as[i]
+			if a != at && a.Outcome == OutcomeLost && a.StartedAt.Before(at.StartedAt) && (!found || a.StartedAt.After(latest)) {
+				latest, found = a.StartedAt, true
+			}
+		}
+	}
+	for _, other := range runs() {
+		if other.Session == run.Session && other.ID != run.ID {
+			consider(other.Attempts)
+		}
+	}
+	consider(run.Attempts)
+	return latest, found
 }
 
 // latestEnd is the latest time an attempt of the run's session ended before limit, across every
@@ -410,11 +473,12 @@ func (r *Reviewer) fail(run *Run, reason string) (Result, error) {
 const ledgerAttemptWindow = 10 * time.Minute
 
 // ledgerSpend looks for the usage row of one attempt: the memory.review rows of the session
-// stamped from since on, grouped by call (a call that used several models is split over several
-// rows). Exactly one such call means it is the attempt's, and its rows are summed; none means
-// there is no row; several mean it cannot be told which is the attempt's, and that is reported as
-// not found.
-func ledgerSpend(session string, since time.Time) (int, bool) {
+// stamped from Since on, grouped by call (a call that used several models is split over several
+// rows), minus the calls already linked to another attempt. Exactly one such call means it is the
+// attempt's, and its rows are summed; none means there is no row; several mean it cannot be told
+// which is the attempt's, and that is reported as not found.
+func ledgerSpend(q LedgerQuery) LedgerHit {
+	session, since := q.Session, q.Since
 	spend := map[string]int{} // by call id; a row with none is a call of its own
 	var order []string
 	for _, day := range []string{since.UTC().Format("2006-01-02"), since.UTC().Add(24 * time.Hour).Format("2006-01-02")} {
@@ -430,6 +494,9 @@ func ledgerSpend(session string, since time.Time) (int, bool) {
 			if key == "" {
 				key = fmt.Sprintf("%s#%d", day, i)
 			}
+			if q.Exclude[key] {
+				continue
+			}
 			if _, seen := spend[key]; !seen {
 				order = append(order, key)
 			}
@@ -437,7 +504,7 @@ func ledgerSpend(session string, since time.Time) (int, bool) {
 		}
 	}
 	if len(order) != 1 {
-		return 0, false
+		return LedgerHit{}
 	}
-	return spend[order[0]], true
+	return LedgerHit{Spend: spend[order[0]], Call: order[0], Found: true}
 }

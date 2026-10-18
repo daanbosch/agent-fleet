@@ -12,8 +12,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/paths"
 )
 
 // fsOps are the calls that decide durability; tests replace them to see the order and to fail.
@@ -101,18 +105,29 @@ func (s store[T]) Remove(key string) error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	if stale, _ := filepath.Glob(filepath.Join(s.staging(), key+".*")); len(stale) > 0 {
-		for _, p := range stale {
-			if rerr := os.Remove(p); rerr != nil && !os.IsNotExist(rerr) {
-				return rerr
-			}
-		}
-		if serr := fsOps.syncDir(s.staging()); serr != nil && !os.IsNotExist(serr) {
-			return serr
-		}
+	if err := s.removeStaged(key); err != nil {
+		return err
 	}
 	if serr := fsOps.syncDir(s.Dir()); serr != nil && !os.IsNotExist(serr) {
 		return serr
+	}
+	return nil
+}
+
+// removeStaged deletes the staged copies of key (a writer killed between the create and the
+// rename leaves one, holding the whole record) and syncs the staging directory.
+func (s store[T]) removeStaged(key string) error {
+	stale, _ := filepath.Glob(filepath.Join(s.staging(), key+".*"))
+	if len(stale) == 0 {
+		return nil
+	}
+	for _, p := range stale {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if err := fsOps.syncDir(s.staging()); err != nil && !os.IsNotExist(err) {
+		return err
 	}
 	return nil
 }
@@ -152,32 +167,65 @@ func (s store[T]) sweepStaging(age time.Duration, now time.Time) {
 	}
 }
 
-// mkdirAllSynced creates dir and every missing ancestor and makes each new directory entry
-// durable: every directory it created, and the existing directory the chain hangs from. Creating
-// them without that can lose the whole chain, a state root included, to a host failure that comes
-// after the first record in it was reported written.
+// unsyncedDirs are directories this process created, or is responsible for, whose entries are not
+// yet known to be durable. A sync that fails leaves them here, so the next write retries them
+// instead of finding the directories already visible and assuming they were synced.
+var (
+	syncMu       sync.Mutex
+	unsyncedDirs = map[string]bool{}
+	chainQueued  = map[string]bool{}
+)
+
+// mkdirAllSynced creates dir and every missing ancestor and makes the new directory entries
+// durable: every directory it created, the existing one the chain hangs from, and, once per
+// process for each store directory, the whole chain this package is responsible for (the store's
+// directories, the state root, the config directory and its parent) - a directory that is already
+// visible may owe its sync to an earlier failure or an earlier process.
 func mkdirAllSynced(dir string) error {
 	var created []string
 	for d := dir; ; d = filepath.Dir(d) {
-		if _, err := os.Stat(d); err == nil {
-			created = append(created, d) // the first directory that already existed
-			break
-		}
-		created = append(created, d)
-		if filepath.Dir(d) == d {
+		_, err := os.Stat(d)
+		created = append(created, d) // the last element is the first directory that already existed
+		if err == nil || filepath.Dir(d) == d {
 			break
 		}
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	if len(created) == 1 {
-		return nil // nothing was created
+	syncMu.Lock()
+	defer syncMu.Unlock()
+	if len(created) > 1 {
+		for _, d := range created {
+			unsyncedDirs[d] = true
+		}
 	}
-	for _, d := range created {
+	if !chainQueued[dir] {
+		chainQueued[dir] = true
+		cfg := paths.ClaudeConfigDir()
+		for d := dir; ; d = filepath.Dir(d) {
+			unsyncedDirs[d] = true
+			if d == cfg || filepath.Dir(d) == d {
+				unsyncedDirs[filepath.Dir(d)] = true
+				break
+			}
+		}
+	}
+	// Deepest first, so a parent is synced after the entries it lists.
+	pending := make([]string, 0, len(unsyncedDirs))
+	for d := range unsyncedDirs {
+		pending = append(pending, d)
+	}
+	sort.Slice(pending, func(i, j int) bool { return len(pending[i]) > len(pending[j]) })
+	for _, d := range pending {
 		if err := fsOps.syncDir(d); err != nil {
+			if os.IsNotExist(err) {
+				delete(unsyncedDirs, d)
+				continue
+			}
 			return err
 		}
+		delete(unsyncedDirs, d)
 	}
 	return nil
 }

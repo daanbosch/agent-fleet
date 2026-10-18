@@ -193,15 +193,20 @@ func Decide(id, decision string, now time.Time) error {
 }
 
 // scrubRunOp blanks the text of one operation in a run that has not ended, keeping what the replay
-// needs (which operation it was, to skip it by its decided marker).
+// needs (which operation it was, to skip it by its decided marker), and removes the run's staged
+// copies.
 func scrubRunOp(p Proposal) error {
-	r, ok := runStore.Read(p.RunID)
-	if !ok || r.Terminal() || p.Index < 0 || p.Index >= len(r.Ops) {
-		return nil
+	if r, ok := runStore.Read(p.RunID); ok && !r.Terminal() && p.Index >= 0 && p.Index < len(r.Ops) {
+		op := r.Ops[p.Index]
+		r.Ops[p.Index] = Op{Op: op.Op, Scope: op.Scope, Name: op.Name}
+		if err := runStore.Write(r.ID, r); err != nil {
+			return err
+		}
 	}
-	op := r.Ops[p.Index]
-	r.Ops[p.Index] = Op{Op: op.Op, Scope: op.Scope, Name: op.Name}
-	return runStore.Write(r.ID, r)
+	// A run record being rewritten when the process stopped leaves a staged copy of the older
+	// whole record, text included; it is removed whatever state the run is in. Done under the
+	// state lock, so no live writer of the record is racing it.
+	return runStore.removeStaged(p.RunID)
 }
 
 // gcDecidedLocked drops the decided markers whose run has ended (or is gone): only an open run can

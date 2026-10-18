@@ -78,6 +78,8 @@ type Attempt struct {
 	// billed). Empty for an attempt that ended normally: the ledger has its row.
 	Cost  string `json:"cost,omitempty"`
 	Spend int    `json:"spend,omitempty"`
+	// Call is the ledger call id the attempt was linked to; no other attempt is linked to it.
+	Call string `json:"call,omitempty"`
 }
 
 // Run is the durable record of one review of one window.

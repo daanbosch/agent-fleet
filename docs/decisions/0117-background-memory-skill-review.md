@@ -402,7 +402,8 @@ Nothing publishes and nothing triggers a review yet.
   leaves the run record in the write that ends the run. Every record is written durably (file synced, renamed,
   directories synced, every newly created directory included) before it is relied on, and a removal that fails is
   an error. A lost attempt is linked to a usage row only when exactly one call of the session falls in its window
-  and no earlier attempt could own that second; otherwise it is cost-unknown.
+  and no earlier attempt could own that second, never to a call another attempt is already linked to, and not when an
+  earlier attempt of the session was lost in the last ten minutes (its end is unknown); otherwise it is cost-unknown.
 - **Bounds:** one review in flight in the Agent; 250 helper calls per local day (counted and persisted before the
   call, so a crash over-counts rather than under-counts); a call no backend could run does not count and adds no
   attempt to the record. **At most 100 pending proposals is provisional and NOT among the owner-confirmed P0 caps**

@@ -402,25 +402,25 @@ func TestLedgerLinkHandlesSecondPrecisionAndSplitCalls(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	spend, ok := ledgerSpend("sess", start.Truncate(time.Second))
-	if !ok || spend != 120 {
-		t.Fatalf("spend = %d, found = %v: want 120 (both rows of the call, none of the others)", spend, ok)
+	hit := ledgerSpend(LedgerQuery{Session: "sess", Since: start.Truncate(time.Second)})
+	if !hit.Found || hit.Spend != 120 || hit.Call != "mine" {
+		t.Fatalf("hit = %+v: want 120 (both rows of the call, none of the others)", hit)
 	}
-	if _, ok := ledgerSpend("other-session", start.Truncate(time.Second)); ok {
+	if ledgerSpend(LedgerQuery{Session: "other-session", Since: start.Truncate(time.Second)}).Found {
 		t.Error("another session's row matched")
 	}
 	// Two calls in the window: which one is the attempt's cannot be told, so none is linked.
 	if err := usagex.AppendRows([]usagex.Record{row(start.Add(time.Minute), "second-call", 50)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := ledgerSpend("sess", start.Truncate(time.Second)); ok {
+	if ledgerSpend(LedgerQuery{Session: "sess", Since: start.Truncate(time.Second)}).Found {
 		t.Error("an ambiguous window was linked")
 	}
 
 	// settleLost starts the search at the attempt's second, or one later when the attempt before
 	// it ended within that second.
-	r := &Reviewer{Ledger: func(session string, since time.Time) (int, bool) {
-		return int(since.Unix() % 1000), true
+	r := &Reviewer{Ledger: func(q LedgerQuery) LedgerHit {
+		return LedgerHit{Spend: int(q.Since.Unix() % 1000), Found: true}
 	}}
 	run := &Run{Session: "sess", Attempts: []Attempt{
 		{N: 1, StartedAt: start.Add(-time.Minute), EndedAt: start.Add(-100 * time.Millisecond), Outcome: OutcomeMalformed},
