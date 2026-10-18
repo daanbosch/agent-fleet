@@ -23,6 +23,7 @@ import { MuseImportPanel } from "./memoryMuseImport.tsx";
 import { ClaudeExportPanel } from "./memoryClaudeExport.tsx";
 import { MemoryPinsPanel } from "./memoryPins.tsx";
 import { MemoryBrowserPanel } from "./memoryBrowser.tsx";
+import { ExternalMemoryHelpLink } from "./ExternalMemoryHelpLink.tsx";
 import type { ChangeDiff, MemoryChange, SecretFinding } from "./memoryTypes.ts";
 
 // An unknown op from a newer Agent is printed raw rather than breaking the row.
@@ -67,6 +68,7 @@ export function ExternalMemorySwitch() {
         />
       </Row>
       <p className="muted ds-note">{tr("mem.ext_switch_note")}</p>
+      <ExternalMemoryHelpLink />
     </>
   );
 }
