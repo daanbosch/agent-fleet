@@ -18,7 +18,7 @@ export function TokenCapabilities() {
         <li>{tr("tokens.can_memory_write")}</li>
         <li>
           {tr("tokens.can_memory_setting_pre")}
-          <button type="button" className="linklike" onClick={() => openSettings("memory")}>
+          <button type="button" className="linklike" onClick={() => openSettings("memory:settings")}>
             {tr("tokens.can_memory_setting_link")}
           </button>
           {tr("tokens.can_memory_setting_post")}

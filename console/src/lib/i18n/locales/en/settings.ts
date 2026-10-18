@@ -192,7 +192,7 @@ export const settings: Record<keyof typeof jaSettings, string> = {
   "agents.session_search": "Past-session search",
   "agents.note_session_search":
     "Lets a session search what was said in this workspace's past sessions of every kind, including stopped and archived ones (search_sessions). Read-only, and only conversation text is indexed; tool output and thinking are left out. The command palette's Conversations mode works whatever this is set to. Turning it on reaches sessions started from now on; turning it off refuses running sessions' searches as soon as it is saved. Default ON.",
-  "agents.note_agent_memory_moved": "Agent Fleet memory (the memory every kind of agent shares through af's memory_* tools) is turned on and off in Settings > Agent memory.",
+  "agents.note_agent_memory_moved": "Agent Fleet memory (the memory every kind of agent shares through af's memory_* tools) is turned on and off in Settings > Agent memory > Settings.",
   "agents.image_generation": "Image generation",
   "agents.note_image_generation":
     "Lets a session generate an image from a prompt (the generate_image tool). It uses a connected CLI's own image generation, spending that plan's usage each time. Applies to sessions started from now on. Default OFF.",
@@ -632,6 +632,7 @@ export const settings: Record<keyof typeof jaSettings, string> = {
   "set.tab_keys": "Keyboard",
   "set.tab_usage": "Agent usage",
   "set.tab_memory": "Agent memory",
+  "set.tab_memory_snapshots": "Memory snapshots",
   "set.tab_machine": "Machine",
   "set.tab_env": "Toolchains",
   "set.tab_database": "Databases",

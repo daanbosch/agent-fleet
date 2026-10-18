@@ -859,3 +859,25 @@ no decision above changes.
   setting, not a signature, is what gates them. They do not carry the member-origin mark
   ([0113](0113-member-origin-mark.md)), which is for the Console's own requests. There is no tenant-level admin
   switch; `AF_MCP_ENABLED` still turns `/mcp` off for a whole deployment. Follow-ups: #2318.
+
+## Note (2026-10-18): Settings shows two memory entries, not one (#2324)
+
+The Settings tab "Agent memory" had grown into one scroll of thirteen panels that held two different objects: the
+native-memory snapshots of [0022](0022-agent-memory-management.md) and the shared memory of this ADR. This note
+records the structure the maintainer chose; the decisions above are unchanged and no API or Agent behaviour moved.
+
+- **Two adjacent rail entries.** "Agent memory" (`set.tab_memory`, ja エージェントメモリ) is this ADR's memory;
+  "Memory snapshots" (`set.tab_memory_snapshots`, ja メモリのスナップショット) is 0022's version control. Each has one
+  status header and a small view-nav whose last view is remembered per entry. `openSettings("memory:changes")`
+  names a view; `err.memory_disabled` and the Agent-settings pointer now say Settings > Agent memory > Settings.
+- **Agent memory** has the views Memories (browse and pins, merged later), Changes, Import & export and Settings
+  (the sessions' switch with the auto-sync status, and the outside-client setting). Only Settings works while the
+  workspace is stopped, because both switches are ui-prefs (#1735).
+- **Memory snapshots** has History (with "Restore this point"), Targets and Export / import. **The codex memories
+  toggle stays in Targets**: it is a setting of codex's own memory, which is what 0022 versions.
+- The views are standalone components behind the nav, so they can be mounted in a first-class Memory view later
+  (the maintainer's option C, once an approval queue exists) without a rewrite.
+- The forgotten-memory action will be labelled "Unforget" (ja 忘却を取り消す) instead of "Restore", so "Restore this
+  point" belongs to snapshots alone. That label change is a later step and not part of this one.
+
+Follow-ups: #2324.

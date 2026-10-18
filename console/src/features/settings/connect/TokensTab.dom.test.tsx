@@ -1,5 +1,5 @@
 // The tokens tab says what a token reaches, including the AF memory tools (#2329), and its link
-// opens Settings > Agent memory. The text is static, so it is there even though no Agent answers.
+// opens Settings > Agent memory > Settings. The text is static, so it is there even though no Agent answers.
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -24,7 +24,7 @@ afterEach(() => {
   host?.remove();
   root = null;
   host = null;
-  useSettingsUI.setState({ settingsOpen: false, settingsSection: "tokens" });
+  useSettingsUI.setState({ settingsOpen: false, settingsSection: "tokens", settingsView: null });
 });
 
 describe("TokensTab what-this-token-can-do section", () => {
@@ -46,6 +46,7 @@ describe("TokensTab what-this-token-can-do section", () => {
     expect(link).toBeTruthy();
     await act(async () => link!.click());
     expect(useSettingsUI.getState().settingsSection).toBe("memory");
+    expect(useSettingsUI.getState().settingsView).toBe("settings");
     expect(useSettingsUI.getState().settingsOpen).toBe(true);
   });
 });
