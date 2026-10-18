@@ -1,0 +1,10 @@
+{
+  "Global": "global-fixture",
+  "Version": 3,
+  "Destination": {"Chat": "-100123456", "Generation": "gen-1", "Hub": "/tmp/fixture-hub.sock", "Topic": "8"},
+  "Projects": {
+    "proj-alpha": {"Topic": "8", "SourceIDs": ["src-1"], "Creation": null},
+    "proj-beta": {"Topic": "", "SourceIDs": [], "Creation": null}
+  },
+  "Sources": {"src-1": {"Project": "proj-alpha", "cursor": 5}}
+}

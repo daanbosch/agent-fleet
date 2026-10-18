@@ -1,0 +1,55 @@
+{
+  "sessions": [
+    {
+      "id": "h-claude-0001",
+      "agent": "claude",
+      "agentVersion": "2.1.0",
+      "mode": "normal",
+      "title": "alpha work",
+      "prompt": "SECRET-PROMPT-MARKER do the thing",
+      "workdir": "/work/alpha",
+      "status": "running",
+      "pid": 1,
+      "createdAt": "2026-10-01T09:00:00Z",
+      "startedAt": "2026-10-01T09:00:02Z"
+    },
+    {
+      "id": "h-codex-0002",
+      "agent": "codex",
+      "agentVersion": "0.9.0",
+      "mode": "yolo",
+      "terminal": "kitty",
+      "title": "",
+      "prompt": "",
+      "workdir": "/work/beta",
+      "status": "exited",
+      "pid": 999999999,
+      "createdAt": "2026-10-02T09:00:00Z"
+    },
+    {
+      "id": "h-pi-0003",
+      "agent": "pi",
+      "agentVersion": "1.4.0",
+      "mode": "yolo",
+      "terminal": "headless",
+      "title": "gamma pi",
+      "prompt": "",
+      "workdir": "/work/gamma",
+      "status": "running",
+      "pid": 1,
+      "createdAt": "2026-10-03T09:00:00Z"
+    },
+    {
+      "id": "h-pi-0004",
+      "agent": "pi",
+      "agentVersion": "1.4.0",
+      "mode": "normal",
+      "terminal": "headless",
+      "title": "",
+      "prompt": "",
+      "status": "exited",
+      "pid": 999999999,
+      "createdAt": "2026-10-04T09:00:00Z"
+    }
+  ]
+}
