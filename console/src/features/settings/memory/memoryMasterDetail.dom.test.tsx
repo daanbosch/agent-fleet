@@ -1,5 +1,5 @@
 // The Memories master-detail (#1985, #2324): rows with author / uses / pin, search, filter chips, the
-// detail pane with body, forget and restore through the existing revert route (commit in the query for the audit), and the save form
+// detail pane with body, forget and unforget through the existing revert route (commit in the query for the audit), and the save form
 // (#1997) with its secret refusal. Withheld memories are a count, never a name.
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { act } from "react";
@@ -389,17 +389,32 @@ describe("MemoriesMasterDetail", () => {
     expect(apiJSON).not.toHaveBeenCalled();
   });
 
-  it("restores a forgotten memory through the revert route", async () => {
+  it("unforgets a forgotten memory through the revert route", async () => {
     await setValue(select(), "project:" + project.id);
     await chip("mem.md_f_forgotten");
     expect(document.body.textContent).toContain("old-note");
     const restore = Array.from(document.body.querySelectorAll<HTMLButtonElement>(".mem-br-row button")).at(-1);
+    expect(restore?.textContent).toBe(t("mem.br_unforget"));
+    expect(restore?.textContent).toMatch(/^(Unforget|忘却を取り消す)$/);
     await click(restore);
     expect(apiJSON).toHaveBeenCalledWith("api/agents/memory/entries/revert?commit=abcdef1234", "POST", {
       commit: "abcdef1234",
       forget: false,
       ack: false,
     });
+  });
+
+  it("says Unforget in the toasts, and names the Changes view's Revert this change when the text trips the scan", async () => {
+    await setValue(select(), "project:" + project.id);
+    await chip("mem.md_f_forgotten");
+    const unforget = () => Array.from(document.body.querySelectorAll<HTMLButtonElement>(".mem-br-row button")).at(-1);
+    apiJSON.mockResolvedValueOnce({ error: { code: "memory_secret_detected", message: "x" } });
+    await click(unforget());
+    expect(document.body.textContent).toContain(t("mem.br_unforget_secret"));
+    expect(t("mem.br_unforget_secret")).toContain(t("mem.af_revert"));
+    apiJSON.mockResolvedValueOnce({});
+    await click(unforget());
+    expect(document.body.textContent).toContain(t("mem.br_unforgotten", { name: "old-note" }));
   });
 
   it("opens the purge dialog for a forgotten memory and asks for its preview, calling no write", async () => {
@@ -609,9 +624,9 @@ describe("MemoriesMasterDetail", () => {
     expect(document.body.textContent).toContain("old-note");
     await setValue(select(), "user");
     expect(api).toHaveBeenCalledWith("api/agents/memory/entries/member-forgotten?scope=user");
-    // The user scope's answer is still pending: the project's row and its Restore are gone already.
+    // The user scope's answer is still pending: the project's row and its Unforget are gone already.
     expect(document.body.textContent).not.toContain("old-note");
-    expect(text("Restore") ?? text("復元")).toBeUndefined();
+    expect(text(t("mem.br_unforget"))).toBeUndefined();
     await act(async () => release({ forgotten: [], projects: [project] }));
     await flush();
     expect(document.body.textContent).not.toContain("old-note");
@@ -803,12 +818,13 @@ describe("MemoriesMasterDetail master-detail", () => {
     expect(detail().querySelector(".mem-br-body")).toBeNull();
   });
 
-  it("restores from the detail pane of a forgotten memory and refreshes", async () => {
+  it("unforgets from the detail pane of a forgotten memory and refreshes", async () => {
     await setValue(select(), "project:" + project.id);
     await chip("mem.md_f_forgotten");
     await click(document.body.querySelector(".mem-md-pick"));
     expect(detail().querySelector("h5")!.textContent).toBe("old-note");
     const lists = calls("api/agents/memory/entries/list").length;
+    expect(detail().querySelector(".mem-br-actions button")!.textContent).toBe(t("mem.br_unforget"));
     await click(detail().querySelector(".mem-br-actions button"));
     expect(apiJSON).toHaveBeenCalledWith("api/agents/memory/entries/revert?commit=abcdef1234", "POST", {
       commit: "abcdef1234",

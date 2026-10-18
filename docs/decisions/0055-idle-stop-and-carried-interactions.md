@@ -315,3 +315,24 @@ once every 5 s:
   MCP tool. A hung tool is
   indistinguishable from a long one for cursor, kiro and opencode, so it holds for as long as it
   lives (the safe side). Re-measure when bumping a CLI version.
+
+## Addendum (2026-10-18): background work gets an upper bound on holding the container (#2338)
+
+The 2026-10-07 addendum exempted `backgroundBusy` from the progress lapse, and left it with no bound at all. The
+detectors cannot tell a job from a server: a dev server's wrapper shell (`bash -> npm -> vite`, the Gradle client JVM)
+stays alive for as long as the server runs, and CPU time cannot separate it either (an idle Spring Boot app keeps
+consuming some). So a session that started `npm run dev` and went idle held its Workspace until someone stopped it.
+
+- Decision: the Agent reports `backgroundSince` (the first poll that observed `backgroundBusy`, in memory, cleared when
+  it goes false) and `backgroundAgeSec` (its age on the Agent's clock), for every kind that reports `backgroundBusy`.
+  The CP relays both and classifies a `backgroundBusy` row older than `background_hold_max` as `activityUnknown`, like a
+  lapsed working row: it no longer holds the Workspace, and tier 1 does not fold it (so no row is halted that was not
+  halted before). The keep-awake pin is still checked first and is never subject to the bound; it is the way to keep a
+  genuinely long job.
+- `background_hold_max` is a per-tenant limit (`""` = deployment default `AF_BACKGROUND_HOLD_MAX`, 2h; `0` = unbounded).
+  An absent age (an older Agent) holds, as before. The idle clock and presence are unchanged, so a server somebody is
+  using stays up.
+- The forecast's `background` holder carries `since` and `lapseAt` and goes through the same `backgroundLapsed`
+  predicate as the reaper (decision 11); the heatmap sampler uses it too.
+- An Agent restart restarts the period: each restart resets the bound, so repeated restarts more frequent than the bound can keep extending the hold.
+- Not done: a member-facing badge, and carrying "the background task ended by idle stop" into the session on resume.

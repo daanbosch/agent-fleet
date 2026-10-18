@@ -168,6 +168,14 @@ function workingDetail(h: { since?: string; lapseAt?: string }, tr: ReturnType<t
   return (f ? tr("admin.idle_hold_for_row", { for: f }) : "") + (left ? tr("admin.idle_hold_lapse_row", { left }) : "");
 }
 
+// The same for a "background" holder: how long the background work has been running and when the
+// hold ends (background_hold_max), the latter left out when the bound is off.
+function backgroundDetail(h: { since?: string; lapseAt?: string }, tr: ReturnType<typeof useT>): string {
+  const f = elapsedShort(h.since);
+  const left = remainingShort(h.lapseAt);
+  return (f ? tr("admin.idle_hold_bg_for_row", { for: f }) : "") + (left ? tr("admin.idle_hold_bg_lapse_row", { left }) : "");
+}
+
 // MemberIdleDetail — the auto-stop outlook in the member detail.
 //
 // The same reaper observation as MemberIdleChip, unfolded from one line. Always show the
@@ -200,7 +208,7 @@ export function MemberIdleDetail({ idle, state }: { idle?: MemberIdle; state?: s
                   : h.kind === "working"
                     ? tr("admin.idle_hold_working_row", { session: h.session ?? "" }) + workingDetail(h, tr)
                     : h.kind === "background"
-                      ? tr("admin.idle_hold_background_row", { session: h.session ?? "" })
+                      ? tr("admin.idle_hold_background_row", { session: h.session ?? "" }) + backgroundDetail(h, tr)
                       : h.kind === "repojob"
                         ? tr("admin.idle_hold_repojob_row")
                         : h.kind === "imagejob"

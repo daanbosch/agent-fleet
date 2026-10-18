@@ -358,7 +358,11 @@ art as it serves it.
   now" actions: creating, forking or resuming a session, answering a carried question, the
   SSM node lookup. **Opening a terminal does not start it, and neither does reading or
   reloading the Console**: those answer "the workspace is stopped — start it first", so a tab
-  left open never keeps a Workspace warm. This is effective for
+  left open never keeps a Workspace warm. Background work (a dev server or a
+  `run_in_background` task started by an idle session) holds the Workspace for at most
+  **2 hours** (`AF_BACKGROUND_HOLD_MAX`, per tenant `background_hold_max`; `0` = unbounded);
+  after that it no longer keeps the Workspace awake, and the "do not auto-stop" pin is the way to
+  keep a genuinely long job. This is effective for
   saving resources. For the meaning of the env vars, see
   `deploy/compose/.env.example`; for how it works, see
   `docs/build/09-deploy.md` §9.4. A Terminal claude, agy, codex, cursor, copilot, kiro or opencode session showing "working" keeps the

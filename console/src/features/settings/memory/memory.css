@@ -277,8 +277,8 @@
 }
 
 /* The view-nav and status header the two memory entries share (viewNav.tsx). Tabs at desktop
-   widths; at phone width the same choice is a select, so a long label set never wraps into
-   a ragged block. */
+   widths. The tabs stay one row at every width and scroll sideways when the labels do not fit,
+   so a long label set never wraps into a ragged block. */
 .mem-status {
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -305,7 +305,9 @@
 .mem-viewnav-tabs {
   display: flex;
   gap: 4px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
   border-bottom: 1px solid var(--border);
 }
 
@@ -316,16 +318,13 @@
   background: none;
   padding: 6px 10px;
   color: var(--muted);
+  white-space: nowrap;
+  flex: none;
 }
 
 .mem-viewnav-tab.active {
   color: var(--fg);
   border-bottom-color: var(--accent);
-}
-
-.mem-viewnav-select {
-  display: none;
-  width: 100%;
 }
 
 .mem-view {
@@ -335,13 +334,11 @@
 }
 
 @media (max-width: 760px) {
-  .mem-viewnav-tabs {
-    display: none;
+  .mem-viewnav-tab {
+    padding: 6px 8px;
+    min-height: 40px;
   }
 
-  .mem-viewnav-select {
-    display: block;
-  }
   /* Two panes do not work at a narrow width (phone, tablet portrait), so stack them. */
   .mem-body {
       grid-template-columns: 1fr;

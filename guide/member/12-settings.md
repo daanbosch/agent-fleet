@@ -255,7 +255,8 @@ The page opens with one status line: whether it is on, how many memories in how 
 and a warning, with a link to Settings, when the background sync with Claude Code needs you. Under it are four views:
 **Memories · Changes · Import & export · Settings**. The view you leave open is remembered. While the workspace is stopped
 only **Settings** works (the switches are saved for the next start); the other views offer **Start the workspace**. On a
-phone the view names become a drop-down.
+phone or a tablet in portrait the tabs stay on one row and scroll sideways when they do not all fit; the arrow keys,
+Home and End move between them.
 
 #### Memories
 
@@ -282,9 +283,9 @@ phone the view names become a drop-down.
   memory holds every word it returns the ones that hold some and says so. A pin is recorded as a change by you ("pin changed") and can be
   reverted; an agent's later update of a pinned memory keeps the pin, and the af memory tools offer agents no way to pin or unpin.
 
-- **Forget, Restore and history**: **Forget this memory** removes it from every agent's view. The **Forgotten** chip
-  lists the ones you can **Restore**, on the row or in the detail pane (the text comes back as it was before; if it now
-  looks like a secret, restore it from the Changes view, where you can confirm). Both are the same revert and forget as in
+- **Forget, Unforget and history**: **Forget this memory** removes it from every agent's view. The **Forgotten** chip
+  lists the ones you can **Unforget**, on the row or in the detail pane (the text comes back as it was before; if it now
+  looks like a secret, use **Revert this change** on its forget entry in the Changes view, where you can confirm). Both are the same revert and forget as in
   the Changes view, recorded as made by you and undoable. Forget works on any listed memory: its newest change is looked
   up when you press it, however old. **Forgotten** lists every memory forgotten in the scope you have selected (all scopes
   by default), however long ago, up to 300 at a time (pick one scope to see the rest). With a very large number of
@@ -309,7 +310,7 @@ phone the view names become a drop-down.
   that held only it are dropped; the unreachable objects are garbage-collected and each purged revision is
   checked to be gone from disk. The memory's **current text stays**, so the memory and its history still agree; if the
   current text is what must go, edit the memory first and then purge, which makes the old text a past
-  revision. A forgotten memory loses every revision, including the forget record, and cannot be restored
+  revision. A forgotten memory loses every revision, including the forget record, and cannot be unforgotten
   afterwards. Other memories' history, and their revert, are untouched. After a purge the memory's remaining
   change cannot be reverted (there is nothing earlier to go back to); you can still forget it. **Exports you
   already made cannot be recalled**: a bundle (full history) or archive you downloaded, or copied
@@ -514,9 +515,13 @@ The view you leave open is remembered. It needs the running workspace.
 #### History
 
 - **History**: newest first, with the time and the trigger (automatic / manual / pre-restore / pre-write-back / restore /
-  import). You can also jump to a point in time by date.
+  import). You can also jump to a point in time by date. The snapshots that Agent Fleet memory writes leave
+  (trigger "agent memory") are hidden, because Agent memory > Changes already lists those writes: a line "Agent Fleet memory
+  writes hidden: N" stands in for each run of them, with a link to Changes, and **Show Agent Fleet memory writes**
+  lists them (the choice is remembered on this device). A date jump that lands on one shows it, and its diff and
+  **Restore this point** work like any other row's.
 
-- **Restore to this point**: pick the scope (everything, or select what to restore). **The state just before
+- **Restore this point**: pick the scope (everything, or select what to restore). **The state just before
   the restore is snapshotted too**, so the restore itself can be undone. You are warned if a session of that
   kind is running.
 

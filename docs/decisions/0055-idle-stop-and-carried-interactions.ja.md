@@ -287,3 +287,22 @@ managed ドライバ（本物の spawn / Resume / Send の経路。CLI が許す
 - 注意: kind ごとにモデルも CLI のバージョンも 1 つだけの実測。cursor と kiro はローカル shell ツールだけを実測しており、
   未完了呼び出しの追跡はプロトコルに従うが外部 MCP ツールでは実測していない。cursor・kiro・opencode は固まったツールと長いツールを
   区別できないので、そのツールが生きている間は抱える（安全側）。CLI のバージョンを上げるときは再実測する。
+
+## 追記（2026-10-18）: バックグラウンド作業がコンテナを抱える時間に上限を置く（#2338）
+
+2026-10-07 の追記で `backgroundBusy` は進捗の失効から除外され、上限が一切無くなっていた。検出器はジョブとサーバを区別
+できない。開発サーバのラッパー shell（`bash -> npm -> vite`、Gradle クライアント JVM）はサーバが動く限り生き続け、CPU
+時間でも区別できない（アイドルの Spring Boot も多少は CPU を使う）。そのため `npm run dev` を起動してアイドルになった
+セッションは、誰かが止めるまで Workspace を抱え続けた。
+
+- 決定: Agent は `backgroundBusy` を報告する全 kind について、`backgroundSince`（`backgroundBusy` を最初に観測した poll。
+  メモリ上、false になったら消す）と `backgroundAgeSec`（Agent の時計での経過秒）を載せる。CP は両方を中継し、
+  `background_hold_max` を超えた `backgroundBusy` 行を、失効した working 行と同じ `activityUnknown` に分類する。
+  Workspace を抱えず、tier 1 も畳まない（従来畳まなかった行を新たに halt することは無い）。keep-awake ピンは従来どおり
+  最初に判定し、上限の対象にならない。本当に長いジョブを残す手段はピンである。
+- `background_hold_max` はテナントごとの上限（`""` = デプロイ既定 `AF_BACKGROUND_HOLD_MAX`、2h。`0` = 無制限）。経過秒が
+  無い（古い Agent）場合は従来どおり抱える。アイドル時計とプレゼンスは変えないので、使われているサーバは残る。
+- 予報の `background` holder は `since` と `lapseAt` を持ち、reaper と同じ `backgroundLapsed` 述語を通る（決定 11）。
+  ヒートマップのサンプラーも同じ述語を使う。
+- Agent が再起動すると期間は最初からになる。再起動のたびに上限がリセットされるので、上限より短い間隔で再起動が続けば保持は延び続けうる。
+- 未実施: メンバー向けバッジ、および再開時に「アイドル停止でバックグラウンドタスクが終了した」ことをセッションへ伝えること。
