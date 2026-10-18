@@ -41,3 +41,19 @@ func TestBackgroundSinceTracksPeriod(t *testing.T) {
 		t.Fatalf("after death since = %q, want fresh start", s.BackgroundSince)
 	}
 }
+
+func TestPruneBackgroundSinceDropsUnlisted(t *testing.T) {
+	now := time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC)
+	keep, gone := "bgprune-keep", "bgprune-gone"
+	backgroundSinceOf(keep, true, true, now)
+	backgroundSinceOf(gone, true, true, now) // never observed dead: archived while busy
+	pruneBackgroundSince(func(n string) bool { return n == keep })
+	backgroundSeenMu.Lock()
+	_, hasKeep := backgroundSeenMap[keep]
+	_, hasGone := backgroundSeenMap[gone]
+	backgroundSeenMu.Unlock()
+	if !hasKeep || hasGone {
+		t.Fatalf("keep=%v gone=%v, want true/false", hasKeep, hasGone)
+	}
+	backgroundSinceOf(keep, false, true, now)
+}

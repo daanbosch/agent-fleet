@@ -334,5 +334,5 @@ consuming some). So a session that started `npm run dev` and went idle held its 
   using stays up.
 - The forecast's `background` holder carries `since` and `lapseAt` and goes through the same `backgroundLapsed`
   predicate as the reaper (decision 11); the heatmap sampler uses it too.
-- An Agent restart restarts the period, so a row holds for at most one more bound; never forever.
+- An Agent restart restarts the period: each restart resets the bound, so repeated restarts more frequent than the bound can keep extending the hold.
 - Not done: a member-facing badge, and carrying "the background task ended by idle stop" into the session on resume.

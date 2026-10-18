@@ -226,6 +226,9 @@ func HandleListSessions(w http.ResponseWriter, r *http.Request) {
 		sessions = append(sessions, wireSession(m, false))
 	}
 	pruneOverviewFacts(func(name string) bool { _, ok := metas[name]; return ok })
+	// An archived or deleted session is never wired again, so its background period would
+	// otherwise stay in the map for the life of the Agent.
+	pruneBackgroundSince(func(name string) bool { m, ok := metas[name]; return ok && !m.Archived })
 	// Surface ORPHAN sessions: a live claude_* tmux session with no meta. These are
 	// invisible to the meta-driven list above, so the auto-namer would reuse their
 	// name and HandleCreateSession then fails with "session already running" — a

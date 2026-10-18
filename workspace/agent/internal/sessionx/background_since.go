@@ -14,7 +14,8 @@ import (
 // Kept in memory per session: the first poll that saw BackgroundBusy starts the period and the
 // first poll that sees it false (or the session dead) ends it. It is generic on purpose — every
 // kind that reports BackgroundBusy goes through here, none has its own copy. An Agent restart
-// starts the period over, which can only make a row hold longer by one bound, never forever.
+// starts the period over: each restart resets the bound, so repeated restarts more frequent than
+// the bound can keep extending the hold.
 //
 // The age is computed on this clock for the same reason ProgressAgeSec is: the CP compares it
 // with a threshold and must not depend on its own clock agreeing with the Workspace's.
@@ -39,6 +40,19 @@ func backgroundSinceOf(name string, busy, alive bool, now time.Time) (time.Time,
 		backgroundSeenMap[name] = since
 	}
 	return since, true
+}
+
+// pruneBackgroundSince drops the periods of sessions that no longer appear in the list (deleted,
+// or archived, which the list skips), so the map cannot outgrow it. The list handler calls it
+// with the metas it just read.
+func pruneBackgroundSince(listed func(name string) bool) {
+	backgroundSeenMu.Lock()
+	defer backgroundSeenMu.Unlock()
+	for name := range backgroundSeenMap {
+		if !listed(name) {
+			delete(backgroundSeenMap, name)
+		}
+	}
 }
 
 // fillBackgroundSince sets the two wire fields from backgroundSinceOf.
