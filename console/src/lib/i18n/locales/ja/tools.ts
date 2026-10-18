@@ -860,7 +860,7 @@ export const tools = {
   "mem.view_settings": "設定",
   "mem.view_history": "履歴",
   "mem.view_targets": "対象",
-  "mem.view_transfer": "持ち出し / 取り込み",
+  "mem.view_transfer": "書き出し・取り込み",
   "mem.status_on": "オン",
   "mem.status_off": "オフ",
   "mem.status_count": "メモリ {n} 件",
@@ -1244,7 +1244,7 @@ export const tools = {
   "mem.restored": "戻しました（更新{written}・削除{deleted}）",
   "mem.restore_nochange": "すでにその時点と同じ内容でした",
 
-  // --- 持ち出し / 取り込み（docs/log/39 P3）---
+  // --- Export / import (docs/log/39 P3) ---
   "mem.export_format_bundle": "bundle（全履歴）",
   "mem.export_format_tar": "tar.gz（最新のみ）",
   "mem.export_do": "書き出す",

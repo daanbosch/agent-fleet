@@ -859,7 +859,7 @@ export const tools: Record<keyof typeof jaTools, string> = {
   "mem.view_settings": "Settings",
   "mem.view_history": "History",
   "mem.view_targets": "Targets",
-  "mem.view_transfer": "Export / import",
+  "mem.view_transfer": "Export & import",
   "mem.status_on": "On",
   "mem.status_off": "Off",
   "mem.status_count": "{n} memories",

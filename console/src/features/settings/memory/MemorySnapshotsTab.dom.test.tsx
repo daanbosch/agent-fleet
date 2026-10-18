@@ -1,6 +1,6 @@
-// The Memory snapshots entry (ADR 0022): a status header over History / Targets / Export-import.
+// The Memory snapshots entry (ADR 0022): a status header over History / Targets / Export & import.
 // Pinned here: where each control lives after the split (the codex memories toggle and Automatic
-// snapshots in Targets, Restore this point in History, the bundle export in Export / import),
+// snapshots in Targets, Restore this point in History, the bundle export in Export & import),
 // view switching, the remembered view, deep links, and that none of Agent Fleet's own memory
 // controls came along.
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
@@ -215,7 +215,7 @@ describe("MemorySnapshotsTab", () => {
     expect(text()).not.toContain(t("mem.restore"));
   });
 
-  it("puts the bundle export under Export / import", async () => {
+  it("puts the bundle export under Export & import", async () => {
     await mount();
     await goto("transfer");
     expect(text()).toContain(t("mem.export_do"));

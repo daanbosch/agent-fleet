@@ -10,7 +10,7 @@
 // History (the snapshot list on the left, the selected row's diff on the right, then the restore
 // panel: pick a scope, then a confirm dialog; rows left by Agent Fleet's own memory writes are
 // hidden unless asked, since Agent memory > Changes lists them), Targets (root overview, codex memories toggle,
-// automatic capture) and Export / import (P3: bundle = full history, tar.gz = latest only; import
+// automatic capture) and Export & import (P3: bundle = full history, tar.gz = latest only; import
 // replaces the selected scope). The diff uses the same <Diff> as the SCM commit pane, so there is
 // one way a diff looks rather than two.
 //
@@ -464,7 +464,7 @@ export function MemorySnapshotsTab() {
           </>
         )}
 
-        {/* Export / import */}
+        {/* Export & import */}
         {view === "transfer" && (
           <TransferSection busy={busy} setBusy={setBusy} onApplied={() => setReload((n) => n + 1)} />
         )}
