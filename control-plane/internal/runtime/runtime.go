@@ -223,7 +223,13 @@ func NewFactory(profile string, mcfg Config) (RuntimeFactory, error) {
 		return newNativeFactory(mcfg)
 	case "kubernetes", "k8s":
 		return newKubeFactory(mcfg)
+	case "fastvm", "firecracker":
+		// fastvm warm-clone Firecracker microVMs (team-telnyx fast-vm-spinner);
+		// see runtime_fastvm.go. Not a shares-the-host-processes runtime: every
+		// workspace is a real microVM, so "dev-only" auth restrictions do not
+		// apply the way they force AUTH=dev on native.
+		return newFastVMFactory(mcfg)
 	default:
-		return nil, fmt.Errorf("unknown AF_RUNTIME profile %q (want local|ecs|ecs-ec2|native|kubernetes)", profile)
+		return nil, fmt.Errorf("unknown AF_RUNTIME profile %q (want local|ecs|ecs-ec2|native|kubernetes|fastvm)", profile)
 	}
 }
