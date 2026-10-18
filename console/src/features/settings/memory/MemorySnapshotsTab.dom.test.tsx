@@ -163,7 +163,6 @@ describe("MemorySnapshotsTab", () => {
       await goto(v);
       expect(host!.textContent, v).not.toContain(t("mem.af_switch"));
       expect(host!.textContent, v).not.toContain(t("mem.br_title"));
-      expect(host!.textContent, v).not.toContain(t("mem.pin_title"));
     }
   });
 

@@ -21,7 +21,7 @@ import { ExternalMemoryHelpLink } from "./ExternalMemoryHelpLink.tsx";
 import type { ChangeDiff, MemoryChange, SecretFinding } from "./memoryTypes.ts";
 
 // An unknown op from a newer Agent is printed raw rather than breaking the row.
-const opLabel = (op: string): string => tMaybe("mem.af_op_" + op) ?? op;
+export const opLabel = (op: string): string => tMaybe("mem.af_op_" + op) ?? op;
 
 // AgentMemorySwitch is the sessions' switch (ui-prefs agentMemory, default off). It is a
 // ui-pref, not Agent state, so it must stay reachable while the workspace is stopped: the member
@@ -67,6 +67,39 @@ export function ExternalMemorySwitch() {
   );
 }
 
+/** One change's diff as the Changes view shows it; the Memories view's per-memory history reuses
+ *  it. The Agent scans the diff before it answers (the generic memory diff does not) and sends
+ *  masked findings instead of a diff that fails. */
+export function ChangeDiffBody({ commit }: { commit: string }) {
+  const tr = useT();
+  const [diff, setDiff] = useState<ChangeDiff | null>(null);
+  useEffect(() => {
+    let live = true;
+    setDiff(null);
+    api("api/agents/memory/entries/diff?commit=" + encodeURIComponent(commit))
+      .then((d) => live && setDiff(d?.error ? { diff: "" } : d))
+      .catch(() => live && setDiff({ diff: "" }));
+    return () => {
+      live = false;
+    };
+  }, [commit]);
+  if (diff === null) return <pre className="diff muted">{tr("common.loading")}</pre>;
+  if (diff.withheld)
+    return (
+      <div className="pad">
+        <p className="mem-warn">{tr("mem.af_diff_withheld")}</p>
+        <ul className="mem-findings">
+          {(diff.findings ?? []).map((f, i) => (
+            <li key={i}>
+              <code>{f.rule}</code> {tr("mem.af_secret_line", { line: f.line })} <code>{f.hint}</code>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  return <Diff text={diff.diff} embedded wrap />;
+}
+
 export function AgentChangesPanel({ reload, onChanged }: { reload: number; onChanged: () => void }) {
   const tr = useT();
   const toast = useToast();
@@ -76,7 +109,6 @@ export function AgentChangesPanel({ reload, onChanged }: { reload: number; onCha
   const [withheld, setWithheld] = useState(0);
   const [loadErr, setLoadErr] = useState("");
   const [sel, setSel] = useState("");
-  const [diff, setDiff] = useState<ChangeDiff | null>(null);
   const [busy, setBusy] = useState(false);
   const [mine, setMine] = useState(0);
 
@@ -99,23 +131,6 @@ export function AgentChangesPanel({ reload, onChanged }: { reload: number; onCha
     }
     setSel((cur) => (cur && changes.some((c) => c.commit === cur) ? cur : changes[0].commit));
   }, [changes]);
-
-  useEffect(() => {
-    if (!sel) {
-      setDiff(null);
-      return;
-    }
-    let live = true;
-    setDiff(null);
-    // The Agent scans this diff before it answers (the generic memory diff does not), and
-    // sends masked findings instead of a diff that fails.
-    api("api/agents/memory/entries/diff?commit=" + encodeURIComponent(sel))
-      .then((d) => live && setDiff(d?.error ? { diff: "" } : d))
-      .catch(() => live && setDiff({ diff: "" }));
-    return () => {
-      live = false;
-    };
-  }, [sel]);
 
   const where = (c: MemoryChange) => (c.scope === "user" ? tr("mem.af_scope_user") : (c.project?.display ?? ""));
   const who = (c: MemoryChange) =>
@@ -245,23 +260,7 @@ export function AgentChangesPanel({ reload, onChanged }: { reload: number; onCha
               )}
             </div>
           )}
-          {selected &&
-            (diff === null ? (
-              <pre className="diff muted">{tr("common.loading")}</pre>
-            ) : diff.withheld ? (
-              <div className="pad">
-                <p className="mem-warn">{tr("mem.af_diff_withheld")}</p>
-                <ul className="mem-findings">
-                  {(diff.findings ?? []).map((f, i) => (
-                    <li key={i}>
-                      <code>{f.rule}</code> {tr("mem.af_secret_line", { line: f.line })} <code>{f.hint}</code>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : (
-              <Diff text={diff.diff} embedded wrap />
-            ))}
+          {selected && <ChangeDiffBody commit={selected.commit} />}
         </div>
       </div>
     </div>
