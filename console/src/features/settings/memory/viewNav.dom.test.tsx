@@ -141,4 +141,32 @@ describe("ViewNav", () => {
   it("does not throw where scrollIntoView is missing (jsdom)", async () => {
     await expect(mount()).resolves.toBeUndefined();
   });
+
+  it("shows a count beside the label and names the tab with it, only while it is above 0", async () => {
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () =>
+      root!.render(
+        <ViewNav
+          label="Views"
+          views={[
+            { key: "a", label: "Alpha", count: 3, ariaLabel: "Alpha, 3 proposed" },
+            { key: "b", label: "Beta", count: 0, ariaLabel: "Beta, 0 proposed" },
+            { key: "c", label: "Gamma" },
+          ]}
+          value="a"
+          onChange={() => {}}
+          prefix="t"
+        />,
+      ),
+    );
+    const [a, b, c] = tabs();
+    expect(a.querySelector(".mem-viewnav-count")?.textContent).toBe("3");
+    expect(a.getAttribute("aria-label")).toBe("Alpha, 3 proposed");
+    expect(b.querySelector(".mem-viewnav-count")).toBeNull();
+    expect(b.hasAttribute("aria-label")).toBe(false);
+    expect(c.textContent).toBe("Gamma");
+    expect(c.hasAttribute("aria-label")).toBe(false);
+  });
 });

@@ -99,9 +99,13 @@ type Run struct {
 	Ops       []Op   `json:"ops,omitempty"`
 	ProjectID string `json:"projectId,omitempty"`
 	// Queued and Skipped are what queueing did, as counts.
-	Queued  int    `json:"queued,omitempty"`
-	Skipped int    `json:"skipped,omitempty"`
-	Failure string `json:"failure,omitempty"`
+	Queued  int `json:"queued,omitempty"`
+	Skipped int `json:"skipped,omitempty"`
+	// NotifyPending is set in the write that ends a run which left proposals in the queue and
+	// cleared once the Console notification for it has been made durable (OnQueued). A stop between
+	// the two leaves it set, and ReconcileNotices finishes the notification.
+	NotifyPending bool   `json:"notifyPending,omitempty"`
+	Failure       string `json:"failure,omitempty"`
 	// Unsent counts the times no backend could run the review without tools; those calls never
 	// reached a model, so they are a counter and not attempts.
 	Unsent    int       `json:"unsent,omitempty"`
@@ -227,6 +231,13 @@ func pruneRuns(now time.Time) {
 	kept := 0
 	for _, r := range listRunsLocked() {
 		if !r.Terminal() {
+			continue
+		}
+		// A run whose notification is still owed is the only record of it (ReconcileNotices reads
+		// it), so it stays while one of its own proposals is waiting. That bounds the exception:
+		// the queue holds at most MaxPending proposals, and a mark whose proposals were all decided
+		// no longer protects its run.
+		if r.NotifyPending && runHasPendingLocked(r.ID) {
 			continue
 		}
 		if kept++; kept <= keepTerminalRuns {

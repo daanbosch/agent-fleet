@@ -705,3 +705,49 @@
 .mem-ie-card p {
   margin: 0;
 }
+
+/* The count beside a view's label (proposals waiting for a decision). */
+.mem-viewnav-count {
+  display: inline-block;
+  margin-left: 6px;
+  min-width: 1.4em;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 0.8em;
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* The review's proposals (Changes > Proposed). */
+.mem-changes-sub {
+  margin-bottom: 8px;
+}
+
+.mem-prop-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.mem-prop-why {
+  margin: 8px 0 0;
+}
+
+.mem-prop-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.mem-run-report {
+  margin: 8px 0;
+}
+
+.mem-run-report ul {
+  margin: 4px 0 0;
+  padding-left: 1.2em;
+}

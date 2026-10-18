@@ -12,6 +12,11 @@ import { useSettingsUI, lastSectionView, rememberSectionView } from "../store.ts
 export interface ViewDef {
   key: string;
   label: string;
+  /** A count shown beside the label (proposals waiting, say); nothing while 0 or absent. */
+  count?: number;
+  /** The accessible name when the count has to be part of it ("Changes, 3 proposed"); the label
+   *  is used when absent. */
+  ariaLabel?: string;
 }
 
 /** Which view of `section` is showing. `dflt` is the entry's default when nothing was asked or
@@ -131,8 +136,14 @@ export function ViewNav({
             tabIndex={v.key === value ? 0 : -1}
             className={"mem-viewnav-tab" + (v.key === value ? " active" : "")}
             onClick={() => onChange(v.key)}
+            aria-label={v.count ? v.ariaLabel : undefined}
           >
             {v.label}
+            {v.count ? (
+              <span className="mem-viewnav-count" aria-hidden="true">
+                {v.count}
+              </span>
+            ) : null}
           </button>
         ))}
       </div>

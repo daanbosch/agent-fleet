@@ -327,6 +327,29 @@ you can **revert it** (the earlier text comes back) or **forget the memory**; ei
 change, so it can be undone too. If the text you bring back looks like a secret, you are shown the masked
 findings and asked to confirm.
 
+While **Have finished sessions suggest memories** is on, or while suggestions are still waiting, the view has two
+parts: **Published** (the list above) and **Proposed**, with the number of suggestions waiting beside it. The same
+number sits beside **Changes** in the view bar, and a notification ("N memory suggestions are waiting for your
+approval", under the **Other notices** row of the notification settings) opens this view. If any are waiting, the view opens
+on **Proposed**.
+
+- **Proposed** lists what the background review suggested, oldest first, with the reason it gave and the difference
+  from the memory as it is now. **Nothing in it is in memory yet.** **Approve** publishes it as a change by
+  `review` (the session it was suggested from is shown as the author session); you can undo it like any other change.
+  **Reject** deletes its text and keeps only a fingerprint, so the same suggestion is not made again until that memory
+  is forgotten. **Reject all** rejects every suggestion, and **Reject all from this review** the ones of the review
+  you picked.
+- A suggestion **can't be approved**, only rejected, when the memory has changed since the review looked at it (the
+  difference is against what you have now), when it was forgotten (a review never brings a forgotten memory back), when
+  the suggestion now matches a secret rule (its text is then not shown at all), or when its project is no longer here.
+  Approving also runs the store's secret scan again.
+- On a change the review published, **Undo this review's changes** puts back, as new changes, everything that review
+  published, each memory only if nobody changed it afterwards. A memory that was edited since is left as it is and
+  named in the result (with the reason); running it again retries only what is left.
+- Only you can approve, reject or undo: the Control Plane signs those requests and the workspace refuses them from a
+  session, and the list of suggestions is not readable from a session either. The Control Plane records each decision
+  (without any text) in the audit log.
+
 #### Import & export
 
 Import & export is a hub of cards, one per source, in three groups: **Import** (Import from Claude Code, Import
@@ -498,8 +521,7 @@ refused.
   like a secret is left out), but it is still sent to the provider of the agent chosen for this feature under
   **AI assistance**, which can be a different provider from the session's own; it spends tokens (at most 250 calls a
   day, one at a time), and it does not run while the workspace is stopped. It looks automatically only at sessions whose last turn ended within the last 48 hours; older ones, or what happened while the workspace was stopped, are covered by the session menu's **"Suggest memories now"**. **Nothing reaches memory without your
-  approval**, and the screen to approve proposals is not available yet: for now up to 100 proposals pile up and memory
-  is untouched. When the setting is on, a **Memory review** card appears under AI assistance, where you can pin the
+  approval**: up to 100 proposals wait under [Changes › Proposed](#changes), where you approve or reject them. When the setting is on, a **Memory review** card appears under AI assistance, where you can pin the
   agent and model, and each session's **⋯** menu offers **"Suggest memories now"**, which reviews that session
   immediately. Only agents that can be run with their tools switched off can do the review; if the one you pin cannot,
   the review does not run rather than falling back to another provider.

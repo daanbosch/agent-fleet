@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync/atomic"
 	"time"
 
@@ -400,6 +401,13 @@ func latestEnd(run *Run, limit time.Time) time.Time {
 	return latest
 }
 
+// OnQueued is told when a run ends with proposals in the queue: the run, how many it queued and how
+// many are pending in all. The Agent raises the Console notification from it (package main). It
+// carries counts only. It returns an error when the notification could not be made durable; the
+// run then keeps NotifyPending and ReconcileNotices tries again, so the notification is neither
+// lost to a stop nor repeated (the Agent keys it by the run id).
+var OnQueued func(runID string, queued, pending int) error
+
 // finish queues the validated operations and ends the run. It is safe to repeat after a stop at
 // any of its steps: proposals have derived ids, one that already got a decision is skipped, and
 // the run is marked done only once everything is queued. When the queue has no room it stops with
@@ -428,6 +436,7 @@ func (r *Reviewer) finish(run *Run) (Result, error) {
 	}
 	r.stage("enqueued")
 	run.State, run.Queued, run.Skipped, run.Ops = StateDone, res.Queued, res.Skipped, nil
+	run.NotifyPending = res.Queued > 0 && OnQueued != nil
 	if err := saveRun(run, now); err != nil {
 		return Result{}, err
 	}
@@ -435,6 +444,7 @@ func (r *Reviewer) finish(run *Run) (Result, error) {
 	if err := moveWatermark(run.Key, run.Last, now); err != nil {
 		return Result{}, err
 	}
+	notifyRun(run, now)
 	stateMu.Lock()
 	gcDecidedLocked()
 	stateMu.Unlock()
@@ -507,4 +517,38 @@ func ledgerSpend(q LedgerQuery) LedgerHit {
 		return LedgerHit{}
 	}
 	return LedgerHit{Spend: spend[order[0]], Call: order[0], Found: true}
+}
+
+// notifyRun makes the run's Console notification durable and clears its pending mark. A failure is
+// logged and leaves the mark for ReconcileNotices.
+func notifyRun(run *Run, now time.Time) {
+	if !run.NotifyPending || OnQueued == nil {
+		return
+	}
+	// Everything this run proposed was decided before the notification went out: there is nothing
+	// to announce (another run's proposals do not make this one's news).
+	stateMu.Lock()
+	mine := runHasPendingLocked(run.ID)
+	stateMu.Unlock()
+	if mine {
+		if err := OnQueued(run.ID, run.Queued, pendingCount()); err != nil {
+			log.Printf("memory review: the notification for a finished run was not made; it is retried")
+			return
+		}
+	}
+	run.NotifyPending = false
+	if err := saveRun(run, now); err != nil {
+		log.Printf("memory review: could not clear a finished notification mark")
+	}
+}
+
+// ReconcileNotices finishes the notifications of runs that ended with proposals but whose
+// notification was not made durable (a stop in between, or the outbox failing).
+func ReconcileNotices(now time.Time) {
+	for _, run := range runs() {
+		if run.Terminal() && run.NotifyPending {
+			r := run
+			notifyRun(&r, now)
+		}
+	}
 }

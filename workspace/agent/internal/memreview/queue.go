@@ -147,6 +147,16 @@ func listPendingLocked() []Proposal {
 	return out
 }
 
+// runHasPendingLocked reports whether the run still has a proposal waiting, with stateMu held.
+func runHasPendingLocked(runID string) bool {
+	for _, id := range pendingStore.keys() {
+		if p, ok := pendingStore.Read(id); ok && p.RunID == runID {
+			return true
+		}
+	}
+	return false
+}
+
 // pendingCount is the queue length.
 func pendingCount() int {
 	stateMu.Lock()
