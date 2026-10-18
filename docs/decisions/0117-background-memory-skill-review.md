@@ -506,8 +506,8 @@ Console half (P2b) follows. The decisions above are unchanged.
   the commit and the hook, leaves the note, and every wake-up of the loop (also while the review is off) finishes it. Whether
   a note's forget committed is read from the memory's history (a forget, or a revert that deleted it, newer than `base`),
   never from whether the memory exists, since an explicit save may have re-created it; a forget that did not commit owes
-  nothing and its note is dropped, and a base that is no longer in the history leaves the note in place (visible, not
-  guessed). The reconcile acts only on the note it read: a newer one under the same key is left alone. Only rejections made
+  nothing and its note is dropped. A base that is no longer in the history (a purge renames the later commits) leaves the
+  note in place, even when an older forget of an earlier incarnation is still visible: visible, not guessed. The reconcile acts only on the note it read: a newer one under the same key is left alone. Only rejections made
   up to a note's time are released; one made after the forget is about the memory as it is then. Notes still owed are
   counted in the status (`releasePending`).
 - **"Revert this run"** reverts, as new commits by the member with `AF-Revert-Of`, each commit carrying the run id that is

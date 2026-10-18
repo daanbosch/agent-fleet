@@ -528,7 +528,11 @@ func ReviewForgetCommitted(scope, projectID, name, base string) (bool, error) {
 	path := rel + "/" + name + ".md"
 	agentMemMu.RLock()
 	defer agentMemMu.RUnlock()
+	errNoBase := errors.New("the change a forget started from is no longer in the history")
 	if !memoryHasCommits() {
+		if base != "" {
+			return false, errNoBase
+		}
 		return false, nil
 	}
 	log, err := memoryGitRun("log", memoryBranch, "-F", "--grep=AF-Memory: "+agentMemRepoPrefix+"/"+path,
@@ -536,6 +540,11 @@ func ReviewForgetCommitted(scope, projectID, name, base string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	// A deletion counts only if it is newer than base. A history rewrite (a purge) renames every
+	// later commit, so a base that is gone says nothing about which forget is this one's: an older
+	// forget of an earlier incarnation must not stand in for it. The scan therefore runs to base
+	// before it answers.
+	deleted := false
 	for _, rec := range strings.Split(log, memoryRecSep) {
 		f := strings.SplitN(strings.TrimSpace(rec), memoryFldSep, 2)
 		if len(f) < 2 {
@@ -546,23 +555,23 @@ func ReviewForgetCommitted(scope, projectID, name, base string) (bool, error) {
 			continue
 		}
 		if f[0] == base {
-			return false, nil // reached the change the forget started from: nothing deleted it since
+			return deleted, nil // reached the change the forget started from
 		}
 		switch tr["AF-Op"] {
 		case "forget":
-			return true, nil
+			deleted = true
 		case "revert":
 			if _, exists, err := agentMemBlob(f[0], path); err != nil {
 				return false, err
 			} else if !exists {
-				return true, nil
+				deleted = true
 			}
 		}
 	}
 	if base != "" {
-		return false, errors.New("the change a forget started from is no longer in the history")
+		return false, errNoBase
 	}
-	return false, nil
+	return deleted, nil
 }
 
 func reviewScopeOf(rel string) (scope, projectID string) {

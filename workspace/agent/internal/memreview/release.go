@@ -5,8 +5,11 @@ package memreview
 // store (memoryx), which tells this package twice: before it commits, and after. The first call
 // writes down that a release is owed (an intent), the second does it and strikes the intent. A
 // release that fails, or a stop between the commit and the second call, leaves the intent, and
-// ReconcileReleases (every wake-up of the loop and at start) finishes it. An intent for a memory
-// that still exists means the forget never committed, and is dropped.
+// ReconcileReleases (every wake-up of the loop and at start) finishes it. Whether the forget behind
+// an intent committed is read from the memory's history, newer than the change the forget began
+// from (never from whether the memory exists, which an explicit save may have changed); a forget
+// that did not commit owes nothing and its intent is dropped, and an answer the history cannot give
+// leaves the intent in place.
 //
 // An intent carries the time it was written, and only rejections made up to then are released: one
 // made after the forget (a review proposing the forgotten memory again, rejected by the member) is

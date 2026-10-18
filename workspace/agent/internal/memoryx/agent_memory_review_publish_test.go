@@ -616,3 +616,63 @@ func TestReviewTargetForgottenSeesTheHistoryWhenTheProjectDirectoryIsLost(t *tes
 		t.Fatalf("a name that never existed reads as forgotten: %+v", st)
 	}
 }
+
+// A history rewrite (a member's purge of another memory) renames every later commit, so the base a
+// pending forget began from can vanish. An older forget of an earlier incarnation of the same name
+// is then still in the history and must not be taken for this forget's.
+func TestReviewForgetCommittedDoesNotUseAnOlderForgetWhenTheBaseIsGone(t *testing.T) {
+	_, _, _ = agentMemTestEnv(t)
+	now := time.Now()
+	c := agentMemCallerT(t, "claude-main")
+	pid := c.Project.ID
+	save := func(name, body string, rev int) {
+		t.Helper()
+		if _, err := agentMemSave(c, agentMemSaveReq{Name: name, Description: "d", Type: "project", Body: body, Revision: rev}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save("other", "old text", 0)
+	save("topic", "first incarnation", 0)
+	if _, err := agentMemForget(c, agentMemForgetReq{Name: "topic", Revision: 1}, now); err != nil {
+		t.Fatal(err)
+	}
+	save("topic", "second incarnation", 0)
+
+	// The current topic's forget begins (Intent) and does not commit.
+	base := ""
+	SetForgetHooks(&ForgetHooks{Intent: func(_, _, _, b string) error { base = b; return errors.New("stop") }})
+	t.Cleanup(func() { SetForgetHooks(nil) })
+	if _, err := agentMemForget(c, agentMemForgetReq{Name: "topic", Revision: 2}, now); err == nil || base == "" {
+		t.Fatalf("the forget should have stopped at its intent (base %q): %v", base, err)
+	}
+	SetForgetHooks(nil)
+	if got, err := ReviewForgetCommitted("project", pid, "topic", base); err != nil || got {
+		t.Fatalf("before the purge: %v %v", got, err)
+	}
+
+	// The member purges another memory's past: every later commit gets a new id.
+	save("other", "new text", 1)
+	pv, err := agentMemPurgePreview(agentMemScopeProject, pid, "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agentMemPurge(agentMemPurgeReq{Scope: agentMemScopeProject, Project: pid, Name: "other", Plan: pv.Plan, Confirm: "other"}); err != nil {
+		t.Fatal(err)
+	}
+	// Controls: the old base is gone from the history, the live topic is untouched, and the older
+	// forget is still there.
+	if _, err := memoryGitRun("cat-file", "-e", base+"^{commit}"); err == nil {
+		t.Skip("the purge kept the base commit; the scenario needs its id to change")
+	}
+	if e, err := agentMemRead(c, "project", "topic"); err != nil || e.Body != "second incarnation" {
+		t.Fatalf("the live topic changed: %+v %v", e, err)
+	}
+	got, err := ReviewForgetCommitted("project", pid, "topic", base)
+	if err == nil {
+		t.Fatalf("answered %v although the base is gone; the older forget must not stand in", got)
+	}
+	// Without a history at all, a base is not "nothing committed" either.
+	if _, err := ReviewForgetCommitted("project", pid, "nobody-ever", "0123456789abcdef0123456789abcdef01234567"); err == nil {
+		t.Fatal("a missing base was read as an answer")
+	}
+}
