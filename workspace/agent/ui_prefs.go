@@ -21,6 +21,7 @@ import (
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/chatx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/httpx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/mcpx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/memoryx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/memreview"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
@@ -254,6 +255,19 @@ func chatAutoTurnModel() string {
 	return sessionx.VisibleModel(session.KindClaude, strings.TrimSpace(v))
 }
 
+// memoryReviewNeedsMark says whether replacing the prefs `before` with `after` would arm the
+// background memory review: the mode becomes "propose", or AF memory is switched on while the mode
+// already is. Every way into the enabled state (uiprefs.MemoryReviewEnabled) is one of the two.
+// Turning the review off, or any write that leaves it as it was, needs nothing.
+func memoryReviewNeedsMark(before, after map[string]any) bool {
+	mode := func(m map[string]any) string { s, _ := m["memoryReview"].(string); return s }
+	memory := func(m map[string]any) bool { b, _ := m["agentMemory"].(bool); return b }
+	if mode(after) != "propose" {
+		return false
+	}
+	return mode(before) != "propose" || (memory(after) && !memory(before))
+}
+
 func handleGetUIPrefs(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, uiprefs.Read())
 }
@@ -272,6 +286,14 @@ func handlePutUIPrefs(w http.ResponseWriter, r *http.Request) {
 	var obj map[string]any
 	if json.Unmarshal(body, &obj) != nil {
 		httpx.WriteErr(w, http.StatusBadRequest, "bad_json", "body must be a JSON object")
+		return
+	}
+	// Turning the memory review on sends other sessions' conversations to a model provider, so it
+	// is the member's decision and not a session's: AGENT_TOKEN, which every session's shell
+	// holds, can read and write these prefs, and the review's own member-origin route would be a
+	// door beside an open window. A write that would switch the review on therefore needs the
+	// Control Plane's mark (ADR 0113), which the CP puts on every relayed prefs write.
+	if memoryReviewNeedsMark(uiprefs.Read(), obj) && !memberorigin.RequireBody(w, r, body) {
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(uiprefs.Path()), 0o700); err != nil {

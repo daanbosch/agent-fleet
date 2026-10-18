@@ -81,6 +81,14 @@ type Loop struct {
 	mu      sync.Mutex
 	running map[string]bool // by session name: a review of it is in progress
 	wake    chan struct{}
+	manual  map[string]ManualInfo // by session name: how the last "Review now" ended
+	// ctx is the Agent's lifetime as far as the loop is concerned: Start sets it, Shutdown cancels
+	// it, and every helper call, automatic or manual, runs under it (an exec.CommandContext on a
+	// Background context would outlive the Agent as an orphaned CLI). wg counts the goroutines.
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+	closed bool
 }
 
 // NewLoop is the Loop the Agent runs.
@@ -96,6 +104,44 @@ func (l *Loop) enabled() bool {
 	return uiprefs.MemoryReviewEnabled()
 }
 
+// ensureCtxLocked creates the loop's cancellable context on first use (from Start's parent, or from
+// Background when a manual review comes first) and returns it. Shutdown cancels it.
+func (l *Loop) ensureCtxLocked(parent context.Context) context.Context {
+	if l.ctx == nil {
+		l.ctx, l.cancel = context.WithCancel(parent)
+	}
+	return l.ctx
+}
+
+func (l *Loop) isClosed() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.closed
+}
+
+// Shutdown stops the loop taking new work, cancels the reviews in flight (so the helper CLI is
+// killed rather than left behind when the Agent exits) and waits for them up to budget. A review
+// cut short stays `dispatched` in its run record, which the next start settles like any other lost
+// attempt.
+func (l *Loop) Shutdown(budget time.Duration) {
+	l.mu.Lock()
+	l.closed = true
+	cancel := l.cancel
+	l.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	done := make(chan struct{})
+	go func() {
+		l.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(budget):
+	}
+}
+
 func (l *Loop) now() time.Time {
 	if l.Now != nil {
 		return l.Now()
@@ -105,8 +151,17 @@ func (l *Loop) now() time.Time {
 
 // Start runs the loop until ctx ends: one wake-up at once (this is what resumes a run a restart
 // interrupted), then one per Interval or Wake.
-func (l *Loop) Start(ctx context.Context) {
+func (l *Loop) Start(parent context.Context) {
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		return
+	}
+	ctx := l.ensureCtxLocked(parent)
+	l.wg.Add(1)
+	l.mu.Unlock()
 	go func() {
+		defer l.wg.Done()
 		for {
 			l.Tick(ctx)
 			select {
@@ -136,15 +191,13 @@ type examined struct {
 
 var examinedStore = store[examined]{"examined"}
 
-// CountNew counts what was added after the watermark: displayable turns and user prompts. Turns
-// are numbered from firstNumber.
+// CountNew counts what was added after the watermark: turns and user prompts. A turn is a row of
+// the normalized transcript other than a compaction summary (docs/log/134 section 1.1): the
+// normalizer already emits only displayable rows, a thinking-only one included, whatever the review
+// later leaves out of the prompt it builds. Turns are numbered from firstNumber.
 func CountNew(turns []transcript.Turn, firstNumber, watermark int) (n, prompts int) {
 	for i, t := range turns {
-		num := firstNumber + i
-		if num <= watermark || t.Compact {
-			continue
-		}
-		if text, _ := renderTurn(num, t); text == "" {
+		if firstNumber+i <= watermark || t.Compact {
 			continue
 		}
 		n++
@@ -157,7 +210,7 @@ func CountNew(turns []transcript.Turn, firstNumber, watermark int) (n, prompts i
 
 // Tick is one wake-up.
 func (l *Loop) Tick(ctx context.Context) {
-	if !l.enabled() {
+	if l.isClosed() || !l.enabled() {
 		return
 	}
 	now := l.now()
@@ -179,7 +232,9 @@ func (l *Loop) Tick(ctx context.Context) {
 			continue
 		}
 		budget--
-		if stop := l.drive(ctx, c, TriggerAuto); stop {
+		// Only the claimed window is resumed here. What came after it waits for its own turn end,
+		// settle time and threshold like any other.
+		if stop := l.drive(ctx, c, TriggerAuto, run.Last); stop {
 			return
 		}
 	}
@@ -229,10 +284,13 @@ func (l *Loop) forgetGone(live map[string]Candidate) {
 }
 
 // drive resumes or runs a session, reading its turns first.
-func (l *Loop) drive(ctx context.Context, c Candidate, trigger string) (stop bool) {
+func (l *Loop) drive(ctx context.Context, c Candidate, trigger string, upTo int) (stop bool) {
 	turns, err := l.Source.Turns(c)
 	if err != nil {
 		return false
+	}
+	if upTo > 0 && len(turns) > upTo {
+		turns = turns[:upTo]
 	}
 	stop, _ = l.driveTurns(ctx, c, turns, trigger)
 	return stop
@@ -317,11 +375,18 @@ func (l *Loop) Running(name string) bool {
 // ErrNoSession is ReviewNow's answer for a name the Source does not list.
 var ErrNoSession = errors.New("no such session to review")
 
+// ErrShuttingDown is the answer once Shutdown has begun.
+var ErrShuttingDown = errors.New("the Agent is shutting down")
+
 // ReviewNow starts a manual review of the named session in the background and returns at once:
 // a review is a model call and takes longer than a request should wait. It ignores the settle time,
 // the thresholds and the backoff, and nothing else: the switch, the budget, the daily cap and
-// the one-in-flight limit all apply. The outcome is in Status.
+// the one-in-flight limit all apply. How it ended is in Status (Manual), including when there was
+// nothing new to review: an answer the caller can wait for.
 func (l *Loop) ReviewNow(name string) error {
+	if l.isClosed() {
+		return ErrShuttingDown
+	}
 	if !l.enabled() {
 		return ErrDisabled
 	}
@@ -341,40 +406,63 @@ func (l *Loop) ReviewNow(name string) error {
 	if !l.claimName(name) {
 		return ErrBusy
 	}
-	refusalMu.Lock()
-	delete(refusals, name)
-	refusalMu.Unlock()
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		l.releaseName(name)
+		return ErrShuttingDown
+	}
+	ctx := l.ensureCtxLocked(context.Background())
+	l.wg.Add(1)
+	l.mu.Unlock()
 	go func() {
+		defer l.wg.Done()
 		defer l.releaseName(name)
-		turns, err := l.Source.Turns(*found)
-		if err != nil {
-			log.Printf("memory review: %s: transcript unreadable", name)
-			return
-		}
-		for i := 0; i < maxWindowsPerTrigger; i++ {
-			res, err := l.Reviewer.Review(context.Background(), Request{Key: found.Key, Session: name, Trigger: TriggerManual, Turns: turns, FirstNumber: 1})
-			if err != nil {
-				l.recordRefusal(name, err)
-				return
-			}
-			if !res.Terminal() || !res.More {
-				return
-			}
-		}
+		l.setManual(name, l.reviewManually(ctx, *found))
 	}()
 	return nil
 }
 
-// refusals remember why the last manual review of a session did not start or go on, for Status.
-var (
-	refusalMu sync.Mutex
-	refusals  = map[string]string{}
-)
+// reviewManually works through the windows of one manual review and says how it ended: "done",
+// "empty" (nothing new after the watermark), "unreadable" (the transcript could not be read), or
+// the refusal code of the error that stopped it.
+func (l *Loop) reviewManually(ctx context.Context, c Candidate) string {
+	turns, err := l.Source.Turns(c)
+	if err != nil {
+		log.Printf("memory review: %s: transcript unreadable", c.Name)
+		return "unreadable"
+	}
+	outcome := "done"
+	for i := 0; i < maxWindowsPerTrigger; i++ {
+		res, err := l.Reviewer.Review(ctx, Request{Key: c.Key, Session: c.Name, Trigger: TriggerManual, Turns: turns, FirstNumber: 1})
+		switch {
+		case err != nil:
+			return refusalCode(err)
+		case res.State == "empty":
+			if i == 0 {
+				outcome = "empty"
+			}
+			return outcome
+		case !res.Terminal() || !res.More:
+			return outcome
+		}
+	}
+	return outcome
+}
 
-func (l *Loop) recordRefusal(name string, err error) {
-	refusalMu.Lock()
-	defer refusalMu.Unlock()
-	refusals[name] = refusalCode(err)
+// ManualInfo is how the last "Review now" of a session ended.
+type ManualInfo struct {
+	At      time.Time `json:"at"`
+	Outcome string    `json:"outcome"`
+}
+
+func (l *Loop) setManual(name, outcome string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.manual == nil {
+		l.manual = map[string]ManualInfo{}
+	}
+	l.manual[name] = ManualInfo{At: l.now(), Outcome: outcome}
 }
 
 // refusalCode is the closed vocabulary Status reports.
@@ -392,6 +480,8 @@ func refusalCode(err error) string {
 		return "no_backend"
 	case errors.Is(err, ErrBackoff):
 		return "backoff"
+	case errors.Is(err, context.Canceled), errors.Is(err, ErrShuttingDown):
+		return "shutting_down"
 	}
 	return "failed"
 }
@@ -399,10 +489,10 @@ func refusalCode(err error) string {
 // Info is a session's review status.
 type Info struct {
 	Running bool `json:"running"`
-	// Last is the newest run of the session, "" fields when there is none.
+	// Last is the newest run of the session, nil when there is none.
 	Last *LastRun `json:"last,omitempty"`
-	// Refused is why the last manual review stopped before or between runs (see refusalCode).
-	Refused string `json:"refused,omitempty"`
+	// Manual is how the last "Review now" ended (see reviewManually), nil before the first.
+	Manual *ManualInfo `json:"manual,omitempty"`
 }
 
 // LastRun is the newest run of a session, as counts and a state: no text.
@@ -424,8 +514,10 @@ func (l *Loop) Status(name string) Info {
 			break
 		}
 	}
-	refusalMu.Lock()
-	info.Refused = refusals[name]
-	refusalMu.Unlock()
+	l.mu.Lock()
+	if m, ok := l.manual[name]; ok {
+		info.Manual = &m
+	}
+	l.mu.Unlock()
 	return info
 }

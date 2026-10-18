@@ -83,14 +83,57 @@ func (lh *loopHarness) add(name string, ago time.Duration, ts []transcript.Turn)
 
 func (lh *loopHarness) tick() { lh.loop.Tick(context.Background()) }
 
-func TestCountNewCountsDisplayableTurnsAndUserPrompts(t *testing.T) {
+// A turn is a row of the normalized transcript other than a compaction summary (docs/log/134
+// section 1.1): a thinking-only row is one, even though the prompt the review builds leaves it out.
+func TestCountNewCountsNormalizedRowsExceptCompaction(t *testing.T) {
 	ts := append(turns(10), transcript.Turn{Role: "user", Compact: true, Text: "summary", Parts: []transcript.Part{{Kind: "text", Text: "summary"}}},
 		transcript.Turn{Role: "assistant", Parts: []transcript.Part{{Kind: "thinking", Text: "hm"}}})
-	if n, p := CountNew(ts, 1, 0); n != 10 || p != 5 {
-		t.Fatalf("n=%d prompts=%d: the compaction row and a thinking-only row are not turns", n, p)
+	if n, p := CountNew(ts, 1, 0); n != 11 || p != 5 {
+		t.Fatalf("n=%d prompts=%d: want 11 turns (10 plus the thinking row) and 5 prompts", n, p)
 	}
-	if n, p := CountNew(ts, 1, 6); n != 4 || p != 2 {
+	if n, p := CountNew(ts, 1, 6); n != 5 || p != 2 {
 		t.Fatalf("after the watermark: n=%d prompts=%d", n, p)
+	}
+}
+
+// 20 ordinary rows and 10 thinking-only rows are 30 turns: an unattended session with no prompts
+// reaches the confirmed threshold with them.
+func TestTickCountsThinkingRowsTowardsTheThreshold(t *testing.T) {
+	lh := newLoopHarness(t)
+	ts := assistantTurns(20)
+	for i := 0; i < 10; i++ {
+		ts = append(ts, transcript.Turn{Role: "assistant", Parts: []transcript.Part{{Kind: "thinking", Text: "hm"}}})
+	}
+	// Turn 2 is the evidence the default reply cites; it is an ordinary row.
+	lh.add("thinker", 10*time.Minute, ts)
+	lh.tick()
+	if lh.calls != 1 || Watermark("thinker-key") != 30 {
+		t.Fatalf("calls %d watermark %d", lh.calls, Watermark("thinker-key"))
+	}
+}
+
+// Only the window an open run already claimed is resumed unconditionally; what came after it waits
+// for its own turn end, settle time and threshold.
+func TestTickResumesOnlyTheClaimedWindow(t *testing.T) {
+	lh := newLoopHarness(t)
+	c := lh.add("a", 10*time.Minute, turns(2))
+	if !lh.reviewUntilCrash(lh.reviewer(), "claimed", Request{Key: c.Key, Session: c.Name, Trigger: TriggerAuto, Turns: turns(2), FirstNumber: 1}) {
+		t.Fatal("no stop")
+	}
+	// The session carried on: 40 more turns, and it is mid-turn again (no evidence).
+	lh.src.turns[c.Key] = turns(42)
+	lh.src.cands[0].EndedAt = time.Time{}
+	lh.loop.Reviewer = lh.reviewer()
+	lh.tick()
+	if lh.calls != 1 || Watermark(c.Key) != 2 {
+		t.Fatalf("calls %d watermark %d: only the claimed window may be resumed", lh.calls, Watermark(c.Key))
+	}
+	// Once it has settled and has enough new turns, the rest is reviewed on its own terms.
+	lh.src.cands[0].EndedAt = lh.now.Add(-10 * time.Minute)
+	lh.replies = []func() (string, error){say(`{"ops":[]}`)}
+	lh.tick()
+	if lh.calls != 2 || Watermark(c.Key) != 42 {
+		t.Fatalf("calls %d watermark %d", lh.calls, Watermark(c.Key))
 	}
 }
 
@@ -318,8 +361,8 @@ func TestReviewNowReportsWhyItStopped(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitIdle(t, lh.loop, "a")
-	if got := lh.loop.Status("a").Refused; got != "no_backend" {
-		t.Fatalf("refused = %q", got)
+	if m := lh.loop.Status("a").Manual; m == nil || m.Outcome != "no_backend" {
+		t.Fatalf("manual = %+v", m)
 	}
 	// ...and a later request clears it.
 	h := lh
@@ -328,8 +371,8 @@ func TestReviewNowReportsWhyItStopped(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitIdle(t, lh.loop, "a")
-	if got := lh.loop.Status("a").Refused; got != "" {
-		t.Fatalf("refused = %q after a success", got)
+	if m := lh.loop.Status("a").Manual; m == nil || m.Outcome != "done" {
+		t.Fatalf("manual = %+v after a success", m)
 	}
 }
 
@@ -351,4 +394,94 @@ func TestStartTicksAtOnceAndStopsWithItsContext(t *testing.T) {
 	// Wake after cancel must not block.
 	lh.loop.Wake()
 	lh.loop.Wake()
+}
+
+// "Review now" on a session with nothing new still answers: the outcome is something to wait for.
+func TestReviewNowSaysWhenThereIsNothingNew(t *testing.T) {
+	lh := newLoopHarness(t)
+	lh.add("a", 5*time.Second, turns(4))
+	if err := lh.loop.ReviewNow("a"); err != nil {
+		t.Fatal(err)
+	}
+	waitIdle(t, lh.loop, "a")
+	first := lh.loop.Status("a").Manual
+	if first == nil || first.Outcome != "done" {
+		t.Fatalf("first = %+v", first)
+	}
+	lh.now = lh.now.Add(time.Minute)
+	if err := lh.loop.ReviewNow("a"); err != nil {
+		t.Fatal(err)
+	}
+	waitIdle(t, lh.loop, "a")
+	second := lh.loop.Status("a").Manual
+	if second == nil || second.Outcome != "empty" || !second.At.After(first.At) {
+		t.Fatalf("second = %+v (first %+v)", second, first)
+	}
+	if lh.calls != 1 {
+		t.Fatalf("calls = %d", lh.calls)
+	}
+	// An unreadable transcript answers too.
+	lh.src.err = errors.New("gone")
+	lh.now = lh.now.Add(time.Minute)
+	if err := lh.loop.ReviewNow("a"); err != nil {
+		t.Fatal(err)
+	}
+	waitIdle(t, lh.loop, "a")
+	if m := lh.loop.Status("a").Manual; m == nil || m.Outcome != "unreadable" {
+		t.Fatalf("manual = %+v", m)
+	}
+}
+
+// Shutdown reaches the helper call, whichever way the review started: the CLI is killed rather
+// than left running when the Agent exits, nothing new starts, and the interrupted attempt stays
+// `dispatched` for the next start to settle.
+func TestShutdownCancelsTheHelperCallOfBothPaths(t *testing.T) {
+	for _, path := range []string{"manual", "auto"} {
+		t.Run(path, func(t *testing.T) {
+			lh := newLoopHarness(t)
+			c := lh.add("a", 10*time.Minute, assistantTurns(40))
+			started := make(chan struct{})
+			cancelled := make(chan error, 1)
+			lh.loop.Reviewer.Call = func(ctx context.Context, persona, prompt string) (string, error) {
+				close(started)
+				<-ctx.Done()
+				cancelled <- ctx.Err()
+				return "", ctx.Err()
+			}
+			if path == "manual" {
+				if err := lh.loop.ReviewNow("a"); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				lh.loop.Interval = time.Hour
+				lh.loop.Start(context.Background())
+			}
+			<-started
+			lh.loop.Shutdown(5 * time.Second)
+			select {
+			case err := <-cancelled:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("the call ended with %v", err)
+				}
+			default:
+				t.Fatal("Shutdown returned before the helper call was cancelled")
+			}
+			if lh.loop.Running("a") {
+				t.Fatal("a review is still marked running after Shutdown")
+			}
+			if run := onlyRun(t); run.State != StateDispatched || run.Attempts[0].Outcome != OutcomeDispatched {
+				t.Fatalf("run = %+v", run)
+			}
+			// Nothing new starts.
+			if err := lh.loop.ReviewNow("a"); !errors.Is(err, ErrShuttingDown) {
+				t.Fatalf("ReviewNow after Shutdown: %v", err)
+			}
+			before := len(runs())
+			lh.loop.Tick(context.Background())
+			if len(runs()) != before {
+				t.Fatal("a wake-up after Shutdown started work")
+			}
+			_ = c
+		})
+	}
 }

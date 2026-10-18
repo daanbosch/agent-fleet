@@ -368,6 +368,8 @@ export const sessions = {
   "srow.memory_review_started": "レビューを始めました",
   "srow.memory_review_queued": "メモリの提案を {n} 件ためました",
   "srow.memory_review_none": "レビューが終わりました。残す価値のある内容は見つかりませんでした",
+  "srow.memory_review_empty": "前回のレビュー以降、新しい内容はありませんでした",
+  "srow.memory_review_unreadable": "会話を読み取れませんでした",
   "srow.memory_review_failed": "レビューは、この区間から提案を得られませんでした",
   "srow.memory_review_off": "メモリのレビューがオフです（設定の Agent メモリでオンにします）",
   "srow.memory_review_busy": "別のレビューが実行中です",

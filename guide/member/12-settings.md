@@ -497,7 +497,7 @@ refused.
   MCP servers**, which lists what looks worth keeping as *proposals*. The excerpt is redacted first (anything that looks
   like a secret is left out), but it is still sent to the provider of the agent chosen for this feature under
   **AI assistance**, which can be a different provider from the session's own; it spends tokens (at most 250 calls a
-  day, one at a time), and it does not run while the workspace is stopped. **Nothing reaches memory without your
+  day, one at a time), and it does not run while the workspace is stopped. It looks automatically only at sessions whose last turn ended within the last 48 hours; older ones, or what happened while the workspace was stopped, are covered by the session menu's **"Suggest memories now"**. **Nothing reaches memory without your
   approval**, and the screen to approve proposals is not available yet: for now up to 100 proposals pile up and memory
   is untouched. When the setting is on, a **Memory review** card appears under AI assistance, where you can pin the
   agent and model, and each session's **⋯** menu offers **"Suggest memories now"**, which reviews that session

@@ -424,7 +424,8 @@ approval screen, which the setting's own text says.
   (`agentMemory` and `memoryReview`) at every wake-up and again before each call. It considers a session with a
   transcript that is not archived, whose newest turn ended at least 300 s ago, with at least 30 new turns or
   3 new user prompts after its watermark (a displayable row counts as a turn; compaction summaries do not). A run
-  that is open is resumed whatever the thresholds say. At most 5 sessions and 10 windows per trigger are handled
+  that is open is resumed whatever the thresholds say, but only its claimed window: what came after it waits for
+  its own turn end, settle time and threshold. At most 5 sessions and 10 windows per trigger are handled
   per wake-up; a global limit (no deny-all backend, daily cap, full queue, another review in flight) ends the
   wake-up and is logged once an hour.
 - **Turn-end evidence** is the status store's own: a persisted `TurnEnd` (the hook kinds and the managed
@@ -437,7 +438,9 @@ approval screen, which the setting's own text says.
   automatically (turning the setting on must not spend the daily cap on every old session at once; older ones are
   left to "Review now"), and a turn end that was looked at is remembered durably so a restart does not parse
   every transcript again. A session is identified by its status id and creation time, so a recreated session does
-  not inherit the old watermark.
+  not inherit the old watermark. The consequence of the 48 hours is stated to the member (the setting's text and
+  the guide): after a longer stop, or for an older session, nothing is picked up automatically and "Review now"
+  is the way.
 - **"Review now"** (`POST /agents/memory-review/run`) is a member action: it answers only the Control Plane's
   member-origin mark (ADR 0113), the CP signs and audits it (`memory.review.run`, session-name hint only), and it
   starts the review in the background and answers 202; `GET /agents/memory-review?session=` reports counts and
@@ -445,5 +448,15 @@ approval screen, which the setting's own text says.
 - **The setting** is in Settings > Agent memory > Settings and discloses that a redacted excerpt goes to the
   provider the AI-assist setting picks for the feature, which may differ from the session's own, that it costs
   tokens, and that nothing is saved unapproved. The AI-assist card appears while the setting is on.
+
+- **Arming the review needs the member's mark.** AGENT_TOKEN, which every session's shell holds, can also write the
+  Agent's settings, so a settings write that would make the review enabled (the mode becomes `propose`, or AF
+  memory is switched on while it is) is accepted only with the Control Plane's member-origin mark (ADR 0113), which
+  the CP now puts on every relayed settings write. Turning the review off, or any other change, needs nothing.
+- **"Review now" always answers.** How the last manual review ended (`done`, `empty` for nothing new after the
+  watermark, `unreadable`, or the code of the refusal that stopped it) is part of the status, so a review that
+  changes no run record can still be waited for.
+- **Shutdown** stops the loop taking work and cancels the helper call in flight, automatic or manual, so no CLI is
+  left behind; the interrupted attempt stays `dispatched` for the next start to settle.
 
 Follow-ups: #2321, #2322.

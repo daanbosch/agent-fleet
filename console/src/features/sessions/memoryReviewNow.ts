@@ -11,7 +11,9 @@ type Notify = (message: string, opts?: { kind?: "error" | "warn" | "info" | "suc
 interface ReviewStatus {
   session?: {
     running?: boolean;
-    refused?: string;
+    // How the last "Review now" ended (written every time one ends, even when there was nothing to
+    // review): "done", "empty", "unreadable", or the code of the refusal that stopped it.
+    manual?: { at: string; outcome: string };
     last?: { state: string; queued: number; at: string };
   };
 }
@@ -34,7 +36,7 @@ const statusPath = (name: string) => "api/agents/memory-review?session=" + encod
 
 export async function reviewSessionNow(name: string, notify: Notify, sleep: (ms: number) => Promise<void> = delay): Promise<void> {
   const before: ReviewStatus | null = await api(statusPath(name)).catch(() => null);
-  const prevAt = before?.session?.last?.at ?? "";
+  const prevAt = before?.session?.manual?.at ?? "";
   const res = await apiJSON("api/agents/memory-review/run?session=" + encodeURIComponent(name), "POST", { session: name }).catch(
     () => ({ error: { code: "unreachable" } }),
   );
@@ -49,12 +51,21 @@ export async function reviewSessionNow(name: string, notify: Notify, sleep: (ms:
     const st: ReviewStatus | null = await api(statusPath(name)).catch(() => null);
     const s = st?.session;
     if (!s || s.running) continue;
-    if (s.refused) {
-      notify(t(REFUSAL[s.refused] ?? "srow.memory_review_unknown"));
+    if (!s.manual || s.manual.at === prevAt) continue; // this review has not ended yet
+    if (s.manual.outcome === "empty") {
+      notify(t("srow.memory_review_empty"), { kind: "info" });
       return;
     }
-    if (!s.last || s.last.at === prevAt) continue; // this run has not written its record yet
-    if (s.last.state !== "done") notify(t("srow.memory_review_failed"), { kind: "warn" });
+    if (s.manual.outcome === "unreadable") {
+      notify(t("srow.memory_review_unreadable"), { kind: "warn" });
+      return;
+    }
+    if (s.manual.outcome !== "done") {
+      notify(t(REFUSAL[s.manual.outcome] ?? "srow.memory_review_unknown"));
+      return;
+    }
+    if (!s.last) notify(t("srow.memory_review_none"), { kind: "info" });
+    else if (s.last.state !== "done") notify(t("srow.memory_review_failed"), { kind: "warn" });
     else if (s.last.queued > 0) notify(t("srow.memory_review_queued", { n: s.last.queued }), { kind: "success" });
     else notify(t("srow.memory_review_none"), { kind: "info" });
     return;

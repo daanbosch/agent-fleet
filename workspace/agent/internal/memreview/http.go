@@ -50,6 +50,8 @@ func HandleRun(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusConflict, "memory_review_off", "the memory review is switched off (it needs Agent memory and a review mode)")
 	case errors.Is(err, ErrNoSession):
 		httpx.WriteErr(w, http.StatusNotFound, "not_found", "no such session to review")
+	case errors.Is(err, ErrShuttingDown):
+		httpx.WriteErr(w, http.StatusServiceUnavailable, "shutting_down", "the Agent is shutting down")
 	case errors.Is(err, ErrBusy):
 		httpx.WriteErr(w, http.StatusConflict, "memory_review_busy", "a review is already running")
 	default:

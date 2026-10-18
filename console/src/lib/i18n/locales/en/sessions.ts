@@ -360,6 +360,8 @@ export const sessions: Record<keyof typeof jaSessions, string> = {
   "srow.memory_review_started": "Review started",
   "srow.memory_review_queued": "Queued {n} memory proposals",
   "srow.memory_review_none": "Review finished: nothing worth keeping was found",
+  "srow.memory_review_empty": "Nothing new since the last review",
+  "srow.memory_review_unreadable": "The conversation could not be read",
   "srow.memory_review_failed": "The review got no proposals from this stretch of the conversation",
   "srow.memory_review_off": "The memory review is off (turn it on under Agent memory in settings)",
   "srow.memory_review_busy": "Another review is running",
