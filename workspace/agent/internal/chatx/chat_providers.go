@@ -1640,8 +1640,22 @@ func headlessPrompt(persona string, knowledge []string, prompt string) string {
 // --mcp-config and --tools are both variadic, so each must be followed by a flag, and --tools
 // MUST stay last: a following positional would be eaten.
 func claudeOneShotArgs(persona, model string) []string {
-	args := []string{"-p", "--no-session-persistence", "--output-format", "json",
-		"--system-prompt", persona}
+	return claudeOneShotArgsFormat(persona, model, false)
+}
+
+// claudeOneShotArgsFormat is claudeOneShotArgs with the output format chosen. stream is the
+// deny-all route's (chat_denyall.go): stream-json carries the init event that lists the
+// tools and MCP servers the run actually has, and needs --verbose in print mode.
+func claudeOneShotArgsFormat(persona, model string, stream bool) []string {
+	format := "json"
+	if stream {
+		format = "stream-json"
+	}
+	args := []string{"-p", "--no-session-persistence", "--output-format", format}
+	if stream {
+		args = append(args, "--verbose")
+	}
+	args = append(args, "--system-prompt", persona)
 	if model != "" {
 		args = append(args, "--model", model)
 	}
@@ -2302,8 +2316,7 @@ func OneShotHeadlessRun(ctx context.Context, feature string, tier OneShotTier, p
 		claudeModel = selected
 	}
 	call.Kind, call.ModelReq = session.KindClaude, claudeModel
-	cmd := chatClaudeCmd(ctx, claudeOneShotArgs(persona, claudeModel)...)
-	cmd.Env = append(cmd.Env, claudeOneShotEnv...)
+	cmd := claudeOneShotCmd(ctx, claudeOneShotArgs(persona, claudeModel))
 	cmd.Stdin = strings.NewReader(prompt)
 	out, err := cmd.Output()
 	var r claudeResult

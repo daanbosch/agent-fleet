@@ -143,3 +143,33 @@ func TestAgentMemoryDefaultsOff(t *testing.T) {
 		}
 	}
 }
+
+// The memory review (ADR 0117) is a string setting with two values and an off default; anything
+// else, including "auto" which only exists from phase P3, reads as off. It also needs AF memory
+// itself: the review proposes into that store and the memory switch must keep governing it.
+func TestMemoryReviewReadsOffUnlessProposeAndNeedsAgentMemory(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prefs   map[string]any
+		mode    string
+		enabled bool
+	}{
+		{"missing", map[string]any{}, "off", false},
+		{"propose without memory", map[string]any{"memoryReview": "propose"}, "propose", false},
+		{"propose with memory", map[string]any{"memoryReview": "propose", "agentMemory": true}, "propose", true},
+		{"off with memory", map[string]any{"memoryReview": "off", "agentMemory": true}, "off", false},
+		{"auto is not a value yet", map[string]any{"memoryReview": "auto", "agentMemory": true}, "off", false},
+		{"wrong type", map[string]any{"memoryReview": true, "agentMemory": true}, "off", false},
+		{"propose with memory false", map[string]any{"memoryReview": "propose", "agentMemory": false}, "propose", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writePrefs(t, tc.prefs)
+			if got := MemoryReview(); got != tc.mode {
+				t.Errorf("MemoryReview = %q, want %q", got, tc.mode)
+			}
+			if got := MemoryReviewEnabled(); got != tc.enabled {
+				t.Errorf("MemoryReviewEnabled = %v, want %v", got, tc.enabled)
+			}
+		})
+	}
+}
