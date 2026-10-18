@@ -353,6 +353,19 @@ describe("BundleImportWizard", () => {
     expect(host!.querySelector(".mem-wiz-step.current")?.textContent).toBe(t("mem.wz_step_source"));
   });
 
+  it("never hands a received import id to another owner's preview", async () => {
+    raw.mockResolvedValue(reply({ importId: "20261014T093000Z", format: "bundle" }));
+    api.mockResolvedValue(afPreview);
+    await mountWizard();
+    await upload();
+    expect(api).toHaveBeenCalledTimes(1);
+    api.mockClear();
+    await switchOwner("globex");
+    await flush();
+    expect(api).not.toHaveBeenCalled();
+    expect(host!.querySelector(".mem-wiz-step.current")?.textContent).toBe(t("mem.wz_step_source"));
+  });
+
   it("forgets the received import when the owner changes, and unlocks after an apply that outlived it", async () => {
     raw.mockResolvedValue(reply({ importId: "20261014T093000Z", format: "bundle" }));
     api.mockResolvedValue(afPreview);

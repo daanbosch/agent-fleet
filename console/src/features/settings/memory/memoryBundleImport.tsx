@@ -231,7 +231,10 @@ export function BundleImportWizard({ onChanged, onClose }: { onChanged: () => vo
   // upload still in flight, so an id the Agent minted for one owner is never read under another.
   const ownerKey = useTenantStore((s) => s.tenant) + "\u0000" + useTenantStore((s) => s.whoami?.user ?? "");
   const fileRef = useRef<HTMLInputElement>(null);
-  const [importId, setImportId] = useState("");
+  // The id counts only for the owner it was received under; the check is at render time so a child
+  // never gets the chance to read it for another owner (an effect would reset one render too late).
+  const [received, setReceived] = useState<{ owner: string; id: string } | null>(null);
+  const importId = received && received.owner === ownerKey ? received.id : "";
   const [uploading, setUploading] = useState(false);
   const [run, setRun] = useState<"idle" | "busy" | "done">("idle");
   const [result, setResult] = useState<string | null>(null);
@@ -240,7 +243,7 @@ export function BundleImportWizard({ onChanged, onClose }: { onChanged: () => vo
   // owner or leaving the wizard moves it on, and a late answer is dropped.
   const gen = useRef(0);
   useEffect(() => {
-    setImportId("");
+    setReceived(null);
     setUploading(false);
     setRun("idle");
     setResult(null);
@@ -255,7 +258,7 @@ export function BundleImportWizard({ onChanged, onClose }: { onChanged: () => vo
     const owner = ownerNow();
     const live = () => gen.current === mine && ownerNow() === owner;
     setUploading(true);
-    setImportId("");
+    setReceived(null);
     setRun("idle");
     setResult(null);
     setErr("");
@@ -275,7 +278,7 @@ export function BundleImportWizard({ onChanged, onClose }: { onChanged: () => vo
         setErr(tr("mem.bi_not_bundle"));
         return;
       }
-      setImportId(String(body.importId));
+      setReceived({ owner, id: String(body.importId) });
     } catch {
       if (live()) {
         setErr(tr("mem.import_failed"));
