@@ -167,6 +167,8 @@ export function TenantLimits({
   // A clock used only while waiting on a human decision (question, plan approval, permission).
   // Empty means: follow the session-halt timeout above.
   const [interIdle, setInterIdle] = useState(tenant?.interaction_idle_timeout || "");
+  // How long background work (a dev server, run_in_background) may hold the Workspace awake.
+  const [bgHold, setBgHold] = useState(tenant?.background_hold_max || "");
   const [homeHib, setHomeHib] = useState(tenant?.home_hibernate_after || "");
   const [homeBackup, setHomeBackup] = useState(tenant?.home_backup_every || "");
   const [allowUpd, setAllowUpd] = useState(!!tenant?.allow_agent_self_update);
@@ -189,6 +191,7 @@ export function TenantLimits({
     setSessIdle(tenant?.session_idle_timeout || "");
     setWsIdle(tenant?.ws_idle_timeout || "");
     setInterIdle(tenant?.interaction_idle_timeout || "");
+    setBgHold(tenant?.background_hold_max || "");
     setHomeHib(tenant?.home_hibernate_after || "");
     setHomeBackup(tenant?.home_backup_every || "");
     setAllowUpd(!!tenant?.allow_agent_self_update);
@@ -208,6 +211,7 @@ export function TenantLimits({
       session_idle_timeout: sessIdle.trim(),
       ws_idle_timeout: wsIdle.trim(),
       interaction_idle_timeout: interIdle.trim(),
+      background_hold_max: bgHold.trim(),
       home_hibernate_after: homeHib.trim(),
       home_backup_every: homeBackup.trim(),
       allow_agent_self_update: allowUpd,
@@ -283,6 +287,10 @@ export function TenantLimits({
           <label className="admin-fld">
             <span className="af-cap">{tr("admin.interaction_halt")}</span>
             <input type="text" placeholder={tr("admin.interaction_ph")} value={interIdle} onChange={(e) => setInterIdle(e.target.value)} />
+          </label>
+          <label className="admin-fld">
+            <span className="af-cap">{tr("admin.background_hold")}</span>
+            <input type="text" placeholder={tr("admin.background_hold_ph")} value={bgHold} onChange={(e) => setBgHold(e.target.value)} />
           </label>
           <label className="admin-fld">
             <span className="af-cap">{tr("admin.ws_stop")}</span>
