@@ -13,7 +13,8 @@ export interface AiAssistResolutionRow {
   feature: string;
   enabled: boolean;
   kind?: string;
-  source: "pin" | "default" | "unknown";
+  // "unavailable": the feature runs deny-all (memory.review) and its pinned agent cannot.
+  source: "pin" | "default" | "unknown" | "unavailable";
 }
 
 const POLL_MS = 10_000;

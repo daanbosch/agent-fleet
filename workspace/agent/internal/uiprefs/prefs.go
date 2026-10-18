@@ -272,6 +272,26 @@ func ExternalMemory() string {
 	return memoryx.ExternalMemoryOff
 }
 
+// MemoryReview is the member's background memory review mode (ADR 0117 decision 6, ui-prefs
+// memoryReview): "off" or "propose". Missing, malformed or any other value (including "auto",
+// which does not exist before phase P3) reads as "off": the review sends conversation excerpts to
+// a model, so a member turns it on knowingly. Separate from AgentMemory, which it needs as well:
+// see MemoryReviewEnabled.
+func MemoryReview() string {
+	if v, _ := Read()["memoryReview"].(string); v == memoryx.MemoryReviewPropose {
+		return v
+	}
+	return memoryx.MemoryReviewOff
+}
+
+// MemoryReviewEnabled is whether the review may run at all: AF memory is on AND a review mode is
+// chosen. Every caller that starts or continues a review asks this, never MemoryReview alone —
+// a review proposing into a store the member switched off would be a write path the switch does
+// not govern.
+func MemoryReviewEnabled() bool {
+	return AgentMemory() && MemoryReview() != memoryx.MemoryReviewOff
+}
+
 // SpawnChildLimit is how many children the user lets one session have at a time (ADR 0073
 // decision 6, ui-prefs sessionSpawnChildLimit). It returns the stored number RAW — 0 for missing
 // or malformed — because the range and the fallback belong to session.NormalizeSpawnChildLimit,

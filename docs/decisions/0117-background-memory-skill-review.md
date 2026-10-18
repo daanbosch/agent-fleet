@@ -340,3 +340,32 @@ policy assumptions from one heavy-use sample, to be revisited from P1 traffic (#
   deny-all is not verified and is P1's (#2320) to provide. Measurements left open: #2333. 1 of 3
   hand-run proposals was plausibly useful. The one-shot environment's `MAX_THINKING_TOKENS=0` did not stop hidden
   thinking, which was 74–97 % of the output tokens.
+
+**Note (2026-10-18, #2320): phase P1 is delivered as three stacked changes, and the first one fixes how
+decisions 2–4 are read.** The decisions above are unchanged. P1 is split into (A) the pure parts: the
+ledger feature, the `memoryReview` key, the deny-all route, the redacted input and the reply validator;
+(B) the run claim, the attempt record, the pending queue and the one helper call; (C) the trigger loop, its
+turn-end evidence and "Review now". Nothing publishes in any of them. Where the code had to choose:
+
+- **Redaction (decision 2) is variant (a), applied to each decoded string.** A turn's text, a tool label, a
+  tool result, an index line or a memory body is used whole or not at all: any finding, a NUL byte, or a scan
+  that reaches the 20-finding cap replaces the whole string with a marker. It is judged in full and only then
+  clipped (tool results to 500 characters), so a clip cannot split a key. A line-dropping variant was
+  rejected because a private key's body lines carry no rule of their own.
+- **The deny-all contract (decision 3) checks what the run effectively has, not its argv.** Measured on
+  claude 2.1.302: with `CLAUDE_CODE_ENABLE_CFC=1` in the inherited environment, `--strict-mcp-config` with an
+  empty config still leaves Claude in Chrome connected with 22 tools (found in review of #2335, fixed with
+  `--no-chrome`). The route therefore runs the identical argv and environment with a local slash command
+  first, reads the init event, and refuses to send the transcript unless `tools` and `mcp_servers` are both
+  present and empty; the real run's own init event is checked again and its reply discarded if it lists
+  anything. Only claude qualifies. A feature pin on any other backend fails the review instead of moving the
+  transcript to another vendor; with no pin the shared order is walked past kinds that cannot qualify.
+- **Existing memories are ranked by the window, not the other way round.** `memory_search` needs every query
+  word in a memory; a 40,000-character window is not a query. Names and description words that occur in the
+  window score, ties keep the index order, and the top five bodies are sent.
+- **Reply validation (decision 4).** An `update` or `forget` is accepted only for a memory whose text was
+  shown, with the revision from the input as its base; a `create` is refused over any memory the session could
+  see, shown or not. A secret in any field drops the whole reply, like a malformed one.
+- **`memoryReview` needs `agentMemory` too**, and `auto` reads as `off` until P3 defines it.
+
+Follow-ups: #2320 (B and C), #2321, #2322.

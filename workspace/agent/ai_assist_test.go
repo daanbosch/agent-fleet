@@ -32,16 +32,16 @@ func aiAssistResolutionCall(t *testing.T) []aiAssistResolutionRow {
 	return resp.Features
 }
 
-// The 8 features tracked in aiAssistFeatures must be exactly the 8 the ledger already
+// The 9 features tracked in aiAssistFeatures must be exactly the 9 the ledger already
 // separates (usagex/ledger.go) — the point of decision 3 is that the settings screen and the
 // usage view name the same thing.
-func TestAIAssistResolutionListsAllEightFeatures(t *testing.T) {
+func TestAIAssistResolutionListsAllNineFeatures(t *testing.T) {
 	writeUIPrefs(t, `{}`)
 	rows := aiAssistResolutionCall(t)
 	want := map[string]bool{
 		"title.session": false, "title.chat": false, "branch.suggest": false,
 		"suggest.session": false, "suggest.chat": false, "suggest.edit": false,
-		"plan.update": false, "translate.mirror": false,
+		"plan.update": false, "translate.mirror": false, "memory.review": false,
 	}
 	if len(rows) != len(want) {
 		t.Fatalf("got %d rows, want %d: %+v", len(rows), len(want), rows)
@@ -146,4 +146,53 @@ func TestAIAssistResolutionEnabledPerFeature(t *testing.T) {
 			t.Fatalf("%s must stay enabled (default ON), got false: %+v", f, got)
 		}
 	}
+}
+
+// The memory review runs only where tools can be denied, so its "currently uses" must not name a
+// backend it would never run on: a pin on a backend that cannot qualify says "unavailable", and
+// without one the answer is the first backend that can (claude), not the head of the shared order.
+func TestAIAssistResolutionOfTheMemoryReviewFollowsTheDenyAllRule(t *testing.T) {
+	row := func(t *testing.T) aiAssistResolutionRow {
+		t.Helper()
+		for _, r := range aiAssistResolutionCall(t) {
+			if r.Feature == "memory.review" {
+				return r
+			}
+		}
+		t.Fatal("no memory.review row")
+		return aiAssistResolutionRow{}
+	}
+	setup := func(t *testing.T, prefs string) {
+		writeUIPrefs(t, prefs)
+		for _, k := range []string{"claude", "codex", "opencode", "cursor", "agy"} {
+			t.Cleanup(chatx.SetHeadlessAvailableForTest(k, true))
+		}
+	}
+
+	t.Run("a pin that cannot run deny-all is unavailable", func(t *testing.T) {
+		setup(t, `{"aiFeatureAgents":{"memory.review":"codex"}}`)
+		if r := row(t); r.Source != chatx.OneShotSourceUnavailable || r.Kind != "" {
+			t.Fatalf("row = %+v", r)
+		}
+	})
+	t.Run("the shared order is walked past kinds that cannot qualify", func(t *testing.T) {
+		setup(t, `{"aiAssistOrder":["codex","claude"]}`)
+		if r := row(t); r.Kind != "claude" || r.Source != "default" {
+			t.Fatalf("row = %+v", r)
+		}
+	})
+	t.Run("enabled needs AF memory and a review mode", func(t *testing.T) {
+		for prefs, want := range map[string]bool{
+			`{}`:                         false,
+			`{"agentMemory":true}`:       false,
+			`{"memoryReview":"propose"}`: false,
+			`{"agentMemory":true,"memoryReview":"propose"}`: true,
+			`{"agentMemory":true,"memoryReview":"auto"}`:    false, // auto does not exist before P3
+		} {
+			setup(t, prefs)
+			if got := row(t).Enabled; got != want {
+				t.Errorf("%s: enabled = %v, want %v", prefs, got, want)
+			}
+		}
+	})
 }
