@@ -1633,6 +1633,10 @@ func headlessPrompt(persona string, knowledge []string, prompt string) string {
 // and plugin servers are not covered by it. A one-shot may read third-party text (a
 // transcript, a pull request), so tool-less has to hold whatever the member has configured.
 //
+// --no-chrome is needed on top: Claude in Chrome (CLAUDE_CODE_ENABLE_CFC=1 in the inherited
+// environment) is added as a dynamic MCP server that strict mode does not remove; measured on
+// 2.1.302, it connects with 22 browser tools until this flag is passed.
+//
 // --mcp-config and --tools are both variadic, so each must be followed by a flag, and --tools
 // MUST stay last: a following positional would be eaten.
 func claudeOneShotArgs(persona, model string) []string {
@@ -1641,7 +1645,7 @@ func claudeOneShotArgs(persona, model string) []string {
 	if model != "" {
 		args = append(args, "--model", model)
 	}
-	args = append(args, "--strict-mcp-config", "--mcp-config", claudeEmptyMCPConfig)
+	args = append(args, "--strict-mcp-config", "--mcp-config", claudeEmptyMCPConfig, "--no-chrome")
 	return append(args, "--tools", "")
 }
 
