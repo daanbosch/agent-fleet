@@ -433,7 +433,7 @@ approval screen, which the setting's own text says.
   revision. It never persists an idle, so the completion notification's gate is untouched. A kind with a
   transcript and neither (a muse TUI session, say) gets no automatic review: it fails closed, and "Review now"
   works for it.
-- **Cost guards that are P1 assumptions:** only sessions whose last turn ended within 48 hours are looked at
+- **Cost guards, confirmed by the owner on 2026-10-18 (revisited from P1 traffic, #2333):** only sessions whose last turn ended within 48 hours are looked at
   automatically (turning the setting on must not spend the daily cap on every old session at once; older ones are
   left to "Review now"), and a turn end that was looked at is remembered durably so a restart does not parse
   every transcript again. A session is identified by its status id and creation time, so a recreated session does

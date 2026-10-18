@@ -43,7 +43,8 @@ const (
 	maxSessionsPerTick = 5
 	// DefaultLookback is how far back an automatic review looks for a turn end: a session whose
 	// last turn ended longer ago is left to "Review now". It stops enabling the review from
-	// spending the daily cap on every old session at once. A P1 assumption.
+	// spending the daily cap on every old session at once. Confirmed by the owner on 2026-10-18;
+	// revisited from P1 traffic (#2333).
 	DefaultLookback = 48 * time.Hour
 )
 
