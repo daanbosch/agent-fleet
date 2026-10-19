@@ -69,9 +69,13 @@ type Result struct {
 
 // Reviewer carries the seams. New wires the real ones; tests replace them.
 type Reviewer struct {
-	Now      func() time.Time
-	Enabled  func() bool
-	Snapshot func(session string) (memoryx.ReviewSnapshot, error)
+	Now     func() time.Time
+	Enabled func() bool
+	// AutoEnabled is the member's separate switch for the turn-end loop (ui-prefs memoryReviewAuto).
+	// It gates only TriggerAuto reviews, on top of Enabled; nil means the switch is not in play
+	// (tests). A manual review never asks it.
+	AutoEnabled func() bool
+	Snapshot    func(session string) (memoryx.ReviewSnapshot, error)
 	// Call makes one deny-all helper call under ctx's usage tag.
 	Call func(ctx context.Context, persona, prompt string) (string, error)
 	// Ledger finds the usage row of a lost attempt, if one was written.
@@ -85,15 +89,26 @@ type Reviewer struct {
 // New is the Reviewer the Agent runs.
 func New() *Reviewer {
 	return &Reviewer{
-		Now:      time.Now,
-		Enabled:  uiprefs.MemoryReviewEnabled,
-		Snapshot: memoryx.ReviewSnapshotFor,
+		Now:         time.Now,
+		Enabled:     uiprefs.MemoryReviewEnabled,
+		AutoEnabled: uiprefs.MemoryReviewAuto,
+		Snapshot:    memoryx.ReviewSnapshotFor,
 		Call: func(ctx context.Context, persona, prompt string) (string, error) {
 			return chatx.OneShotDenyAll(ctx, usagex.FeatureMemoryReview, chatx.OneShotShort, persona, prompt)
 		},
 		Ledger:  ledgerSpend,
 		Backoff: DefaultBackoff,
 	}
+}
+
+// allowed says whether a review with this trigger may start or continue now. It is asked before a
+// window is claimed and again just before the helper call, so switching automatic review off stops
+// the next claim and the next call; a call already running is not interrupted (see Loop).
+func (r *Reviewer) allowed(trigger string) bool {
+	if !r.Enabled() {
+		return false
+	}
+	return trigger != TriggerAuto || r.AutoEnabled == nil || r.AutoEnabled()
 }
 
 func (r *Reviewer) stage(s string) {
@@ -116,7 +131,7 @@ func (r *Reviewer) Review(ctx context.Context, req Request) (Result, error) {
 	if req.Key == "" || req.Session == "" || (req.Trigger != TriggerAuto && req.Trigger != TriggerManual) {
 		return Result{}, errors.New("a review needs a session key, a session name and an auto or manual trigger")
 	}
-	if !r.Enabled() {
+	if !r.allowed(req.Trigger) {
 		return Result{}, ErrDisabled
 	}
 	if !inflight.CompareAndSwap(false, true) {
@@ -207,7 +222,7 @@ func (r *Reviewer) advance(ctx context.Context, run *Run, req Request) (Result, 
 	if run.used() >= MaxAttempts {
 		return r.fail(run, "attempt budget spent")
 	}
-	if !r.Enabled() {
+	if !r.allowed(req.Trigger) {
 		return Result{}, ErrDisabled
 	}
 	if now.Before(run.NotBefore) && req.Trigger != TriggerManual {

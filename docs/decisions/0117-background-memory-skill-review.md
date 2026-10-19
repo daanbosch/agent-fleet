@@ -540,3 +540,22 @@ unchanged.
   Agent shows no name, text, reason or diff.
 
 Follow-ups: none for P2; #2322 and #2323 remain.
+
+**Note (2026-10-19, #2358): automatic review is a separate switch, off by default.** Owner decision; the decisions above
+are unchanged except that decision 1's turn-end loop is no longer armed by `memoryReview` alone.
+
+- **Two settings.** `memoryReview` (`off` / `propose`, with `agentMemory`) enables the review and the manual "Suggest
+  memories now". A new boolean ui-pref `memoryReviewAuto` (missing or non-boolean is `false`) arms the loop on top of it.
+  Someone who had `propose` before this note therefore has no background review until they turn it on.
+- **Off means no claims.** The loop checks the switch at every wake-up, between sessions and between windows, and the
+  Reviewer checks it for an automatic review before it claims a window and again just before the helper call. An open
+  run is not resumed while it is off. A manual review ignores it.
+- **In flight: finish, no retry.** A helper call already running when the switch goes off is not cancelled (cancelling
+  would leave a `dispatched` record with an unknown cost for the next start to settle); its answer is queued as
+  proposals like any other. No further window is claimed, and a call that fails then is not retried while the switch is
+  off (the run waits as `claimed`, and is resumed if the switch is turned on again).
+- **Writing it on needs the member mark** (ADR 0113), like the other ways of arming the review.
+- **Console.** The switch sits under the review mode with its own note: cost, which sessions, the 48 h look-back.
+- **P3 (#2322) is untouched** but its `auto` publish mode and budgets must also require `memoryReviewAuto` for anything
+  the loop starts.
+

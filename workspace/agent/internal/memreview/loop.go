@@ -5,8 +5,12 @@ package memreview
 // so a restart, a stopped workspace or a missed tick only delays a review.
 //
 // A session is considered when ALL of these hold:
-//   - the review switch is on and AF memory is on (checked at every wake-up, and again by the
-//     Reviewer before it calls);
+//   - the review switch is on, AF memory is on and the member's separate automatic-review switch
+//     (memoryReviewAuto, off by default) is on - checked at every wake-up, between sessions and
+//     windows, and again by the Reviewer before it claims and before it calls. Switching automatic
+//     review off lets a helper call already in flight finish (its answer is queued like any other,
+//     a failed one is not retried while the switch is off) and claims nothing after it. A manual
+//     "Review now" needs only the review switch;
 //   - the session has a transcript, is not archived, and its status shows a real end of turn - the
 //     Source decides that from the evidence the status store keeps, never from an idle the Agent
 //     merely assumes - at least Settle ago;
@@ -72,11 +76,14 @@ type Loop struct {
 	Reviewer *Reviewer
 	Source   Source
 	// Enabled is the switch (agentMemory and memoryReview); nil means uiprefs.MemoryReviewEnabled.
-	Enabled  func() bool
-	Now      func() time.Time
-	Settle   time.Duration
-	Interval time.Duration
-	Lookback time.Duration
+	Enabled func() bool
+	// AutoEnabled gates the turn-end loop on top of Enabled; nil means uiprefs.MemoryReviewAutoEnabled,
+	// or, when only Enabled is injected (tests), Enabled itself.
+	AutoEnabled func() bool
+	Now         func() time.Time
+	Settle      time.Duration
+	Interval    time.Duration
+	Lookback    time.Duration
 
 	mu      sync.Mutex
 	running map[string]bool // by session name: a review of it is in progress
@@ -102,6 +109,16 @@ func (l *Loop) enabled() bool {
 		return l.Enabled()
 	}
 	return uiprefs.MemoryReviewEnabled()
+}
+
+func (l *Loop) autoEnabled() bool {
+	if l.AutoEnabled != nil {
+		return l.AutoEnabled() && l.enabled()
+	}
+	if l.Enabled != nil {
+		return l.Enabled()
+	}
+	return uiprefs.MemoryReviewAutoEnabled()
 }
 
 // ensureCtxLocked creates the loop's cancellable context on first use (from Start's parent, or from
@@ -217,7 +234,7 @@ func (l *Loop) Tick(ctx context.Context) {
 	// memory it concerned because the member switched the review off.
 	ReconcileReleases()
 	ReconcileNotices(l.now())
-	if !l.enabled() {
+	if !l.autoEnabled() {
 		return
 	}
 	now := l.now()
@@ -231,7 +248,7 @@ func (l *Loop) Tick(ctx context.Context) {
 	budget := maxSessionsPerTick
 	// Open runs first: they are somebody's claimed window.
 	for _, run := range runs() {
-		if budget == 0 || ctx.Err() != nil || !l.enabled() {
+		if budget == 0 || ctx.Err() != nil || !l.autoEnabled() {
 			return
 		}
 		c, ok := byKey[run.Key]
@@ -248,7 +265,7 @@ func (l *Loop) Tick(ctx context.Context) {
 	// Then the sessions that have settled, oldest end first.
 	sort.SliceStable(cands, func(i, j int) bool { return cands[i].EndedAt.Before(cands[j].EndedAt) })
 	for _, c := range cands {
-		if budget == 0 || ctx.Err() != nil || !l.enabled() {
+		if budget == 0 || ctx.Err() != nil || !l.autoEnabled() {
 			return
 		}
 		if c.EndedAt.IsZero() || now.Sub(c.EndedAt) < l.Settle || now.Sub(c.EndedAt) > l.Lookback {

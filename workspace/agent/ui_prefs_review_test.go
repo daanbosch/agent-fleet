@@ -42,6 +42,11 @@ func TestMemoryReviewNeedsMarkRule(t *testing.T) {
 		{"memory turned off", map[string]any{"agentMemory": true, "memoryReview": "propose"}, map[string]any{"memoryReview": "propose"}, false},
 		{"auto is not a mode yet", map[string]any{}, map[string]any{"agentMemory": true, "memoryReview": "auto"}, false},
 		{"wrong types", map[string]any{}, map[string]any{"agentMemory": "true", "memoryReview": true}, false},
+		{"auto switched on", map[string]any{"agentMemory": true, "memoryReview": "propose"}, map[string]any{"agentMemory": true, "memoryReview": "propose", "memoryReviewAuto": true}, true},
+		{"auto switched on before the review", map[string]any{}, map[string]any{"memoryReviewAuto": true}, true},
+		{"auto stays on", map[string]any{"memoryReviewAuto": true}, map[string]any{"memoryReviewAuto": true, "iconSet": "x"}, false},
+		{"auto switched off", map[string]any{"memoryReviewAuto": true}, map[string]any{"memoryReviewAuto": false}, false},
+		{"auto wrong type", map[string]any{}, map[string]any{"memoryReviewAuto": "true"}, false},
 	} {
 		if got := memoryReviewNeedsMark(tc.before, tc.after); got != tc.want {
 			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
@@ -57,6 +62,7 @@ func TestAPrefsWriteThatArmsTheMemoryReviewNeedsTheMemberMark(t *testing.T) {
 		"mode on":              {`{}`, `{"memoryReview":"propose"}`},
 		"mode on, memory on":   {`{}`, `{"agentMemory":true,"memoryReview":"propose"}`},
 		"memory on under mode": {`{"memoryReview":"propose"}`, `{"agentMemory":true,"memoryReview":"propose"}`},
+		"auto on":              {`{"agentMemory":true,"memoryReview":"propose"}`, `{"agentMemory":true,"memoryReview":"propose","memoryReviewAuto":true}`},
 	} {
 		writeUIPrefs(t, tc.before)
 		rec := putPrefs(t, nil, tc.body)

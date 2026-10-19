@@ -57,4 +57,35 @@ describe("MemoryReviewSwitch", () => {
     await mount();
     expect(host.textContent).not.toContain(t("mem.review_needs_memory"));
   });
+
+  it("keeps automatic review a separate switch, off by default, with its own explanation", async () => {
+    await mount();
+    expect(getSettings().memoryReviewAuto).toBe(false);
+    // Choosing the mode does not arm the loop.
+    await act(async () => button(t("mem.review_propose"))!.click());
+    expect(getSettings().memoryReview).toBe("propose");
+    expect(getSettings().memoryReviewAuto).toBe(false);
+    expect(host.textContent).toContain(t("mem.review_auto_switch"));
+    expect(host.textContent).toContain(t("mem.review_auto_note"));
+    // The note names the cost, the sessions it looks at and the look-back.
+    expect(t("mem.review_auto_note")).toMatch(/トークン|tokens/);
+    expect(t("mem.review_auto_note")).toMatch(/48/);
+    const on = button(t("common.on")); // the mode row has no "On": it is the automatic switch
+    expect(on).toBeDefined();
+    await act(async () => on!.click());
+    expect(getSettings().memoryReviewAuto).toBe(true);
+  });
+
+  it("says automatic review needs the review mode", async () => {
+    setSetting("memoryReview", "off");
+    setSetting("memoryReviewAuto", false);
+    await mount();
+    expect(host.textContent).not.toContain(t("mem.review_auto_needs_review"));
+    setSetting("memoryReviewAuto", true);
+    await mount();
+    expect(host.textContent).toContain(t("mem.review_auto_needs_review"));
+    setSetting("memoryReview", "propose");
+    await mount();
+    expect(host.textContent).not.toContain(t("mem.review_auto_needs_review"));
+  });
 });

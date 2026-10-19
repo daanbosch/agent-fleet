@@ -515,16 +515,26 @@ refused.
   How to ask for it, and what is recorded, is in [10 Going further](10-integrations.md#using-agent-fleet-memory-from-an-external-agent).
 
 - **Have finished sessions suggest memories** (setting "Have finished sessions suggest memories", **off by default**;
-  it also needs the switch above): a while after a session has paused (5 minutes), once it has gained 30 turns or 3 of
-  your prompts since its last review, an excerpt of the conversation is read by an agent that has **no tools and no
-  MCP servers**, which lists what looks worth keeping as *proposals*. The excerpt is redacted first (anything that looks
-  like a secret is left out), but it is still sent to the provider of the agent chosen for this feature under
-  **AI assistance**, which can be a different provider from the session's own; it spends tokens (at most 250 calls a
-  day, one at a time), and it does not run while the workspace is stopped. It looks automatically only at sessions whose last turn ended within the last 48 hours; older ones, or what happened while the workspace was stopped, are covered by the session menu's **"Suggest memories now"**. **Nothing reaches memory without your
-  approval**: up to 100 proposals wait under [Changes › Proposed](#changes), where you approve or reject them. When the setting is on, a **Memory review** card appears under AI assistance, where you can pin the
-  agent and model, and each session's **⋯** menu offers **"Suggest memories now"**, which reviews that session
-  immediately. Only agents that can be run with their tools switched off can do the review; if the one you pin cannot,
-  the review does not run rather than falling back to another provider.
+  it also needs the switch above): choosing **Propose** turns the review on, which by itself does nothing in the
+  background. You ask for it from a session's **⋯** menu with **"Suggest memories now"**: an excerpt of the
+  conversation is read by an agent that has **no tools and no MCP servers**, which lists what looks worth keeping as
+  *proposals*. The excerpt is redacted first (anything that looks like a secret is left out), but it is still sent to
+  the provider of the agent chosen for this feature under **AI assistance**, which can be a different provider from the
+  session's own; it spends tokens (at most 250 calls a day, one at a time), and it does not run while the workspace is
+  stopped. **Nothing reaches memory without your approval**: up to 100 proposals wait under
+  [Changes › Proposed](#changes), where you approve or reject them. When the setting is on, a **Memory review** card
+  appears under AI assistance, where you can pin the agent and model. Only agents that can be run with their tools
+  switched off can do the review; if the one you pin cannot, the review does not run rather than falling back to another
+  provider.
+- **Also suggest automatically** (setting "Also suggest automatically", **off by default**, separate from the one
+  above; it works only while **Propose** is chosen): with it on, finished sessions are reviewed in the background
+  without you asking. A session is picked up 5 minutes after it paused, once it has gained 30 turns or 3 of your
+  prompts since its last review, and only if its last turn ended within the last 48 hours; older ones, or what
+  happened while the workspace was stopped, are covered by **"Suggest memories now"**. The cost is the same tokens as
+  above (the 250 calls a day are shared with the manual button), spent with nobody watching. Turning it off stops new
+  reviews right away: a call already running is allowed to finish, and the proposals it brings still wait for your
+  approval, but nothing further is started and a failed call is not retried. People who had **Propose** on before this
+  setting existed start with it off and must turn it on to keep the background review.
 
 ### Memory snapshots
 

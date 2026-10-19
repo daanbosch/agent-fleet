@@ -292,6 +292,22 @@ func MemoryReviewEnabled() bool {
 	return AgentMemory() && MemoryReview() != memoryx.MemoryReviewOff
 }
 
+// MemoryReviewAuto is the member's separate choice to let the turn-end loop claim review windows
+// (ADR 0117 decision 1, ui-prefs memoryReviewAuto). Only a boolean true is on; missing or malformed
+// reads as false, so a member who enabled the review by hand-only use is never opted into
+// background spending. See MemoryReviewAutoEnabled.
+func MemoryReviewAuto() bool {
+	v, _ := Read()["memoryReviewAuto"].(bool)
+	return v
+}
+
+// MemoryReviewAutoEnabled is whether the automatic loop may claim or continue a window: the review
+// itself is enabled AND the member turned automatic review on. A manual "Suggest memories now" asks
+// MemoryReviewEnabled alone. Phase P3's `auto` publish mode and budgets must respect this too.
+func MemoryReviewAutoEnabled() bool {
+	return MemoryReviewEnabled() && MemoryReviewAuto()
+}
+
 // SpawnChildLimit is how many children the user lets one session have at a time (ADR 0073
 // decision 6, ui-prefs sessionSpawnChildLimit). It returns the stored number RAW — 0 for missing
 // or malformed — because the range and the fallback belong to session.NormalizeSpawnChildLimit,
