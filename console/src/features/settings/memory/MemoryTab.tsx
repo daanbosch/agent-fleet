@@ -15,6 +15,7 @@ import { Button } from "../../../ui/Button.tsx";
 import { EmptyState } from "../../../ui/EmptyState.tsx";
 import { useT } from "../../../lib/i18n/index.ts";
 import { ViewNav, useSectionView, type ViewDef } from "./viewNav.tsx";
+import { useReviewStatus } from "./memoryReviewQueue.ts";
 import { AgentMemoryStatus } from "./views/AgentMemoryStatus.tsx";
 import { MemoriesView } from "./views/MemoriesView.tsx";
 import { ChangesView } from "./views/ChangesView.tsx";
@@ -36,9 +37,18 @@ export function MemoryTab() {
   const bump = () => setReload((n) => n + 1);
   const [view, setView] = useSectionView(MEMORY_SECTION, VIEWS, running ? "memories" : "settings", running);
 
+  // The background review's queue: its length is the count beside "Changes".
+  const { status: review, poll } = useReviewStatus(running, reload);
+  const proposed = review?.pending ?? 0;
+
   const defs: ViewDef[] = [
     { key: "memories", label: tr("mem.view_memories") },
-    { key: "changes", label: tr("mem.view_changes") },
+    {
+      key: "changes",
+      label: tr("mem.view_changes"),
+      count: proposed,
+      ariaLabel: tr("mem.view_changes_count", { n: proposed }),
+    },
     { key: "importexport", label: tr("mem.view_importexport") },
     { key: "settings", label: tr("mem.view_settings") },
   ];
@@ -49,7 +59,7 @@ export function MemoryTab() {
       <ViewNav label={tr("mem.views_label")} views={defs} value={view} onChange={setView} prefix="mem-af" />
       <div role="tabpanel" id="mem-af-panel" aria-labelledby={`mem-af-tab-${view}`} className="mem-view">
         {view === "settings" ? (
-          <AgentSettingsView />
+          <AgentSettingsView running={running} />
         ) : !running ? (
           <EmptyState icon="archive" title={tr("mem.ws_required_title")} hint={tr("mem.ws_required_hint")}>
             <Button icon="play" disabled={wsStartBusy(wsState)} onClick={() => void startWs()}>
@@ -57,7 +67,7 @@ export function MemoryTab() {
             </Button>
           </EmptyState>
         ) : view === "changes" ? (
-          <ChangesView reload={reload} onChanged={bump} />
+          <ChangesView reload={reload} onChanged={bump} review={review} poll={poll} />
         ) : view === "importexport" ? (
           <ImportExportView reload={reload} onChanged={bump} />
         ) : (

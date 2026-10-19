@@ -65,7 +65,10 @@ type ReviewSnapshot struct {
 	Session string
 	Kind    string
 	// HasProject is false for a session outside any working copy: only user scope exists for it.
+	// ProjectID names the project (the store's own id) so a proposal can be applied later without
+	// the session.
 	HasProject bool
+	ProjectID  string
 	// Entries are in memory_index order: pinned, then guidance types, then most used, then newest.
 	Entries []ReviewEntry
 	// Withheld counts files left out because they failed the store's own scan or could not be read.
@@ -87,6 +90,9 @@ func ReviewSnapshotFor(sessionName string) (ReviewSnapshot, error) {
 	agentMemMu.RLock()
 	defer agentMemMu.RUnlock()
 	out := ReviewSnapshot{Session: c.Session, Kind: c.Kind, HasProject: c.Project != nil}
+	if c.Project != nil {
+		out.ProjectID = c.Project.ID
+	}
 	var all []agentMemEntry
 	for _, scope := range agentMemScopes(c) {
 		es, withheld, err := agentMemLoadScope(scope, c)

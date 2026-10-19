@@ -67,7 +67,7 @@ func memoryTools() []mcpTool {
 	return []mcpTool{
 		{
 			name: "memory_projects", minScope: scopeRead,
-			desc:   "List the projects of the member's Agent Fleet memory (id, display name, repository, memory count). Pass an id as `project` to the other memory tools. Needs \"Use AF memory from outside Agent Fleet\" in Settings > Agent memory; the workspace must be running.",
+			desc:   "List the projects of the member's Agent Fleet memory (id, display name, repository, memory count). Pass an id as `project` to the other memory tools. Needs \"Use AF memory from outside Agent Fleet\" in Settings > Agent memory, and the tenant administrator must allow it; the workspace must be running.",
 			schema: map[string]any{"type": "object", "properties": map[string]any{}},
 			run: func(ctx context.Context, a API, res *Resolved, _ map[string]any) (string, error) {
 				return a.memoryCall(ctx, res, "GET", "/agents/memory/external/projects", nil)
@@ -163,6 +163,24 @@ func memoryTools() []mcpTool {
 			},
 		},
 	}
+}
+
+// tenantAllowsExternalMemory reports the tenant-wide switch (#2318) of the tenant behind the PAT's
+// membership, read live so an administrator's change applies to the next list or call. When in
+// doubt it answers false: a membership that is gone or a store that cannot answer must not expose
+// the member's memory.
+func (a API) tenantAllowsExternalMemory(ctx context.Context, prin *mcpPrincipal) bool {
+	ms, err := a.cp.Store().ListMemberships(ctx, prin.identityID)
+	if err != nil {
+		return false
+	}
+	for _, m := range ms {
+		if m.MembershipID == prin.membershipID {
+			on, err := a.cp.Store().GetTenantExternalMemory(ctx, m.TenantID)
+			return err == nil && on
+		}
+	}
+	return false
 }
 
 func setIf(q url.Values, k, v string) {

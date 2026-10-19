@@ -127,6 +127,12 @@ type agentMemCaller struct {
 	Project *agentMemProject // nil: the session has no working copy, so user scope only
 	// trailers go on the commit of a write this caller makes (the external client's name).
 	trailers []string
+	// noRevival makes a create refuse a name that was forgotten or ever existed (the background
+	// review never revives a memory the member or an agent forgot, ADR 0117 decision 5), judged
+	// inside the store lock the save holds. keepKinds makes an update keep the kinds the memory
+	// already has instead of taking the request's. Both are set by the review's publish only.
+	noRevival bool
+	keepKinds bool
 }
 
 // agentMemResolveCaller looks the calling session up. An empty name is an author AF cannot
@@ -1000,6 +1006,11 @@ func agentMemSave(c agentMemCaller, req agentMemSaveReq, now time.Time) (agentMe
 		return agentMemWriteResult{}, memoryErrf(http.StatusNotFound, errCodeMemoryNotFound,
 			"the memory does not exist (it may have been forgotten); save it with revision 0 to create it")
 	case !exists:
+		if c.noRevival {
+			if err := agentMemRefuseRevival(rel, req.Name); err != nil {
+				return agentMemWriteResult{}, err
+			}
+		}
 		if base, err = agentMemTombRevision(rel, req.Name); err != nil {
 			return agentMemWriteResult{}, err
 		}
@@ -1014,6 +1025,9 @@ func agentMemSave(c agentMemCaller, req agentMemSaveReq, now time.Time) (agentMe
 	if exists {
 		e.Created, e.Source, e.SourceHash = cur.Entry.Created, cur.Entry.Source, cur.Entry.SourceHash
 		e.Pinned = cur.Entry.Pinned
+		if c.keepKinds {
+			e.Kinds = cur.Entry.Kinds
+		}
 	}
 	data := agentMemRender(e)
 	repoRel := rel + "/" + req.Name + ".md"
@@ -1093,6 +1107,10 @@ func agentMemForget(c agentMemCaller, req agentMemForgetReq, now time.Time) (age
 			"the memory is at revision %d, not %d; read it again before forgetting it", cur.Entry.Revision, req.Revision)
 	}
 	repoRel := rel + "/" + req.Name + ".md"
+	base, err := forgetIntent(rel, req.Name)
+	if err != nil {
+		return agentMemWriteResult{}, err
+	}
 	if err := agentMemWriteTomb(rel, req.Name, cur.Entry.Revision); err != nil {
 		return agentMemWriteResult{}, err
 	}
@@ -1102,6 +1120,7 @@ func agentMemForget(c agentMemCaller, req agentMemForgetReq, now time.Time) (age
 		return agentMemWriteResult{}, err
 	}
 	agentMemClearUsage(rel, req.Name)
+	forgetDone(rel, req.Name, base)
 	return agentMemWriteResult{Name: req.Name, Scope: req.Scope, Revision: cur.Entry.Revision, Commit: rev, Deleted: true}, nil
 }
 

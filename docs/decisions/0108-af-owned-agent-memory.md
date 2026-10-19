@@ -885,3 +885,21 @@ Follow-ups: #2324.
 Update (2026-10-18, #2324 PR 4): the label landed as "Unforget" (`mem.br_unforget`, ja 忘却を取り消す). The same pass
 hid the `agent memory` rows in Memory snapshots > History behind "Show Agent Fleet memory writes", since Agent memory >
 Changes lists those writes already.
+
+Update (2026-10-18, #2324): the view-nav is always a tablist. The phone-width select is gone; at narrow widths the tabs stay on one row and scroll sideways, with arrow-key, Home and End navigation.
+
+## Note (2026-10-19): a tenant-level switch for outside access (#2318)
+
+Decision 2 left "a tenant-level admin switch can disable the feature" open, and the limits paragraph above says there is
+none. This note records the one that was added; the decisions above are unchanged and the member-level setting is not
+redesigned.
+
+- **Storage.** `tenant.external_memory` (migration 0103 SQLite, 0088 Postgres), `1` by default so every existing tenant
+  behaves as before, and the member's `externalMemory` setting still starts off.
+- **Enforcement at the CP.** `/mcp` does not list the six memory tools when the tenant's switch is off, and
+  `mcpToolCall` resolves tools from the same list, so a call by name is refused as an unknown tool. The switch is read
+  live per request from the tenant behind the PAT's membership; when it cannot be read the tools are withheld. The
+  Agent's own check of the member setting is unchanged.
+- **Admin surface.** `GET`/`PUT /api/admin/tenants/{slug}/external-memory` for the tenant administrator, shown in tenant
+  settings as "External memory access" and audited as `tenant.external_memory` (`enabled=true|false`). Guide:
+  `admin/08-external-memory`.

@@ -20,6 +20,7 @@ import type { Member, Tenant } from "../parts/adminShared.ts";
 import { TenantLoginRules, TenantLoginRulesView } from "./tenantLoginRules.tsx";
 import { TenantSignInMethods } from "./tenantSignInMethods.tsx";
 import { PoolBudgetHint, type PoolBudget } from "./ec2Pool.tsx";
+import { TenantExternalMemoryView } from "./tenantExternalMemory.tsx";
 import { TenantNetworkView } from "./tenantNetwork.tsx";
 import { TenantLimitBoardView } from "../../limits/TenantLimitBoardView.tsx";
 import { TenantBranchRulesView } from "./tenantBranchRules.tsx";
@@ -62,6 +63,8 @@ export function tenantScopeGroups(opts: { cost: boolean; engines?: boolean }): S
     ["branch-rules", "tenant.tab_branch_rules"],
     // Defaults for members' Console (ADR 0114 decision 8): the agent the first-run card names.
     ["member-defaults", "tenant.tab_member_defaults"],
+    // Whether members may use Agent Fleet memory from outside Agent Fleet (#2318).
+    ["external-memory", "tenant.tab_external_memory"],
     // The reduced engine panel (ADR 0072 open question 11). Created only where the operator
     // granted this tenant `allow_engine_ingest` — like the cost item above, the item does not
     // exist rather than existing and being hidden, because the CP answers 403 without the
@@ -567,6 +570,7 @@ export function TenantScopeBody({
   if (section === "mcp") return <McpAdminView key={slug} tenants={one} />;
   if (section === "branch-rules") return <TenantBranchRulesView key={slug} slug={slug} />;
   if (section === "member-defaults") return <TenantMemberDefaultsPanel key={slug} slug={slug} />;
+  if (section === "external-memory") return <TenantExternalMemoryView key={slug} slug={slug} />;
   // tenant is passed because this view carries two toggles, "accept" and "show as a button"
   // (docs/log/61 §61.17.5). Only a super_admin can flip them, and the rules PUT stays fixed at
   // withSuperAdmin (decision 19). onChanged reloads the four columns.

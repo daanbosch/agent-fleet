@@ -52,7 +52,7 @@ func TestReviewSnapshotReadsWhatTheSessionSeesAndCountsNoUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snap.Kind != "codex" || !snap.HasProject {
+	if snap.Kind != "codex" || !snap.HasProject || snap.ProjectID != claudeC.Project.ID {
 		t.Fatalf("snapshot = %+v", snap)
 	}
 	var names []string

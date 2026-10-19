@@ -277,8 +277,8 @@
 }
 
 /* The view-nav and status header the two memory entries share (viewNav.tsx). Tabs at desktop
-   widths; at phone width the same choice is a select, so a long label set never wraps into
-   a ragged block. */
+   widths. The tabs stay one row at every width and scroll sideways when the labels do not fit,
+   so a long label set never wraps into a ragged block. */
 .mem-status {
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -305,7 +305,9 @@
 .mem-viewnav-tabs {
   display: flex;
   gap: 4px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
   border-bottom: 1px solid var(--border);
 }
 
@@ -316,16 +318,13 @@
   background: none;
   padding: 6px 10px;
   color: var(--muted);
+  white-space: nowrap;
+  flex: none;
 }
 
 .mem-viewnav-tab.active {
   color: var(--fg);
   border-bottom-color: var(--accent);
-}
-
-.mem-viewnav-select {
-  display: none;
-  width: 100%;
 }
 
 .mem-view {
@@ -335,13 +334,11 @@
 }
 
 @media (max-width: 760px) {
-  .mem-viewnav-tabs {
-    display: none;
+  .mem-viewnav-tab {
+    padding: 6px 8px;
+    min-height: 40px;
   }
 
-  .mem-viewnav-select {
-    display: block;
-  }
   /* Two panes do not work at a narrow width (phone, tablet portrait), so stack them. */
   .mem-body {
       grid-template-columns: 1fr;
@@ -707,4 +704,50 @@
 .mem-ie-card h4,
 .mem-ie-card p {
   margin: 0;
+}
+
+/* The count beside a view's label (proposals waiting for a decision). */
+.mem-viewnav-count {
+  display: inline-block;
+  margin-left: 6px;
+  min-width: 1.4em;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 0.8em;
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* The review's proposals (Changes > Proposed). */
+.mem-changes-sub {
+  margin-bottom: 8px;
+}
+
+.mem-prop-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.mem-prop-why {
+  margin: 8px 0 0;
+}
+
+.mem-prop-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.mem-run-report {
+  margin: 8px 0;
+}
+
+.mem-run-report ul {
+  margin: 4px 0 0;
+  padding-left: 1.2em;
 }

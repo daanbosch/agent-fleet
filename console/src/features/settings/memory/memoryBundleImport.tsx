@@ -1,5 +1,5 @@
 // BundleAfPanel — the one-shot import of AF memory out of a memory bundle (#1983, ADR 0108). The
-// generic bundle receive (the same upload Memory snapshots > Export / import makes) keeps the
+// generic bundle receive (the same upload Memory snapshots > Export & import makes) keeps the
 // file's lineage under an import id; its apply never writes AF memory (no secret scan), so this is
 // where it is brought in: previewed first, project by project, then sent in batches of 50.
 // BundleImportWizard is the Import & export entry: it takes the file in and hands the import id on.
@@ -327,7 +327,7 @@ export function BundleImportWizard({ onChanged, onClose }: { onChanged: () => vo
 }
 
 /**
- * The pointer Memory snapshots > Export / import shows under a received bundle that carries Agent
+ * The pointer Memory snapshots > Export & import shows under a received bundle that carries Agent
  * Fleet memory. The restore there never writes it (no secret scan); the import lives in Agent
  * memory > Import & export. Nothing is drawn for a bundle without it.
  */

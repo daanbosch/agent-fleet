@@ -377,3 +377,213 @@ turn-end evidence and "Review now". Nothing publishes in any of them. Where the 
 - **`memoryReview` needs `agentMemory` too**, and `auto` reads as `off` until P3 defines it.
 
 Follow-ups: #2320 (B and C), #2321, #2322.
+
+**Note (2026-10-18, #2320): part B of P1 (run state, one helper call, pending queue) fixes these readings.**
+Nothing publishes and nothing triggers a review yet.
+
+- **State lives in `af-memory-review/` beside the memory store's mount**, outside the memory repo: `runs/`,
+  `watermark/`, `daily.json`, `pending/`, `rejected/`. A run is keyed by the session identity and the window end,
+  created `claimed` before any call, `dispatched` before each call, `answered` once a validated reply is kept, and
+  ends `done` or `failed`. At most one run is open per session; a second trigger resumes it instead of claiming
+  another window, and "Review now" ignores the backoff but not the attempt budget, the daily cap or the
+  in-flight limit.
+- **Budget:** one call and at most one retry per window. A call that was never sent (no deny-all backend) spends
+  neither an attempt nor a daily call. A reply the scan refuses is not retried. When the budget is spent the run
+  ends `failed` and the watermark moves past the window; so does a window the transcript can no longer rebuild.
+  Failure reasons come from a closed vocabulary: nothing a model or a process printed is stored.
+- **Recovery:** a `dispatched` attempt found after a restart is closed as `lost` and linked to its ledger row when
+  one exists, else marked cost-unknown, then counted against the budget. An `answered` run is queued without a
+  call, with proposal ids derived from the run, so a stop mid-queueing duplicates nothing; a proposal that got a
+  decision in the meantime is remembered by id (without text) until the run ends, so the replay does not bring it
+  back, and a decision also blanks that operation's text in a run that has not ended, so a decision that reports
+  success leaves no copy. A run ends before the watermark moves, and the next start repairs the watermark from the
+  newest ended run, so a stop between the two cannot make a window reviewable again or shift the next one; an
+  ended run is not pruned until its session's watermark has reached its window. The proposal text
+  leaves the run record in the write that ends the run. Every record is written durably (file synced, renamed,
+  directories synced, every newly created directory included) before it is relied on, and a removal that fails is
+  an error. A lost attempt is linked to a usage row only when exactly one call of the session falls in its window
+  and no earlier attempt could own that second, never to a call another attempt is already linked to, and not when an
+  earlier attempt of the session was lost in the last ten minutes (its end is unknown); otherwise it is cost-unknown.
+- **Bounds:** one review in flight in the Agent; 250 helper calls per local day (counted and persisted before the
+  call, so a crash over-counts rather than under-counts); a call no backend could run does not count and adds no
+  attempt to the record. At most 100 pending proposals (the journal's figure was 20 queued sessions, a policy
+  assumption; the owner was asked for this number and **confirmed it on 2026-10-18**, to be revisited from P1
+  traffic, #2333). The bound holds inside the insert; a reply that does not fit stays `answered` and is queued as room
+  appears, without another call.
+- **Queue retention (decision 8):** pending text is deleted on any decision; a rejection keeps only the content
+  hash (operation, scope, name, type, description, body and the project) until the memory is forgotten
+  (`ForgetMemory`); a rejected idea and an identical pending one are not queued again.
+
+Follow-ups: #2320 (part C), #2321, #2322.
+
+**Note (2026-10-18, #2320): part C of P1 (the trigger, "Review now" and the setting's control) fixes these
+readings.** Still nothing publishes: proposals only accumulate in the pending queue until P2 (#2321) adds the
+approval screen, which the setting's own text says.
+
+- **The loop** wakes at Agent start and every minute (and when the switch is turned on), and checks the switch
+  (`agentMemory` and `memoryReview`) at every wake-up and again before each call. It considers a session with a
+  transcript that is not archived, whose newest turn ended at least 300 s ago, with at least 30 new turns or
+  3 new user prompts after its watermark (a displayable row counts as a turn; compaction summaries do not). A run
+  that is open is resumed whatever the thresholds say, but only its claimed window: what came after it waits for
+  its own turn end, settle time and threshold. At most 5 sessions and 10 windows per trigger are handled
+  per wake-up; a global limit (no deny-all backend, daily cap, full queue, another review in flight) ends the
+  wake-up and is logged once an hour.
+- **Turn-end evidence** is the status store's own: a persisted `TurnEnd` (the hook kinds and the managed
+  drivers), or, for agy, copilot, cursor and kiro, which report nothing, an end the loop observed itself by
+  polling the kind's live source and recording it with `status.RecordTurnEnd`, bound to the status record's
+  revision. It never persists an idle, so the completion notification's gate is untouched. A kind with a
+  transcript and neither (a muse TUI session, say) gets no automatic review: it fails closed, and "Review now"
+  works for it.
+- **Cost guards, confirmed by the owner on 2026-10-18 (revisited from P1 traffic, #2333):** only sessions whose last turn ended within 48 hours are looked at
+  automatically (turning the setting on must not spend the daily cap on every old session at once; older ones are
+  left to "Review now"), and a turn end that was looked at is remembered durably so a restart does not parse
+  every transcript again. A session is identified by its status id and creation time, so a recreated session does
+  not inherit the old watermark. The consequence of the 48 hours is stated to the member (the setting's text and
+  the guide): after a longer stop, or for an older session, nothing is picked up automatically and "Review now"
+  is the way.
+- **"Review now"** (`POST /agents/memory-review/run`) is a member action: it answers only the Control Plane's
+  member-origin mark (ADR 0113), the CP signs and audits it (`memory.review.run`, session-name hint only), and it
+  starts the review in the background and answers 202; `GET /agents/memory-review?session=` reports counts and
+  states, never text. It ignores the settle time, the thresholds and the backoff and nothing else.
+- **The setting** is in Settings > Agent memory > Settings and discloses that a redacted excerpt goes to the
+  provider the AI-assist setting picks for the feature, which may differ from the session's own, that it costs
+  tokens, and that nothing is saved unapproved. The AI-assist card appears while the setting is on.
+
+- **Arming the review needs the member's mark.** AGENT_TOKEN, which every session's shell holds, can also write the
+  Agent's settings, so a settings write that would make the review enabled (the mode becomes `propose`, or AF
+  memory is switched on while it is) is accepted only with the Control Plane's member-origin mark (ADR 0113), which
+  the CP now puts on every relayed settings write. Turning the review off, or any other change, needs nothing.
+- **"Review now" always answers.** How the last manual review ended (`done`, `empty` for nothing new after the
+  watermark, `unreadable`, or the code of the refusal that stopped it) is part of the status, so a review that
+  changes no run record can still be waited for. It also totals the windows, proposals queued and failed windows over
+  every window that review worked through, so a first window's proposal is not lost behind an empty second one or
+  a refusal part way.
+- **Shutdown** stops the loop taking work and cancels the helper call in flight, automatic or manual, so no CLI is
+  left behind; the interrupted attempt stays `dispatched` for the next start to settle.
+
+Follow-ups: #2321, #2322.
+
+**Note (2026-10-19, #2321): phase P2a (the Agent and Control Plane half of approval) fixes these readings.** The
+Console half (P2b) follows. The decisions above are unchanged.
+
+- **Who may decide.** Approve, reject, reject all and "revert this run" (`POST /agents/memory-review/proposals/approve`,
+  `…/proposals/reject`, `…/proposals/reject-all`, `…/runs/revert`) answer only a request carrying the Control Plane's
+  member-origin mark (ADR 0113); the CP signs and audits them (`memory.review.approve`, `.reject`, `.reject_all`,
+  `.revert_run`; the hint is a 20-hex proposal or run id and nothing else). The handlers check the mark themselves as well
+  as through the wrapper, no af MCP tool names these routes (a test keeps it so), and the review loop never calls the
+  functions behind them. The queue list is member-only as well (`POST …/proposals/list`, a POST because the mark signs
+  JSON requests, not audited because it changes nothing): a proposal is text the model drew from other sessions'
+  conversations that the member has not chosen to publish, so a session holding only AGENT_TOKEN must not read it, unlike
+  the change list, which shows memory that is already published. What the list returns is scanned again with the current
+  rules (they grow after a proposal is queued); a proposal that matches now is returned without its name, text, reason and
+  diff, flagged `withheld`, and can still be rejected. The count for a badge is the existing `pending` of
+  `GET /agents/memory-review` (the queue length, stale proposals included, since each still needs a decision); it carries no
+  text.
+- **Approval publishes through `agentMemSave` / `agentMemForget`**, as author kind `review`, the reviewed session as author
+  session (also when it is gone: a project that already has memory is read from the store, one that does not is refused),
+  with `AF-Review-Run: <run id>` and one more trailer, `AF-Review-Proposal: <proposal id>`. The second is what makes a retry
+  harmless: a stop between the commit and the removal of the queue entry leaves the proposal pending, and the next approval
+  finds the commit by that trailer and writes nothing. An `update` keeps the kinds the memory has (the model is not shown
+  them). A secret is refused at approval again, by the store's own scan. An approval that published but could not clear the queue
+  entry answers 500 `decision_incomplete`; the CP audits it as an approval (detail `published_queue_not_cleared`) because
+  the commit exists, and a retry finishes the clearing.
+- **Stale and forgotten.** A base revision that is no longer the memory's, a memory that is gone or has appeared, is
+  `stale`; a `create` over a name with a tombstone, or with any change in the history (the tombstone can be lost with its
+  directory, the history cannot), is `forgotten`, checked inside the store lock of the save. Neither writes anything. The
+  proposal stays in the queue, marked, with its text, because the member still has to decide; rejecting it removes the text
+  and keeps the hash like any rejection (a stale idea is not offered again unchanged). The list computes the state from the
+  live store with the same rule approval applies (history included, not only the tombstone, also when the project's whole
+  directory is gone), so a proposal made stale by an
+  edit shows as stale before anyone presses approve; a reason an approval attempt recorded and the store cannot show again
+  (secret, unknown project, forgotten) is kept.
+- **Rejected hashes are released, durably.** P1 kept the hash until the memory is forgotten but nothing told the queue when
+  that happened. `memoryx` now calls two hooks around a forget, an undone creation or a move out of a project (all three
+  paths alike). Before the commit, the review writes down, durably, that a release is owed, one note per forget (keyed by
+  the memory's newest change at that moment, `base`) and only when a rejection about that memory exists; if the note cannot
+  be made durable the hook refuses and the forget does not happen, because a commit nothing could recover the release from
+  is worse than a forget that is tried again. With no rejection nothing is written, so a forget does not depend on the
+  review's directory. After the commit the review releases and strikes the note. A release that fails, or a stop between
+  the commit and the hook, leaves the note, and every wake-up of the loop (also while the review is off) finishes it. Whether
+  a note's forget committed is read from the memory's history (a forget, or a revert that deleted it, newer than `base`),
+  never from whether the memory exists, since an explicit save may have re-created it; a forget that did not commit owes
+  nothing and its note is dropped. A base that is no longer in the history (a purge renames the later commits) leaves the
+  note in place, even when an older forget of an earlier incarnation is still visible: visible, not guessed. The reconcile acts only on the note it read: a newer one under the same key is left alone. Only rejections made
+  up to a note's time are released; one made after the forget is about the memory as it is then. Notes still owed are
+  counted in the status (`releasePending`).
+- **"Revert this run"** reverts, as new commits by the member with `AF-Revert-Of`, each commit carrying the run id that is
+  still its memory's newest change and whose memory is exactly as it left it. The answer is per commit: `reverted`,
+  `already` (an earlier revert of this run undid it), `conflict` (`edited`: a later change exists; `blocked`: the revert
+  itself was refused, for example the earlier history was purged), `failed` (the store could not do it now). Running it
+  again retries only what is left. A creation that is reverted leaves a tombstone, so a later review does not bring it back.
+  The change list's rows do not carry the run id yet: P2b adds it (`reviewRun`) together with the Console type the wire
+  contract test requires, so the Console half and its type land in one change.
+- **Not gated by the `agentMemory` switch.** Like the other member routes, deciding on what is already queued works while
+  the switch is off.
+
+Follow-ups: #2321 (P2b, the Console).
+
+**Note (2026-10-19, #2321): phase P2b (the Console half of approval) fixes these readings.** The decisions above are
+unchanged.
+
+- **Where.** Settings > Agent memory > Changes gets a second part, **Proposed**, beside the published list; both are shown
+  while the review is on or proposals are still waiting (switching the review off does not hide what it already made),
+  and the view opens on **Proposed** when some are waiting. The queue length is the count beside **Changes** in the view
+  bar and beside **Proposed**; a status the Agent could not give reads as unknown, never as 0. There is no banner in the
+  session mirror (owner answer 4).
+- **The notification** is a workspace-level notice `memory-review` with counts only (`queued`, `pending`), raised once per
+  run that leaves proposals in the queue (the same outbox as `memory-sync`, keyed by the run id so a replayed run does not
+  repeat it). It is in the "Other notices" row of the notification settings, and a click opens Settings > Agent memory >
+  Changes.
+- **The run id reaches the change list** as `reviewRun` on the rows of commits the review published, which is what "revert
+  this run" takes; the button is on such a row and reports per commit, naming the memories left as conflicts and why.
+- A proposal that cannot be approved (stale, forgotten, secret, invalid) offers only reject, and a proposal withheld by the
+  Agent shows no name, text, reason or diff.
+
+Follow-ups: none for P2; #2322 and #2323 remain.
+
+**Note (2026-10-19, #2358): automatic review is a separate switch, off by default.** Owner decision; the decisions above
+are unchanged except that decision 1's turn-end loop is no longer armed by `memoryReview` alone.
+
+- **Two settings.** `memoryReview` (`off` / `propose`, with `agentMemory`) enables the review and the manual "Suggest
+  memories now". A new boolean ui-pref `memoryReviewAuto` (missing or non-boolean is `false`) arms the loop on top of it.
+  Someone who had `propose` before this note therefore has no background review until they turn it on.
+- **Off means no claims.** The loop checks the switch at every wake-up, between sessions and between windows, and the
+  Reviewer checks it for an automatic review before it claims a window and again just before the helper call. An open
+  run is not resumed while it is off. A manual review ignores it.
+- **Ordering.** The prefs write is serialized with the Reviewer's two boundaries (claiming a window; recording the dispatch) by one short mutex, never held across a helper call. A boundary that passed first is in flight and finishes; every one after an "off" write sees it, so nothing new starts.
+- **In flight: finish, no retry.** A helper call already running when the switch goes off is not cancelled (cancelling
+  would leave a `dispatched` record with an unknown cost for the next start to settle); its answer is queued as
+  proposals like any other. No further window is claimed, and a call that fails then is not retried while the switch is
+  off (the run waits as `claimed`, and is resumed if the switch is turned on again).
+- **Writing it on needs the member mark** (ADR 0113), like the other ways of arming the review.
+- **Console.** The switch sits under the review mode with its own note: cost, which sessions, the 48 h look-back.
+- **P3 (#2322) is untouched** but its `auto` publish mode and budgets must also require `memoryReviewAuto` for anything
+  the loop starts.
+
+**Note (2026-10-19, #2357): decision 3's deny-all contract was checked for the other one-shot kinds; none could be
+qualified, and each is refused for a recorded reason.** The decision is unchanged. The test for a kind is the one claude
+passes: the run's own output must say what the run has (tools and MCP servers), a probe with the same argv and environment
+must show it empty before the transcript is sent, and the real run is checked again. A switch in the argv is not evidence
+(the Chrome finding above). Where no such inventory was shown, the kind fails closed: a feature pin on it fails the review,
+and the shared order skips it. **"Refused" here means "no inventory was shown by this investigation", not "removal is
+impossible".** Each line says what the evidence was: *help* (the CLI's help text), *debug* (a command run here),
+*earlier* (a measurement already in the repository, not re-run), *not run* (nothing was started against a model).
+
+| kind | what was found about removing tools / MCP | what was found about reading the inventory | evidence | result |
+|---|---|---|---|---|
+| claude | `--tools ""`, empty strict MCP config, `--no-chrome` | init event lists `tools` and `mcp_servers` | earlier (ADR notes above) | **qualifies** (unchanged) |
+| codex 0.163.0 | no flag that removes built-in tools was found; `-s read-only` limits the shell | `codex debug prompt-input` renders messages only (5 items, the same count with `features.shell_tool=false`); `codex exec --json` was not run, so whether it lists tools is unknown | help, debug; `exec --json` not run | refused |
+| opencode 2.0.32 | the one-shot config sets `permission` edit/bash deny and, on 2.x, hard-deny policies for shell, edit, write and subagent (`chat_providers.go`); other built-in tools are not shown to be absent, and the user's global MCP servers merge in (`debug config` listed one planted in the global config) | `debug` offers `agents`, `config`, `paths`; none lists the run's tools; the inline config is not shown by `debug config` | help, debug; no run | refused |
+| cursor 2026.10.16 | `--mode ask` is documented as read-only, not tool-less | stream-json `system/init` is documented with session id, model and permission mode, no tool list | help; earlier (docs/log/40); not run (no login) | refused |
+| agy | no switch is known from the driver | the driver reads plain text from `-p`; no inventory is known. `agy --version` aborts in this container (entropy check), so nothing was probed | not run | refused |
+| muse 1.4.7 | `--disable-shell`, `--disable-write`, `--disable-web-tools` are the removal flags in its help | a `--provider echo` run with the chat flags emitted 24 events of 14 types, none naming a tool or MCP server; a real-provider run was not made, so the echo stream may not reflect it | help, debug (echo); real provider not run | refused |
+
+copilot and kiro are not one-shot kinds and were not examined. What would qualify a kind later: a flag or config that
+removes every built-in tool and every inherited MCP server, and an output (init event, debug subcommand that resolves
+the same configuration, or a protocol handshake) that lists what remains, with the same fail-closed reading as claude's
+stream. In code, a kind qualifies only by having a runner in `denyAllBackends` (`chatx/chat_denyall.go`); the run is
+dispatched on the resolved kind, and `denyAllLimits` keeps the reason for every other one-shot kind, enforced by a test so
+a new kind must be classified. Not verified here: any run of codex, opencode, cursor or agy against a model (no login in
+this probe), so a later attempt should start from the *not run* lines, not treat them as measured dead ends.
+
+Follow-ups: #2357 stays open for the kinds above.

@@ -255,7 +255,8 @@ The page opens with one status line: whether it is on, how many memories in how 
 and a warning, with a link to Settings, when the background sync with Claude Code needs you. Under it are four views:
 **Memories · Changes · Import & export · Settings**. The view you leave open is remembered. While the workspace is stopped
 only **Settings** works (the switches are saved for the next start); the other views offer **Start the workspace**. On a
-phone the view names become a drop-down.
+phone or a tablet in portrait the tabs stay on one row and scroll sideways when they do not all fit; the arrow keys,
+Home and End move between them.
 
 #### Memories
 
@@ -325,6 +326,29 @@ The list shows every change (when, which agent and session, what), newest first.
 you can **revert it** (the earlier text comes back) or **forget the memory**; either is recorded as a new
 change, so it can be undone too. If the text you bring back looks like a secret, you are shown the masked
 findings and asked to confirm.
+
+While **Have finished sessions suggest memories** is on, or while suggestions are still waiting, the view has two
+parts: **Published** (the list above) and **Proposed**, with the number of suggestions waiting beside it. The same
+number sits beside **Changes** in the view bar, and a notification ("N memory suggestions are waiting for your
+approval", under the **Other notices** row of the notification settings) opens this view. If any are waiting, the view opens
+on **Proposed**.
+
+- **Proposed** lists what the background review suggested, oldest first, with the reason it gave and the difference
+  from the memory as it is now. **Nothing in it is in memory yet.** **Approve** publishes it as a change by
+  `review` (the session it was suggested from is shown as the author session); you can undo it like any other change.
+  **Reject** deletes its text and keeps only a fingerprint, so the same suggestion is not made again until that memory
+  is forgotten. **Reject all** rejects every suggestion, and **Reject all from this review** the ones of the review
+  you picked.
+- A suggestion **can't be approved**, only rejected, when the memory has changed since the review looked at it (the
+  difference is against what you have now), when it was forgotten (a review never brings a forgotten memory back), when
+  the suggestion now matches a secret rule (its text is then not shown at all), or when its project is no longer here.
+  Approving also runs the store's secret scan again.
+- On a change the review published, **Undo this review's changes** puts back, as new changes, everything that review
+  published, each memory only if nobody changed it afterwards. A memory that was edited since is left as it is and
+  named in the result (with the reason); running it again retries only what is left.
+- Only you can approve, reject or undo: the Control Plane signs those requests and the workspace refuses them from a
+  session, and the list of suggestions is not readable from a session either. The Control Plane records each decision
+  (without any text) in the audit log.
 
 #### Import & export
 
@@ -490,12 +514,34 @@ refused.
   has no outside access at all.
   How to ask for it, and what is recorded, is in [10 Going further](10-integrations.md#using-agent-fleet-memory-from-an-external-agent).
 
+- **Have finished sessions suggest memories** (setting "Have finished sessions suggest memories", **off by default**;
+  it also needs the switch above): choosing **Propose** turns the review on, which by itself does nothing in the
+  background. You ask for it from a session's **⋯** menu with **"Suggest memories now"**: an excerpt of the
+  conversation is read by an agent that has **no tools and no MCP servers**, which lists what looks worth keeping as
+  *proposals*. The excerpt is redacted first (anything that looks like a secret is left out), but it is still sent to
+  the provider of the agent chosen for this feature under **AI assistance**, which can be a different provider from the
+  session's own; it spends tokens (at most 250 calls a day, one at a time), and it does not run while the workspace is
+  stopped. **Nothing reaches memory without your approval**: up to 100 proposals wait under
+  [Changes › Proposed](#changes), where you approve or reject them. When the setting is on, a **Memory review** card
+  appears under AI assistance, where you can pin the agent and model. Only agents that can be run with their tools
+  switched off can do the review; if the one you pin cannot, the review does not run rather than falling back to another
+  provider.
+- **Also suggest automatically** (setting "Also suggest automatically", **off by default**, separate from the one
+  above; it works only while **Propose** is chosen): with it on, finished sessions are reviewed in the background
+  without you asking. A session is picked up 5 minutes after it paused, once it has gained 30 turns or 3 of your
+  prompts since its last review, and only if its last turn ended within the last 48 hours; older ones, or what
+  happened while the workspace was stopped, are covered by **"Suggest memories now"**. The cost is the same tokens as
+  above (the 250 calls a day are shared with the manual button), spent with nobody watching. Turning it off stops new
+  reviews right away: a call already running is allowed to finish, and the proposals it brings still wait for your
+  approval, but nothing further is started and a failed call is not retried. People who had **Propose** on before this
+  setting existed start with it off and must turn it on to keep the background review.
+
 ### Memory snapshots
 
 Version control over the memory an agent accumulates by itself (claude's auto-memory, codex's memories), so
 "it learned something it shouldn't have" and "when did this go wrong" are fixable after the fact. This is separate from
 [Agent memory](#agent-memory), which is Agent Fleet's own shared memory. The page shows the last snapshot, whether
-automatic snapshots are on and **Snapshot now** at the top, over three views: **History · Targets · Export / import**.
+automatic snapshots are on and **Snapshot now** at the top, over three views: **History · Targets · Export & import**.
 The view you leave open is remembered. It needs the running workspace.
 
 #### History
@@ -518,9 +564,9 @@ The view you leave open is remembered. It needs the running workspace.
 - **Automatic snapshots**: taken a few minutes after an agent stops (nothing is stored if nothing changed).
   "Snapshot now" takes one by hand. On some deployments the operator has disabled automatic snapshots.
 
-#### Export / import
+#### Export & import (Memory snapshots)
 
-- **Export / import**: bundle (full history) or tar.gz (latest only). If what you are about to export looks
+- **Export & import**: bundle (full history) or tar.gz (latest only). If what you are about to export looks
   like it contains secrets, you are warned and asked to confirm first.
   - **Agent Fleet memory from a bundle**: restoring or importing a bundle here never writes Agent Fleet memory
     (the restore has no secret scan). When the bundle you picked carries some, a line under it says "This bundle

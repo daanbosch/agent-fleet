@@ -414,7 +414,7 @@ describe("BundleImportWizard", () => {
   });
 });
 
-// Memory snapshots > Export / import no longer holds the import; it points at Import & export.
+// Memory snapshots > Export & import no longer holds the import; it points at Import & export.
 describe("BundleAfPointer", () => {
   const mountPointer = async () => {
     host = document.createElement("div");

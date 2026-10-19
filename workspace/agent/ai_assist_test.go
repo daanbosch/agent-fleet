@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/chatx"
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memreview"
 )
 
 func aiAssistResolutionCall(t *testing.T) []aiAssistResolutionRow {
@@ -81,8 +82,12 @@ func TestAIAssistResolutionColdCacheIsUnknown(t *testing.T) {
 	writeUIPrefs(t, `{}`)
 	forceAllHeadlessUnavailable(t)
 	for _, r := range aiAssistResolutionCall(t) {
-		if r.Source != "unknown" || r.Kind != "" {
-			t.Fatalf("%s: source=%q kind=%q, want unknown/\"\" on a cold cache", r.Feature, r.Source, r.Kind)
+		want := "unknown"
+		if r.Feature == "memory.review" {
+			want = "unavailable" // its one qualifying kind (claude) is confirmed unreachable, not cold
+		}
+		if r.Source != want || r.Kind != "" {
+			t.Fatalf("%s: source=%q kind=%q, want %s/\"\" on a cold cache", r.Feature, r.Source, r.Kind, want)
 		}
 	}
 }
@@ -195,4 +200,30 @@ func TestAIAssistResolutionOfTheMemoryReviewFollowsTheDenyAllRule(t *testing.T) 
 			}
 		}
 	})
+}
+
+// The memory review status and /ai-assist/resolution answer from one resolution: with no
+// qualifying backend both say "unavailable", and the status carries a state only.
+func TestMemoryReviewStatusAgreesWithTheResolutionWithoutABackend(t *testing.T) {
+	writeUIPrefs(t, `{}`)
+	forceAllHeadlessUnavailable(t)
+	old1, old2 := memreview.ResolveBackend, memreview.WarmBackend
+	memreview.ResolveBackend, memreview.WarmBackend = chatx.ResolveDenyAllCached, chatx.WarmDenyAllKind
+	t.Cleanup(func() { memreview.ResolveBackend, memreview.WarmBackend = old1, old2 })
+
+	var row aiAssistResolutionRow
+	for _, r := range aiAssistResolutionCall(t) {
+		if r.Feature == "memory.review" {
+			row = r
+		}
+	}
+	w := httptest.NewRecorder()
+	memreview.HandleStatus(w, httptest.NewRequest(http.MethodGet, "/agents/memory-review", nil))
+	var st memreview.StatusResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil || w.Code != http.StatusOK {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if row.Source != "unavailable" || st.Backend != memreview.BackendUnavailable || st.BackendKind != "" {
+		t.Fatalf("resolution %+v, status backend %q/%q", row, st.Backend, st.BackendKind)
+	}
 }
