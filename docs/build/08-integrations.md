@@ -267,9 +267,22 @@ those variables in for one `exec`:
     then `jira -c` that file. The files hold no secret.
   - With no config named, the wrapper uses the managed `config.yml`, or else points
     `JIRA_CONFIG_FILE` at `~/.cache/agent-fleet/jira/config.yml`, which holds only
-    `installation: Cloud`: enough for `issue view` and `issue list -p KEY`. `issue create`,
-    `sprint list` and the epic commands need the issue types, board and epic fields that only
-    `jira init` writes.
+    `installation: Cloud`: enough for `issue view` and `issue list -p KEY`. `sprint list` and the
+    epic commands need the board and epic fields that only `jira init` writes.
+  - **`issue create` without `jira init`**: jira-cli reads `issue.types` from the config only
+    (`setIssueTypes`, v1.7.0), and `jira init`, the only writer, calls the Agile board API first
+    (401 on OAuth without the Jira Software scopes). So for `issue create`, when the effective
+    config is the generated one or a managed one (not named with `-c`: that one wins over the
+    environment) and has no `types:` key, the wrapper runs `workspace-agent jira-issue-types KEY`
+    (`-p` in any spelling, else the config's `project.key`). The helper GETs
+    `/rest/api/2/issue/createmeta?projectKeys=KEY` with the token it holds itself (classic
+    `read:jira-work`) and prints only the non-secret `issue.types` block. The wrapper caches it as
+    `~/.cache/agent-fleet/jira/issue-types-KEY.yml` (reused when a later fetch fails) and points
+    `JIRA_CONFIG_FILE` at `config-KEY.yml` there: the base config plus that block, rewritten on
+    every run. A config that already has `types:` is left alone, as is one that has an `issue:`
+    key of its own or is not block-style (appending would not merge). Any failure runs jira on its
+    own config after a one-line stderr hint to run `jira init` (and says that a 401 there can mean
+    missing Jira Software scopes). A managed config that has types serves every `-p`, as before.
 - **The user's own setup wins**: an explicit `JIRA_API_TOKEN` or `JIRA_SERVER`, a `jira init`
   given its own `--server` / `--login` / `--installation` / `--auth-type`, or any config outside
   the managed directory (`-c` in any spelling, `JIRA_CONFIG_FILE`, or jira's own default
@@ -288,7 +301,7 @@ those variables in for one `exec`:
 **Limits worth knowing:**
 
 - **Scopes on OAuth**: boards, sprints, epics and `jira init` call `/rest/agile/1.0`, which
-  accepts no classic scope. The tenant's Jira app has to grant read:board-scope:jira-software,
+  accepts no classic scope (`issue create` does not need them, see above). The tenant's Jira app has to grant read:board-scope:jira-software,
   read:project:jira, read/write:sprint:jira-software, read/write:epic:jira-software,
   read:issue-details:jira and read:jql:jira. The administrator then ticks the
   `jira_software` scope group on the app (`tenant_git_oauth.scope_groups`), and only then does
