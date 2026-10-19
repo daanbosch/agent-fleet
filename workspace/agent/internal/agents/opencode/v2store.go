@@ -17,7 +17,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -39,52 +38,104 @@ func v2Served() bool {
 	return apiMajor(detectedMajor.Load()) == 0 && installedMajor() >= 2 && storeIsV2()
 }
 
-// storeIsV2: the database has the v2 tables, i.e. opencode 2 has opened (and migrated) it.
+// storeIsV2: opencode 2 has opened the database and its history import is over. The tables alone
+// do not say so: an import that stopped half way leaves a v2 schema beside the v1 rows, and those
+// conversations are still read from the v1 tables until a v2 start finishes the job.
 func storeIsV2() bool {
-	db, err := openV2Store()
-	if err != nil {
+	path := specDBPath(CurrentLaunch())
+	db, ok := openRODB(path)
+	if !ok {
 		return false
 	}
 	defer db.Close()
 	var n int
-	return db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'session_v2'`).Scan(&n) == nil && n > 0
+	if db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'session_v2'`).Scan(&n) != nil || n == 0 {
+		return false
+	}
+	return !needsMigration(path)
 }
 
-// daemonGone: err is a failure to reach the daemon, or a connection cut mid-answer, and not an
-// answer from it. A refusal (statusError) and a body that does not parse (an HTML page, a changed
-// contract) are answers: the store would show an older conversation than the one the daemon holds,
-// or hide that its contract moved.
+// daemonGone: err is a failure to reach the daemon, or a connection cut while its answer was being
+// read, and not an answer from it. A refusal (statusError) and a body that arrives whole and does
+// not parse (an HTML page, a truncated JSON document, a changed contract) are answers: the store
+// would show an older conversation than the one the daemon holds, or hide that its contract moved.
 func daemonGone(err error) bool {
 	if err == nil {
 		return false
 	}
 	var ue *url.Error
 	var ne net.Error
-	return errors.Is(err, errV2Down) || errors.As(err, &ue) || errors.As(err, &ne) || errors.Is(err, io.ErrUnexpectedEOF)
+	var be bodyReadError
+	return errors.Is(err, errV2Down) || errors.As(err, &ue) || errors.As(err, &ne) || errors.As(err, &be)
 }
 
-// conversation resolves the slot's conversation and reads its messages through the daemon. When
-// the daemon cannot be reached at either step, both are read again, whole, from the store: a
-// partial answer from the API is never joined to the store's. The returned target is the one every
-// later read of this conversation has to use.
-func (t apiTarget) conversation(m session.Meta) (apiTarget, *v2SessionInfo, []v2Msg, error) {
+// v2Kid is a subagent's conversation: when it was created (messages older than that are copies)
+// and what it said.
+type v2Kid struct {
+	Born int64
+	Msgs []v2Msg
+}
+
+// v2Conv is a conversation read as one unit, the target it came from, and its subagents'.
+type v2Conv struct {
+	T    apiTarget
+	Info *v2SessionInfo
+	Msgs []v2Msg
+	Kids []v2Kid
+}
+
+// readConv reads info's messages and its subagents' through t. Only an unreachable daemon is an
+// error; any other failure leaves what was gathered, like readSession.
+func (t apiTarget) readConv(info *v2SessionInfo) (v2Conv, error) {
+	c := v2Conv{T: t, Info: info}
+	var err error
+	if c.Msgs, err = t.messages(info.ID); daemonGone(err) {
+		return c, err
+	}
+	for _, child := range v2Children(c.Msgs) {
+		var k v2Kid
+		ci, err := t.sessionInfo(child)
+		if daemonGone(err) {
+			return c, err
+		}
+		if err == nil {
+			k.Born = ci.Time.Created
+		}
+		cm, err := t.messages(child)
+		if daemonGone(err) {
+			return c, err
+		}
+		if err != nil && len(cm) == 0 {
+			continue
+		}
+		k.Msgs = cm
+		c.Kids = append(c.Kids, k)
+	}
+	return c, nil
+}
+
+// conversation resolves the slot's conversation and reads it, subagents included, through the
+// daemon. When the daemon cannot be reached at any step, everything is read again, whole, from the
+// store: a partial answer from the API is never joined to the store's. The conversation carries the
+// target every later read of it has to use.
+func (t apiTarget) conversation(m session.Meta) (v2Conv, error) {
 	info, err := t.v2Session(m)
-	var msgs []v2Msg
 	if err == nil && info != nil {
-		if msgs, err = t.messages(info.ID); err != nil && !daemonGone(err) {
-			err = nil // best-effort like readSession: the turns gathered so far
+		var c v2Conv
+		if c, err = t.readConv(info); !daemonGone(err) {
+			return c, nil
 		}
 	}
 	if !daemonGone(err) {
-		return t, info, msgs, err
+		return v2Conv{T: t, Info: info}, err
 	}
 	off := apiTarget{offline: true}
 	info, err = off.v2Session(m)
 	if err != nil || info == nil {
-		return off, info, nil, err
+		return v2Conv{T: off, Info: info}, err
 	}
-	msgs, _ = off.messages(info.ID)
-	return off, info, msgs, nil
+	c, _ := off.readConv(info)
+	return c, nil
 }
 
 // openV2Store opens the database the v2 opencode of this workspace writes.

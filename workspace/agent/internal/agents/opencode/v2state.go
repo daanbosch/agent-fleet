@@ -45,6 +45,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -148,8 +149,19 @@ func (t apiTarget) getCtx(ctx context.Context, path string, out any) error {
 	if res.StatusCode != http.StatusOK {
 		return statusError(res.StatusCode)
 	}
-	return json.NewDecoder(res.Body).Decode(out)
+	// The body is read whole before it is parsed: a read that fails is a connection cut
+	// (bodyReadError), while a body that arrives complete and does not parse is the daemon's answer.
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return bodyReadError{err}
+	}
+	return json.Unmarshal(body, out)
 }
+
+// bodyReadError is an answer whose body could not be read to its end.
+type bodyReadError struct{ error }
+
+func (e bodyReadError) Unwrap() error { return e.error }
 
 // --- wire shapes ----------------------------------------------------------------
 
@@ -448,13 +460,14 @@ func queuedV2(t apiTarget, ses string) []string {
 }
 
 func readTranscriptV2(t apiTarget, m session.Meta) agents.TranscriptData {
-	t, info, msgs, err := t.conversation(m)
+	c, err := t.conversation(m)
+	t, info, msgs := c.T, c.Info, c.Msgs
 	if err != nil || info == nil {
 		td := agents.TranscriptData{Path: t.Addr}
 		managedEnrich(m, &td)
 		return td
 	}
-	turns := v2Turns(t, info, msgs, false)
+	turns := v2Turns(c, false)
 	td := agents.TranscriptData{
 		Turns:      turns,
 		Path:       t.Addr + sessionPath(info.ID),
@@ -489,11 +502,11 @@ func v2Mode(info *v2SessionInfo, msgs []v2Msg) string {
 }
 
 func usageTurnsV2(t apiTarget, m session.Meta) []transcript.Turn {
-	t, info, msgs, err := t.conversation(m)
-	if err != nil || info == nil {
+	c, err := t.conversation(m)
+	if err != nil || c.Info == nil {
 		return nil
 	}
-	return v2Turns(t, info, msgs, true)
+	return v2Turns(c, true)
 }
 
 func recallSettingsV2(t apiTarget, m session.Meta) agents.RecalledSettings {
@@ -564,20 +577,12 @@ type v2Stamped struct {
 // rewriting each message in v1's stored shape and handing it to parseMessage: one reader decides
 // what a turn looks like on both majors. With usage set it also returns a CostOnly turn for every
 // billed message that shows nothing (an empty failed step, a compaction).
-func v2Turns(t apiTarget, info *v2SessionInfo, msgs []v2Msg, usage bool) []transcript.Turn {
+func v2Turns(c v2Conv, usage bool) []transcript.Turn {
 	win := modelWindowLookup()
-	cwd := info.Location.Directory
-	all := v2SessionTurns(msgs, cwd, info.Time.Created, false, usage, win)
-	for _, child := range v2Children(msgs) {
-		born := int64(0)
-		if ci, err := t.sessionInfo(child); err == nil {
-			born = ci.Time.Created
-		}
-		cm, err := t.messages(child)
-		if err != nil && len(cm) == 0 {
-			continue
-		}
-		all = append(all, v2SessionTurns(cm, cwd, born, true, usage, win)...)
+	cwd := c.Info.Location.Directory
+	all := v2SessionTurns(c.Msgs, cwd, c.Info.Time.Created, false, usage, win)
+	for _, k := range c.Kids {
+		all = append(all, v2SessionTurns(k.Msgs, cwd, k.Born, true, usage, win)...)
 	}
 	sort.SliceStable(all, func(i, j int) bool { return all[i].created < all[j].created })
 	out := make([]transcript.Turn, len(all))

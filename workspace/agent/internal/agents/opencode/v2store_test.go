@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -332,14 +333,15 @@ func TestV2StoreTakesOverWhenTheMessageReadIsCut(t *testing.T) {
 
 // A subagent's copied messages (older than the child itself) are not billed twice, with the
 // daemon and without it: the child's creation time comes from the same place as its messages.
-func TestV2StoreDoesNotBillACopiedChildTwice(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	d, m := v2Slot(t, "subagent.messages.json")
+// subagentConversation is the recorded parent conversation with its subagent session, served by
+// the fake daemon: the parent's messages, the child's id and the child's messages.
+func subagentConversation(t *testing.T, childMsgs []string) (d *v2Daemon, m session.Meta, parent []json.RawMessage, child string) {
+	t.Helper()
+	d, m = v2Slot(t, "subagent.messages.json")
 	var w struct {
 		Data []json.RawMessage `json:"data"`
 	}
 	_ = json.Unmarshal(v2Fixture(t, "subagent.messages.json"), &w)
-	var child string
 	for _, raw := range w.Data {
 		var mm v2Msg
 		_ = json.Unmarshal(raw, &mm)
@@ -352,12 +354,32 @@ func TestV2StoreDoesNotBillACopiedChildTwice(t *testing.T) {
 	if child == "" {
 		t.Fatal("fixture has no subagent session")
 	}
+	d.addSession(t, child, "ses_a", "1791931541411", "")
+	d.messages[child] = childMsgs
+	return d, m, w.Data, child
+}
+
+// storeSubagentConversation writes parent and child into the store.
+func storeSubagentConversation(t *testing.T, parent []json.RawMessage, child string, childMsgs []string) {
+	t.Helper()
+	db := openTestStore(t)
+	addStoreSession(t, db, "ses_a", "", 1791931000000, 1791931000000)
+	addStoreMessages(t, db, "ses_a", parent)
+	addStoreSession(t, db, child, "ses_a", 1791931541411, 1791931541411)
+	var raws []json.RawMessage
+	for _, c := range childMsgs {
+		raws = append(raws, json.RawMessage(c))
+	}
+	addStoreMessages(t, db, child, raws)
+}
+
+func TestV2StoreDoesNotBillACopiedChildTwice(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	childMsgs := []string{
 		`{"id":"msg_c1","type":"user","text":"task","time":{"created":1791931541000}}`,
 		`{"id":"msg_c2","type":"assistant","agent":"general","model":{"id":"m","providerID":"stub"},"cost":0.0003,"time":{"created":1791931541001,"completed":1791931541002},"content":[{"type":"text","text":"copied"}]}`,
 	}
-	d.addSession(t, child, "ses_a", "1791931541411", "")
-	d.messages[child] = childMsgs
+	_, m, parent, child := subagentConversation(t, childMsgs)
 	want := usageTurnsV2(mustTarget(t, m), m)
 	var wantCost float64
 	for _, tn := range want {
@@ -369,15 +391,7 @@ func TestV2StoreDoesNotBillACopiedChildTwice(t *testing.T) {
 		t.Fatalf("the API path bills the copied child message: %v", wantCost)
 	}
 
-	db := openTestStore(t)
-	addStoreSession(t, db, "ses_a", "", 1791931000000, 1791931000000)
-	addStoreMessages(t, db, "ses_a", w.Data)
-	addStoreSession(t, db, child, "ses_a", 1791931541411, 1791931541411)
-	var raws []json.RawMessage
-	for _, c := range childMsgs {
-		raws = append(raws, json.RawMessage(c))
-	}
-	addStoreMessages(t, db, child, raws)
+	storeSubagentConversation(t, parent, child, childMsgs)
 	useTarget(t, deadDaemon(t))
 	tg, _ := v2TargetFor(m)
 	var gotCost float64
@@ -393,6 +407,111 @@ func TestV2StoreDoesNotBillACopiedChildTwice(t *testing.T) {
 	}
 	if gotCost != 0 {
 		t.Fatalf("offline, the copied child message is billed again: $%v", gotCost)
+	}
+}
+
+// The parent arrives and the subagent's own endpoint is then cut: the whole conversation, children
+// included, is read again from the store, not the parent alone.
+func TestV2StoreTakesOverWhenASubagentReadIsCut(t *testing.T) {
+	childMsgs := []string{
+		`{"id":"msg_c1","type":"user","text":"subagent task: say hi","time":{"created":1791931541420}}`,
+		`{"id":"msg_c2","type":"assistant","agent":"general","model":{"id":"m","providerID":"stub"},"time":{"created":1791931541430,"completed":1791931541440},"content":[{"type":"text","text":"hi from the child"}]}`,
+	}
+	for _, cut := range []string{"info", "messages"} {
+		t.Run(cut, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			d, m, parent, child := subagentConversation(t, childMsgs)
+			storeSubagentConversation(t, parent, child, childMsgs)
+			cutPath := "/api/session/" + child
+			if cut == "messages" {
+				cutPath += "/message"
+			}
+			inner := d.f.srv.Config.Handler
+			d.f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == cutPath {
+					c, _, err := w.(http.Hijacker).Hijack()
+					if err == nil {
+						c.Close()
+					}
+					return
+				}
+				inner.ServeHTTP(w, r)
+			})
+			got, _ := readTranscript(m)
+			var side int
+			for _, tn := range got.Turns {
+				if tn.Sidechain {
+					side++
+				}
+			}
+			if side != 2 {
+				t.Fatalf("sidechain turns = %d, want the child's 2 from the store: %+v", side, got.Turns)
+			}
+		})
+	}
+}
+
+// A body that arrives whole but is cut short as a document is the daemon's answer, however it
+// ends; only a connection that dies before the declared length is "gone".
+func TestV2StoreTellsATruncatedDocumentFromACutConnection(t *testing.T) {
+	serve := func(t *testing.T, declared int) (*v2Daemon, session.Meta) {
+		d := newV2Daemon(t)
+		d.f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			c, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+			_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + strconv.Itoa(declared) + "\r\n\r\n{"))
+		})
+		m := v2Meta(t, "ses_a")
+		writeV2Store(t, "ses_a", "tool.messages.json")
+		return d, m
+	}
+	t.Run("whole body, truncated document", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		_, m := serve(t, 1)
+		for i := 0; i < 2; i++ {
+			if got, _ := readTranscript(m); len(got.Turns) != 0 {
+				t.Fatalf("read %d: %d turns from the store although the daemon answered", i, len(got.Turns))
+			}
+		}
+	})
+	t.Run("connection dies before the declared length", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		_, m := serve(t, 100)
+		if got, _ := readTranscript(m); len(got.Turns) != 2 {
+			t.Fatalf("turns = %d, want the store's conversation", len(got.Turns))
+		}
+	})
+}
+
+// An import that stopped half way leaves a v2 schema beside the v1 rows; those conversations are
+// still read from the v1 tables until a v2 start finishes the import.
+func TestV2NotServedOverAHalfMigratedStore(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	prev := detectedMajor.Load()
+	detectedMajor.Store(0)
+	t.Cleanup(func() { detectedMajor.Store(prev) })
+	useMajor(t, 2)
+	db := openTestStore(t) // the empty v2 schema
+	for _, q := range []string{
+		`CREATE TABLE session (id TEXT)`,
+		`INSERT INTO session VALUES ('ses_v1')`,
+		`CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT)`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if v2Served() {
+		t.Fatal("a v2 schema with v1 rows and no completed import: served as v2")
+	}
+	if _, err := db.Exec(`INSERT INTO kv VALUES ('migration.v1-v2', '{"phase":"completed"}')`); err != nil {
+		t.Fatal(err)
+	}
+	if !v2Served() {
+		t.Fatal("the import is over: not served as v2")
 	}
 }
 
