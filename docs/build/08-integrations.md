@@ -285,7 +285,16 @@ those variables in for one `exec`:
     alone. So is one that is not plain block style (the first line at column 0, every column-0
     line a bare `key:`, no `issue` key, no `---` / `...`): appending would not merge. Any failure runs jira on its
     own config after a one-line stderr hint to run `jira init` (and says that a 401 there can mean
-    missing Jira Software scopes). A managed config that has types serves every `-p`, as before.
+    missing Jira Software scopes). A managed config that has types and a plain `project.key`
+    serves that project only: for `issue create -p B` with B other than the key (case-insensitive,
+    no `-c`) the wrapper derives `config-B-<hash>.yml` the same way (same cache, naming, modes and
+    GC) but with the base's column-0 `issue:` block cut out first and B's types appended. That
+    block also holds `fields.custom`, which jira-cli sends on create, and A's custom fields must not
+    reach B, so they are dropped for B (the other keys, board and epic included, stay). The cut is
+    made only when the file has exactly one bare `issue:` line (any case); otherwise, or when the
+    fetch fails with nothing cached, jira runs on the base and a hint names
+    `jira init -c ~/.config/agent-fleet/jira/<name>.yml --project B --board "<name>"`. A config
+    whose `project.key` cannot be read plainly, or that has no `-p`, is used as is.
 - **The user's own setup wins**: an explicit `JIRA_API_TOKEN` or `JIRA_SERVER`, a `jira init`
   given its own `--server` / `--login` / `--installation` / `--auth-type`, or any config outside
   the managed directory (`-c` in any spelling, `JIRA_CONFIG_FILE`, or jira's own default

@@ -59,7 +59,12 @@ session. You can view, list, create, edit, comment on and transition issues:
   for the generated config and for configs in `~/.config/agent-fleet/jira/`, and it needs `-p`
   (or a default project in that config). If it cannot, it prints a one-line hint and `jira` then
   fails with `invalid issue types in config`; run `jira init` below (`jira board list -p PROJ`
-  shows the exact board name it wants).
+  shows the exact board name it wants). A config written by `jira init` holds the types of its
+  own project only (IDs are per project in team-managed projects), so for `-p` naming another
+  project the wrapper hands `jira` a copy with that project's types and without the config's
+  custom fields (they belong to the first project). If the types cannot be read, `jira` runs on
+  the config as it is and a hint names `jira init -c ~/.config/agent-fleet/jira/<name>.yml
+  --project PROJ --board "PROJ board"`, which gives that project a config of its own.
 - **Project, board, sprints and epics**: run `jira init --project PROJ --board "PROJ board"` once
   (add `--force` to replace an earlier setup). It writes your default project, board, issue types
   and epic fields, which `jira sprint list` and the epic commands need, and it asks no questions.
