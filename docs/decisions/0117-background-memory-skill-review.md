@@ -550,6 +550,7 @@ are unchanged except that decision 1's turn-end loop is no longer armed by `memo
 - **Off means no claims.** The loop checks the switch at every wake-up, between sessions and between windows, and the
   Reviewer checks it for an automatic review before it claims a window and again just before the helper call. An open
   run is not resumed while it is off. A manual review ignores it.
+- **Ordering.** The prefs write is serialized with the Reviewer's two boundaries (claiming a window; recording the dispatch) by one short mutex, never held across a helper call. A boundary that passed first is in flight and finishes; every one after an "off" write sees it, so nothing new starts.
 - **In flight: finish, no retry.** A helper call already running when the switch goes off is not cancelled (cancelling
   would leave a `dispatched` record with an unknown cost for the next start to settle); its answer is queued as
   proposals like any other. No further window is claimed, and a call that fails then is not retried while the switch is

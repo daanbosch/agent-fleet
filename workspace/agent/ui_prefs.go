@@ -324,7 +324,9 @@ func handlePutUIPrefs(w http.ResponseWriter, r *http.Request) {
 	sessionSearchBefore := uiprefs.SessionSearch()
 	agentMemoryBefore := uiprefs.AgentMemory()
 	memoryReviewAutoBefore := uiprefs.MemoryReviewAutoEnabled()
-	if err := uiprefs.WriteAtomic(body); err != nil {
+	// Serialized with the review's claim and dispatch, so that once an "off" is written no further
+	// window is claimed and no call is started (ADR 0117 note, #2358).
+	if err := memreview.WithSwitchWrite(func() error { return uiprefs.WriteAtomic(body) }); err != nil {
 		httpx.WriteErr(w, http.StatusInternalServerError, "write_failed", err.Error())
 		return
 	}

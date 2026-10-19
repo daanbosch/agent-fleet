@@ -174,3 +174,54 @@ func TestSwitchGoingOffBeforeTheClaimCreatesNoRun(t *testing.T) {
 		t.Fatalf("err %v calls %d runs %d", err, h.calls, len(runs()))
 	}
 }
+
+// A write of "off" that races a review at its boundary is ordered with it: either the dispatch
+// passed first (the call is in flight and finishes) or the write did (nothing starts). Here the
+// write holds the gate while the review reaches it, so the review must see "off".
+func TestSwitchWriteOrdersWithTheDispatchBoundary(t *testing.T) {
+	h := newHarness(t)
+	r := h.reviewer()
+	var on atomic.Bool
+	on.Store(true)
+	r.AutoEnabled = on.Load
+	reached := make(chan struct{})
+	inner := r.Snapshot
+	r.Snapshot = func(s string) (memoryx.ReviewSnapshot, error) {
+		close(reached) // the review is about to ask for the gate
+		return inner(s)
+	}
+	// Note: the claim boundary comes before the snapshot, so the write starts after the claim.
+	wrote := make(chan struct{})
+	go func() {
+		defer close(wrote)
+		_ = WithSwitchWrite(func() error {
+			<-reached
+			time.Sleep(100 * time.Millisecond) // the review is now waiting at the dispatch boundary
+			on.Store(false)
+			return nil
+		})
+	}()
+	_, err := r.Review(t.Context(), Request{Key: "k", Session: "s", Trigger: TriggerAuto, Turns: turns(4), FirstNumber: 1})
+	<-wrote
+	if !errors.Is(err, ErrDisabled) || h.calls != 0 {
+		t.Fatalf("err %v calls %d: a dispatch must not pass a switch write that holds the gate", err, h.calls)
+	}
+}
+
+// Once the dispatch passed the boundary the call is in flight and finishes, whatever the switch does.
+func TestACallThatPassedTheDispatchBoundaryFinishes(t *testing.T) {
+	h := newHarness(t)
+	r := h.reviewer()
+	var on atomic.Bool
+	on.Store(true)
+	r.AutoEnabled = on.Load
+	r.hook = func(stage string) {
+		if stage == "dispatched" {
+			_ = WithSwitchWrite(func() error { on.Store(false); return nil })
+		}
+	}
+	res, err := r.Review(t.Context(), Request{Key: "k", Session: "s", Trigger: TriggerAuto, Turns: turns(4), FirstNumber: 1})
+	if err != nil || h.calls != 1 || res.State != StateDone {
+		t.Fatalf("res %+v err %v calls %d", res, err, h.calls)
+	}
+}
