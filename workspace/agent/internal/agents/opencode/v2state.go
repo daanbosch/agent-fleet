@@ -63,6 +63,9 @@ import (
 type apiTarget struct {
 	Addr   string
 	Client *http.Client
+	// offline reads the conversation from opencode.db instead (v2store.go): the daemon is gone,
+	// so no request can be made. Addr and Client are empty then.
+	offline bool
 }
 
 // v2TargetFor says where slot m's state is read from, or false when it is read from opencode.db.
@@ -71,7 +74,7 @@ type apiTarget struct {
 // --standalone Terminal session keeps its state in the shared database file only, which is
 // still the v1 reader's path.
 var v2TargetFor = func(m session.Meta) (apiTarget, bool) {
-	if !isV2() {
+	if !v2Served() {
 		return apiTarget{}, false
 	}
 	if m.DriverKind() == session.DriverManaged || sharedSlot(m) {
@@ -103,6 +106,9 @@ var errV2Down = errors.New("opencode api: daemon recently unreachable")
 // get is a state read: short, and refused at once while the daemon is known to be down. A
 // transport failure (not an HTTP status) marks it down for v2DownFor.
 func (t apiTarget) get(path string, out any) error {
+	if t.offline {
+		return errV2Offline
+	}
 	v2Down.mu.Lock()
 	down := time.Now().Before(v2Down.until[t.Addr])
 	v2Down.mu.Unlock()
@@ -124,6 +130,9 @@ func (t apiTarget) get(path string, out any) error {
 // getTurn is the read a waiting turn makes: the client's own timeout, and no down verdict, since
 // the turn counts its own consecutive failures.
 func (t apiTarget) getTurn(path string, out any) error {
+	if t.offline {
+		return errV2Offline
+	}
 	return t.getCtx(context.Background(), path, out)
 }
 
@@ -251,13 +260,13 @@ func sessionPath(ses string) string { return "/api/session/" + url.PathEscape(se
 // writes it on create), else the newest root conversation in its directory that this slot itself
 // can have opened (created after it, like activeSession on v1). nil when there is none yet.
 func (t apiTarget) v2Session(m session.Meta) (*v2SessionInfo, error) {
+	if t.offline {
+		return storeSession(m)
+	}
 	if id := sids.Read(session.UUID(m.Dir, m.Name)); id != "" {
-		var w struct {
-			Data v2SessionInfo `json:"data"`
-		}
-		switch err := t.get(sessionPath(id), &w); {
+		switch info, err := t.sessionInfo(id); {
 		case err == nil:
-			return &w.Data, nil
+			return info, nil
 		case !errors.Is(err, statusError(http.StatusNotFound)):
 			return nil, err
 		}
@@ -282,10 +291,27 @@ func (t apiTarget) v2Session(m session.Meta) (*v2SessionInfo, error) {
 	return best, nil
 }
 
+// sessionInfo is the record of conversation id.
+func (t apiTarget) sessionInfo(id string) (*v2SessionInfo, error) {
+	if t.offline {
+		return storeSessionByID(id)
+	}
+	var w struct {
+		Data v2SessionInfo `json:"data"`
+	}
+	if err := t.get(sessionPath(id), &w); err != nil {
+		return nil, err
+	}
+	return &w.Data, nil
+}
+
 const v2PageSize = 200
 
 // messages reads a whole conversation, oldest first.
 func (t apiTarget) messages(ses string) ([]v2Msg, error) {
+	if t.offline {
+		return storeMessages(ses)
+	}
 	var all []v2Msg
 	path := sessionPath(ses) + "/message?order=asc&limit=" + fmt.Sprint(v2PageSize)
 	for page := 0; page < 1000; page++ {
@@ -423,7 +449,7 @@ func queuedV2(t apiTarget, ses string) []string {
 }
 
 func readTranscriptV2(t apiTarget, m session.Meta) agents.TranscriptData {
-	info, err := t.v2Session(m)
+	t, info, err := t.orStore(m)
 	if err != nil || info == nil {
 		td := agents.TranscriptData{Path: t.Addr}
 		managedEnrich(m, &td)
@@ -465,7 +491,7 @@ func v2Mode(info *v2SessionInfo, msgs []v2Msg) string {
 }
 
 func usageTurnsV2(t apiTarget, m session.Meta) []transcript.Turn {
-	info, err := t.v2Session(m)
+	t, info, err := t.orStore(m)
 	if err != nil || info == nil {
 		return nil
 	}
