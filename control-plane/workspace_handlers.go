@@ -789,6 +789,9 @@ type sessionWire struct {
 	State     string `json:"state"`
 	Alive     bool   `json:"alive"`
 	Resumable bool   `json:"resumable"`
+	// Attachable is nil unless the agent reports it: only a host session reports false, and
+	// the console composes a continue for those instead of typing into a terminal.
+	Attachable *bool `json:"attachable,omitempty"`
 	// Locked is the user's deletion lock. sessionWire decode→re-emits the Agent
 	// response for both GET /api/sessions and SSE, so omitting this field makes a
 	// successfully saved lock immediately disappear from the Console.

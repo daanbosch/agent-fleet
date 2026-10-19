@@ -597,6 +597,9 @@ func main() {
 	} else if mgr.internalBaseURL != "" {
 		log.Printf("WARNING: AF_CP_INTERNAL_URL is set without AF_CP_INTERNAL_LISTEN — workspaces are sent to an address this CP does not serve")
 	}
+	if hyprmuxAutostartOn(rtProfile) {
+		go mgr.autostartHyprmuxWorkspaces(ctx, hyprmuxAutostartRetryAfter)
+	}
 	srv := &http.Server{Addr: cfg.addr, Handler: withClientIP(logRequests(served)), ReadHeaderTimeout: 10 * time.Second}
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatal(err)

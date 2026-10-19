@@ -450,4 +450,9 @@ export const mirror: Record<keyof typeof jaMirror, string> = {
   "mirror.queue_now_inject": "Send now (the agent takes it into the running turn)",
   "mirror.queue_now_after": "Send now (the agent accepts it and handles it after the running turn)",
   "mirror.queue_attach_only": "(attachments only)",
+  "mirror.imported_placeholder": "Message for this host session (it is resumed or continued with it)",
+  "mirror.imported_send": "Resume / send",
+  "mirror.imported_sending": "Sending…",
+  "mirror.imported_sent": "Sent. Session:",
+  "mirror.imported_failed": "Not sent:",
 };

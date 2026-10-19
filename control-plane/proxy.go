@@ -147,6 +147,8 @@ func auditActionTarget(r *http.Request) (action, target string, ok bool) {
 			return "session.create", "", true
 		case name != "" && strings.HasSuffix(p, "/fork"):
 			return "session.fork", name, true
+		case name != "" && p == "/api/sessions/"+name+"/continue":
+			return "session.continue", name, true
 		case name != "" && p == "/api/sessions/"+name+"/move":
 			return "session.move", name, true
 		case name != "" && strings.HasPrefix(p, "/api/sessions/"+name+"/move/"):
