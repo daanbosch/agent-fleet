@@ -540,3 +540,30 @@ unchanged.
   Agent shows no name, text, reason or diff.
 
 Follow-ups: none for P2; #2322 and #2323 remain.
+
+**Note (2026-10-19, #2357): decision 3's deny-all contract was checked for the other one-shot kinds; none qualifies,
+and each is refused for a recorded reason.** The decision is unchanged. The test for a kind is the one claude passes:
+the run's own output must say what the run has (tools and MCP servers), a probe with the same argv and environment must
+show it empty before the transcript is sent, and the real run is checked again. A switch in the argv is not evidence
+(the Chrome finding above). Where the output cannot say, the kind fails closed: a feature pin on it fails the review,
+and the shared order skips it. Findings per kind, from the CLIs installed in this workspace:
+
+| kind | tool-less / MCP-less run | readable from the run's output | result |
+|---|---|---|---|
+| claude | yes (`--tools ""`, empty strict MCP config, `--no-chrome`) | init event lists `tools` and `mcp_servers` | **qualifies** (unchanged) |
+| codex 0.163.0 | no flag removes its built-in tools (`-s read-only` limits the shell, it does not remove it) | no: `codex debug prompt-input` renders messages only (5 items, the same count with `features.shell_tool=false`), no tool list | refused |
+| opencode 2.0.32 | edit and bash can be denied; nothing denies the rest, and the user's global MCP servers merge in (`debug config` listed one planted in the global config) | no: `debug` offers `agents`, `config`, `paths` and none lists the run's tools; the inline config is not shown by `debug config` | refused |
+| cursor 2026.10.16 | `--mode ask` is read-only, not tool-less | no: stream-json `system/init` carries session id, model and permission mode only (docs/log/40; not re-run, no login here) | refused |
+| agy | no switch removes its tools | no: `-p` prints plain text. `agy --version` aborts in this container (entropy check), so it could not be probed at all | refused |
+| muse 1.4.7 | `--disable-shell`, `--disable-write`, `--disable-web-tools` cover those three only | no: a `--provider echo` run with the chat flags emitted 24 events of 14 types, none naming a tool or MCP server | refused |
+
+copilot and kiro are not one-shot kinds and were not examined. What would qualify a kind later: a flag or config that
+removes every built-in tool and every inherited MCP server, and an output (init event, debug subcommand that resolves
+the same configuration, or a protocol handshake) that lists what remains, with the same fail-closed reading as claude's
+stream. In code, a kind qualifies only by having a runner in `denyAllBackends` (`chatx/chat_denyall.go`); the run is
+dispatched on the resolved kind, and `denyAllLimits` keeps the reason for every other one-shot kind, enforced by a test so
+a new kind must be classified. Not verified here: any run of codex, opencode, cursor or agy against a model (no login in
+this probe), so the table rests on help text, debug subcommands and the repository's earlier measurements, not on a
+tool-use attempt.
+
+Follow-ups: #2357 stays open for the kinds above.
