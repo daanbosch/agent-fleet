@@ -917,7 +917,7 @@ export const tools: Record<keyof typeof jaTools, string> = {
   "mem.review_propose": "Propose",
   "mem.review_note": "A while after a session pauses, an excerpt of its conversation (parts that look like secrets are left out) is read by an agent that has no tools and no MCP servers, which lists what looks worth keeping as proposals. Nothing reaches memory until you approve it, under Agent memory > Changes > Proposed (up to 100 wait there). The excerpt is sent to the provider of the agent chosen under AI assist settings, which can be a different provider from the session's own, and it spends tokens (at most 250 calls a day). It does not run while the workspace is stopped. It looks automatically only at sessions whose last turn ended within the last 48 hours; for older ones, or what happened while it was stopped, use \"Suggest memories now\" in the session menu. It only runs while \"Let sessions use Agent Fleet memory\" above is on. Off by default.",
   "mem.review_needs_memory": "This setting takes effect only while \"Let sessions use Agent Fleet memory\" above is on.",
-  "mem.review_no_backend": "Memory review cannot run here: no agent that can run without tools is available (currently only claude qualifies). Install and sign in to claude, or the review stays parked.",
+  "mem.review_no_backend": "Memory review cannot run here: no agent that can run without tools is available (currently only claude qualifies). If a different agent is pinned for the memory review under AI assist settings, change or clear that pin; otherwise install and sign in to claude. Until then the review stays parked.",
   "mem.view_changes_count": "Changes, {n} proposed",
   "mem.changes_sub_label": "Changes views",
   "mem.rv_sub_log": "Published",

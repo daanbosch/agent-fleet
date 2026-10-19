@@ -25,7 +25,10 @@ const POLL_MS = 10_000;
 export function useAiAssistResolution(enabled = true): Record<string, AiAssistResolutionRow> | null {
   const [rows, setRows] = useState<Record<string, AiAssistResolutionRow> | null>(null);
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled) {
+      setRows(null); // a disabled hook must not keep, or later reuse, an earlier answer
+      return;
+    }
     let alive = true;
     const load = () => {
       void api("api/ai-assist/resolution").then((d) => {
@@ -41,7 +44,7 @@ export function useAiAssistResolution(enabled = true): Record<string, AiAssistRe
       clearInterval(id);
     };
   }, [enabled]);
-  return rows;
+  return enabled ? rows : null;
 }
 
 /** True only on the Agent's definite "no deny-all backend" answer for the memory review (ADR 0117);
