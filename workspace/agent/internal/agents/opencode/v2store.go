@@ -17,7 +17,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
+	"net/url"
 
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/session"
 )
@@ -25,33 +28,63 @@ import (
 var errV2Offline = errors.New("opencode api: reading from the store, no daemon")
 
 // v2Served reports whether conversations of this workspace live in the v2 store. A probed daemon
-// says so; before any probe (the Agent has just restarted and nothing has started a daemon yet)
-// the installed opencode does. Defaulting to v1 there made a stopped v2 session read the v1 tables,
-// which v2 never fills.
+// says so. Before any probe (the Agent has just restarted and nothing has started a daemon yet)
+// the installed opencode and the database together do: v1 was the default there, which read the
+// tables v2 never fills, but an install of 2.x over a database v2 has not migrated yet still holds
+// its history in the v1 tables, and only v2's first start moves it.
 func v2Served() bool {
 	if isV2() {
 		return true
 	}
-	return apiMajor(detectedMajor.Load()) == 0 && installedMajor() >= 2
+	return apiMajor(detectedMajor.Load()) == 0 && installedMajor() >= 2 && storeIsV2()
 }
 
-// daemonGone: err is a failure to reach the daemon at all, not an answer from it.
+// storeIsV2: the database has the v2 tables, i.e. opencode 2 has opened (and migrated) it.
+func storeIsV2() bool {
+	db, err := openV2Store()
+	if err != nil {
+		return false
+	}
+	defer db.Close()
+	var n int
+	return db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'session_v2'`).Scan(&n) == nil && n > 0
+}
+
+// daemonGone: err is a failure to reach the daemon, or a connection cut mid-answer, and not an
+// answer from it. A refusal (statusError) and a body that does not parse (an HTML page, a changed
+// contract) are answers: the store would show an older conversation than the one the daemon holds,
+// or hide that its contract moved.
 func daemonGone(err error) bool {
-	var se statusError
-	return err != nil && !errors.As(err, &se)
+	if err == nil {
+		return false
+	}
+	var ue *url.Error
+	var ne net.Error
+	return errors.Is(err, errV2Down) || errors.As(err, &ue) || errors.As(err, &ne) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
-// orStore resolves the slot's conversation through the daemon and, when the daemon cannot be
-// reached, through the store. The returned target is the one every later read of this
-// conversation has to use.
-func (t apiTarget) orStore(m session.Meta) (apiTarget, *v2SessionInfo, error) {
+// conversation resolves the slot's conversation and reads its messages through the daemon. When
+// the daemon cannot be reached at either step, both are read again, whole, from the store: a
+// partial answer from the API is never joined to the store's. The returned target is the one every
+// later read of this conversation has to use.
+func (t apiTarget) conversation(m session.Meta) (apiTarget, *v2SessionInfo, []v2Msg, error) {
 	info, err := t.v2Session(m)
+	var msgs []v2Msg
+	if err == nil && info != nil {
+		if msgs, err = t.messages(info.ID); err != nil && !daemonGone(err) {
+			err = nil // best-effort like readSession: the turns gathered so far
+		}
+	}
 	if !daemonGone(err) {
-		return t, info, err
+		return t, info, msgs, err
 	}
 	off := apiTarget{offline: true}
 	info, err = off.v2Session(m)
-	return off, info, err
+	if err != nil || info == nil {
+		return off, info, nil, err
+	}
+	msgs, _ = off.messages(info.ID)
+	return off, info, msgs, nil
 }
 
 // openV2Store opens the database the v2 opencode of this workspace writes.
@@ -108,7 +141,7 @@ func storeSession(m session.Meta) (*v2SessionInfo, error) {
 	defer db.Close()
 	s, err := scanStoreSession(db.QueryRow(storeSessionCols+
 		` WHERE directory = ? AND (parent_id IS NULL OR parent_id = '') AND time_created >= ?
-		 ORDER BY time_updated DESC LIMIT 1`, m.CWD(), metaCreatedMs(m)))
+		 ORDER BY time_updated DESC, id DESC LIMIT 1`, m.CWD(), metaCreatedMs(m)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

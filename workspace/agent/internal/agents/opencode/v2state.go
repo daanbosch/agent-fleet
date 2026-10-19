@@ -118,8 +118,7 @@ func (t apiTarget) get(path string, out any) error {
 	ctx, cancel := context.WithTimeout(context.Background(), v2StateTimeout)
 	defer cancel()
 	err := t.getCtx(ctx, path, out)
-	var se statusError
-	if err != nil && !errors.As(err, &se) {
+	if daemonGone(err) { // an answer that does not parse is not a daemon that is down
 		v2Down.mu.Lock()
 		v2Down.until[t.Addr] = time.Now().Add(v2DownFor)
 		v2Down.mu.Unlock()
@@ -449,13 +448,12 @@ func queuedV2(t apiTarget, ses string) []string {
 }
 
 func readTranscriptV2(t apiTarget, m session.Meta) agents.TranscriptData {
-	t, info, err := t.orStore(m)
+	t, info, msgs, err := t.conversation(m)
 	if err != nil || info == nil {
 		td := agents.TranscriptData{Path: t.Addr}
 		managedEnrich(m, &td)
 		return td
 	}
-	msgs, _ := t.messages(info.ID) // best-effort like readSession: the turns gathered so far
 	turns := v2Turns(t, info, msgs, false)
 	td := agents.TranscriptData{
 		Turns:      turns,
@@ -491,11 +489,10 @@ func v2Mode(info *v2SessionInfo, msgs []v2Msg) string {
 }
 
 func usageTurnsV2(t apiTarget, m session.Meta) []transcript.Turn {
-	t, info, err := t.orStore(m)
+	t, info, msgs, err := t.conversation(m)
 	if err != nil || info == nil {
 		return nil
 	}
-	msgs, _ := t.messages(info.ID)
 	return v2Turns(t, info, msgs, true)
 }
 
@@ -572,12 +569,9 @@ func v2Turns(t apiTarget, info *v2SessionInfo, msgs []v2Msg, usage bool) []trans
 	cwd := info.Location.Directory
 	all := v2SessionTurns(msgs, cwd, info.Time.Created, false, usage, win)
 	for _, child := range v2Children(msgs) {
-		var cinfo struct {
-			Data v2SessionInfo `json:"data"`
-		}
 		born := int64(0)
-		if t.get(sessionPath(child), &cinfo) == nil {
-			born = cinfo.Data.Time.Created
+		if ci, err := t.sessionInfo(child); err == nil {
+			born = ci.Time.Created
 		}
 		cm, err := t.messages(child)
 		if err != nil && len(cm) == 0 {

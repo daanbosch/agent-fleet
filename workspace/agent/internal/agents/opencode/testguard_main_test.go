@@ -25,10 +25,7 @@ func TestMain(m *testing.M) {
 	startMigrationServe = func(LaunchSpec) (string, string, <-chan struct{}, func(), error) {
 		return srv.URL, "", nil, func() {}, nil
 	}
-	// No test reads the opencode the host happens to have: with none on PATH and no pin the
-	// unprobed daemon is 1.x (v2Served), and a test that wants 2.x says so.
-	opencodeBinary = func() string { return "" }
-	buildPinsPath = os.DevNull
+	pinNoHostOpencode()
 	code := testguard.Run(m, nil)
 	srv.Close()
 	os.Exit(code)
