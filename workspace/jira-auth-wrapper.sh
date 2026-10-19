@@ -128,7 +128,7 @@ fi
 # them through createmeta (classic scope, `workspace-agent jira-issue-types`, which holds the
 # token itself) into a derived, secret-free config next to the generated one. Any failure leaves
 # jira running on the config it had, after a hint that names the next step.
-has_types() { grep -Eq '^[[:space:]]*"?types"?[[:space:]]*:' "$1" 2>/dev/null; }
+has_types() { grep -Eiq '^[[:space:]]*"?types"?[[:space:]]*:' "$1" 2>/dev/null; }
 types_hint() {
   echo "jira: this config has no issue types, which \`issue create\` needs; $1 (find the exact board name with \`jira board list -p KEY\`; a 401 from init can mean the Jira app lacks the Jira Software scopes, which needs a Jira reconnect)" >&2
 }
@@ -140,7 +140,7 @@ appendable() {
   first="$(sed -n '/^[[:space:]]*\(#.*\)\{0,1\}$/d;p;q' "$1" 2>/dev/null)"
   case "$first" in "" | [[:space:]]*) return 1 ;; esac
   grep -Ev '^([[:space:]]|#|$)' "$1" 2>/dev/null | grep -Evq '^[A-Za-z_][A-Za-z0-9_-]*:([[:space:]]|$)' && return 1
-  grep -Eq '^issue[[:space:]]*:' "$1" 2>/dev/null && return 1
+  grep -Eiq '^issue[[:space:]]*:' "$1" 2>/dev/null && return 1
   return 0
 }
 # Writes the derived config to a private directory and points JIRA_CONFIG_FILE at it. The base is

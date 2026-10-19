@@ -450,6 +450,8 @@ done < <(printf '%s\0' \
   $'  installation: Cloud\n  issue:\n    fields: []' \
   $'---\ninstallation: Cloud\nissue:\n    fields: []' \
   $'installation: Cloud\nissue:\n    fields: []\n...' \
+  $'installation: Cloud\nIssue:\n    fields:\n        custom: []' \
+  $'installation: Cloud\nISSUE:\n    fields: []' \
   $'installation: Cloud\n"project": {key: ABC}' \
   $'{installation: Cloud}')
 config "$MANAGED/config.yml" $'# managed\n\ninstallation: Cloud\nproject:\n    key: ABC\n    type: classic\nissuetypes: []'
