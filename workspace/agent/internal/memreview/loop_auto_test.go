@@ -175,32 +175,32 @@ func TestSwitchGoingOffBeforeTheClaimCreatesNoRun(t *testing.T) {
 	}
 }
 
-// A write of "off" that races a review at its boundary is ordered with it: either the dispatch
-// passed first (the call is in flight and finishes) or the write did (nothing starts). Here the
-// write holds the gate while the review reaches it, so the review must see "off".
+// A write of "off" that races a review at its dispatch boundary is ordered with it: either the
+// dispatch passed first (the call is in flight and finishes) or the write did (nothing starts).
+// The order is fixed by the Snapshot seam: the claim has passed, then the writer takes the gate and
+// says so, and only then does the review move on to the dispatch boundary, where it must wait for
+// the writer and see "off".
 func TestSwitchWriteOrdersWithTheDispatchBoundary(t *testing.T) {
 	h := newHarness(t)
 	r := h.reviewer()
 	var on atomic.Bool
 	on.Store(true)
 	r.AutoEnabled = on.Load
-	reached := make(chan struct{})
+	held := make(chan struct{})
+	wrote := make(chan struct{})
 	inner := r.Snapshot
 	r.Snapshot = func(s string) (memoryx.ReviewSnapshot, error) {
-		close(reached) // the review is about to ask for the gate
+		go func() {
+			defer close(wrote)
+			_ = WithSwitchWrite(func() error {
+				close(held) // the gate is ours; the review cannot pass its dispatch boundary yet
+				on.Store(false)
+				return nil
+			})
+		}()
+		<-held
 		return inner(s)
 	}
-	// Note: the claim boundary comes before the snapshot, so the write starts after the claim.
-	wrote := make(chan struct{})
-	go func() {
-		defer close(wrote)
-		_ = WithSwitchWrite(func() error {
-			<-reached
-			time.Sleep(100 * time.Millisecond) // the review is now waiting at the dispatch boundary
-			on.Store(false)
-			return nil
-		})
-	}()
 	_, err := r.Review(t.Context(), Request{Key: "k", Session: "s", Trigger: TriggerAuto, Turns: turns(4), FirstNumber: 1})
 	<-wrote
 	if !errors.Is(err, ErrDisabled) || h.calls != 0 {
