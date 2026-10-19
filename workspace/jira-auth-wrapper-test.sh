@@ -541,6 +541,31 @@ types
 run -- issue create -p KEY
 grep -q '10001' "$(seen CONFIG)" && ! grep -q '99999' "$(seen CONFIG)" || fail "snapshot: next run did not get the helper's types"
 
+# 13. software=missing from the helper → one explanatory line on stderr for board / sprint / epic /
+#     init, never for issue calls or `version`; jira still runs as before, token still injected.
+reset
+printf 'site=%s\nserver=%s\nauth=bearer\nlogin=me@example.com\nsoftware=missing\ntoken=fake-oauth-tok\n' "$SITE" "$ROUTE" >"$T/agent.out"
+for sub in board sprint epic init; do
+  run -- $sub list
+  grep -q 'Boards, sprints and epics: not available' "$T/err" || fail "software notice: none for '$sub'"
+  expect "software notice $sub" TOKEN fake-oauth-tok
+  [ "$rc" = 0 ] || fail "software notice $sub: rc=$rc"
+  no_leak "software notice $sub" fake-oauth-tok
+done
+run -- issue list
+grep -q 'not available' "$T/err" && fail "software notice: shown for issue list"
+run -- version
+[ ! -f "$T/agent.calls" ] || fail "software notice: version reached the helper"
+# Granted or unknown (no software= line, e.g. an API token) stays silent.
+reset
+oauth
+run -- board list
+grep -q 'not available' "$T/err" && fail "software notice: shown without software=missing"
+reset
+apitok
+run -- sprint list
+grep -q 'not available' "$T/err" && fail "software notice: shown for an API token"
+
 # 12. The helper runs before the export, so it never sees a token in its environment.
 reset
 oauth

@@ -292,8 +292,17 @@ Jira は git でなく作業項目インボックス
   read・write:epic:jira-software / read:issue-details:jira / read:jql:jira の許可が必要。
   そのうえで管理者がアプリの `jira_software` スコープグループ（`tenant_git_oauth.scope_groups`）
   にチェックを入れて初めて、認可 URL がそれらを求める。アプリにないスコープを求める認可は
-  Atlassian に拒否されるため。接続済みのメンバーは接続し直すと受け取れる。API トークン接続は
+  Atlassian に拒否されるため。実測（2026-10-19）: この拒否は Atlassian 側の「Something went
+  wrong」の行き止まりページで、callback へのリダイレクトがない。af が捕まえて Software スコープ
+  抜きでやり直せる `error=invalid_scope` は返らないので、テナントのオプションは外せない。
+  接続済みのメンバーは接続し直すと受け取れる。API トークン接続は
   アカウントができることを何でもできる。
+  不足を見えるようにする: Agent は現在のサイトについて accessible-resources が返すスコープを
+  保持し（`JiraSite.Scopes`）、`softwareScopes`（`granted` / `missing`、不明なら省略: API トークン、
+  またはこの項目より前のストア）を導く。設定の Jira カードは `missing` で「ボード・スプリント・
+  エピック: 利用できません」を出し、`workspace-agent jira-cred` は `software=missing` を出力する。
+  wrapper はこれを受けて `board`・`sprint`・`epic`・`init` で同じ 1 行を stderr に書き、そのまま
+  jira を実行する。
 - **OAuth のリンク**: jira-cli はブラウザ用 URL をサーバーから組み立てるので、OAuth では
   サイトではなく `api.atlassian.com/ex/jira/...` を指す。
 - **版の固定**: Dockerfile の `JIRA_CLI_VERSION`（v1.7.0、最新リリース）。tarball はリリースの

@@ -73,7 +73,9 @@ session. You can view, list, create, edit, comment on and transition issues:
   editing and moving issues needs an account that is allowed to.
 - **With OAuth, boards, sprints and epics** need the Jira Software scopes on the tenant's Jira app.
   Your tenant administrator turns them on, and you then **reconnect Jira** once. Until then those
-  commands, and `jira init`, fail with an authorization error. Links the CLI prints point at
+  commands, and `jira init`, fail with an authorization error; Settings › Issue tracker shows
+  "Boards, sprints and epics: not available" on the Jira card, and `jira` prints the same
+  explanation before running those commands. Links the CLI prints point at
   `api.atlassian.com` rather than your site.
 - **Jira Data Center** (or another Jira) is not connected through Settings. Set it up yourself
   (`jira init` with your own `--server`, a config outside `~/.config/agent-fleet/jira/`, or

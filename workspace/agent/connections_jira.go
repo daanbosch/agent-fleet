@@ -66,7 +66,36 @@ func jiraStatus(s *secrets.Data) map[string]any {
 		m["sites"] = sites
 		m["cloudId"] = c.CloudID
 	}
+	if v := jiraSoftwareScopes(c); v != "" {
+		m["softwareScopes"] = v
+	}
 	return m
+}
+
+// jiraBoardScope is the scope every Jira Software board call needs; its absence is what makes
+// `jira board list` / `jira init` answer 401 while issue calls work.
+const jiraBoardScope = "read:board-scope:jira-software"
+
+// jiraSoftwareScopes says whether the current site's authorization holds the Jira Software
+// scopes: "granted", "missing", or "" when unknown. An API-token connection and a site whose
+// scopes were never recorded are unknown, never "missing": the warning must not appear for
+// them.
+func jiraSoftwareScopes(c *secrets.JiraCreds) string {
+	if c == nil || c.AuthKind != "oauth" {
+		return ""
+	}
+	for _, st := range c.Sites {
+		if st.CloudID != c.CloudID || len(st.Scopes) == 0 {
+			continue
+		}
+		for _, sc := range st.Scopes {
+			if sc == jiraBoardScope {
+				return "granted"
+			}
+		}
+		return "missing"
+	}
+	return ""
 }
 
 type jiraConnReq struct {
@@ -296,7 +325,7 @@ func jiraAccessibleSites(c *secrets.JiraCreds) ([]secrets.JiraSite, error) {
 		if r.ID == "" || r.URL == "" {
 			continue
 		}
-		out = append(out, secrets.JiraSite{CloudID: r.ID, URL: strings.TrimRight(r.URL, "/"), Name: r.Name})
+		out = append(out, secrets.JiraSite{CloudID: r.ID, URL: strings.TrimRight(r.URL, "/"), Name: r.Name, Scopes: r.Scopes})
 	}
 	return out, nil
 }

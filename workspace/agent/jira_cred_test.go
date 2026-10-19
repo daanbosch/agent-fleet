@@ -57,6 +57,38 @@ func TestJiraCredServesAFreshOAuthTokenAsBearerOnTheCloudRoute(t *testing.T) {
 	}
 }
 
+// software=missing only for an OAuth site whose recorded scopes lack the board scope; granted,
+// unrecorded (old store) and API-token connections stay silent.
+func TestJiraCredFlagsMissingSoftwareScopes(t *testing.T) {
+	cases := []struct {
+		name   string
+		kind   string
+		scopes []string
+		want   bool
+	}{
+		{"missing", "oauth", []string{"read:jira-work", "offline_access"}, true},
+		{"granted", "oauth", []string{"read:jira-work", jiraBoardScope}, false},
+		{"unrecorded", "oauth", nil, false},
+		{"api token", "", []string{"read:jira-work"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			seedJiraStore(t, func(s *secrets.Data) {
+				s.Jira = &secrets.JiraCreds{AuthKind: c.kind, Site: "https://acme.atlassian.net", CloudID: "cid-1",
+					AccessToken: "fake-at", Token: "fake-api", Email: "me@example.com", Expiry: time.Now().Add(time.Hour).Unix(),
+					Sites: []secrets.JiraSite{{CloudID: "cid-1", URL: "https://acme.atlassian.net", Scopes: c.scopes}}}
+			})
+			got := jiraCredOut()
+			if has := strings.Contains(got, "software=missing\n"); has != c.want {
+				t.Fatalf("answered %q, software=missing want %v", got, c.want)
+			}
+			if c.kind == "oauth" && !strings.HasSuffix(got, "token=fake-at\n") {
+				t.Fatalf("token is not last: %q", got)
+			}
+		})
+	}
+}
+
 func TestJiraCredOmitsAnUnknownOAuthLogin(t *testing.T) {
 	seedJiraStore(t, func(s *secrets.Data) {
 		s.Jira = &secrets.JiraCreds{AuthKind: "oauth", Site: "https://acme.atlassian.net", CloudID: "cid-1",
