@@ -74,7 +74,7 @@ const OneShotSourceUnavailable = "unavailable"
 // resolveDenyAllKind, answered from the availability cache alone so GET /ai-assist/resolution
 // never starts a CLI. ok is false while the cache cannot say yet, which includes "nothing
 // confirmed reachable"; "unavailable" is the one definite answer: the pin names a backend that
-// cannot qualify.
+// cannot qualify, or every kind that could qualify is confirmed unreachable.
 func ResolveDenyAllCached(feature string) (kind, source string, ok bool) {
 	if pin := aiFeatureAgentPref(feature); oneShotRunnable(pin) {
 		if !DenyAllKind(pin) {
@@ -96,7 +96,14 @@ func ResolveDenyAllCached(feature string) (kind, source string, ok bool) {
 			return k, OneShotSourceDefault, true
 		}
 	}
-	return "", "", false // nothing confirmed reachable: unknown, as oneShotKindCached says
+	// Definite only when every deny-all kind has a fresh "not reachable" entry; a single cold
+	// entry keeps the answer unknown, because the next warm-up may still find it.
+	for k := range denyAllBackends {
+		if _, known := headlessAvailableCached(k); !known {
+			return "", "", false
+		}
+	}
+	return "", OneShotSourceUnavailable, true
 }
 
 // WarmDenyAllKind fills the availability cache for the kinds a deny-all feature can run on, the

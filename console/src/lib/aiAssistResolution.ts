@@ -22,9 +22,10 @@ const POLL_MS = 10_000;
 /** Keyed by feature id. null while the first fetch is still in flight — a feature absent from
  *  a loaded map means the Agent could not answer yet (a cold availability cache), which reads
  *  as "unknown", not as a guess. */
-export function useAiAssistResolution(): Record<string, AiAssistResolutionRow> | null {
+export function useAiAssistResolution(enabled = true): Record<string, AiAssistResolutionRow> | null {
   const [rows, setRows] = useState<Record<string, AiAssistResolutionRow> | null>(null);
   useEffect(() => {
+    if (!enabled) return;
     let alive = true;
     const load = () => {
       void api("api/ai-assist/resolution").then((d) => {
@@ -39,6 +40,12 @@ export function useAiAssistResolution(): Record<string, AiAssistResolutionRow> |
       alive = false;
       clearInterval(id);
     };
-  }, []);
+  }, [enabled]);
   return rows;
+}
+
+/** True only on the Agent's definite "no deny-all backend" answer for the memory review (ADR 0117);
+ *  while the answer is loading or unknown the review is not blocked, the Agent re-checks it. */
+export function useMemoryReviewUnavailable(enabled = true): boolean {
+  return useAiAssistResolution(enabled)?.["memory.review"]?.source === "unavailable";
 }

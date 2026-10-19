@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/chatx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/memberorigin/memberorigintest"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/uiprefs"
@@ -155,4 +156,71 @@ func TestStatusIsReadableWithoutTheMarkAndChecksTheName(t *testing.T) {
 			t.Errorf("%s: %d", path, w.Code)
 		}
 	}
+}
+
+func stubBackend(t *testing.T, kind, source string, ok bool) {
+	t.Helper()
+	oldR, oldW := ResolveBackend, WarmBackend
+	ResolveBackend = func(string) (string, string, bool) { return kind, source, ok }
+	WarmBackend = func() {}
+	t.Cleanup(func() { ResolveBackend, WarmBackend = oldR, oldW })
+}
+
+func statusOf(t *testing.T) StatusResponse {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	reviewMux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/agents/memory-review", nil))
+	var st StatusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil || rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	return st
+}
+
+// No deny-all backend: the status says so (a state, no text) and "Review now" is refused
+// without starting anything, instead of parking a run that cannot send.
+func TestNoDenyAllBackendIsReportedAndRunRefused(t *testing.T) {
+	lh := newLoopHarness(t)
+	withDefaultLoop(t, lh)
+	lh.add("a", 5, turns(4))
+	s := memberorigintest.Install(t)
+	writePrefsFile(t, `{"agentMemory":true,"memoryReview":"propose"}`)
+	stubBackend(t, "", chatx.OneShotSourceUnavailable, true)
+
+	if st := statusOf(t); st.Backend != BackendUnavailable || st.BackendKind != "" {
+		t.Fatalf("backend = %q/%q, want unavailable", st.Backend, st.BackendKind)
+	}
+	if w := post(t, s, `{"session":"a"}`); w.Code != http.StatusConflict || code(w) != "memory_review_no_backend" {
+		t.Fatalf("run: %d %s", w.Code, w.Body)
+	}
+	if lh.calls != 0 || len(runs()) != 0 || lh.loop.Running("a") {
+		t.Fatal("a refused request started a review")
+	}
+}
+
+func TestAvailableDenyAllBackendIsReported(t *testing.T) {
+	lh := newLoopHarness(t)
+	withDefaultLoop(t, lh)
+	writePrefsFile(t, `{}`)
+	stubBackend(t, "claude", chatx.OneShotSourceDefault, true)
+	if st := statusOf(t); st.Backend != BackendAvailable || st.BackendKind != "claude" {
+		t.Fatalf("backend = %q/%q", st.Backend, st.BackendKind)
+	}
+}
+
+// A cold cache answers "unknown" and does not block "Review now": the run itself fails closed.
+func TestUnknownDenyAllBackendDoesNotRefuseRun(t *testing.T) {
+	lh := newLoopHarness(t)
+	withDefaultLoop(t, lh)
+	lh.add("a", 5, turns(4))
+	s := memberorigintest.Install(t)
+	writePrefsFile(t, `{"agentMemory":true,"memoryReview":"propose"}`)
+	stubBackend(t, "", "", false)
+	if st := statusOf(t); st.Backend != BackendUnknown {
+		t.Fatalf("backend = %q", st.Backend)
+	}
+	if w := post(t, s, `{"session":"a"}`); w.Code != http.StatusAccepted {
+		t.Fatalf("run: %d %s", w.Code, w.Body)
+	}
+	waitIdle(t, lh.loop, "a")
 }
