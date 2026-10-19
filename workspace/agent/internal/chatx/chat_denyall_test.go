@@ -365,6 +365,94 @@ func TestDenyAllKindIsClaudeOnly(t *testing.T) {
 	}
 }
 
+// Every kind a one-shot can run on is either a qualified backend with a runner or an unqualified
+// one with a recorded limitation, never both and never neither: a new kind has to be classified
+// before it can be picked for a feature that reads a third party's text.
+func TestDenyAllLimitsCoverEveryOneShotKind(t *testing.T) {
+	for _, k := range oneShotKinds {
+		run, qualified := denyAllBackends[k]
+		why, limited := denyAllLimits[k]
+		switch {
+		case qualified && limited:
+			t.Errorf("%s is both qualified and listed with a limitation", k)
+		case !qualified && !limited:
+			t.Errorf("%s is neither qualified nor given a limitation", k)
+		case qualified && run == nil:
+			t.Errorf("%s is qualified with no runner", k)
+		case limited && strings.TrimSpace(why) == "":
+			t.Errorf("%s has an empty limitation", k)
+		}
+	}
+	for k := range denyAllLimits {
+		if !oneShotRunnable(k) {
+			t.Errorf("denyAllLimits names %q, which is not a one-shot kind", k)
+		}
+	}
+	for k := range denyAllBackends {
+		if !oneShotRunnable(k) {
+			t.Errorf("denyAllBackends names %q, which is not a one-shot kind", k)
+		}
+	}
+}
+
+// withDenyAllBackend installs a runner for kind for the test's duration.
+func withDenyAllBackend(t *testing.T, kind string, run denyAllRunner) {
+	t.Helper()
+	old, had := denyAllBackends[kind]
+	denyAllBackends[kind] = run
+	t.Cleanup(func() {
+		if had {
+			denyAllBackends[kind] = old
+		} else {
+			delete(denyAllBackends, kind)
+		}
+	})
+}
+
+// The run is dispatched on the kind that was resolved. Before the table carried a runner per
+// kind, any kind added to the list would have been verified and run as claude.
+func TestOneShotDenyAllRunsTheResolvedKindsOwnRunner(t *testing.T) {
+	writeUIPrefs(t, `{"aiFeatureAgents":{"memory.review":"codex"}}`)
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Cleanup(SetHeadlessAvailableForTest("claude", true))
+	t.Cleanup(SetHeadlessAvailableForTest("codex", true))
+	logDir := fakeDenyAllClaude(t, cleanProbe, cleanRun)
+	var got string
+	withDenyAllBackend(t, "codex", func(_ context.Context, _, prompt, _ string) (string, error) {
+		got = prompt
+		return "CODEX-REPLY", nil
+	})
+
+	reply, err := runDenyAll(t)
+	if err != nil || reply != "CODEX-REPLY" || got != secretPrompt {
+		t.Fatalf("reply = %q, err = %v, prompt seen = %q", reply, err, got)
+	}
+	if n := invocations(t, logDir); n != 0 {
+		t.Fatalf("claude was started %d times for a codex run", n)
+	}
+}
+
+// A runner that is missing (nil) is no qualification: the kind is skipped, a pin on it fails, and
+// nothing is started or panics.
+func TestOneShotDenyAllTreatsANilRunnerAsUnqualified(t *testing.T) {
+	writeUIPrefs(t, `{"aiFeatureAgents":{"memory.review":"codex"}}`)
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Cleanup(SetHeadlessAvailableForTest("claude", true))
+	t.Cleanup(SetHeadlessAvailableForTest("codex", true))
+	logDir := fakeDenyAllClaude(t, cleanProbe, cleanRun)
+	withDenyAllBackend(t, "codex", nil)
+
+	if DenyAllKind("codex") {
+		t.Fatal("a kind with no runner qualifies")
+	}
+	if _, err := runDenyAll(t); !errors.Is(err, ErrDenyAllUnavailable) {
+		t.Fatalf("err = %v, want ErrDenyAllUnavailable", err)
+	}
+	if invocations(t, logDir) != 0 {
+		t.Fatal("a CLI was started")
+	}
+}
+
 // The cached resolution says "unavailable" once the only qualifying kind is confirmed unreachable,
 // and stays unknown while its cache entry is cold: GET /ai-assist/resolution and the memory
 // review status share this answer.

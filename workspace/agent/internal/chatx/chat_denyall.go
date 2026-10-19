@@ -4,10 +4,10 @@ package chatx
 // text must run with no tool, no MCP server, no file and no network access, and a backend that
 // cannot be shown to do that does not run it. Fail closed, never "run with the default".
 //
-// Only claude qualifies today. The others have no flag that removes their tools (codex keeps
-// its read-only shell, opencode's one-shot config denies edit and bash only, cursor's ask mode
-// is read-only rather than tool-less, agy and muse have no such switch), and none of them has
-// been verified; the table is denyAllKinds.
+// Only claude qualifies today. A kind qualifies when it has an entry in denyAllBackends: a runner
+// that probes the very run it will make, and checks the real run's own output again. The others
+// have none, because none of them prints what the run has (denyAllLimits says why, per kind).
+// Fail closed: a kind without a runner is skipped, and a pin on it fails the call.
 //
 // A flag in the argv is not proof. Measured on claude 2.1.302: --strict-mcp-config with an
 // empty config still leaves Claude in Chrome connected (22 browser tools) when the inherited
@@ -21,7 +21,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -33,17 +35,37 @@ import (
 // one that is could not be verified. Nothing was sent to any model.
 var ErrDenyAllUnavailable = errors.New("no backend that can run without tools is available")
 
-// denyAllKinds are the kinds with a deny-all one-shot that is verified at run time.
-var denyAllKinds = []string{session.KindClaude}
+// denyAllRunner makes one deny-all call on one kind, model already chosen. It verifies the
+// posture with a probe first, then checks the real run's output, and returns an error wrapping
+// ErrDenyAllUnavailable when the probe could not show the posture. The runner writes the ledger
+// row itself, and only once the transcript is about to be sent: a refused probe reached no model
+// and must leave no row.
+type denyAllRunner func(ctx context.Context, persona, prompt, model string) (string, error)
+
+// denyAllBackends are the kinds with a deny-all one-shot that is verified at run time. This table
+// is the only way in: DenyAllKind, the resolution, the warm-up and the dispatch in OneShotDenyAll
+// all read it, so a kind cannot qualify without bringing its own probe and re-check.
+var denyAllBackends = map[string]denyAllRunner{
+	session.KindClaude: runClaudeDenyAll,
+}
+
+// denyAllLimits says, for each one-shot kind that does not qualify, why it was not qualified. Each
+// line is "no inventory shown", not "cannot be done": it names what was and was not found, and the
+// evidence behind it (help text, a debug command, an earlier measurement, or not run) is in ADR
+// 0117 (note of 2026-10-19). A kind leaves this table only by gaining a runner above.
+// TestDenyAllLimitsCoverEveryOneShotKind keeps the two in step with oneShotKinds, so a new kind has
+// to be classified.
+var denyAllLimits = map[string]string{
+	session.KindCodex:    "no tool inventory was found: prompt-input lists messages only, exec --json was not run, and no flag removing built-in tools was found",
+	session.KindOpencode: "the one-shot config denies shell, edit, write and subagent only; other built-in tools and the user's global MCP servers are not shown absent, and no output lists the run's tools",
+	session.KindCursor:   "ask mode is read-only, not tool-less; the stream-json init event is documented without a tool or MCP list, and it was not run",
+	session.KindAgy:      "not probed (the CLI aborts at start here); the driver reads plain text from -p, so no inventory is known, and no tool-removal switch is known",
+	session.KindMuse:     "the disable flags cover shell, write and web per its help; an echo-provider event stream named no tools, and a real-provider run was not made",
+}
 
 // DenyAllKind reports whether kind has a verified-at-run-time deny-all one-shot.
 func DenyAllKind(kind string) bool {
-	for _, k := range denyAllKinds {
-		if k == kind {
-			return true
-		}
-	}
-	return false
+	return denyAllBackends[kind] != nil // a nil runner is no probe: fail closed
 }
 
 // OneShotSourceUnavailable is the resolution source of a deny-all feature whose pinned backend
@@ -80,7 +102,7 @@ func ResolveDenyAllCached(feature string) (kind, source string, ok bool) {
 	// entry keeps the answer unknown, because the next warm-up may still find it.
 	// One read per kind: a warm-up racing the loops above may have stored "reachable" since, and
 	// that must read as unknown, never as a verdict.
-	for _, k := range denyAllKinds {
+	for k := range denyAllBackends {
 		if avail, known := headlessAvailableCached(k); !known || avail {
 			return "", "", false
 		}
@@ -91,7 +113,7 @@ func ResolveDenyAllCached(feature string) (kind, source string, ok bool) {
 // WarmDenyAllKind fills the availability cache for the kinds a deny-all feature can run on, the
 // counterpart of WarmOneShotKind: that one warms the shared order, which may never reach claude.
 func WarmDenyAllKind() {
-	for _, k := range denyAllKinds {
+	for _, k := range slices.Sorted(maps.Keys(denyAllBackends)) {
 		warmWG.Add(1)
 		go func() {
 			defer warmWG.Done()
@@ -146,11 +168,19 @@ func OneShotDenyAll(ctx context.Context, feature string, tier OneShotTier, perso
 	}
 	selected = strings.TrimSpace(selected)
 
-	// Same argv, same environment, a prompt that is not the transcript.
+	run := denyAllBackends[kind]
+	if run == nil {
+		return "", fmt.Errorf("%w: %q has no verified deny-all route", ErrDenyAllUnavailable, kind)
+	}
+	return run(ctx, persona, prompt, selected)
+}
+
+// runClaudeDenyAll is claude's runner: probe with the same argv and environment and a prompt that
+// is not the transcript, then run, and read the init event of the real run.
+func runClaudeDenyAll(ctx context.Context, persona, prompt, selected string) (string, error) {
 	if err := verifyClaudeDenyAll(ctx, persona, selected); err != nil {
 		return "", err
 	}
-
 	call := usagex.Call{Kind: session.KindClaude, ModelReq: selected}
 	defer usagex.RecordCall(ctx, &call, time.Now())
 	cmd := claudeOneShotCmd(ctx, claudeOneShotArgsFormat(persona, selected, true))
