@@ -149,7 +149,7 @@ appendable() {
 # types) gets its own file instead of rewriting one jira has yet to read. The types cache is kept
 # per connection (a hash of the server URL, which holds no secret) and project.
 derive_types_config() {
-  local base="$1" ddir types derived yaml sh ch
+  local base="$1" ddir types derived yaml sh ch snap
   appendable "$base" || return 1
   key="${proj:-}"
   [ -n "$key" ] || key="$(sed -n '/^project:/,/^[^[:space:]#]/{s/^[[:space:]][[:space:]]*key:[[:space:]]*["'"'"']*\([A-Za-z0-9_]*\).*/\1/p;T;q}' "$base" 2>/dev/null)"
@@ -168,14 +168,21 @@ derive_types_config() {
   esac
   rm -f "$types.$$" 2>/dev/null
   [ -s "$types" ] || return 1
-  ch="$({ cat "$base" && printf '\n' && cat "$types"; } 2>/dev/null | sha256sum | cut -c1-16)"
-  [ -n "$ch" ] || return 1
+  # Read base and types once into a private temp: the hash names exactly what is published, even
+  # when another run swaps the types cache in between.
+  snap="$ddir/snap.$$"
+  (umask 077; { cat "$base" && printf '\n' && cat "$types"; } >"$snap") 2>/dev/null || { rm -f "$snap"; return 1; }
+  ch="$(sha256sum <"$snap" 2>/dev/null | cut -c1-16)"
+  [ -n "$ch" ] || { rm -f "$snap"; return 1; }
   derived="$ddir/config-$key-$ch.yml"
-  if [ ! -s "$derived" ]; then
-    (umask 077; { cat "$base" && printf '\n' && cat "$types"; } >"$derived.$$") 2>/dev/null &&
-      mv -f "$derived.$$" "$derived" 2>/dev/null || { rm -f "$derived.$$" 2>/dev/null; return 1; }
+  if [ -s "$derived" ]; then
+    rm -f "$snap"
+    touch -c "$derived" 2>/dev/null
+  else
+    mv -f "$snap" "$derived" 2>/dev/null || { rm -f "$snap"; return 1; }
   fi
-  find "$ddir" -name 'config-*.yml' -mtime +1 -delete 2>/dev/null
+  # Never the file this run is about to hand to jira; the age limit protects other runs' files.
+  find "$ddir" -name 'config-*.yml' ! -name "${derived##*/}" -mtime +1 -delete 2>/dev/null
   export JIRA_CONFIG_FILE="$derived"
 }
 if { [ "$sub" = issue ] || [ "$sub" = issues ]; } && [ "$sub2" = create ]; then

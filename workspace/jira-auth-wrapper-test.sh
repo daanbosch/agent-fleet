@@ -501,6 +501,44 @@ types
 run -- issue create -p KEY
 expect_d site-a-again KEY
 
+# 13k. A derived file older than the GC age is reused, kept (mtime refreshed) and still exists
+#      when jira starts; other stale files are collected.
+reset
+oauth
+types
+run -- issue create -p KEY
+old_cfg="$(seen CONFIG)"
+touch -d '3 days ago' "$old_cfg"
+printf 'x: 1\n' >"$CGEN/derived/config-OLD-0000.yml"
+touch -d '3 days ago' "$CGEN/derived/config-OLD-0000.yml"
+run -- issue create -p KEY
+[ "$(seen CONFIG)" = "$old_cfg" ] || fail "gc: config changed to $(seen CONFIG)"
+[ -s "$old_cfg" ] || fail "gc: the config handed to jira was collected"
+[ -n "$(find "$old_cfg" -mtime -1)" ] || fail "gc: reuse did not refresh the mtime"
+[ ! -e "$CGEN/derived/config-OLD-0000.yml" ] || fail "gc: a stale file survived"
+
+# 13l. The types cache swapped by another run while the config is being assembled: the published
+#      file is named by what it holds, and the next run's answer is not shadowed by a mismatch.
+reset
+oauth
+types
+cat >"$T/bin/cat" <<'STUB'
+#!/bin/sh
+# After the types cache is read once, another run replaces it.
+/bin/cat "$@"
+case "$*" in *issue-types-*) [ -f "$STUB_DIR/swap.done" ] || { touch "$STUB_DIR/swap.done"; sed 's/10001/99999/' "$STUB_DIR/types.fixture" >"$1.new" 2>/dev/null; mv -f "$1.new" "$1"; } ;; esac
+STUB
+chmod +x "$T/bin/cat"
+rm -f "$T/swap.done"
+run -- issue create -p KEY
+rm -f "$T/bin/cat"
+first="$(seen CONFIG)"
+grep -q '10001' "$first" && ! grep -q '99999' "$first" || fail "snapshot: the published file does not hold what was read"
+[ "$(sha256sum <"$first" | cut -c1-16)" = "$(basename "$first" .yml | sed 's/.*-//')" ] || fail "snapshot: name does not match content"
+types
+run -- issue create -p KEY
+grep -q '10001' "$(seen CONFIG)" && ! grep -q '99999' "$(seen CONFIG)" || fail "snapshot: next run did not get the helper's types"
+
 # 12. The helper runs before the export, so it never sees a token in its environment.
 reset
 oauth
