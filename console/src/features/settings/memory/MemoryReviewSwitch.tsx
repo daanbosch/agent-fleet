@@ -9,11 +9,14 @@
 
 import { Choice, Row } from "../parts/controls.tsx";
 import { setSetting, useSettings } from "../../../lib/settings.ts";
+import { useMemoryReviewUnavailable } from "../../../lib/aiAssistResolution.ts";
 import { useT } from "../../../lib/i18n/index.ts";
 
-export function MemoryReviewSwitch() {
+// running: the Agent can be asked; while the workspace is stopped nothing is fetched (only the pref works).
+export function MemoryReviewSwitch({ running = false }: { running?: boolean }) {
   const tr = useT();
   const s = useSettings();
+  const unavailable = useMemoryReviewUnavailable(running);
   return (
     <>
       <Row label={tr("mem.review_switch")}>
@@ -27,6 +30,7 @@ export function MemoryReviewSwitch() {
         />
       </Row>
       <p className="muted ds-note">{tr("mem.review_note")}</p>
+      {unavailable && <p className="mem-warn">{tr("mem.review_no_backend")}</p>}
       {s.memoryReview !== "off" && !s.agentMemory && <p className="mem-warn">{tr("mem.review_needs_memory")}</p>}
     </>
   );
