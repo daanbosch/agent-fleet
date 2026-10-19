@@ -100,8 +100,10 @@ func ResolveDenyAllCached(feature string) (kind, source string, ok bool) {
 	}
 	// Definite only when every deny-all kind has a fresh "not reachable" entry; a single cold
 	// entry keeps the answer unknown, because the next warm-up may still find it.
+	// One read per kind: a warm-up racing the loops above may have stored "reachable" since, and
+	// that must read as unknown, never as a verdict.
 	for k := range denyAllBackends {
-		if _, known := headlessAvailableCached(k); !known {
+		if avail, known := headlessAvailableCached(k); !known || avail {
 			return "", "", false
 		}
 	}

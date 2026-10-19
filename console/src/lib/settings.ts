@@ -384,6 +384,10 @@ export interface Settings {
   // missing-key answer (uiprefs.MemoryReview): conversation excerpts go to a model. It also needs
   // agentMemory on. There is no control for it yet; this is the key the Agent reads.
   memoryReview: MemoryReviewMode;
+  // Automatic background review (ADR 0117 decision 1): the turn-end loop may claim sessions on its
+  // own. Default false, like the Agent's own missing-key answer (uiprefs.MemoryReviewAuto); the manual
+  // "Suggest memories now" needs only memoryReview.
+  memoryReviewAuto: boolean;
   // How many children ONE session may have at a time (ADR 0073 decision 6, AgentsTab > Session).
   // Per parent, not per workspace: two parents at the ceiling is twice that many agents.
   //
@@ -1197,6 +1201,7 @@ const DEFAULTS: Settings = {
   agentMemory: false, // opt-in (ADR 0108) — what one session saves reaches every kind later
   externalMemory: "off", // opt-in (#1988) — memory text leaves the workspace for an outside client's model
   memoryReview: "off", // opt-in (ADR 0117) — conversation excerpts go to a model, and it spends tokens
+  memoryReviewAuto: false, // opt-in (ADR 0117 decision 1) — the loop spends tokens unattended
   sessionSpawnChildLimit: 3, // the value the limit had while it was a constant (ADR 0073 decision 6)
   sessionStoppedArchiveDays: 0, // the deployment default (ADR 0097)
   sessionSpendCapUsd: 0, // no budget (#1054)
@@ -1541,6 +1546,7 @@ function load(): Settings {
       agentMemory: normalizeAgentMemory(saved.agentMemory),
       externalMemory: normalizeExternalMemory(saved.externalMemory),
       memoryReview: normalizeMemoryReview(saved.memoryReview),
+      memoryReviewAuto: saved.memoryReviewAuto === true,
     };
   } catch {
     return { ...DEFAULTS };
@@ -1973,6 +1979,7 @@ const AGENT_DEFAULTED = new Set<keyof Settings>([
   "agentMemory",
   "externalMemory", // #1988: missing ⇒ off (uiprefs.ExternalMemory), for the same reason
   "memoryReview", // ADR 0117: missing ⇒ off (uiprefs.MemoryReview), for the same reason
+  "memoryReviewAuto", // ADR 0117: missing ⇒ off (uiprefs.MemoryReviewAuto), for the same reason
 ]);
 
 // Accumulated data — unlike toggles and colors these settings build up over time and cannot be
@@ -2206,6 +2213,10 @@ export async function hydrateUIPrefs(): Promise<boolean> {
   }
   if (merged.memoryReview !== normalizeMemoryReview(merged.memoryReview)) {
     merged.memoryReview = normalizeMemoryReview(merged.memoryReview);
+    changed = true;
+  }
+  if (merged.memoryReviewAuto !== (merged.memoryReviewAuto === true)) {
+    merged.memoryReviewAuto = merged.memoryReviewAuto === true;
     changed = true;
   }
   const customClaude = normalizeClaudeCustomModels(merged.claudeCustomModels);

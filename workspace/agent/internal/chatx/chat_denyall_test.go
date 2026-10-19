@@ -467,3 +467,13 @@ func TestResolveDenyAllCachedWithoutAQualifyingBackend(t *testing.T) {
 		t.Fatalf("got %q %q %v, want default claude", kind, source, ok)
 	}
 }
+
+// A deny-all kind that turns out reachable on the second read keeps the answer unknown: the
+// verdict "unavailable" needs every kind confirmed unreachable in the same pass.
+func TestResolveDenyAllCachedNeverCallsAReachableKindUnavailable(t *testing.T) {
+	writeUIPrefs(t, `{}`)
+	t.Cleanup(ClearHeadlessAvailableForTest("claude"))
+	if _, source, ok := ResolveDenyAllCached("memory.review"); ok || source != "" {
+		t.Fatalf("cold: got %q %v, want unknown", source, ok)
+	}
+}

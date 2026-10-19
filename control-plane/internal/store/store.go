@@ -1070,6 +1070,10 @@ type TenantStore interface {
 	// this one is the tenant_admin's. "" = no restriction.
 	GetTenantAllowedCIDRs(ctx context.Context, tenantID string) (string, error)
 	SetTenantAllowedCIDRs(ctx context.Context, tenantID, cidrs string) error
+	// GetTenantExternalMemory / SetTenantExternalMemory: the tenant-wide switch for AF memory
+	// reached through /mcp from outside Agent Fleet (#2318). Unknown tenant = error.
+	GetTenantExternalMemory(ctx context.Context, tenantID string) (bool, error)
+	SetTenantExternalMemory(ctx context.Context, tenantID string, enabled bool) error
 }
 
 // TenantIdP is one tenant-defined login provider (docs/log/61 §61.11, migration 0040).
