@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // legacyFake is a legacy-era (initialize + Mcp-Session-Id) server. reject decides, per
@@ -19,6 +20,7 @@ type legacyFake struct {
 	status  int    // status for a rejected request
 	body    string // body for a rejected request
 	reject  func(n int, method string) bool
+	delay   time.Duration // per-request latency
 
 	mu sync.Mutex
 	n  int
@@ -31,6 +33,7 @@ func (f *legacyFake) handler() http.Handler {
 			Method string `json:"method"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&m)
+		time.Sleep(f.delay)
 		w.Header().Set("Content-Type", "application/json")
 		enc := json.NewEncoder(w)
 		switch m.Method {
@@ -212,5 +215,70 @@ func TestProbeHTTPSessionAffinityNeedsFreshConnections(t *testing.T) {
 	res := Probe(context.Background(), httpDef("remote", srv.URL))
 	if res.OK || res.Error != errSessionRejected {
 		t.Fatalf("the instance without the session went unnoticed: %+v", res)
+	}
+}
+
+// A stateless-era server whose tools/list is a 503 with a plain-text body is a failure.
+func TestProbeHTTPStatelessToolsListNon2xxFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m struct {
+			ID     any    `json:"id"`
+			Method string `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&m)
+		if m.Method == "server/discover" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": m.ID,
+				"result": map[string]any{"supportedVersions": []string{"2026-07-28"}}})
+			return
+		}
+		http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	res := Probe(context.Background(), httpDef("remote", srv.URL))
+	if res.OK || res.Error != "HTTP 503" || !strings.Contains(res.Detail, "upstream unavailable") {
+		t.Fatalf("got %+v", res)
+	}
+}
+
+// A healthy but slow single-instance server must not fail because of the extra checks.
+func TestProbeHTTPSlowStatefulServerStillPasses(t *testing.T) {
+	f := &legacyFake{issueID: true, delay: 400 * time.Millisecond}
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	d := httpDef("remote", srv.URL)
+	d.TimeoutMS = 2500
+	res := Probe(context.Background(), d)
+	if !res.OK || res.ToolCount != 1 {
+		t.Fatalf("slow healthy server failed: %+v", res)
+	}
+}
+
+// Rate limiting that hits only the extra checks is inconclusive, not a failure.
+func TestProbeHTTPExtraCheckRateLimitedStillPasses(t *testing.T) {
+	res := probeLegacy(t, &legacyFake{issueID: true, status: 429, body: "slow down",
+		reject: func(n int, _ string) bool { return n >= 3 }})
+	if !res.OK {
+		t.Fatalf("got %+v", res)
+	}
+}
+
+// A 400 echoing the session id next to an unrelated complaint is not an unknown session.
+func TestProbeHTTPSessionIDEchoIsNotSessionVerdict(t *testing.T) {
+	res := probeLegacy(t, &legacyFake{issueID: true, status: 400,
+		body:   `{"error":"invalid params","request":{"method":"tools/list"},"sessionId":"sess-1"}`,
+		reject: func(n int, _ string) bool { return n >= 2 }})
+	if res.OK || res.Error != "HTTP 400" {
+		t.Fatalf("got %+v", res)
+	}
+}
+
+// The status survives a long body: the Detail keeps the HTTP number.
+func TestProbeHTTPSessionRejectedDetailKeepsStatusForLongBody(t *testing.T) {
+	body := `{"message":"Session not found"}` + strings.Repeat(" ", 2000) + "END"
+	res := probeLegacy(t, &legacyFake{issueID: true, status: 404, body: body,
+		reject: func(n int, _ string) bool { return n >= 2 }})
+	if res.Error != errSessionRejected || !strings.HasPrefix(res.Detail, "HTTP 404: ") {
+		t.Fatalf("got %+v", res)
 	}
 }
