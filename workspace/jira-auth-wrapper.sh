@@ -35,7 +35,7 @@
 #   otherwise the assignments below would be echoed, or exported to every helper.
 set +xa
 unset cred tok server auth login cfg sub sub2 proj cfg_argv own_init debug prev conf managed gen
-unset parent eff key cdir types derived yaml hint basekey
+unset parent eff key cdir types derived yaml hint basekey soft
 
 real="${AF_JIRA_REAL:-/usr/local/libexec/jira}"
 
@@ -123,8 +123,19 @@ tok="$(printf '%s\n' "$cred" | field token)"
 server="$(printf '%s\n' "$cred" | field server)"
 auth="$(printf '%s\n' "$cred" | field auth)"
 login="$(printf '%s\n' "$cred" | field login)"
+soft="$(printf '%s\n' "$cred" | field software)"
 if [ -z "$tok" ] || [ -z "$server" ] || [ -z "$auth" ]; then
   exec "$real" "$@"
+fi
+
+# The Agent says `software=missing` only for an OAuth authorization it knows lacks the Jira
+# Software scopes (never for an API token or an unknown one). Boards, sprints, epics and `init`
+# would answer a bare 401 then, so say why, once, and run jira as before: this never blocks.
+if [ "$soft" = missing ]; then
+  case "$sub" in
+    board | boards | sprint | sprints | epic | epics | init)
+      echo "jira: Boards, sprints and epics: not available - this Jira connection lacks the Jira Software scopes (expect 401). Ask the tenant administrator to add the scopes to the Atlassian app and tick the Jira Software option on the tenant's Jira card, then reconnect Jira in Settings." >&2 ;;
+  esac
 fi
 
 # `jira issue create` reads the issue types from the config only, and `jira init` (the only

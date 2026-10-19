@@ -318,8 +318,19 @@ those variables in for one `exec`:
   read:issue-details:jira and read:jql:jira. The administrator then ticks the
   `jira_software` scope group on the app (`tenant_git_oauth.scope_groups`), and only then does
   the authorize URL ask for them: Atlassian refuses an authorization that names a scope the
-  app lacks. Members already connected reconnect to receive them. An API-token connection has
+  app lacks. Measured (2026-10-19): the refusal is a dead-end "Something went wrong" page on
+  Atlassian's side with no redirect back to the callback, so there is no `error=invalid_scope`
+  for af to catch and retry without the Software scopes; the tenant option cannot be dropped.
+  Members already connected reconnect to receive them. An API-token connection has
   whatever the account can do.
+  Making the absence visible: the Agent keeps the scopes accessible-resources reports for the
+  current site (`JiraSite.Scopes`) and derives `softwareScopes` (`granted` / `missing`, absent
+  when unknown: API token, or a failed lookup). A store from before the field is filled in
+  from accessible-resources on the next `jira-cred` or Jira fetch (bounded, throttled, written
+  only onto site entries that have no scopes), so no reconnect is needed to see the warning. The Settings Jira card shows
+  "Boards, sprints and epics: not available" on `missing`, and `workspace-agent jira-cred`
+  prints `software=missing`, on which the wrapper writes the same one line to stderr for
+  `board`, `sprint`, `epic` and `init` and then runs jira unchanged.
 - **Links on OAuth**: jira-cli builds browse URLs from its server, so with OAuth they point at
   `api.atlassian.com/ex/jira/...` rather than the site.
 - **Pin**: `JIRA_CLI_VERSION` in the Dockerfile (v1.7.0, the latest release). The tarball must

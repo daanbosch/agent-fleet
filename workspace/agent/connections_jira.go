@@ -67,7 +67,36 @@ func jiraStatus(s *secrets.Data) map[string]any {
 		m["sites"] = sites
 		m["cloudId"] = c.CloudID
 	}
+	if v := jiraSoftwareScopes(c); v != "" {
+		m["softwareScopes"] = v
+	}
 	return m
+}
+
+// jiraBoardScope is the scope every Jira Software board call needs; its absence is what makes
+// `jira board list` / `jira init` answer 401 while issue calls work.
+const jiraBoardScope = "read:board-scope:jira-software"
+
+// jiraSoftwareScopes says whether the current site's authorization holds the Jira Software
+// scopes: "granted", "missing", or "" when unknown. An API-token connection and a site whose
+// scopes were never recorded are unknown, never "missing": the warning must not appear for
+// them.
+func jiraSoftwareScopes(c *secrets.JiraCreds) string {
+	if c == nil || c.AuthKind != "oauth" {
+		return ""
+	}
+	for _, st := range c.Sites {
+		if st.CloudID != c.CloudID || len(st.Scopes) == 0 {
+			continue
+		}
+		for _, sc := range st.Scopes {
+			if sc == jiraBoardScope {
+				return "granted"
+			}
+		}
+		return "missing"
+	}
+	return ""
 }
 
 type jiraConnReq struct {
@@ -297,7 +326,7 @@ func jiraAccessibleSites(c *secrets.JiraCreds) ([]secrets.JiraSite, error) {
 		if r.ID == "" || r.URL == "" {
 			continue
 		}
-		out = append(out, secrets.JiraSite{CloudID: r.ID, URL: strings.TrimRight(r.URL, "/"), Name: r.Name})
+		out = append(out, secrets.JiraSite{CloudID: r.ID, URL: strings.TrimRight(r.URL, "/"), Name: r.Name, Scopes: r.Scopes})
 	}
 	return out, nil
 }
@@ -418,6 +447,7 @@ func jiraGet(c *secrets.JiraCreds, u string) ([]byte, error) {
 	if err := jiraEnsureFresh(c); err != nil {
 		return nil, err
 	}
+	jiraBackfillScopes(c)
 	body, status, err := jiraRequest(c, "GET", u, nil)
 	if err != nil {
 		return nil, err
@@ -470,6 +500,111 @@ func jiraRequest(c *secrets.JiraCreds, method, u string, payload []byte) ([]byte
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	return body, resp.StatusCode, nil
+}
+
+// jiraScopesRecorded reports whether the current site of an OAuth connection has its scopes.
+func jiraScopesRecorded(c *secrets.JiraCreds) bool {
+	for _, st := range c.Sites {
+		if st.CloudID == c.CloudID {
+			return len(st.Scopes) > 0
+		}
+	}
+	return true // no such site entry: nothing to fill in
+}
+
+var (
+	jiraBackfillMu   sync.Mutex
+	jiraBackfillLast time.Time
+)
+
+// jiraBackfillRetry spaces the attempts of one process after a failed lookup.
+const jiraBackfillRetry = 10 * time.Minute
+
+// jiraBackfillBudget bounds the lookup, so a slow Atlassian costs a jira run a delay, not a hang.
+var jiraBackfillBudget = 8 * time.Second
+
+// jiraBackfillScopes fills in the scopes of a connection stored before they were recorded, so a
+// member who connected without the Jira Software scopes learns why without reconnecting first.
+// c must hold a fresh access token. It only reads accessible-resources and writes scopes onto
+// site entries that have none, inside the store update, so a reconnect or site switch racing
+// it is never overwritten. Any failure leaves the connection unknown (as before).
+func jiraBackfillScopes(c *secrets.JiraCreds) {
+	if c == nil || c.AuthKind != "oauth" || c.AccessToken == "" || jiraScopesRecorded(c) {
+		return
+	}
+	jiraBackfillMu.Lock()
+	if !jiraBackfillLast.IsZero() && time.Since(jiraBackfillLast) < jiraBackfillRetry {
+		jiraBackfillMu.Unlock()
+		return
+	}
+	jiraBackfillLast = time.Now()
+	jiraBackfillMu.Unlock()
+
+	type res struct {
+		sites []secrets.JiraSite
+		err   error
+	}
+	ch := make(chan res, 1)
+	cc := *c
+	go func() {
+		sites, err := jiraAccessibleSites(&cc)
+		ch <- res{sites, err}
+	}()
+	var r res
+	select {
+	case r = <-ch:
+	case <-time.After(jiraBackfillBudget):
+		return
+	}
+	if r.err != nil {
+		return
+	}
+	scopes := map[string][]string{}
+	for _, st := range r.sites {
+		if len(st.Scopes) > 0 {
+			scopes[st.CloudID] = st.Scopes
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := secrets.UpdateContext(ctx, func(s *secrets.Data) error {
+		if s.Jira == nil || s.Jira.AuthKind != "oauth" {
+			return nil
+		}
+		for i := range s.Jira.Sites {
+			if sc := scopes[s.Jira.Sites[i].CloudID]; len(s.Jira.Sites[i].Scopes) == 0 && len(sc) > 0 {
+				s.Jira.Sites[i].Scopes = sc
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return
+	}
+	for i := range c.Sites {
+		if sc := scopes[c.Sites[i].CloudID]; len(c.Sites[i].Scopes) == 0 {
+			c.Sites[i].Scopes = sc
+		}
+	}
+}
+
+// jiraBackfillForStatus lets the Settings card learn the scopes of an older OAuth connection
+// without any jira run or rail fetch. It talks to Atlassian only for an OAuth connection whose
+// current site has no recorded scopes (and then at most once per jiraBackfillRetry), and reloads
+// s so the answer includes what it stored and any token it renewed.
+func jiraBackfillForStatus(s *secrets.Data) {
+	c := s.Jira
+	if c == nil || c.AuthKind != "oauth" || c.CloudID == "" || jiraScopesRecorded(c) || !jiraConnected(c) {
+		return
+	}
+	cc := *c
+	if jiraEnsureFresh(&cc) != nil {
+		return
+	}
+	jiraBackfillScopes(&cc)
+	if ns, err := secrets.Load(); err == nil {
+		*s = *ns
+	}
 }
 
 // jiraFreshWindow renews slightly before the stamp says to. A token that expires while
