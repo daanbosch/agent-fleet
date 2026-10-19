@@ -291,7 +291,7 @@ those variables in for one `exec`:
     GC) but with the base's column-0 `issue:` block cut out first and B's types appended. That
     block also holds `fields.custom`, which jira-cli sends on create, and A's custom fields must not
     reach B, so they are dropped for B (the other keys, board and epic included, stay). The cut is
-    made only when the file has exactly one bare `issue:` line (any case); otherwise, or when the
+    made only when the file has exactly one bare `issue:` line (any case) and defines no YAML anchor, alias or `<<` merge (the cut could leave an alias undefined), and the run has no `--parent` / `-P` (a parent goes out as `fields.parent` or as the epic-link custom field depending on the project kind, which `project.type` / `epic.*` hold for the base project only); otherwise, or when the
     fetch fails with nothing cached, jira runs on the base and a hint names
     `jira init -c ~/.config/agent-fleet/jira/<name>.yml --project B --board "<name>"`. A config
     whose `project.key` cannot be read plainly, or that has no `-p`, is used as is.

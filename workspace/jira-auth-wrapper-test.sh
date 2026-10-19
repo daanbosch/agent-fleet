@@ -444,6 +444,31 @@ for bad in $'installation: Cloud\nproject:\n    key: AAA\n"issue":\n    types:\n
   expect other-unsafe CONFIG "$MANAGED/config.yml"
   grep -q 'jira init' "$T/err" || fail "other-unsafe: no hint"
 done
+# A column-0 comment inside the block does not end it: nothing of A's survives, and what follows
+# the block stays a top-level key.
+config "$MANAGED/config.yml" $'installation: Cloud\nissue:\n# comment\n    types:\n        - id: "7"\n          name: Task\nproject:\n    key: AAA'
+run -- issue create -p BBB
+expect_d other-comment BBB
+d="$(seen CONFIG)"
+grep -q '"7"' "$d" && fail "other-comment: A's type ID survived"
+grep -qx 'project:' "$d" && grep -qx '    key: AAA' "$d" || fail "other-comment: project key lost"
+# Only project's own `key:` counts, not a nested one: -p BBB is then another project than AAA.
+config "$MANAGED/config.yml" $'project:\n    other:\n        key: BBB\n    key: AAA\nissue:\n    types:\n        - id: "7"'
+run -- issue create -p BBB
+expect_d other-nested BBB
+# An anchor defined in the cut block would leave its aliases undefined: not merged.
+config "$MANAGED/config.yml" $'project:\n    key: AAA\nissue:\n    types: &oldtypes\n        - id: "7"\nissue_x: *oldtypes'
+run -- issue create -p BBB
+expect other-anchor CONFIG "$MANAGED/config.yml"
+grep -q 'jira init' "$T/err" || fail "other-anchor: no hint"
+# --parent depends on the other project's kind (project.type, epic.*), unknown here: not merged.
+config "$MANAGED/config.yml" "$A_CFG"
+for form in "--parent BBB-1" "-P BBB-1" "--parent=BBB-1"; do
+  # shellcheck disable=SC2086
+  run -- issue create -p BBB $form
+  expect "other-parent $form" CONFIG "$MANAGED/config.yml"
+  grep -q 'jira init' "$T/err" || fail "other-parent $form: no hint"
+done
 # -c, a user's own config, JIRA_SERVER: untouched.
 config "$MANAGED/config.yml" "$A_CFG"
 config "$MANAGED/a.yml" "$A_CFG"

@@ -64,7 +64,8 @@ session. You can view, list, create, edit, comment on and transition issues:
   project the wrapper hands `jira` a copy with that project's types and without the config's
   custom fields (they belong to the first project). If the types cannot be read, `jira` runs on
   the config as it is and a hint names `jira init -c ~/.config/agent-fleet/jira/<name>.yml
-  --project PROJ --board "PROJ board"`, which gives that project a config of its own.
+  --project PROJ --board "PROJ board"`, which gives that project a config of its own. Creating with `--parent` for another project always
+  takes that route, because the config cannot say what kind of project it is.
 - **Project, board, sprints and epics**: run `jira init --project PROJ --board "PROJ board"` once
   (add `--force` to replace an earlier setup). It writes your default project, board, issue types
   and epic fields, which `jira sprint list` and the epic commands need, and it asks no questions.
