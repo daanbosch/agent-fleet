@@ -207,7 +207,7 @@ func TestReviewNeverRunsWhileSwitchedOff(t *testing.T) {
 	h.enabled = true
 	r := h.reviewer()
 	n := 0
-	r.Enabled = func() bool { n++; return n == 1 }
+	r.Enabled = func() bool { n++; return n <= 2 } // the top check and the one before the claim
 	if _, err := r.Review(context.Background(), h.req(TriggerAuto, turns(4))); !errors.Is(err, ErrDisabled) {
 		t.Fatalf("err = %v", err)
 	}

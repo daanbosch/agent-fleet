@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/k-k1/agent-fleet/workspace/agent/internal/memoryx"
 	"github.com/k-k1/agent-fleet/workspace/agent/internal/transcript"
 )
 
@@ -140,5 +141,36 @@ func TestReviewerRefusesAnAutomaticReviewWhileTheSwitchIsOff(t *testing.T) {
 	req.Trigger = TriggerManual
 	if _, err := r.Review(t.Context(), req); err != nil || h.calls != 1 {
 		t.Fatalf("manual: err %v calls %d", err, h.calls)
+	}
+}
+
+// The switch going off while the memory is read (after the first check, before the call is
+// recorded) stops the call: nothing is sent and the run stays claimed.
+func TestSwitchGoingOffWhileTheSnapshotIsReadStartsNoCall(t *testing.T) {
+	h := newHarness(t)
+	r := h.reviewer()
+	var on atomic.Bool
+	on.Store(true)
+	r.AutoEnabled = on.Load
+	inner := r.Snapshot
+	r.Snapshot = func(s string) (memoryx.ReviewSnapshot, error) {
+		on.Store(false)
+		return inner(s)
+	}
+	_, err := r.Review(t.Context(), Request{Key: "k", Session: "s", Trigger: TriggerAuto, Turns: turns(4), FirstNumber: 1})
+	if !errors.Is(err, ErrDisabled) || h.calls != 0 || onlyRun(t).State != StateClaimed || len(onlyRun(t).Attempts) != 0 {
+		t.Fatalf("err %v calls %d runs %+v", err, h.calls, runs())
+	}
+}
+
+// The switch going off between the first check and the claim creates no run.
+func TestSwitchGoingOffBeforeTheClaimCreatesNoRun(t *testing.T) {
+	h := newHarness(t)
+	r := h.reviewer()
+	n := 0
+	r.AutoEnabled = func() bool { n++; return n == 1 } // true only for the check at the top
+	_, err := r.Review(t.Context(), Request{Key: "k", Session: "s", Trigger: TriggerAuto, Turns: turns(4), FirstNumber: 1})
+	if !errors.Is(err, ErrDisabled) || h.calls != 0 || len(runs()) != 0 {
+		t.Fatalf("err %v calls %d runs %d", err, h.calls, len(runs()))
 	}
 }

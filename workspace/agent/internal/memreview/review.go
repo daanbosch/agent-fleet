@@ -162,6 +162,10 @@ func (r *Reviewer) Review(ctx context.Context, req Request) (Result, error) {
 		if pendingCount() >= MaxPending {
 			return Result{}, ErrQueueFull
 		}
+		// The switch may have gone off while the windows were built: claim nothing then.
+		if !r.allowed(req.Trigger) {
+			return Result{}, ErrDisabled
+		}
 		run = Run{ID: runID(req.Key, w.Last), Key: req.Key, Session: req.Session, Trigger: req.Trigger,
 			Base: wm, First: w.First, Last: w.Last, State: StateClaimed, Created: now}
 		if err := saveRun(&run, now); err != nil {
@@ -241,6 +245,12 @@ func (r *Reviewer) advance(ctx context.Context, run *Run, req Request) (Result, 
 	}
 	in := BuildInput(win, snap)
 
+	// Last look before the call is recorded and started: reading the memory and building the input
+	// take time, and a call not yet started must not start after the switch went off. What remains
+	// is the instant between this check and Call; a call that has begun is allowed to finish.
+	if !r.allowed(req.Trigger) {
+		return Result{}, ErrDisabled
+	}
 	if err := consumeCall(now); err != nil {
 		return Result{}, err
 	}
