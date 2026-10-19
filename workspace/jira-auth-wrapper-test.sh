@@ -403,6 +403,97 @@ expect managed-c TOKEN fake-oauth-tok
 [ "$(helper_calls)" = 0 ] || fail "managed-c: helper was asked"
 grep -q 'jira init' "$T/err" || fail "managed-c: no hint"
 
+# 13e2. A managed config holding project A's types, `-p B`: jira gets a derived config with B's
+#       types, A's issue block (types and custom fields) gone, the other keys kept.
+A_CFG=$'installation: Cloud\nproject:\n    key: AAA\n    type: classic\nboard:\n    id: 1\n    name: A board\nissue:\n    fields:\n        custom:\n            - name: Sprint\n              key: customfield_10020\n              schema:\n                datatype: number\n    types:\n        - id: "7"\n          name: Task\n          subtask: false\nepic:\n    name: customfield_10011'
+reset
+oauth
+types
+config "$MANAGED/config.yml" "$A_CFG"
+cp "$MANAGED/config.yml" "$T/a.before"
+run -- issue create -p bbb -t Task -s x
+expect_d other-project BBB
+d="$(seen CONFIG)"
+grep -qx '    - id: "10001"' "$d" || fail "other-project: B's types missing"
+grep -q '"7"' "$d" && fail "other-project: A's type ID survived"
+grep -q 'customfield_10020' "$d" && fail "other-project: A's custom fields survived"
+grep -qx 'epic:' "$d" && grep -qx '    key: AAA' "$d" && grep -qx '    name: A board' "$d" || fail "other-project: base keys lost"
+[ "$(stat -c %a "$d")" = 600 ] || fail "other-project: derived config mode $(stat -c %a "$d")"
+grep -qx 'jira-issue-types BBB' "$T/agent.calls" || fail "other-project: helper not asked for BBB"
+[ ! -s "$T/err" ] || fail "other-project: stderr: $(cat "$T/err")"
+cmp -s "$MANAGED/config.yml" "$T/a.before" || fail "other-project: the managed config was modified"
+no_leak other-project fake-oauth-tok
+# The same project (any case), or no -p at all: the managed config itself.
+for form in "-p AAA" "-p aaa" "-t Task"; do
+  # shellcheck disable=SC2086
+  run -- issue create $form
+  expect "same-project $form" CONFIG "$MANAGED/config.yml"
+done
+[ "$(helper_calls)" = 0 ] || fail "same-project: helper was asked"
+# The helper fails and nothing is cached: A's config as before, plus the init hint.
+rm -f "$T/types.out"; rm -rf "$CGEN/derived"
+run -- issue create -p BBB
+expect other-fail CONFIG "$MANAGED/config.yml"
+grep -q 'jira init -c ~/.config/agent-fleet/jira/bbb.yml --project BBB --board' "$T/err" || fail "other-fail: no hint: $(cat "$T/err")"
+# Not merged when the issue key is not a bare one (quoted, indented), or there are two spellings.
+types
+for bad in $'installation: Cloud\nproject:\n    key: AAA\n"issue":\n    types:\n        - id: "7"' \
+           $'installation: Cloud\nproject:\n    key: AAA\nissue:\n    types:\n        - id: "7"\nIssue:\n    types:\n        - id: "8"'; do
+  config "$MANAGED/config.yml" "$bad"
+  run -- issue create -p BBB
+  expect other-unsafe CONFIG "$MANAGED/config.yml"
+  grep -q 'jira init' "$T/err" || fail "other-unsafe: no hint"
+done
+# A column-0 comment inside the block does not end it: nothing of A's survives, and what follows
+# the block stays a top-level key.
+config "$MANAGED/config.yml" $'installation: Cloud\nissue:\n# comment\n    types:\n        - id: "7"\n          name: Task\nproject:\n    key: AAA'
+run -- issue create -p BBB
+expect_d other-comment BBB
+d="$(seen CONFIG)"
+grep -q '"7"' "$d" && fail "other-comment: A's type ID survived"
+grep -qx 'project:' "$d" && grep -qx '    key: AAA' "$d" || fail "other-comment: project key lost"
+# Only project's own `key:` counts, not a nested one: -p BBB is then another project than AAA.
+config "$MANAGED/config.yml" $'project:\n    other:\n        key: BBB\n    key: AAA\nissue:\n    types:\n        - id: "7"'
+run -- issue create -p BBB
+expect_d other-nested BBB
+# An anchor defined in the cut block would leave its aliases undefined: not merged.
+config "$MANAGED/config.yml" $'project:\n    key: AAA\nissue:\n    types: &oldtypes\n        - id: "7"\nissue_x: *oldtypes'
+run -- issue create -p BBB
+expect other-anchor CONFIG "$MANAGED/config.yml"
+grep -q 'jira init' "$T/err" || fail "other-anchor: no hint"
+config "$MANAGED/config.yml" $'project:\n    key: AAA\nissue:\n    types: &-oldtypes\n        - id: "7"\nissue_x: *-oldtypes'
+run -- issue create -p BBB
+expect other-anchor-dash CONFIG "$MANAGED/config.yml"
+# CRLF files read like LF ones: another project is cut, and a default project still comes from the file.
+config "$MANAGED/config.yml" "$(printf 'installation: Cloud\r\nproject:\r\n    key: AAA\r\nissue:\r\n    types:\r\n        - id: "7"\r\n          name: Task\r\n')"
+run -- issue create -p BBB
+expect_d other-crlf BBB
+grep -q '"7"' "$(seen CONFIG)" && fail "other-crlf: A's type ID survived"
+config "$MANAGED/config.yml" "$(printf 'installation: Cloud\r\nproject:\r\n    key: AAA\r\n')"
+run -- issue create -t Task
+expect_d crlf-default AAA
+# --parent depends on the other project's kind (project.type, epic.*), unknown here: not merged.
+config "$MANAGED/config.yml" "$A_CFG"
+for form in "--parent BBB-1" "-P BBB-1" "--parent=BBB-1"; do
+  # shellcheck disable=SC2086
+  run -- issue create -p BBB $form
+  expect "other-parent $form" CONFIG "$MANAGED/config.yml"
+  grep -q 'jira init' "$T/err" || fail "other-parent $form: no hint"
+done
+# -c, a user's own config, JIRA_SERVER: untouched.
+config "$MANAGED/config.yml" "$A_CFG"
+config "$MANAGED/a.yml" "$A_CFG"
+run -- issue create -c "$MANAGED/a.yml" -p BBB
+expect other-c CONFIG "<unset>"
+grep -qx "ARG=$MANAGED/a.yml" "$T/jira.seen" || fail "other-c: -c not passed through"
+! grep -q '^jira-issue-types' "$T/agent.calls" 2>/dev/null || fail "other-c: helper was asked"
+run JIRA_SERVER=https://own.example.net -- issue create -p BBB
+expect other-server CONFIG "<unset>"
+[ ! -e "$T/agent.calls" ] || fail "other-server: helper was asked"
+run -- issue create --debug -p BBB
+expect other-debug CONFIG "$MANAGED/config.yml"
+[ ! -e "$T/agent.calls" ] || fail "other-debug: helper was asked"
+
 # 13f. The user's own setup is never touched, hinted at or fetched for: another config, jira's
 #      default location, an explicit token or server, a debug run, other subcommands.
 reset

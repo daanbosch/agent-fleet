@@ -25,6 +25,9 @@
 #   scopes). For a config of ours that has none, the types are fetched by the Agent
 #   (`workspace-agent jira-issue-types`, createmeta, classic scope) into a derived copy of the
 #   config under the cache directory; that never replaces a config the user owns.
+#   A managed config that has types holds one project's (IDs are per project in team-managed
+#   projects): `-p` naming another project gets a derived config with that project's types and
+#   without the base's `issue` block, custom fields included.
 # - Fails closed: any helper error leaves jira running with no injected auth.
 # - The token only ever lives in this shell's variables and, at the very end, in the exec'd
 #   jira's environment: never argv, never a file, never printed. xtrace and allexport are
@@ -32,7 +35,7 @@
 #   otherwise the assignments below would be echoed, or exported to every helper.
 set +xa
 unset cred tok server auth login cfg sub sub2 proj cfg_argv own_init debug prev conf managed gen
-unset eff key cdir types derived yaml hint
+unset parent eff key cdir types derived yaml hint basekey
 
 real="${AF_JIRA_REAL:-/usr/local/libexec/jira}"
 
@@ -49,7 +52,7 @@ fi
 # The config jira will read, the subcommand (and the word after it), the project, and whether
 # this is a debug run, from argv. Cobra takes the last -c, in any of -c X, -cX, -c=X, --config X,
 # --config=X; -p / --project the same way.
-cfg="" sub="" sub2="" proj="" own_init="" debug="" prev=""
+cfg="" sub="" sub2="" proj="" own_init="" debug="" prev="" parent=""
 for a in "$@"; do
   case "$prev" in
     -c | --config) cfg="$a"; prev=""; continue ;;
@@ -64,6 +67,7 @@ for a in "$@"; do
     --project=*) proj="${a#--project=}" ;;
     -p=*) proj="${a#-p=}" ;;
     -p?*) proj="${a#-p}" ;;
+    -P | -P?* | --parent | --parent=*) parent=1 ;;
     --debug | --debug=[tT1]* ) debug=1 ;;
     --server | --server=* | --login | --login=* | --installation | --installation=* | --auth-type | --auth-type=*)
       own_init=1 ;;
@@ -135,24 +139,59 @@ types_hint() {
 # True when appending an `issue:` block to the file cannot duplicate or reshape a key: the first
 # real line starts at column 0 and every column-0 line is a bare `key:` (no quotes, no flow
 # style, no `---` / `...` document marks), none of them `issue`. Anything else is not merged.
+# With "replace" the file must instead hold exactly one `issue:` key, as a bare line, which
+# the caller then cuts out; two spellings of it (Viper lowercases keys) are not told apart.
 appendable() {
   local first
   first="$(sed -n '/^[[:space:]]*\(#.*\)\{0,1\}$/d;p;q' "$1" 2>/dev/null)"
   case "$first" in "" | [[:space:]]*) return 1 ;; esac
   grep -Ev '^([[:space:]]|#|$)' "$1" 2>/dev/null | grep -Evq '^[A-Za-z_][A-Za-z0-9_-]*:([[:space:]]|$)' && return 1
+  if [ "${2:-}" = replace ]; then
+    # Cutting a block that defines an anchor (or merges one) would leave aliases undefined.
+    ! grep -Eq '(^|[[:space:]:,{[-])[&*][^[:space:]]|<<[[:space:]]*:' "$1" 2>/dev/null &&
+      [ "$(grep -Eic '^issue[[:space:]]*:' "$1" 2>/dev/null)" = 1 ] &&
+      grep -Eiq '^issue:[[:space:]]*(#.*)?$' "$1" 2>/dev/null
+    return
+  fi
   grep -Eiq '^issue[[:space:]]*:' "$1" 2>/dev/null && return 1
   return 0
+}
+# The base file with its column-0 `issue:` block (types and custom fields, all indented under
+# it) left out; the other keys pass through. A column-0 comment is not the end of the block.
+without_issue() {
+  awk 'tolower($0) ~ /^issue:/ { skip = 1; next }
+       skip && /^#/ { print; next }
+       skip && (/^[[:space:]]/ || /^$/) { next }
+       { skip = 0; print }' "$1"
+}
+# project.key of a config, as `jira init` writes it; empty when it cannot be read plainly.
+project_key() {
+  awk '{ sub(/\r$/, "") }
+       /^project:[ \t]*(#.*)?$/ { inp = 1; next }
+       inp && /^[^ \t#]/ { exit }
+       inp && /^[ \t]*(#.*)?$/ { next }
+       inp {
+         match($0, /^[ \t]+/); ind = substr($0, 1, RLENGTH)
+         if (want == "") want = ind
+         if (ind != want) next
+         v = substr($0, RLENGTH + 1)
+         if (v ~ /^key:[ ]*("[A-Za-z0-9_]+"|\047[A-Za-z0-9_]+\047|[A-Za-z0-9_]+)[ ]*(#.*)?$/) {
+           sub(/^key:[ ]*["\047]?/, "", v); sub(/["\047 ].*$|[ ]*#.*$/, "", v); print v; exit
+         }
+       }' "$1" 2>/dev/null
 }
 # Writes the derived config to a private directory and points JIRA_CONFIG_FILE at it. The base is
 # copied whole, so the files are 0600 in a 0700 directory whatever the caller's umask, and the
 # name carries a hash of the content: a concurrent run with another base (or another site's
 # types) gets its own file instead of rewriting one jira has yet to read. The types cache is kept
 # per connection (a hash of the server URL, which holds no secret) and project.
+# With "replace" the base already holds another project's issue block: it is dropped (its type
+# IDs and custom fields belong to that project only) and the -p project's types take its place.
 derive_types_config() {
-  local base="$1" ddir types derived yaml sh ch snap
-  appendable "$base" || return 1
+  local base="$1" mode="${2:-}" ddir types derived yaml sh ch snap
+  appendable "$base" ${mode:+"$mode"} || return 1
   key="${proj:-}"
-  [ -n "$key" ] || key="$(sed -n '/^project:/,/^[^[:space:]#]/{s/^[[:space:]][[:space:]]*key:[[:space:]]*["'"'"']*\([A-Za-z0-9_]*\).*/\1/p;T;q}' "$base" 2>/dev/null)"
+  [ -n "$key" ] || key="$(project_key "$base")"
   [ -n "$key" ] || return 2
   case "$key" in [A-Za-z]*) ;; *) return 1 ;; esac
   case "$key" in *[!A-Za-z0-9_]*) return 1 ;; esac
@@ -171,7 +210,10 @@ derive_types_config() {
   # Read base and types once into a private temp: the hash names exactly what is published, even
   # when another run swaps the types cache in between.
   snap="$ddir/snap.$$"
-  (umask 077; { cat "$base" && printf '\n' && cat "$types"; } >"$snap") 2>/dev/null || { rm -f "$snap"; return 1; }
+  (umask 077; {
+    if [ "$mode" = replace ]; then without_issue "$base"; else cat "$base"; fi &&
+      printf '\n' && cat "$types"
+  } >"$snap") 2>/dev/null || { rm -f "$snap"; return 1; }
   ch="$(sha256sum <"$snap" 2>/dev/null | cut -c1-16)"
   [ -n "$ch" ] || { rm -f "$snap"; return 1; }
   derived="$ddir/config-$key-$ch.yml"
@@ -197,6 +239,18 @@ if { [ "$sub" = issue ] || [ "$sub" = issues ]; } && [ "$sub2" = create ]; then
         2) types_hint "pass \`-p KEY\` or run \`jira init --project KEY --board NAME\`" ;;
         *) types_hint "run \`jira init --project KEY --board NAME\`" ;;
       esac
+    fi
+  elif [ -z "$cfg_argv" ] && [ -n "$eff" ] && [ -n "$proj" ] && [ -r "$eff" ]; then
+    # The config has types, but they are its own project's: IDs are per project in team-managed
+    # projects. For another -p project use that project's types and none of the custom fields.
+    basekey="$(project_key "$eff")"
+    if [ -n "$basekey" ] && [ "${basekey,,}" != "${proj,,}" ]; then
+      # A parent is sent as fields.parent in a team-managed project and as the epic-link custom
+      # field in a classic one; the config's project.type and epic.* are the base project's and the
+      # other project's kind is not known here, so such a create stays on the base config.
+      if [ -n "$parent" ] || ! derive_types_config "$eff" replace; then
+        echo "jira: $eff holds the issue types of project $basekey, not ${proj}; run \`jira init -c ~/.config/agent-fleet/jira/${proj,,}.yml --project ${proj} --board \"<board name>\"\` to give it its own" >&2
+      fi
     fi
   fi
 fi
