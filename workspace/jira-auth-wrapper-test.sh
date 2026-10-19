@@ -305,38 +305,43 @@ rm -f "$T/bin/sed"
 CGEN="$T/home/.cache/agent-fleet/jira"
 printf 'issue:\n  types:\n    - id: "10001"\n      name: "Task"\n      handle: "Task"\n      subtask: false\n' >"$T/types.fixture"
 types() { cp "$T/types.fixture" "$T/types.out"; }
+expect_d() { # expect_d <label> <KEY>: CONFIG is a derived config for KEY
+  local got
+  got="$(seen CONFIG)"
+  case "$got" in "$CGEN/derived/config-$2-"*.yml) ;; *) fail "$1: CONFIG = '$got'" ;; esac
+}
 helper_calls() { grep -c '^jira-issue-types' "$T/agent.calls" 2>/dev/null; }
 reset
 oauth
 types
 run -- issue create -p KEY -t Task -s "a summary"
 expect create TOKEN fake-oauth-tok
-expect create CONFIG "$CGEN/config-KEY.yml"
-grep -q '^installation: Cloud$' "$CGEN/config-KEY.yml" || fail "create: derived config lost the base"
-grep -q '^    - id: "10001"$' "$CGEN/config-KEY.yml" || fail "create: derived config has no issue types"
+expect_d create KEY
+grep -q '^installation: Cloud$' "$(seen CONFIG)" || fail "create: derived config lost the base"
+grep -q '^    - id: "10001"$' "$(seen CONFIG)" || fail "create: derived config has no issue types"
 [ "$(grep -c '^ARG=' "$T/jira.seen")" = 8 ] || fail "create: argv not passed through intact"
 grep -qx 'jira-issue-types KEY' "$T/agent.calls" || fail "create: helper not asked for KEY"
 [ ! -s "$T/err" ] || fail "create: unexpected stderr: $(cat "$T/err")"
-[ "$(grep -c 'fake' "$CGEN/config-KEY.yml")" = 0 ] || fail "create: derived config holds a secret"
+[ "$(grep -c 'fake' "$(seen CONFIG)")" = 0 ] || fail "create: derived config holds a secret"
 no_leak create fake-oauth-tok
 [ "$(cat "$GEN")" != "" ] && ! grep -q 'issue:' "$GEN" || fail "create: the generated base config was modified"
 
 # 13b. Every spelling of the project, case folded into one file; the last one wins.
 for form in "-p KEY" "-pKEY" "-p=KEY" "--project KEY" "--project=KEY" "-p key" "-p OTHER -p KEY"; do
-  rm -rf "$CGEN"/config-*.yml "$CGEN"/issue-types-*.yml
+  rm -rf "$CGEN/derived"
   # shellcheck disable=SC2086
   run -- issue create $form -t Task
-  expect "create $form" CONFIG "$CGEN/config-KEY.yml"
+  expect_d "create $form" KEY
 done
 run -- issues create -p KEY
-expect create-alias CONFIG "$CGEN/config-KEY.yml"
+expect_d create-alias KEY
 
 # 13c. The last good types answer is used when the helper fails; a helper that never worked
 #      leaves jira on its own config, after a hint naming the next step.
 run -- issue create -p KEY
 rm -f "$T/types.out"
 run -- issue create -p KEY
-expect create-cached CONFIG "$CGEN/config-KEY.yml"
+expect_d create-cached KEY
 [ ! -s "$T/err" ] || fail "create-cached: unexpected stderr"
 reset
 oauth
@@ -349,7 +354,7 @@ grep -q 'jira init' "$T/err" && grep -q "board list" "$T/err" || fail "create-no
 printf 'garbage\n' >"$T/types.out"
 run -- issue create -p KEY
 expect create-garbage CONFIG "$GEN"
-[ ! -e "$CGEN/issue-types-KEY.yml" ] || fail "create-garbage: cached a bad answer"
+[ -z "$(ls "$CGEN"/derived/issue-types-* 2>/dev/null)" ] || fail "create-garbage: cached a bad answer"
 
 # 13d. No project anywhere → no helper call, a hint that says to pass -p.
 reset
@@ -377,8 +382,8 @@ expect managed-types CONFIG "$MANAGED/config.yml"
 [ ! -s "$T/err" ] || fail "managed-types: hint printed"
 config "$MANAGED/config.yml" $'installation: Cloud\nproject:\n    key: ABC\n    type: classic'
 run -- issue create -t Task
-expect managed-project CONFIG "$CGEN/config-ABC.yml"
-grep -q '^    key: ABC$' "$CGEN/config-ABC.yml" && grep -q '^    - id: "10001"$' "$CGEN/config-ABC.yml" ||
+expect_d managed-project ABC
+grep -q '^    key: ABC$' "$(seen CONFIG)" && grep -q '^    - id: "10001"$' "$(seen CONFIG)" ||
   fail "managed-project: derived config is not managed + types"
 grep -qx 'jira-issue-types ABC' "$T/agent.calls" || fail "managed-project: helper not asked for ABC"
 no_leak managed-project fake-oauth-tok
@@ -426,6 +431,75 @@ rm -f "$T/agent.out"
 run -- issue create -p KEY
 expect no-connection CONFIG "$GEN"
 [ ! -f "$T/agent.calls" ] || ! grep -q '^jira-issue-types' "$T/agent.calls" || fail "no-connection: types were fetched without a credential"
+
+# 13g. The base is merged by appending, so only a plain block-style file with no `issue` key
+#      qualifies: quoted or indented keys, an `issue` of any spelling, flow style, document marks.
+reset
+oauth
+types
+i=0
+while IFS= read -r -d '' body; do
+  i=$((i + 1))
+  config "$MANAGED/config.yml" "$body"
+  run -- issue create -p KEY
+  expect "unmergeable $i" CONFIG "$MANAGED/config.yml"
+  grep -q 'jira init' "$T/err" || fail "unmergeable $i: no hint"
+done < <(printf '%s\0' \
+  $'installation: Cloud\n\'issue\':\n    fields:\n        custom: []' \
+  $'installation: Cloud\n"issue":\n    fields:\n        custom: []' \
+  $'  installation: Cloud\n  issue:\n    fields: []' \
+  $'---\ninstallation: Cloud\nissue:\n    fields: []' \
+  $'installation: Cloud\nissue:\n    fields: []\n...' \
+  $'installation: Cloud\n"project": {key: ABC}' \
+  $'{installation: Cloud}')
+config "$MANAGED/config.yml" $'# managed\n\ninstallation: Cloud\nproject:\n    key: ABC\n    type: classic\nissuetypes: []'
+run -- issue create
+expect_d mergeable ABC
+
+# 13h. Two managed configs for one project, run concurrently: each run keeps its own derived file
+#      (the first is still unread by jira when the second starts).
+reset
+oauth
+types
+config "$MANAGED/a.yml" $'installation: Cloud\ncustom-marker: A'
+config "$MANAGED/b.yml" $'installation: Cloud\ncustom-marker: B'
+run -- issue create -c "$MANAGED/a.yml" -p KEY
+run JIRA_CONFIG_FILE="$MANAGED/a.yml" -- issue create -p KEY
+cfg_a="$(seen CONFIG)"
+run JIRA_CONFIG_FILE="$MANAGED/b.yml" -- issue create -p KEY
+cfg_b="$(seen CONFIG)"
+[ "$cfg_a" != "$cfg_b" ] || fail "concurrent: both runs got $cfg_a"
+grep -q 'custom-marker: A' "$cfg_a" && grep -q 'custom-marker: B' "$cfg_b" || fail "concurrent: a run lost its own base"
+
+# 13i. The derived files copy the whole base, so they are private whatever the umask, and the
+#      base keeps its own mode.
+reset
+oauth
+types
+config "$MANAGED/config.yml" $'installation: Cloud\nproject:\n    key: ABC'
+chmod 600 "$MANAGED/config.yml"
+(umask 022; run -- issue create)
+[ "$(stat -c %a "$MANAGED/config.yml")" = 600 ] || fail "perm: base mode changed"
+[ "$(stat -c %a "$CGEN/derived")" = 700 ] || fail "perm: derived dir is $(stat -c %a "$CGEN/derived")"
+for f in "$CGEN"/derived/*; do
+  [ "$(stat -c %a "$f")" = 600 ] || fail "perm: $f is $(stat -c %a "$f")"
+done
+
+# 13j. The last-good types belong to one connection: another site never falls back to them.
+reset
+oauth
+types
+run -- issue create -p KEY
+expect_d site-a KEY
+printf 'site=https://other.atlassian.net\nserver=https://api.atlassian.com/ex/jira/cid-2\nauth=bearer\nlogin=me@example.com\ntoken=fake-oauth-tok\n' >"$T/agent.out"
+rm -f "$T/types.out"
+run -- issue create -p KEY
+expect site-b CONFIG "$GEN"
+grep -q 'jira init' "$T/err" || fail "site-b: no hint"
+oauth
+types
+run -- issue create -p KEY
+expect_d site-a-again KEY
 
 # 12. The helper runs before the export, so it never sees a token in its environment.
 reset

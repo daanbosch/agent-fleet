@@ -277,10 +277,13 @@ those variables in for one `exec`:
     (`-p` in any spelling, else the config's `project.key`). The helper GETs
     `/rest/api/2/issue/createmeta?projectKeys=KEY` with the token it holds itself (classic
     `read:jira-work`) and prints only the non-secret `issue.types` block. The wrapper caches it as
-    `~/.cache/agent-fleet/jira/issue-types-KEY.yml` (reused when a later fetch fails) and points
-    `JIRA_CONFIG_FILE` at `config-KEY.yml` there: the base config plus that block, rewritten on
-    every run. A config that already has `types:` is left alone, as is one that has an `issue:`
-    key of its own or is not block-style (appending would not merge). Any failure runs jira on its
+    `~/.cache/agent-fleet/jira/derived/issue-types-<server hash>-KEY.yml` (reused only for the same
+    connection when a later fetch fails) and points `JIRA_CONFIG_FILE` at
+    `derived/config-KEY-<content hash>.yml`: the base config plus that block. The name follows the
+    content, so concurrent runs with different bases never share a file; the directory is 0700 and
+    the files 0600 because the whole base is copied. A config that already has `types:` is left
+    alone. So is one that is not plain block style (the first line at column 0, every column-0
+    line a bare `key:`, no `issue` key, no `---` / `...`): appending would not merge. Any failure runs jira on its
     own config after a one-line stderr hint to run `jira init` (and says that a 401 there can mean
     missing Jira Software scopes). A managed config that has types serves every `-p`, as before.
 - **The user's own setup wins**: an explicit `JIRA_API_TOKEN` or `JIRA_SERVER`, a `jira init`

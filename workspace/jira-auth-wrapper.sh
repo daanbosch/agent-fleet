@@ -132,29 +132,50 @@ has_types() { grep -Eq '^[[:space:]]*"?types"?[[:space:]]*:' "$1" 2>/dev/null; }
 types_hint() {
   echo "jira: this config has no issue types, which \`issue create\` needs; $1 (find the exact board name with \`jira board list -p KEY\`; a 401 from init can mean the Jira app lacks the Jira Software scopes, which needs a Jira reconnect)" >&2
 }
+# True when appending an `issue:` block to the file cannot duplicate or reshape a key: the first
+# real line starts at column 0 and every column-0 line is a bare `key:` (no quotes, no flow
+# style, no `---` / `...` document marks), none of them `issue`. Anything else is not merged.
+appendable() {
+  local first
+  first="$(sed -n '/^[[:space:]]*\(#.*\)\{0,1\}$/d;p;q' "$1" 2>/dev/null)"
+  case "$first" in "" | [[:space:]]*) return 1 ;; esac
+  grep -Ev '^([[:space:]]|#|$)' "$1" 2>/dev/null | grep -Evq '^[A-Za-z_][A-Za-z0-9_-]*:([[:space:]]|$)' && return 1
+  grep -Eq '^issue[[:space:]]*:' "$1" 2>/dev/null && return 1
+  return 0
+}
+# Writes the derived config to a private directory and points JIRA_CONFIG_FILE at it. The base is
+# copied whole, so the files are 0600 in a 0700 directory whatever the caller's umask, and the
+# name carries a hash of the content: a concurrent run with another base (or another site's
+# types) gets its own file instead of rewriting one jira has yet to read. The types cache is kept
+# per connection (a hash of the server URL, which holds no secret) and project.
 derive_types_config() {
-  local base="$1" cdir types derived yaml
-  # The base is merged by appending, which only works for a block-style file with no `issue`
-  # key of its own.
-  grep -Eq '^"?issue"?[[:space:]]*:|^[[:space:]]*[{]' "$base" 2>/dev/null && return 1
+  local base="$1" ddir types derived yaml sh ch
+  appendable "$base" || return 1
   key="${proj:-}"
   [ -n "$key" ] || key="$(sed -n '/^project:/,/^[^[:space:]#]/{s/^[[:space:]][[:space:]]*key:[[:space:]]*["'"'"']*\([A-Za-z0-9_]*\).*/\1/p;T;q}' "$base" 2>/dev/null)"
   [ -n "$key" ] || return 2
   case "$key" in [A-Za-z]*) ;; *) return 1 ;; esac
   case "$key" in *[!A-Za-z0-9_]*) return 1 ;; esac
   key="${key^^}"
-  cdir="${XDG_CACHE_HOME:-${HOME:-/nonexistent}/.cache}/agent-fleet/jira"
-  types="$cdir/issue-types-$key.yml"
-  derived="$cdir/config-$key.yml"
-  mkdir -p "$cdir" 2>/dev/null || return 1
+  sh="$(printf '%s' "$server" | sha256sum 2>/dev/null | cut -c1-12)"
+  [ -n "$sh" ] || return 1
+  ddir="${XDG_CACHE_HOME:-${HOME:-/nonexistent}/.cache}/agent-fleet/jira/derived"
+  types="$ddir/issue-types-$sh-$key.yml"
+  (umask 077; mkdir -p "$ddir" 2>/dev/null) && chmod 700 "$ddir" 2>/dev/null || return 1
   yaml="$(workspace-agent jira-issue-types "$key" 2>/dev/null)" || yaml=""
   case "$yaml" in
-    "issue:"*"- id:"*) printf '%s\n' "$yaml" >"$types.$$" 2>/dev/null && mv -f "$types.$$" "$types" 2>/dev/null ;;
+    "issue:"*"- id:"*) (umask 077; printf '%s\n' "$yaml" >"$types.$$") 2>/dev/null && mv -f "$types.$$" "$types" 2>/dev/null ;;
   esac
   rm -f "$types.$$" 2>/dev/null
   [ -s "$types" ] || return 1
-  { cat "$base" && printf '\n' && cat "$types"; } >"$derived.$$" 2>/dev/null &&
-    mv -f "$derived.$$" "$derived" 2>/dev/null || { rm -f "$derived.$$" 2>/dev/null; return 1; }
+  ch="$({ cat "$base" && printf '\n' && cat "$types"; } 2>/dev/null | sha256sum | cut -c1-16)"
+  [ -n "$ch" ] || return 1
+  derived="$ddir/config-$key-$ch.yml"
+  if [ ! -s "$derived" ]; then
+    (umask 077; { cat "$base" && printf '\n' && cat "$types"; } >"$derived.$$") 2>/dev/null &&
+      mv -f "$derived.$$" "$derived" 2>/dev/null || { rm -f "$derived.$$" 2>/dev/null; return 1; }
+  fi
+  find "$ddir" -name 'config-*.yml' -mtime +1 -delete 2>/dev/null
   export JIRA_CONFIG_FILE="$derived"
 }
 if { [ "$sub" = issue ] || [ "$sub" = issues ]; } && [ "$sub2" = create ]; then
