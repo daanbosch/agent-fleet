@@ -146,6 +146,14 @@ func (a adminAPI) setTenantNetwork(w http.ResponseWriter, r *http.Request) {
 	a.srv().SetTenantNetwork(w, r)
 }
 
+func (a adminAPI) tenantExternalMemory(w http.ResponseWriter, r *http.Request) {
+	a.srv().TenantExternalMemory(w, r)
+}
+
+func (a adminAPI) setTenantExternalMemory(w http.ResponseWriter, r *http.Request) {
+	a.srv().SetTenantExternalMemory(w, r)
+}
+
 func (a adminAPI) tenantSlotClass(w http.ResponseWriter, r *http.Request) {
 	a.srv().TenantSlotClass(w, r)
 }

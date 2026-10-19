@@ -30,10 +30,13 @@ type memCP struct {
 	gotPath   string
 	gotBody   string
 	calls     int
+	// prin and tenantID are the seeded member and tenant behind the PAT (newMemCP).
+	prin     mcpPrincipal
+	tenantID string
 }
 
 func (c *memCP) ResolveByMembership(context.Context, string, string) (*Resolved, *APIError) {
-	return &Resolved{RT: memRT{state: c.state}, MV: store.MembershipView{MembershipID: "m1", TenantID: "t1"}}, nil
+	return &Resolved{RT: memRT{state: c.state}, MV: store.MembershipView{MembershipID: c.prin.membershipID, TenantID: c.tenantID}}, nil
 }
 
 func (c *memCP) AgentText(_ context.Context, _ runtime.Runtime, method, path string, body []byte) (string, error) {
@@ -47,7 +50,9 @@ func memCall(t *testing.T, cp *memCP, scope, tool string, args map[string]any) (
 	a := New(cp)
 	params, _ := json.Marshal(map[string]any{"name": tool, "arguments": args})
 	ctx := withMCPCall(context.Background(), mcpCallInfo{patID: "pat1", client: "claude-code/9.9"})
-	resp := a.mcpToolCall(ctx, &mcpPrincipal{patID: "pat1", identityID: "i1", membershipID: "m1", scope: scope},
+	prin := cp.prin
+	prin.scope = scope
+	resp := a.mcpToolCall(ctx, &prin,
 		rpcRequest{ID: json.RawMessage(`1`), Params: params})
 	if resp.Error != nil {
 		return resp.Error.Message, true
@@ -71,13 +76,33 @@ func memStore(t *testing.T) store.Store {
 	return st
 }
 
+// newMemCP seeds a tenant with one member in the store, so the tenant-wide switch has a real row.
+func newMemCP(t *testing.T, st store.Store, state string) *memCP {
+	t.Helper()
+	ctx := context.Background()
+	tn, err := st.CreateTenant(ctx, "sales", "Sales")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := st.UpsertIdentity(ctx, "member@example.com", "member-example-com", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := st.EnsureMembership(ctx, id.ID, tn.ID, "member")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &memCP{testCP: testCP{store: st}, state: state, tenantID: tn.ID,
+		prin: mcpPrincipal{patID: "pat1", identityID: id.ID, membershipID: m.ID}}
+}
+
 // Reads are listed for a read PAT, writes only from the write tier, and a read PAT cannot call a
 // write tool by name either.
 func TestMemoryToolsFollowTheScopeTier(t *testing.T) {
-	cp := &memCP{testCP: testCP{store: memStore(t)}, state: "running"}
+	cp := newMemCP(t, memStore(t), "running")
 	list := func(scope string) map[string]bool {
 		out := map[string]bool{}
-		for _, tl := range New(cp).toolsFor(context.Background(), &mcpPrincipal{identityID: "nobody", scope: scope}) {
+		for _, tl := range New(cp).toolsFor(context.Background(), &mcpPrincipal{identityID: cp.prin.identityID, membershipID: cp.prin.membershipID, scope: scope}) {
 			out[tl.name] = true
 		}
 		return out
@@ -101,7 +126,7 @@ func TestMemoryToolsFollowTheScopeTier(t *testing.T) {
 
 // Arguments reach the Agent's external routes unchanged, with the client name and an explicit project.
 func TestMemoryToolsProxyToTheAgent(t *testing.T) {
-	cp := &memCP{testCP: testCP{store: memStore(t)}, state: "running"}
+	cp := newMemCP(t, memStore(t), "running")
 	if _, isErr := memCall(t, cp, "read", "memory_read", map[string]any{"name": "n1", "scope": "project", "project": "demo-0123456789ab"}); isErr {
 		t.Fatal("read failed")
 	}
@@ -121,7 +146,7 @@ func TestMemoryToolsProxyToTheAgent(t *testing.T) {
 
 // A stopped workspace is answered by the CP, with no call to the Agent.
 func TestMemoryToolsSayWhenTheWorkspaceIsStopped(t *testing.T) {
-	cp := &memCP{testCP: testCP{store: memStore(t)}, state: "stopped"}
+	cp := newMemCP(t, memStore(t), "stopped")
 	text, isErr := memCall(t, cp, "read", "memory_index", nil)
 	if !isErr || !strings.Contains(text, "not running") || !strings.Contains(text, "start the workspace") || cp.calls != 0 {
 		t.Fatalf("stopped: %q isErr=%v calls=%d", text, isErr, cp.calls)
@@ -130,8 +155,8 @@ func TestMemoryToolsSayWhenTheWorkspaceIsStopped(t *testing.T) {
 
 // The Agent's refusal is relayed as its own message, not as "agent 403: {json}".
 func TestMemoryToolsRelayTheAgentsRefusal(t *testing.T) {
-	cp := &memCP{testCP: testCP{store: memStore(t)}, state: "running",
-		agentErr: errors.New(`agent 403: {"error":{"code":"memory_external_disabled","message":"turn it on in Settings > Agent memory"}}`)}
+	cp := newMemCP(t, memStore(t), "running")
+	cp.agentErr = errors.New(`agent 403: {"error":{"code":"memory_external_disabled","message":"turn it on in Settings > Agent memory"}}`)
 	text, isErr := memCall(t, cp, "read", "memory_projects", nil)
 	if !isErr || text != "memory_external_disabled: turn it on in Settings > Agent memory" {
 		t.Fatalf("refusal: %q", text)
@@ -142,7 +167,7 @@ func TestMemoryToolsRelayTheAgentsRefusal(t *testing.T) {
 // ledger, and a failed write is not recorded.
 func TestMemoryWritesAreAudited(t *testing.T) {
 	st := memStore(t)
-	cp := &memCP{testCP: testCP{store: st}, state: "running"}
+	cp := newMemCP(t, st, "running")
 	secretName := "ghp-looking-name"
 	memCall(t, cp, "write", "memory_save", map[string]any{"name": secretName, "description": "d", "type": "user", "body": "b", "scope": "user"})
 	memCall(t, cp, "write", "memory_forget", map[string]any{"name": secretName, "revision": 1, "scope": "project", "project": "demo-0123456789ab"})
@@ -150,7 +175,7 @@ func TestMemoryWritesAreAudited(t *testing.T) {
 	cp.agentErr = errors.New("agent 409: {}")
 	memCall(t, cp, "write", "memory_save", map[string]any{"name": "z", "description": "d", "type": "user", "body": "b"})
 
-	rows, err := st.ListAuditByTenant(context.Background(), "t1", 10)
+	rows, err := st.ListAuditByTenant(context.Background(), cp.tenantID, 10)
 	if err != nil || len(rows) != 3 {
 		t.Fatalf("audit rows: %d %v", len(rows), err)
 	}
@@ -188,7 +213,7 @@ func TestMCPClientName(t *testing.T) {
 // an explicit user scope stays user.
 func TestMemoryAuditUsesTheAgentsDefaultScope(t *testing.T) {
 	st := memStore(t)
-	cp := &memCP{testCP: testCP{store: st}, state: "running"}
+	cp := newMemCP(t, st, "running")
 	base := map[string]any{"name": "n", "description": "d", "type": "user", "body": "b"}
 	with := func(extra map[string]any) map[string]any {
 		m := map[string]any{}
@@ -204,7 +229,7 @@ func TestMemoryAuditUsesTheAgentsDefaultScope(t *testing.T) {
 	memCall(t, cp, "write", "memory_save", with(map[string]any{"project": "demo-0123456789ab", "scope": "user"}))
 	memCall(t, cp, "write", "memory_save", with(nil))
 	memCall(t, cp, "write", "memory_forget", map[string]any{"name": "n", "revision": 1, "project": "demo-0123456789ab"})
-	rows, _ := st.ListAuditByTenant(context.Background(), "t1", 10)
+	rows, _ := st.ListAuditByTenant(context.Background(), cp.tenantID, 10)
 	n := map[string]int{}
 	for _, r := range rows {
 		n[r.Action+" "+r.Detail]++
@@ -212,5 +237,71 @@ func TestMemoryAuditUsesTheAgentsDefaultScope(t *testing.T) {
 	if n["memory.entry.save external scope=project"] != 1 || n["memory.entry.save external scope=user"] != 2 ||
 		n["memory.entry.forget external scope=project"] != 1 {
 		t.Fatalf("audit details: %v", n)
+	}
+}
+
+// With the tenant-wide switch off (#2318) the memory tools are neither listed nor callable, at any
+// scope, and the Agent is never reached; turning it back on restores them at once.
+func TestTenantSwitchWithholdsTheMemoryTools(t *testing.T) {
+	st := memStore(t)
+	cp := newMemCP(t, st, "running")
+	ctx := context.Background()
+	listed := func() []string {
+		var out []string
+		prin := cp.prin
+		prin.scope = "write"
+		for _, tl := range New(cp).toolsFor(ctx, &prin) {
+			if strings.HasPrefix(tl.name, "memory_") {
+				out = append(out, tl.name)
+			}
+		}
+		return out
+	}
+	if got := listed(); len(got) != 6 {
+		t.Fatalf("a new tenant must keep the tools (default on): %v", got)
+	}
+	if err := st.SetTenantExternalMemory(ctx, cp.tenantID, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := listed(); len(got) != 0 {
+		t.Fatalf("switch off, still listed: %v", got)
+	}
+	for _, c := range []struct{ scope, tool string }{{"read", "memory_index"}, {"write", "memory_projects"}, {"write", "memory_save"}, {"write", "memory_forget"}} {
+		text, isErr := memCall(t, cp, c.scope, c.tool, map[string]any{"name": "n"})
+		if !strings.Contains(text, "unknown or unauthorized tool") || cp.calls != 0 {
+			t.Fatalf("%s reached past the switch: %q isErr=%v calls=%d", c.tool, text, isErr, cp.calls)
+		}
+	}
+	// Other tools are untouched.
+	prin := cp.prin
+	prin.scope = "read"
+	found := false
+	for _, tl := range New(cp).toolsFor(ctx, &prin) {
+		found = found || tl.name == "list_my_sessions"
+	}
+	if !found {
+		t.Error("the switch must only withhold memory tools")
+	}
+	if err := st.SetTenantExternalMemory(ctx, cp.tenantID, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := listed(); len(got) != 6 {
+		t.Fatalf("switch back on: %v", got)
+	}
+	if _, isErr := memCall(t, cp, "read", "memory_index", nil); isErr || cp.calls != 1 {
+		t.Fatalf("call after re-enable: isErr=%v calls=%d", isErr, cp.calls)
+	}
+}
+
+// A membership the store does not know (revoked, or a store error) gets no memory tools.
+func TestMemoryToolsFailClosedWithoutAMembership(t *testing.T) {
+	cp := newMemCP(t, memStore(t), "running")
+	prin := cp.prin
+	prin.membershipID = "gone"
+	prin.scope = "write"
+	for _, tl := range New(cp).toolsFor(context.Background(), &prin) {
+		if strings.HasPrefix(tl.name, "memory_") {
+			t.Fatalf("%s listed for an unknown membership", tl.name)
+		}
 	}
 }

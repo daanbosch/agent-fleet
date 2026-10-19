@@ -218,6 +218,10 @@ func registerTenantAdminRoutes(mux *http.ServeMux, cfg config) {
 	// on both is checked mid-handler by tenantAdminFor.
 	mux.HandleFunc("GET /api/admin/tenants/{slug}/network", adm.tenantNetwork)
 	mux.HandleFunc("PUT /api/admin/tenants/{slug}/network", adm.setTenantNetwork)
+	// The tenant-wide switch for AF memory used from outside Agent Fleet through /mcp (#2318).
+	// tenant_admin, checked mid-handler by tenantAdminFor like the network rule above.
+	mux.HandleFunc("GET /api/admin/tenants/{slug}/external-memory", adm.tenantExternalMemory)
+	mux.HandleFunc("PUT /api/admin/tenants/{slug}/external-memory", adm.setTenantExternalMemory)
 	// The tenant's DEFAULT machine class (docs/log/70). tenant_admin for the same reason
 	// as the network rule above — it reaches nothing outside this tenant, and the set
 	// it may choose from is bounded by allowed_slot_classes, which only a super_admin
