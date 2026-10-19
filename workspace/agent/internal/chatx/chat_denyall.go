@@ -49,16 +49,18 @@ var denyAllBackends = map[string]denyAllRunner{
 	session.KindClaude: runClaudeDenyAll,
 }
 
-// denyAllLimits says, for each one-shot kind that does not qualify, what was found missing. The
-// state of the CLIs on 2026-10-19 is recorded in ADR 0117 (note of that date); a kind leaves this
-// table only by gaining a runner above. TestDenyAllLimitsCoverEveryOneShotKind keeps the two in
-// step with oneShotKinds, so a new kind has to be classified.
+// denyAllLimits says, for each one-shot kind that does not qualify, why it was not qualified. Each
+// line is "no inventory shown", not "cannot be done": it names what was and was not found, and the
+// evidence behind it (help text, a debug command, an earlier measurement, or not run) is in ADR
+// 0117 (note of 2026-10-19). A kind leaves this table only by gaining a runner above.
+// TestDenyAllLimitsCoverEveryOneShotKind keeps the two in step with oneShotKinds, so a new kind has
+// to be classified.
 var denyAllLimits = map[string]string{
-	session.KindCodex:    "no flag removes its built-in tools and exec --json prints no tool list, so the run cannot be shown to have none",
-	session.KindOpencode: "no deny-all mode (edit and bash only), global MCP servers merge in, and nothing in the run's output lists its tools",
-	session.KindCursor:   "ask mode is read-only, not tool-less, and the stream-json init event carries no tool or MCP list",
-	session.KindAgy:      "no switch removes its tools and -p prints plain text, so nothing can be read back",
-	session.KindMuse:     "the disable flags cover shell, write and web only, and the exec event stream lists no tools",
+	session.KindCodex:    "no tool inventory was found: prompt-input lists messages only, exec --json was not run, and no flag removing built-in tools was found",
+	session.KindOpencode: "the one-shot config denies shell, edit, write and subagent only; other built-in tools and the user's global MCP servers are not shown absent, and no output lists the run's tools",
+	session.KindCursor:   "ask mode is read-only, not tool-less; the stream-json init event is documented without a tool or MCP list, and it was not run",
+	session.KindAgy:      "not probed (the CLI aborts at start here); the driver reads plain text from -p, so no inventory is known, and no tool-removal switch is known",
+	session.KindMuse:     "the disable flags cover shell, write and web per its help; an echo-provider event stream named no tools, and a real-provider run was not made",
 }
 
 // DenyAllKind reports whether kind has a verified-at-run-time deny-all one-shot.
