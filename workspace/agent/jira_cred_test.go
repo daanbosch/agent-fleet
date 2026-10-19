@@ -255,3 +255,76 @@ func TestJiraRefreshIsSerializedAcrossProcesses(t *testing.T) {
 		t.Errorf("stored refresh token = %q", after.Jira.RefreshToken)
 	}
 }
+
+func stubAccessibleResources(t *testing.T, body string, status int) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/oauth/token/accessible-resources" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	old, oldLast := jiraCloudAPIBase, jiraBackfillLast
+	jiraCloudAPIBase = srv.URL
+	jiraBackfillLast = time.Time{}
+	t.Cleanup(func() { srv.Close(); jiraCloudAPIBase = old; jiraBackfillLast = oldLast })
+}
+
+func seedLegacyOAuth(t *testing.T) {
+	seedJiraStore(t, func(s *secrets.Data) {
+		s.Jira = &secrets.JiraCreds{AuthKind: "oauth", Site: "https://acme.atlassian.net", CloudID: "cid-1",
+			AccessToken: "fake-at", Expiry: time.Now().Add(time.Hour).Unix(),
+			Sites: []secrets.JiraSite{{CloudID: "cid-1", URL: "https://acme.atlassian.net"}}}
+	})
+}
+
+// A connection stored before scopes were recorded learns its verdict from accessible-resources
+// on the next jira-cred, without reconnecting; the scopes are persisted, and a later reconnect
+// that grants the board scope clears the warning.
+func TestJiraCredBackfillsScopesOfAnOlderConnection(t *testing.T) {
+	seedLegacyOAuth(t)
+	stubAccessibleResources(t, `[{"id":"cid-1","url":"https://acme.atlassian.net","scopes":["read:jira-work"]}]`, 200)
+	if got := jiraCredOut(); !strings.Contains(got, "software=missing\n") {
+		t.Fatalf("answered %q, want software=missing", got)
+	}
+	s, _ := secrets.Load()
+	if len(s.Jira.Sites[0].Scopes) != 1 || jiraStatus(s)["softwareScopes"] != "missing" {
+		t.Fatalf("scopes not persisted: %+v", s.Jira.Sites)
+	}
+	// Reconnect (what handleJiraOAuthStore stores) with the board scope: granted, no warning.
+	_ = secrets.Update(func(s *secrets.Data) error {
+		s.Jira.Sites[0].Scopes = []string{"read:jira-work", jiraBoardScope}
+		return nil
+	})
+	if got := jiraCredOut(); strings.Contains(got, "software=missing") {
+		t.Fatalf("warning stays after reconnect: %q", got)
+	}
+}
+
+func TestJiraCredBackfillFailureStaysUnknown(t *testing.T) {
+	seedLegacyOAuth(t)
+	stubAccessibleResources(t, `nope`, 500)
+	got := jiraCredOut()
+	if strings.Contains(got, "software=") || !strings.HasSuffix(got, "token=fake-at\n") {
+		t.Fatalf("answered %q", got)
+	}
+	s, _ := secrets.Load()
+	if len(s.Jira.Sites[0].Scopes) != 0 {
+		t.Fatalf("scopes stored after a failed lookup: %+v", s.Jira.Sites)
+	}
+}
+
+// The rail's own fetches fill the scopes too, so the Settings card learns without a jira run.
+func TestJiraGetBackfillsScopes(t *testing.T) {
+	seedLegacyOAuth(t)
+	stubAccessibleResources(t, `[{"id":"cid-1","url":"https://acme.atlassian.net","scopes":["read:jira-work"]}]`, 200)
+	s, _ := secrets.Load()
+	c := s.Jira
+	_, _ = jiraGet(c, jiraCloudAPIBase+"/oauth/token/accessible-resources")
+	s, _ = secrets.Load()
+	if jiraStatus(s)["softwareScopes"] != "missing" {
+		t.Fatalf("status = %v", jiraStatus(s))
+	}
+}

@@ -325,7 +325,9 @@ those variables in for one `exec`:
   whatever the account can do.
   Making the absence visible: the Agent keeps the scopes accessible-resources reports for the
   current site (`JiraSite.Scopes`) and derives `softwareScopes` (`granted` / `missing`, absent
-  when unknown: API token, or a store from before the field). The Settings Jira card shows
+  when unknown: API token, or a failed lookup). A store from before the field is filled in
+  from accessible-resources on the next `jira-cred` or Jira fetch (bounded, throttled, written
+  only onto site entries that have no scopes), so no reconnect is needed to see the warning. The Settings Jira card shows
   "Boards, sprints and epics: not available" on `missing`, and `workspace-agent jira-cred`
   prints `software=missing`, on which the wrapper writes the same one line to stderr for
   `board`, `sprint`, `epic` and `init` and then runs jira unchanged.

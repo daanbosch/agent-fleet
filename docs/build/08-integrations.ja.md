@@ -307,7 +307,9 @@ Jira は git でなく作業項目インボックス
   アカウントができることを何でもできる。
   不足を見えるようにする: Agent は現在のサイトについて accessible-resources が返すスコープを
   保持し（`JiraSite.Scopes`）、`softwareScopes`（`granted` / `missing`、不明なら省略: API トークン、
-  またはこの項目より前のストア）を導く。設定の Jira カードは `missing` で「ボード・スプリント・
+  または取得失敗）を導く。この項目より前のストアは、次の `jira-cred` か Jira 取得のときに
+  accessible-resources から補完する（時間制限と間隔制限があり、スコープ未記録のサイトにだけ書く）
+  ので、警告を見るために再接続する必要はない。設定の Jira カードは `missing` で「ボード・スプリント・
   エピック: 利用できません」を出し、`workspace-agent jira-cred` は `software=missing` を出力する。
   wrapper はこれを受けて `board`・`sprint`・`epic`・`init` で同じ 1 行を stderr に書き、そのまま
   jira を実行する。

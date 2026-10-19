@@ -64,6 +64,9 @@ func jiraCredGet(w io.Writer) {
 		}
 		auth, login, token = "bearer", c.Login, c.AccessToken
 	}
+	if c.AuthKind == "oauth" {
+		jiraBackfillScopes(&c)
+	}
 	if token == "" || strings.ContainsAny(token+login+c.Site, "\r\n") {
 		return
 	}
