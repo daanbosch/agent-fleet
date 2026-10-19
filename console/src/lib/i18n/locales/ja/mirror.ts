@@ -479,4 +479,9 @@ export const mirror = {
   "mirror.queue_now_inject": "今すぐ送る（実行中のターンに取り込まれます）",
   "mirror.queue_now_after": "今すぐ送る（エージェントが受け付け、実行中のターンの後に処理されます）",
   "mirror.queue_attach_only": "（添付のみ）",
+  "mirror.imported_placeholder": "このホストセッションへのメッセージ（再開して続けます）",
+  "mirror.imported_send": "再開して送信",
+  "mirror.imported_sending": "送信中…",
+  "mirror.imported_sent": "送信しました。セッション:",
+  "mirror.imported_failed": "送信できませんでした:",
 };

@@ -55,6 +55,7 @@ export interface Session {
   remoteUrl?: string;
   state?: SessionState | string; // live hook/plugin state ("" = idle)
   alive?: boolean; // tmux session is running
+  attachable?: boolean; // false for a host session the console cannot attach to
   resumable?: boolean; // a stopped session whose dir still exists (false = archive only)
   backgroundBusy?: boolean; // idle by hook but a run_in_background task is still running
   backgroundBusyReason?: string;

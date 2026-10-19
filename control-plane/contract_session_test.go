@@ -54,6 +54,7 @@ var sessionWireBinding = map[string]string{
 	"Name":                 "name",
 	"Kind":                 "kind",
 	"Driver":               "driver",
+	"Attachable":           "attachable",
 	"Dir":                  "dir",
 	"Subdir":               "subdir",
 	"Repo":                 "repo",
@@ -157,7 +158,7 @@ func sessionContractFamily() contractFamily {
 			"currentBranch", "branchDrift", "worktree", "exitReason", "exitCode", "exitSignal",
 			"carried", "handoffPending", "locked", "keepAwakeUntil", "stopAfterTurnAt",
 			"spendCapUsd", "spendCapHitAt", "originSession", "origin", "lastSay", "tokenSpends", "pr", "ports", "generatedImages", "generatedImagesPath",
-			"studio", "initialPromptState", "moving", "movedTo", "inboxOrigin"),
+			"studio", "initialPromptState", "moving", "movedTo", "inboxOrigin", "attachable"),
 		tsOnly: consoleOnlyExempt,
 		goOnly: goOnlyExempt,
 	}

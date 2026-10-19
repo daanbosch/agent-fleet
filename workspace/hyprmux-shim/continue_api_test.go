@@ -53,7 +53,7 @@ func spawnedContinuation(cli *fakeCLI) bool {
 func TestContinueRunsCLIWithTrimmedPromptAndReturnsNewSession(t *testing.T) {
 	cli := continueCLI(t)
 	srv := newAPIServer(t, cli, "")
-	code, body := apiCall(t, srv, "POST", "/api/sessions/h-codex-0002/continue", `{"prompt":"  run the failing test  ","agent":"pi-sol","mode":"yolo"}`)
+	code, body := apiCall(t, srv, "POST", "/sessions/h-codex-0002/continue", `{"prompt":"  run the failing test  ","agent":"pi-sol","mode":"yolo"}`)
 	if code != http.StatusOK || strings.TrimSpace(body) != `{"agent":"pi-sol","name":"h-cont-9","title":"Continue Migrate (Pi SOL)"}` {
 		t.Fatalf("continue = %d %s", code, body)
 	}
@@ -66,7 +66,7 @@ func TestContinueRunsCLIWithTrimmedPromptAndReturnsNewSession(t *testing.T) {
 func TestContinueWithoutPromptRunsDefaultsAndOmitsPromptFlag(t *testing.T) {
 	cli := continueCLI(t)
 	srv := newAPIServer(t, cli, "")
-	if code, body := apiCall(t, srv, "POST", "/api/sessions/h-codex-0002/continue", `{}`); code != http.StatusOK {
+	if code, body := apiCall(t, srv, "POST", "/sessions/h-codex-0002/continue", `{}`); code != http.StatusOK {
 		t.Fatalf("continue = %d %s", code, body)
 	}
 	want := "session continue-pi -json -agent=pi -mode=normal h-codex-0002"
@@ -78,7 +78,7 @@ func TestContinueWithoutPromptRunsDefaultsAndOmitsPromptFlag(t *testing.T) {
 func TestContinueRefusesImportedSessionBeforeSpawning(t *testing.T) {
 	cli := continueCLI(t)
 	srv := newAPIServer(t, cli, "")
-	code, body := apiCall(t, srv, "POST", "/api/sessions/h-claude-0001/continue", `{}`)
+	code, body := apiCall(t, srv, "POST", "/sessions/h-claude-0001/continue", `{}`)
 	if code != http.StatusConflict {
 		t.Fatalf("imported continue = %d %s, want 409", code, body)
 	}
@@ -99,7 +99,7 @@ func TestContinueRejectsBadInputBeforeCLI(t *testing.T) {
 	} {
 		cli := continueCLI(t)
 		srv := newAPIServer(t, cli, "")
-		if code, resp := apiCall(t, srv, "POST", "/api/sessions/h-pi-0003/continue", body); code != http.StatusBadRequest {
+		if code, resp := apiCall(t, srv, "POST", "/sessions/h-pi-0003/continue", body); code != http.StatusBadRequest {
 			t.Errorf("%.40s = %d %s, want 400", body, code, resp)
 		}
 		if len(cli.calls) != 0 {
@@ -111,7 +111,7 @@ func TestContinueRejectsBadInputBeforeCLI(t *testing.T) {
 func TestContinueUnknownSessionIsNotFoundBeforeCLI(t *testing.T) {
 	cli := continueCLI(t)
 	srv := newAPIServer(t, cli, "")
-	if code, body := apiCall(t, srv, "POST", "/api/sessions/h-missing-9/continue", `{}`); code != http.StatusNotFound {
+	if code, body := apiCall(t, srv, "POST", "/sessions/h-missing-9/continue", `{}`); code != http.StatusNotFound {
 		t.Fatalf("unknown continue = %d %s, want 404", code, body)
 	}
 	if len(cli.calls) != 0 {
@@ -121,21 +121,21 @@ func TestContinueUnknownSessionIsNotFoundBeforeCLI(t *testing.T) {
 
 func TestContinueFailsClosedWithoutCLI(t *testing.T) {
 	srv := newAPIServer(t, nil, "")
-	if code, body := apiCall(t, srv, "POST", "/api/sessions/h-pi-0003/continue", `{}`); code != http.StatusServiceUnavailable {
+	if code, body := apiCall(t, srv, "POST", "/sessions/h-pi-0003/continue", `{}`); code != http.StatusServiceUnavailable {
 		t.Fatalf("continue without CLI = %d %s, want 503", code, body)
 	}
 }
 
 func TestContinueCLIFailuresAreBadGateway(t *testing.T) {
 	srv := newAPIServer(t, &fakeCLI{fail: errors.New("boom")}, "")
-	if code, body := apiCall(t, srv, "POST", "/api/sessions/h-pi-0003/continue", `{}`); code != http.StatusBadGateway {
+	if code, body := apiCall(t, srv, "POST", "/sessions/h-pi-0003/continue", `{}`); code != http.StatusBadGateway {
 		t.Fatalf("CLI failure = %d %s, want 502", code, body)
 	}
 
 	cli := continueCLI(t)
 	cli.answers["session continue-pi"] = []byte(`{"title":"no id"}`)
 	srv = newAPIServer(t, cli, "")
-	if code, body := apiCall(t, srv, "POST", "/api/sessions/h-codex-0002/continue", `{}`); code != http.StatusBadGateway {
+	if code, body := apiCall(t, srv, "POST", "/sessions/h-codex-0002/continue", `{}`); code != http.StatusBadGateway {
 		t.Fatalf("CLI answer without a session id = %d %s, want 502", code, body)
 	}
 }
@@ -143,7 +143,7 @@ func TestContinueCLIFailuresAreBadGateway(t *testing.T) {
 func TestContinuePiSourceResumesInPlaceWithTrimmedPrompt(t *testing.T) {
 	cli := continueCLI(t)
 	srv := newAPIServer(t, cli, "")
-	code, body := apiCall(t, srv, "POST", "/api/sessions/h-pi-0003/continue", `{"prompt":"  go on  "}`)
+	code, body := apiCall(t, srv, "POST", "/sessions/h-pi-0003/continue", `{"prompt":"  go on  "}`)
 	if code != http.StatusOK {
 		t.Fatalf("pi resume = %d %s", code, body)
 	}
@@ -166,7 +166,7 @@ func TestContinuePiSourceWithoutPromptResumesPlainly(t *testing.T) {
 	cli := continueCLI(t)
 	cli.answers["session resume"] = []byte(`{"updated":true}`)
 	srv := newAPIServer(t, cli, "")
-	if code, body := apiCall(t, srv, "POST", "/api/sessions/h-pi-0003/continue", `{}`); code != http.StatusOK {
+	if code, body := apiCall(t, srv, "POST", "/sessions/h-pi-0003/continue", `{}`); code != http.StatusOK {
 		t.Fatalf("pi resume = %d %s", code, body)
 	}
 	if want := "session resume -json h-pi-0003"; lastCall(cli) != want {
@@ -178,7 +178,7 @@ func TestContinuePiSourceRefusesUnconfirmedPromptAndNamesRoute(t *testing.T) {
 	cli := continueCLI(t)
 	cli.answers["session resume"] = []byte(`{"updated":true}`)
 	srv := newAPIServer(t, cli, "")
-	code, body := apiCall(t, srv, "POST", "/api/sessions/h-pi-0003/continue", `{"prompt":"go"}`)
+	code, body := apiCall(t, srv, "POST", "/sessions/h-pi-0003/continue", `{"prompt":"go"}`)
 	if code != http.StatusBadGateway || !strings.Contains(body, "session resume") || !strings.Contains(body, "did not confirm") {
 		t.Fatalf("unconfirmed prompt = %d %s, want 502 naming the session resume route", code, body)
 	}
@@ -191,7 +191,7 @@ func TestContinueErrorsNameTheRouteTaken(t *testing.T) {
 	} {
 		cli := routeFailingCLI{fakeCLI: continueCLI(t), route: tc.route}
 		srv := newAPIServer(t, cli, "")
-		code, body := apiCall(t, srv, "POST", "/api/sessions/"+tc.source+"/continue", `{}`)
+		code, body := apiCall(t, srv, "POST", "/sessions/"+tc.source+"/continue", `{}`)
 		if code != http.StatusBadGateway || !strings.Contains(body, tc.want) {
 			t.Fatalf("%s route failure = %d %s, want 502 naming %q", tc.route, code, body, tc.want)
 		}

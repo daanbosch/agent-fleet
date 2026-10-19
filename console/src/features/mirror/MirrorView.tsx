@@ -20,6 +20,7 @@ import { MirrorBanners } from "./parts/MirrorBanners.tsx";
 import { MoveLimitBanner } from "./parts/MoveLimitBanner.tsx";
 import { useMirrorTts } from "./parts/useMirrorTts.tsx";
 import { useMirrorScroll } from "./parts/useMirrorScroll.ts";
+import { ImportedResumeComposer } from "./parts/ImportedResumeComposer.tsx";
 import { useSkillPicker } from "./parts/useSkillPicker.ts";
 import { useReplySuggest } from "./parts/useReplySuggest.ts";
 import { JumpPills } from "./parts/JumpPills.tsx";
@@ -697,7 +698,9 @@ function MirrorViewBody({
       {managed && !readOnly && running && !composerBlock && (
         <DiscardNotice notices={discardView} draftBusy={draftBusy} onRestore={restoreDiscard} onClose={closeDiscard} />
       )}
-      {readOnly ? (
+      {sessionMeta?.attachable === false ? (
+        <ImportedResumeComposer name={session} />
+      ) : readOnly ? (
         dirGone ? (
           <DirGoneNotice />
         ) : (
