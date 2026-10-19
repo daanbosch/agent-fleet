@@ -1,7 +1,7 @@
 # Every (method, path) buildMux() registers. Generated - do not edit by hand.
 # Update: cd control-plane && go test -run TestRouteTableGolden -update-routes-golden ./...
 # ANY = registered without a method. Taken with every routeSwitch on (routes_golden_test.go).
-# count: 689
+# count: 690
 ANY /
 ANY /agent-fleet
 ANY /agent-fleet/
@@ -511,6 +511,7 @@ GET /api/sessions
 POST /api/sessions
 GET /api/sessions/archived
 GET /api/sessions/cleanup
+POST /api/sessions/launch-fastvm
 GET /api/sessions/usage
 DELETE /api/sessions/{name}
 POST /api/sessions/{name}/archive
