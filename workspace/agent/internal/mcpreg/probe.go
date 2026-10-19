@@ -69,6 +69,16 @@ const (
 	eraProbeTimeout = 2 * time.Second
 )
 
+// sessionBoundRequests is how many tools/list calls carry the session id of a stateful
+// legacy-era HTTP server. With two instances behind a balancer, 6 calls miss with
+// probability (1/2)^6; each pays its own TCP/TLS handshake, so keep it inside
+// defaultProbeTimeout.
+const sessionBoundRequests = 6
+
+// errSessionRejected is the verdict for a server that refuses the session id it just issued
+// (several instances, in-memory sessions, no affinity).
+const errSessionRejected = "サーバーが、自ら発行したセッション ID を拒否しました。複数インスタンスで動作していて、セッションの親和性（同じセッションを同じインスタンスへ振り分ける設定）がない可能性があります。サーバーをステートレスにするか、同じセッションのリクエストを必ず同じインスタンスへ振り分けてください"
+
 // errProbeTimeout distinguishes "no answer in time" from "the process died", so the
 // era probe can fall back on the former and fail fast on the latter.
 var errProbeTimeout = errors.New("タイムアウトしました")
@@ -402,7 +412,16 @@ type httpExchange struct {
 }
 
 func probeHTTP(ctx context.Context, d ServerDef) ProbeResult {
+	// No cookie jar, on purpose: Claude Code never sends cookies back on MCP requests, so a
+	// probe honouring load-balancer cookie stickiness would pass where real sessions fail.
 	client := &http.Client{}
+	// Session-bound requests each open a new connection. A load balancer pins a kept-alive
+	// connection to one target, so reusing it hides the instance that does not know the
+	// session (measured: 10 presses of the test passed against two instances; new
+	// connections were rejected about half the time).
+	freshTransport := http.DefaultTransport.(*http.Transport).Clone()
+	freshTransport.DisableKeepAlives = true
+	fresh := &http.Client{Transport: freshTransport}
 	session := "" // legacy era only: 2026-07-28 removed Mcp-Session-Id entirely
 
 	post := func(m rpcMsg, stateless bool) (httpExchange, error) {
@@ -432,7 +451,11 @@ func probeHTTP(ctx context.Context, d ServerDef) ProbeResult {
 		for k, v := range d.Headers {
 			req.Header.Set(k, v)
 		}
-		resp, err := client.Do(req)
+		c := client
+		if session != "" && !stateless {
+			c = fresh
+		}
+		resp, err := c.Do(req)
 		if err != nil {
 			return httpExchange{}, err
 		}
@@ -446,6 +469,9 @@ func probeHTTP(ctx context.Context, d ServerDef) ProbeResult {
 			return ex, nil // notification ack, or empty 200
 		}
 		ex.msg, err = decodeHTTPPayload(resp.Header.Get("Content-Type"), body)
+		if err != nil && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
+			err = nil // a plain-text error body: callers report the status and body tail instead
+		}
 		return ex, err
 	}
 
@@ -492,22 +518,65 @@ func probeHTTP(ctx context.Context, d ServerDef) ProbeResult {
 	}
 	var ir legacyInitResult
 	_ = json.Unmarshal(ex.msg.Result, &ir)
-	if _, err = post(rpcMsg{JSONRPC: "2.0", Method: "notifications/initialized"}, false); err != nil {
-		return ProbeResult{Error: err.Error()}
-	}
-	ex, err = post(rpcMsg{JSONRPC: "2.0", ID: 4, Method: "tools/list", Params: map[string]any{}}, false)
-	if err != nil {
-		return ProbeResult{Error: err.Error(), Detail: tail(ex.raw)}
-	}
-	if ex.status < 200 || ex.status >= 300 {
+	// A server that issued a session id is stateful. Several session-bound requests, not
+	// one: behind a load balancer without affinity a single request reaches the issuing
+	// instance with probability 1/N and the test would pass by luck.
+	stateful := session != ""
+	failStatus := func(ex httpExchange) ProbeResult {
+		if stateful && sessionRejected(ex) {
+			return ProbeResult{
+				Error:  errSessionRejected,
+				Detail: tail(fmt.Sprintf("HTTP %d: %s", ex.status, ex.raw)),
+			}
+		}
 		return ProbeResult{Error: fmt.Sprintf("HTTP %d", ex.status), Detail: tail(ex.raw)}
 	}
-	if ex.msg.Error != nil {
-		return ProbeResult{Error: fmt.Sprintf("tools/list が拒否されました: %s", ex.msg.Error.Message), Detail: tail(ex.raw)}
+	ex, err = post(rpcMsg{JSONRPC: "2.0", Method: "notifications/initialized"}, false)
+	if err != nil {
+		return ProbeResult{Error: err.Error()}
+	}
+	if ex.status < 200 || ex.status >= 300 {
+		return failStatus(ex)
+	}
+	rounds := 1
+	if stateful {
+		rounds = sessionBoundRequests
+	}
+	for i := 0; i < rounds; i++ {
+		ex, err = post(rpcMsg{JSONRPC: "2.0", ID: 4 + i, Method: "tools/list", Params: map[string]any{}}, false)
+		if err != nil {
+			return ProbeResult{Error: err.Error(), Detail: tail(ex.raw)}
+		}
+		if ex.status < 200 || ex.status >= 300 {
+			return failStatus(ex)
+		}
+		if ex.msg.Error != nil {
+			return ProbeResult{Error: fmt.Sprintf("tools/list が拒否されました: %s", ex.msg.Error.Message), Detail: tail(ex.raw)}
+		}
 	}
 	res := okResult(ir.ServerInfo, ex.msg.Result)
 	res.Revision = ProtocolVersionLegacy
 	return res
+}
+
+// sessionRejected reports whether ex is a server refusing a session id it issued: 404, or
+// a 400 whose body says the session is unknown.
+func sessionRejected(ex httpExchange) bool {
+	switch ex.status {
+	case http.StatusNotFound:
+		return true
+	case http.StatusBadRequest:
+		b := strings.ToLower(ex.raw)
+		if !strings.Contains(b, "session") {
+			return false
+		}
+		for _, w := range []string{"not found", "unknown", "invalid", "expired", "no such", "not exist"} {
+			if strings.Contains(b, w) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // decodeHTTPPayload handles both shapes a Streamable HTTP server may answer with:
