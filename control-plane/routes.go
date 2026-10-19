@@ -379,6 +379,7 @@ func registerSessionRoutes(mux *http.ServeMux, cfg config) {
 	// from the {name} pattern, so a session literally named `launch-fastvm` cannot be
 	// addressed via this exact path — acceptable for the synthetic name space of fastvm
 	// sessions (hyprmux-vm-* ids never collide with this literal).
+	mux.HandleFunc("POST /api/sessions/launch-fastvm", rest)
 	// Cleanup (docs/log/32): survey, per-session usage, delete-with-reclaim, and the gz
 	// safety-net archive (list/restore/purge). Proxied verbatim; also used by the MCP
 	// cleanup tools, which reach the Agent directly via the resolved runtime.
