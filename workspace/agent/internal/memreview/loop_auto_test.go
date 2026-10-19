@@ -185,7 +185,17 @@ func TestSwitchWriteOrdersWithTheDispatchBoundary(t *testing.T) {
 	r := h.reviewer()
 	var on atomic.Bool
 	on.Store(true)
-	r.AutoEnabled = on.Load
+	var armed atomic.Bool // the writer holds the gate: the next check is the dispatch boundary's
+	asked := make(chan struct{}, 1)
+	r.AutoEnabled = func() bool {
+		if armed.Load() {
+			select {
+			case asked <- struct{}{}:
+			default:
+			}
+		}
+		return on.Load()
+	}
 	held := make(chan struct{})
 	wrote := make(chan struct{})
 	inner := r.Snapshot
@@ -193,7 +203,14 @@ func TestSwitchWriteOrdersWithTheDispatchBoundary(t *testing.T) {
 		go func() {
 			defer close(wrote)
 			_ = WithSwitchWrite(func() error {
+				armed.Store(true)
 				close(held) // the gate is ours; the review cannot pass its dispatch boundary yet
+				// With the gate the review waits and never asks; the timeout only bounds that wait.
+				// Without it the review asks at once and has read "on" before the write lands.
+				select {
+				case <-asked:
+				case <-time.After(200 * time.Millisecond):
+				}
 				on.Store(false)
 				return nil
 			})
