@@ -25,10 +25,11 @@ import (
 // container's encrypted store, exactly like the git tokens. The CP never sees them: it
 // hands queries down and gets non-secret rows back (ADR 0061).
 //
-// Why a connection is still required even though the in-session `jira` CLI exists:
-// the CLI only runs inside a conversation, so it cannot produce the rail's list (and the
-// official remote MCP flavour is OAuth, which docs/log/48 §0 puts out of af's scope). The
-// two are complements — this connection feeds the list, the CLI reads the body in-session.
+// Why the connection serves both the rail's list and the `jira` CLI's login, yet the list
+// is fetched over REST here rather than by shelling out to `jira`: this process is the
+// credential helper behind the CLI, so calling it would be a round trip through ourselves,
+// and the unattended refresh must not depend on the CLI's output format (see workitems.go).
+// The two are complements — this connection feeds the list, the CLI reads the body in-session.
 
 var jiraHTTPClient = &http.Client{Timeout: 20 * time.Second}
 
