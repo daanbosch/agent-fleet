@@ -250,8 +250,25 @@ Jira は git でなく作業項目インボックス
   - 設定を指定しないときは管理ディレクトリの `config.yml` を使い、なければ
     `JIRA_CONFIG_FILE` を `~/.cache/agent-fleet/jira/config.yml`（中身は
     `installation: Cloud` だけ）に向ける。`issue view` や `issue list -p KEY` はこれで動く。
-    `issue create`・`sprint list`・エピック系は、`jira init` だけが書く課題タイプ・ボード・
-    エピック用フィールドが要る。
+    `sprint list`・エピック系は、`jira init` だけが書くボード・エピック用フィールドが要る。
+  - **`jira init` なしの `issue create`**: jira-cli は `issue.types` を設定からしか読まず
+    （v1.7.0 の `setIssueTypes`）、唯一の書き手である `jira init` は最初に Agile のボード API を
+    呼ぶ（Jira Software スコープのない OAuth では 401）。そこで `issue create` のとき、実効の設定が
+    生成されたものか管理ディレクトリのもの（`-c` で指定したものは環境変数より優先されるので除く）
+    で `types:` キーを持たなければ、ラッパーが `workspace-agent jira-issue-types KEY` を実行する
+    （KEY は `-p` のどの書き方でも、なければ設定の `project.key`）。ヘルパーは自分が持つトークンで
+    `/rest/api/2/issue/createmeta?projectKeys=KEY`（クラシックの `read:jira-work`）を呼び、
+    秘密を含まない `issue.types` のブロックだけを出力する。ラッパーはそれを
+    `~/.cache/agent-fleet/jira/derived/issue-types-<サーバーのハッシュ>-KEY.yml` に保存し（同じ接続の
+    次回の取得失敗時だけ再利用）、`derived/config-KEY-<内容のハッシュ>.yml`（元の設定にそのブロックを
+    足したもの）を `JIRA_CONFIG_FILE` に指定する。名前は内容で決まるので、別の元設定での並行実行が
+    ファイルを共有することはない。元の設定を丸ごとコピーするため、ディレクトリは 0700、ファイルは
+    0600 にする。すでに `types:` がある設定は触らない。単純な block 形式でない設定（先頭行が 0 桁目、
+    0 桁目の行はすべて引用符なしの `key:`、`issue` キーなし、`---` / `...` なし）も、追記では
+    結合できないので触らない。失敗したときは、その
+    設定のまま jira を動かし、標準エラーに `jira init` を促す 1 行のヒントを出す（401 の原因が
+    Jira Software スコープの不足のこともあると添える）。課題タイプを持つ管理設定は、従来どおりどの `-p` にも
+    使われる。
 - **利用者自身の設定が勝つ**: 明示の `JIRA_API_TOKEN` か `JIRA_SERVER`、自分で `--server` /
   `--login` / `--installation` / `--auth-type` を渡した `jira init`、または管理ディレクトリの
   外の設定（どの書き方の `-c` でも、`JIRA_CONFIG_FILE` でも、jira 自身の既定の
@@ -270,7 +287,7 @@ Jira は git でなく作業項目インボックス
 **知っておくべき制限:**
 
 - **OAuth のスコープ**: ボード・スプリント・エピックと `jira init` は `/rest/agile/1.0` を
-  呼び、そこはクラシックスコープを受け付けない。テナントの Jira アプリに
+  呼び、そこはクラシックスコープを受け付けない（`issue create` は不要。上記）。テナントの Jira アプリに
   read:board-scope:jira-software / read:project:jira / read・write:sprint:jira-software /
   read・write:epic:jira-software / read:issue-details:jira / read:jql:jira の許可が必要。
   そのうえで管理者がアプリの `jira_software` スコープグループ（`tenant_git_oauth.scope_groups`）

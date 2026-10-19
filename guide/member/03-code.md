@@ -53,10 +53,17 @@ session. You can view, list, create, edit, comment on and transition issues:
 `jira issue view PROJ-1`, `jira issue list -p PROJ`, `jira issue create -p PROJ`,
 `jira issue comment add PROJ-1 "…"`, `jira issue move PROJ-1 "In Progress"`.
 
+- **Creating issues**: `jira issue create -p PROJ …` works without `jira init`. When your config
+  holds no issue types, the wrapper reads the project's types from Jira (this needs only the default
+  scopes) and gives `jira` a generated copy of the config that includes them. It only does this
+  for the generated config and for configs in `~/.config/agent-fleet/jira/`, and it needs `-p`
+  (or a default project in that config). If it cannot, it prints a one-line hint and `jira` then
+  fails with `invalid issue types in config`; run `jira init` below (`jira board list -p PROJ`
+  shows the exact board name it wants).
 - **Project, board, sprints and epics**: run `jira init --project PROJ --board "PROJ board"` once
   (add `--force` to replace an earlier setup). It writes your default project, board, issue types
-  and epic fields, which `jira issue create`, `jira sprint list` and the epic commands need, and it
-  asks no questions. Without it, pass `-p PROJ` to each command. For a second board, run
+  and epic fields, which `jira sprint list` and the epic commands need, and it asks no questions.
+  Without it, pass `-p PROJ` to each command. For a second board, run
   `jira init -c ~/.config/agent-fleet/jira/other-board.yml --project PROJ --board "Other board"`
   and then use `jira -c ~/.config/agent-fleet/jira/other-board.yml …`. Your connection is used
   only with configs in `~/.config/agent-fleet/jira/`.
