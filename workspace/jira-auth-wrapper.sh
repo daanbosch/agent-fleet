@@ -148,7 +148,7 @@ appendable() {
   grep -Ev '^([[:space:]]|#|$)' "$1" 2>/dev/null | grep -Evq '^[A-Za-z_][A-Za-z0-9_-]*:([[:space:]]|$)' && return 1
   if [ "${2:-}" = replace ]; then
     # Cutting a block that defines an anchor (or merges one) would leave aliases undefined.
-    ! grep -Eq '(^|[[:space:]:,{[-])[&*][A-Za-z0-9_]|<<[[:space:]]*:' "$1" 2>/dev/null &&
+    ! grep -Eq '(^|[[:space:]:,{[-])[&*][^[:space:]]|<<[[:space:]]*:' "$1" 2>/dev/null &&
       [ "$(grep -Eic '^issue[[:space:]]*:' "$1" 2>/dev/null)" = 1 ] &&
       grep -Eiq '^issue:[[:space:]]*(#.*)?$' "$1" 2>/dev/null
     return
@@ -166,7 +166,8 @@ without_issue() {
 }
 # project.key of a config, as `jira init` writes it; empty when it cannot be read plainly.
 project_key() {
-  awk '/^project:[ \t]*(#.*)?$/ { inp = 1; next }
+  awk '{ sub(/\r$/, "") }
+       /^project:[ \t]*(#.*)?$/ { inp = 1; next }
        inp && /^[^ \t#]/ { exit }
        inp && /^[ \t]*(#.*)?$/ { next }
        inp {

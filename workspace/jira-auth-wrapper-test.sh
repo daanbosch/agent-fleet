@@ -461,6 +461,17 @@ config "$MANAGED/config.yml" $'project:\n    key: AAA\nissue:\n    types: &oldty
 run -- issue create -p BBB
 expect other-anchor CONFIG "$MANAGED/config.yml"
 grep -q 'jira init' "$T/err" || fail "other-anchor: no hint"
+config "$MANAGED/config.yml" $'project:\n    key: AAA\nissue:\n    types: &-oldtypes\n        - id: "7"\nissue_x: *-oldtypes'
+run -- issue create -p BBB
+expect other-anchor-dash CONFIG "$MANAGED/config.yml"
+# CRLF files read like LF ones: another project is cut, and a default project still comes from the file.
+config "$MANAGED/config.yml" "$(printf 'installation: Cloud\r\nproject:\r\n    key: AAA\r\nissue:\r\n    types:\r\n        - id: "7"\r\n          name: Task\r\n')"
+run -- issue create -p BBB
+expect_d other-crlf BBB
+grep -q '"7"' "$(seen CONFIG)" && fail "other-crlf: A's type ID survived"
+config "$MANAGED/config.yml" "$(printf 'installation: Cloud\r\nproject:\r\n    key: AAA\r\n')"
+run -- issue create -t Task
+expect_d crlf-default AAA
 # --parent depends on the other project's kind (project.type, epic.*), unknown here: not merged.
 config "$MANAGED/config.yml" "$A_CFG"
 for form in "--parent BBB-1" "-P BBB-1" "--parent=BBB-1"; do
