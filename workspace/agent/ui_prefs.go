@@ -256,12 +256,17 @@ func chatAutoTurnModel() string {
 }
 
 // memoryReviewNeedsMark says whether replacing the prefs `before` with `after` would arm the
-// background memory review: the mode becomes "propose", or AF memory is switched on while the mode
-// already is. Every way into the enabled state (uiprefs.MemoryReviewEnabled) is one of the two.
-// Turning the review off, or any write that leaves it as it was, needs nothing.
+// background memory review: the mode becomes "propose", AF memory is switched on while the mode
+// already is, or automatic review is switched on (memoryReviewAuto). Every way into the enabled
+// state (uiprefs.MemoryReviewEnabled) or into the automatic loop (uiprefs.MemoryReviewAutoEnabled)
+// is one of these. Turning anything off, or any write that leaves it as it was, needs nothing.
 func memoryReviewNeedsMark(before, after map[string]any) bool {
 	mode := func(m map[string]any) string { s, _ := m["memoryReview"].(string); return s }
 	memory := func(m map[string]any) bool { b, _ := m["agentMemory"].(bool); return b }
+	auto := func(m map[string]any) bool { b, _ := m["memoryReviewAuto"].(bool); return b }
+	if auto(after) && !auto(before) {
+		return true
+	}
 	if mode(after) != "propose" {
 		return false
 	}
@@ -318,8 +323,10 @@ func handlePutUIPrefs(w http.ResponseWriter, r *http.Request) {
 	fleetSpawnBefore := uiprefs.FleetSpawn()
 	sessionSearchBefore := uiprefs.SessionSearch()
 	agentMemoryBefore := uiprefs.AgentMemory()
-	memoryReviewBefore := uiprefs.MemoryReviewEnabled()
-	if err := uiprefs.WriteAtomic(body); err != nil {
+	memoryReviewAutoBefore := uiprefs.MemoryReviewAutoEnabled()
+	// Serialized with the review's claim and dispatch, so that once an "off" is written no further
+	// window is claimed and no call is started (ADR 0117 note, #2358).
+	if err := memreview.WithSwitchWrite(func() error { return uiprefs.WriteAtomic(body) }); err != nil {
 		httpx.WriteErr(w, http.StatusInternalServerError, "write_failed", err.Error())
 		return
 	}
@@ -343,8 +350,9 @@ func handlePutUIPrefs(w http.ResponseWriter, r *http.Request) {
 	}
 	// The memory guidance block follows the same switch (ADR 0108 decision 5): written while it
 	// is on, removed when it goes off. Sessions already running have read their instructions.
-	// Turning the memory review on starts looking at once instead of at the next wake-up.
-	if !memoryReviewBefore && uiprefs.MemoryReviewEnabled() && memreview.DefaultLoop != nil {
+	// Turning automatic review on starts looking at once instead of at the next wake-up. Turning the
+	// review on alone arms nothing in the loop; it is the separate switch that does.
+	if !memoryReviewAutoBefore && uiprefs.MemoryReviewAutoEnabled() && memreview.DefaultLoop != nil {
 		memreview.DefaultLoop.Wake()
 	}
 	if uiprefs.AgentMemory() != agentMemoryBefore {

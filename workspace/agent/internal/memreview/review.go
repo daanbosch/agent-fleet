@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -69,9 +70,13 @@ type Result struct {
 
 // Reviewer carries the seams. New wires the real ones; tests replace them.
 type Reviewer struct {
-	Now      func() time.Time
-	Enabled  func() bool
-	Snapshot func(session string) (memoryx.ReviewSnapshot, error)
+	Now     func() time.Time
+	Enabled func() bool
+	// AutoEnabled is the member's separate switch for the turn-end loop (ui-prefs memoryReviewAuto).
+	// It gates only TriggerAuto reviews, on top of Enabled; nil means the switch is not in play
+	// (tests). A manual review never asks it.
+	AutoEnabled func() bool
+	Snapshot    func(session string) (memoryx.ReviewSnapshot, error)
 	// Call makes one deny-all helper call under ctx's usage tag.
 	Call func(ctx context.Context, persona, prompt string) (string, error)
 	// Ledger finds the usage row of a lost attempt, if one was written.
@@ -85,15 +90,50 @@ type Reviewer struct {
 // New is the Reviewer the Agent runs.
 func New() *Reviewer {
 	return &Reviewer{
-		Now:      time.Now,
-		Enabled:  uiprefs.MemoryReviewEnabled,
-		Snapshot: memoryx.ReviewSnapshotFor,
+		Now:         time.Now,
+		Enabled:     uiprefs.MemoryReviewEnabled,
+		AutoEnabled: uiprefs.MemoryReviewAuto,
+		Snapshot:    memoryx.ReviewSnapshotFor,
 		Call: func(ctx context.Context, persona, prompt string) (string, error) {
 			return chatx.OneShotDenyAll(ctx, usagex.FeatureMemoryReview, chatx.OneShotShort, persona, prompt)
 		},
 		Ledger:  ledgerSpend,
 		Backoff: DefaultBackoff,
 	}
+}
+
+// allowed says whether a review with this trigger may start or continue now. It is asked before a
+// window is claimed and again just before the helper call, so switching automatic review off stops
+// the next claim and the next call; a call already running is not interrupted (see Loop).
+func (r *Reviewer) allowed(trigger string) bool {
+	if !r.Enabled() {
+		return false
+	}
+	return trigger != TriggerAuto || r.AutoEnabled == nil || r.AutoEnabled()
+}
+
+// switchGate serializes the boundary where a review becomes real (a window is claimed, a call is
+// recorded as dispatched) with the write of the member's prefs. Without it a review could pass its
+// last check, the member turn automatic review off, and the call still start afterwards. It is held
+// for a few file writes, never across a helper call.
+var switchGate sync.Mutex
+
+// WithSwitchWrite runs write (the prefs write) so that no claim or dispatch is halfway through
+// while it happens: every boundary that follows sees the new switch.
+func WithSwitchWrite(write func() error) error {
+	switchGate.Lock()
+	defer switchGate.Unlock()
+	return write()
+}
+
+// underGate checks the switch and, if it allows the trigger, runs step, all under switchGate.
+func (r *Reviewer) underGate(trigger string, step func() error) error {
+	switchGate.Lock()
+	defer switchGate.Unlock()
+	if !r.allowed(trigger) {
+		return ErrDisabled
+	}
+	return step()
 }
 
 func (r *Reviewer) stage(s string) {
@@ -116,7 +156,7 @@ func (r *Reviewer) Review(ctx context.Context, req Request) (Result, error) {
 	if req.Key == "" || req.Session == "" || (req.Trigger != TriggerAuto && req.Trigger != TriggerManual) {
 		return Result{}, errors.New("a review needs a session key, a session name and an auto or manual trigger")
 	}
-	if !r.Enabled() {
+	if !r.allowed(req.Trigger) {
 		return Result{}, ErrDisabled
 	}
 	if !inflight.CompareAndSwap(false, true) {
@@ -149,7 +189,9 @@ func (r *Reviewer) Review(ctx context.Context, req Request) (Result, error) {
 		}
 		run = Run{ID: runID(req.Key, w.Last), Key: req.Key, Session: req.Session, Trigger: req.Trigger,
 			Base: wm, First: w.First, Last: w.Last, State: StateClaimed, Created: now}
-		if err := saveRun(&run, now); err != nil {
+		// The check and the save are one step against the switch being written (see switchGate):
+		// a claim that passed first exists, one that did not claims nothing.
+		if err := r.underGate(req.Trigger, func() error { return saveRun(&run, now) }); err != nil {
 			return Result{}, err
 		}
 		r.stage("claimed")
@@ -207,7 +249,7 @@ func (r *Reviewer) advance(ctx context.Context, run *Run, req Request) (Result, 
 	if run.used() >= MaxAttempts {
 		return r.fail(run, "attempt budget spent")
 	}
-	if !r.Enabled() {
+	if !r.allowed(req.Trigger) {
 		return Result{}, ErrDisabled
 	}
 	if now.Before(run.NotBefore) && req.Trigger != TriggerManual {
@@ -226,13 +268,21 @@ func (r *Reviewer) advance(ctx context.Context, run *Run, req Request) (Result, 
 	}
 	in := BuildInput(win, snap)
 
-	if err := consumeCall(now); err != nil {
-		return Result{}, err
-	}
-	run.Attempts = append(run.Attempts, Attempt{N: len(run.Attempts) + 1, StartedAt: now, Outcome: OutcomeDispatched})
-	run.State = StateDispatched
-	if err := saveRun(run, now); err != nil {
-		refundCall(now)
+	// The last check, the budget and the dispatch record are one step against the switch being
+	// written (see switchGate): a call whose dispatch passed first is in flight and finishes; one
+	// that did not never starts. The helper call itself runs outside the gate.
+	if err := r.underGate(req.Trigger, func() error {
+		if err := consumeCall(now); err != nil {
+			return err
+		}
+		run.Attempts = append(run.Attempts, Attempt{N: len(run.Attempts) + 1, StartedAt: now, Outcome: OutcomeDispatched})
+		run.State = StateDispatched
+		if err := saveRun(run, now); err != nil {
+			refundCall(now)
+			return err
+		}
+		return nil
+	}); err != nil {
 		return Result{}, err
 	}
 	r.stage("dispatched")
