@@ -145,6 +145,8 @@ func auditActionTarget(r *http.Request) (action, target string, ok bool) {
 			return gcpLoginAudit(r, p, q)
 		case p == "/api/sessions":
 			return "session.create", "", true
+		case p == "/api/sessions/launch-fastvm":
+			return "session.launch_fastvm", "", true
 		case name != "" && strings.HasSuffix(p, "/fork"):
 			return "session.fork", name, true
 		case name != "" && p == "/api/sessions/"+name+"/continue":

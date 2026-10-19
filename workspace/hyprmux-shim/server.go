@@ -51,6 +51,7 @@ func newHandler(cfg config) http.Handler {
 	mux.HandleFunc("POST /api/hyprmux/room-item", s.auth(s.roomItemCreate))
 	mux.HandleFunc("POST /api/hyprmux/session-launch", s.auth(s.sessionLaunch))
 	mux.HandleFunc("POST /sessions/{name}/continue", s.auth(s.continueSession))
+	mux.HandleFunc("POST /sessions/launch-fastvm", s.auth(s.launchFastVM))
 	mux.HandleFunc("GET /api/telegram/status", s.auth(s.telegramStatus))
 	mux.HandleFunc("GET /api/telegram/topics", s.auth(s.telegramTopics))
 	mux.HandleFunc("POST /api/telegram/topic-message", s.auth(s.telegramTopicMessage))
