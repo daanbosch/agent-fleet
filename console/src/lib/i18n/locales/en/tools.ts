@@ -920,6 +920,7 @@ export const tools: Record<keyof typeof jaTools, string> = {
   "mem.review_auto_note": "When on, finished sessions are reviewed in the background without you asking: a few minutes after a session's last turn, once it has gained enough new turns, its excerpt is sent and reviewed as above, and this spends tokens (counted in the same 250 calls a day) with nobody watching. It looks only at sessions whose last turn ended within the last 48 hours; older ones, or what happened while the workspace was stopped, are covered by \"Suggest memories now\". Turning it off stops new reviews right away; a call already running is allowed to finish and its proposals still wait for your approval. Off by default, including for people who had Propose on before this setting existed.",
   "mem.review_auto_needs_review": "Automatic suggestions run only while Propose is chosen above.",
   "mem.review_needs_memory": "This setting takes effect only while \"Let sessions use Agent Fleet memory\" above is on.",
+  "mem.review_no_backend": "Memory review cannot run here: no agent that can run without tools is available (currently only claude qualifies). Install and sign in to claude, or the review stays parked.",
   "mem.view_changes_count": "Changes, {n} proposed",
   "mem.changes_sub_label": "Changes views",
   "mem.rv_sub_log": "Published",

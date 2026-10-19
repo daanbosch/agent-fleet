@@ -1,8 +1,11 @@
 // The background memory review's setting (ADR 0117): off by default, discloses what it sends and
 // costs, and says when it cannot work because AF memory is off.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+
+let unavailable = false;
+vi.mock("../../../lib/aiAssistResolution.ts", () => ({ useMemoryReviewUnavailable: () => unavailable }));
 
 const { MemoryReviewSwitch } = await import("./MemoryReviewSwitch.tsx");
 const { setSetting, getSettings } = await import("../../../lib/settings.ts");
@@ -13,6 +16,7 @@ let host: HTMLDivElement;
 
 beforeEach(() => {
   localStorage.clear();
+  unavailable = false;
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -87,5 +91,13 @@ describe("MemoryReviewSwitch", () => {
     setSetting("memoryReview", "propose");
     await mount();
     expect(host.textContent).not.toContain(t("mem.review_auto_needs_review"));
+  });
+
+  it("says the review cannot run here only when no deny-all backend is available", async () => {
+    await mount();
+    expect(host.textContent).not.toContain(t("mem.review_no_backend"));
+    unavailable = true;
+    await mount();
+    expect(host.textContent).toContain(t("mem.review_no_backend"));
   });
 });

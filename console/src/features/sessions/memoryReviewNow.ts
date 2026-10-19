@@ -29,6 +29,7 @@ const REFUSAL: Record<string, MsgKey> = {
   busy: "srow.memory_review_busy",
   daily_cap: "srow.memory_review_daily_cap",
   queue_full: "srow.memory_review_queue_full",
+  memory_review_no_backend: "srow.memory_review_no_backend",
   no_backend: "srow.memory_review_no_backend",
 };
 

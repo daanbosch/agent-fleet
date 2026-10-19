@@ -17,6 +17,9 @@ vi.mock("./useSessionActions.tsx", () => ({
 const reviewSessionNow = vi.fn(async (..._a: unknown[]) => {});
 vi.mock("./memoryReviewNow.ts", () => ({ reviewSessionNow: (...a: unknown[]) => reviewSessionNow(...a) }));
 
+let reviewUnavailable = false;
+vi.mock("../../lib/aiAssistResolution.ts", () => ({ useMemoryReviewUnavailable: () => reviewUnavailable }));
+
 const { SessionMenu } = await import("./SessionMenu.tsx");
 const { ToastProvider } = await import("../../ui/ToastProvider.tsx");
 const { setSetting } = await import("../../lib/settings.ts");
@@ -46,6 +49,7 @@ const item = () =>
 beforeEach(() => {
   localStorage.clear();
   reviewSessionNow.mockClear();
+  reviewUnavailable = false;
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -85,5 +89,17 @@ describe("the session menu's memory review item", () => {
     await act(async () => item()!.click());
     expect(reviewSessionNow).toHaveBeenCalledTimes(1);
     expect(reviewSessionNow.mock.calls[0][0]).toBe("sk7f3q9");
+  });
+
+  it("is disabled with the reason when no backend can run the review", async () => {
+    setSetting("agentMemory", true);
+    setSetting("memoryReview", "propose");
+    reviewUnavailable = true;
+    await render(session());
+    const el = item() as HTMLButtonElement;
+    expect(el.disabled).toBe(true);
+    expect(el.title).toBe(t("srow.memory_review_no_backend"));
+    await act(async () => el.click());
+    expect(reviewSessionNow).not.toHaveBeenCalled();
   });
 });

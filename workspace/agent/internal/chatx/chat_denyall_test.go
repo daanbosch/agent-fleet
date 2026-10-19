@@ -364,3 +364,18 @@ func TestDenyAllKindIsClaudeOnly(t *testing.T) {
 		t.Fatal("claude qualifies")
 	}
 }
+
+// The cached resolution says "unavailable" once the only qualifying kind is confirmed unreachable,
+// and stays unknown while its cache entry is cold: GET /ai-assist/resolution and the memory
+// review status share this answer.
+func TestResolveDenyAllCachedWithoutAQualifyingBackend(t *testing.T) {
+	writeUIPrefs(t, `{}`)
+	t.Cleanup(SetHeadlessAvailableForTest("claude", false))
+	if kind, source, ok := ResolveDenyAllCached("memory.review"); !ok || source != OneShotSourceUnavailable || kind != "" {
+		t.Fatalf("got %q %q %v, want unavailable", kind, source, ok)
+	}
+	t.Cleanup(SetHeadlessAvailableForTest("claude", true))
+	if kind, source, ok := ResolveDenyAllCached("memory.review"); !ok || source != OneShotSourceDefault || kind != "claude" {
+		t.Fatalf("got %q %q %v, want default claude", kind, source, ok)
+	}
+}
