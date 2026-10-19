@@ -73,6 +73,8 @@ func TestJiraCredFlagsMissingSoftwareScopes(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			// The unrecorded case would otherwise try the backfill against the real Atlassian.
+			stubAccessibleResources(t, `[]`, 500)
 			seedJiraStore(t, func(s *secrets.Data) {
 				s.Jira = &secrets.JiraCreds{AuthKind: c.kind, Site: "https://acme.atlassian.net", CloudID: "cid-1",
 					AccessToken: "fake-at", Token: "fake-api", Email: "me@example.com", Expiry: time.Now().Add(time.Hour).Unix(),
@@ -326,5 +328,25 @@ func TestJiraGetBackfillsScopes(t *testing.T) {
 	s, _ = secrets.Load()
 	if jiraStatus(s)["softwareScopes"] != "missing" {
 		t.Fatalf("status = %v", jiraStatus(s))
+	}
+}
+
+// Opening Settings alone (no jira run, no rail fetch) fills in an older connection's scopes.
+func TestConnectionsGetBackfillsJiraScopes(t *testing.T) {
+	seedLegacyOAuth(t)
+	stubAccessibleResources(t, `[{"id":"cid-1","url":"https://acme.atlassian.net","scopes":["read:jira-work"]}]`, 200)
+	w := httptest.NewRecorder()
+	handleConnectionsGet(w, httptest.NewRequest("GET", "/connections", nil))
+	var out struct {
+		Jira map[string]any `json:"jira"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Jira["softwareScopes"] != "missing" {
+		t.Fatalf("jira status = %v", out.Jira)
+	}
+	if s, _ := secrets.Load(); len(s.Jira.Sites[0].Scopes) == 0 {
+		t.Fatal("scopes not stored")
 	}
 }

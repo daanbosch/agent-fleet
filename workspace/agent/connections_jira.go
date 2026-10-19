@@ -588,6 +588,25 @@ func jiraBackfillScopes(c *secrets.JiraCreds) {
 	}
 }
 
+// jiraBackfillForStatus lets the Settings card learn the scopes of an older OAuth connection
+// without any jira run or rail fetch. It talks to Atlassian only for an OAuth connection whose
+// current site has no recorded scopes (and then at most once per jiraBackfillRetry), and reloads
+// s so the answer includes what it stored and any token it renewed.
+func jiraBackfillForStatus(s *secrets.Data) {
+	c := s.Jira
+	if c == nil || c.AuthKind != "oauth" || c.CloudID == "" || jiraScopesRecorded(c) || !jiraConnected(c) {
+		return
+	}
+	cc := *c
+	if jiraEnsureFresh(&cc) != nil {
+		return
+	}
+	jiraBackfillScopes(&cc)
+	if ns, err := secrets.Load(); err == nil {
+		*s = *ns
+	}
+}
+
 // jiraFreshWindow renews slightly before the stamp says to. A token that expires while
 // the request is in flight comes back as a 401 that looks like a revoked authorization.
 const jiraFreshWindow = 60 * time.Second
