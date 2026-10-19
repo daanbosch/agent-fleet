@@ -307,6 +307,7 @@ func serve() {
 	memreview.DefaultLoop = memreview.NewLoop(sessionx.MemoryReviewSource{})
 	memoryx.SetForgetHooks(memreview.ForgetHooks())
 	memreview.OnQueued = notifyMemoryReview
+	memreview.ResolveBackend, memreview.WarmBackend = chatx.ResolveDenyAllCached, chatx.WarmDenyAllKind
 	memreview.DefaultLoop.Start(context.Background())
 
 	// Automatic recovery of a claude session stopped by a rate limit (docs/log/47 §4-4):

@@ -121,6 +121,14 @@ describe("reviewSessionNow", () => {
     expect(notify).toHaveBeenLastCalledWith(t("srow.memory_review_no_backend"));
   });
 
+  it("explains the Agent's refusal to start without a deny-all backend", async () => {
+    apiMock.mockResolvedValue(status({ running: false }));
+    apiJSONMock.mockResolvedValue({ error: { code: "memory_review_no_backend" } });
+    await reviewSessionNow("a", notify, noSleep);
+    expect(notify).toHaveBeenLastCalledWith(t("srow.memory_review_no_backend"));
+    expect(apiMock).toHaveBeenCalledTimes(1);
+  });
+
   it("explains a refusal to start and polls nothing", async () => {
     apiMock.mockResolvedValue(status({ running: false }));
     for (const [code, key] of [
