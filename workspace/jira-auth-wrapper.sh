@@ -145,7 +145,7 @@ fi
 # jira running on the config it had, after a hint that names the next step.
 has_types() { grep -Eiq '^[[:space:]]*"?types"?[[:space:]]*:' "$1" 2>/dev/null; }
 types_hint() {
-  echo "jira: this config has no issue types, which \`issue create\` needs; $1 (find the exact board name with \`jira board list -p KEY\`; a 401 from init can mean the Jira app lacks the Jira Software scopes, which needs a Jira reconnect)" >&2
+  echo "jira: this config has no issue types, which \`issue create\` needs; $1 (find the exact board name with \`jira board list -p KEY\`; a 401 from init can mean the Jira app lacks the Jira Software scopes: ask the tenant administrator to add them to the Atlassian app and tick the Jira Software option on the tenant's Jira card, then reconnect Jira in Settings)" >&2
 }
 # True when appending an `issue:` block to the file cannot duplicate or reshape a key: the first
 # real line starts at column 0 and every column-0 line is a bare `key:` (no quotes, no flow

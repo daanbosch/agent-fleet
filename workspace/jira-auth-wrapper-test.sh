@@ -351,6 +351,7 @@ expect create-nohelper CONFIG "$GEN"
 expect create-nohelper TOKEN fake-oauth-tok
 grep -q 'jira init' "$T/err" && grep -q "board list" "$T/err" || fail "create-nohelper: no hint: $(cat "$T/err")"
 [ "$(wc -l <"$T/err")" = 1 ] || fail "create-nohelper: hint is not one line"
+grep -q "tenant administrator" "$T/err" && grep -q "Jira Software option" "$T/err" && grep -q "reconnect Jira" "$T/err" || fail "create-nohelper: hint omits the administrator step: $(cat "$T/err")"
 printf 'garbage\n' >"$T/types.out"
 run -- issue create -p KEY
 expect create-garbage CONFIG "$GEN"
