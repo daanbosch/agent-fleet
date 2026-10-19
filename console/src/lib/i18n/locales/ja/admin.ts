@@ -1254,6 +1254,16 @@ export const admin = {
   "tenant.branch_rules_save_failed": "保存できませんでした（入力内容はそのままです）。{error}",
   "tenant.branch_rules_retry": "再試行",
   "tenant.tab_engines": "推論エンジンのモデル",
+  "tenant.tab_external_memory": "外部からのメモリ利用",
+  "tenant.ext_memory_title": "Agent Fleet の外からのメモリ利用",
+  "tenant.ext_memory_note":
+    "このテナントのメンバーが、Agent Fleet の外のエージェント（自分のマシンの Claude Code や Claude Desktop など）から、コントロールプレーンの MCP エンドポイント経由で自分の Agent Fleet メモリを使えるかを決めます。使うにはメンバー自身も 設定 > エージェントメモリ で有効にする必要があり、それまではオフのままです。メモリの本文はワークスペースの外に出て、そのクライアントのモデルに渡ります。",
+  "tenant.ext_memory_allow": "許可",
+  "tenant.ext_memory_block": "ブロック",
+  "tenant.ext_memory_on_hint": "メンバーは各自の判断で有効にできます。メンバー側の設定は引き続きオフから始まります。",
+  "tenant.ext_memory_off_hint": "ブロック中: メンバー自身の設定にかかわらず、どのメンバーの外部エージェントにもメモリのツールは提供されません。Agent Fleet の中でのメモリ利用には影響しません。",
+  "tenant.ext_memory_load_failed": "設定を読み込めませんでした。",
+  "tenant.ext_memory_save_failed": "設定を保存できませんでした。",
   "tenant.tab_engine_access": "推論エンジンの利用者",
   "tenant.engine_access_title": "推論エンジンを使えるメンバー",
   "tenant.engine_access_note":

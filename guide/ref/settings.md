@@ -71,6 +71,7 @@ value you set is not the value in force, look one layer out.
 | Integration OAuth apps | your tenant's own OAuth apps for GitHub / Bitbucket |
 | MCP distribution | integration servers handed to every member |
 | Branch naming rules | the tenant's default for naming new branches and choosing their base, per repository pattern (a JSON list); members' Workspaces pick it up within five minutes. Advice only: a name that does not follow it gets a warning, never a refusal |
+| External memory access | whether members may use their Agent Fleet memory from an agent outside Agent Fleet through `/mcp`. Allow (default) lets members opt in; Block withholds the memory tools from the whole tenant ([admin 08](../admin/08-external-memory.md)) |
 | Member defaults | the agent the first-run card names in its "Connect an agent" step (Claude, Codex, opencode, Cursor, Copilot, Kiro, Muse, or none). Members read it whenever the Console loads. It names, never restricts: connecting any other agent completes the step ([admin 07](../admin/07-member-defaults.md)) |
 | Audit | who changed what, when |
 | Running time | per-member workspace uptime, exportable, plus an hour-by-hour heatmap of the whole tenant |

@@ -686,9 +686,18 @@ func memberTools() []mcpTool {
 // mcpToolCall before any admin tool runs.
 func (a API) toolsFor(ctx context.Context, prin *mcpPrincipal) []mcpTool {
 	var out []mcpTool
-	for _, t := range append(memberTools(), memoryTools()...) {
+	for _, t := range memberTools() {
 		if a.cp.ScopeRank(prin.scope) >= a.cp.ScopeRank(t.minScope) {
 			out = append(out, t)
+		}
+	}
+	// mcpToolCall picks its tool out of this same list, so withholding the memory tools here
+	// is what refuses a call by name as well.
+	if a.tenantAllowsExternalMemory(ctx, prin) {
+		for _, t := range memoryTools() {
+			if a.cp.ScopeRank(prin.scope) >= a.cp.ScopeRank(t.minScope) {
+				out = append(out, t)
+			}
 		}
 	}
 	if ac, _ := a.adminPrincipal(ctx, prin); ac != nil && ac.isAdmin {

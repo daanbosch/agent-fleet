@@ -349,8 +349,8 @@ an operator.
   choice, and they can revoke it themselves. Over that door a member can also let their own agent
   use their Agent Fleet memory; it is a separate per-member setting, off by default (member guide,
   Settings > Agent memory > Settings). External saves and forgets are audited (`memory.entry.save` /
-  `memory.entry.forget`, actor `mcp`, target the project id). There is no tenant-level switch for it;
-  `AF_MCP_ENABLED` turns the whole endpoint off.
+  `memory.entry.forget`, actor `mcp`, target the project id). A tenant administrator can block it for the
+  whole tenant ([admin 08](../admin/08-external-memory.md)); `AF_MCP_ENABLED` turns the whole endpoint off.
 
 ## Handing over the in-workspace browser
 

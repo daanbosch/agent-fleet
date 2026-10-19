@@ -1263,6 +1263,16 @@ export const admin: Record<keyof typeof jaAdmin, string> = {
   "tenant.branch_rules_save_failed": "Could not save; your text is kept. {error}",
   "tenant.branch_rules_retry": "Try again",
   "tenant.tab_engines": "Inference engine models",
+  "tenant.tab_external_memory": "External memory access",
+  "tenant.ext_memory_title": "Memory from outside Agent Fleet",
+  "tenant.ext_memory_note":
+    "Decides whether members of this tenant may use their Agent Fleet memory from an agent outside Agent Fleet (for example Claude Code or Claude Desktop on their own machine) through the Control Plane's MCP endpoint. Each member still has to turn it on for themselves in Settings > Agent memory, and it stays off until they do. The memory text leaves the workspace and reaches that client's model.",
+  "tenant.ext_memory_allow": "Allow",
+  "tenant.ext_memory_block": "Block",
+  "tenant.ext_memory_on_hint": "Members may opt in. Their own setting still starts off.",
+  "tenant.ext_memory_off_hint": "Blocked: the memory tools are not offered to any member's external agent, whatever their own setting says. Memory used inside Agent Fleet is not affected.",
+  "tenant.ext_memory_load_failed": "Could not load the setting.",
+  "tenant.ext_memory_save_failed": "Could not save the setting.",
   "tenant.tab_engine_access": "Engine access",
   "tenant.engine_access_title": "Who may use the inference engines",
   "tenant.engine_access_note":
