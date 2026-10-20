@@ -23,6 +23,9 @@ type registryRow struct {
 	Status       string `json:"status"`
 	PID          int    `json:"pid"`
 	CreatedAt    string `json:"createdAt"`
+	// PiSessionFile is the toolbar-persisted pi session JSONL of a pi row. A kitty row
+	// has no log the shim can read — this file is the only real transcript it has.
+	PiSessionFile string `json:"piSessionFile,omitempty"`
 }
 
 type registryFile struct {
