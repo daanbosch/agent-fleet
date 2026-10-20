@@ -176,11 +176,11 @@ func TestKittyMessagesCacheFollowsAppends(t *testing.T) {
 func TestHeadlessMessagesPrefersPiTranscriptOverLogTail(t *testing.T) {
 	dir := t.TempDir()
 	transcript := writePiFixture(t, dir, "pi.jsonl", piFixtureLines)
+	srv, logsDir := piTestServer(t, transcript)
 	// h-pi-0007 is headless AND has a seeded raw log; the real conversation must win.
-	if err := os.WriteFile(filepath.Join(dir, "h-pi-0007.log"), []byte("line1\nline2\nline3\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(logsDir, "h-pi-0007.log"), []byte("line1\nline2\nline3\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	srv, _ := piTestServer(t, transcript)
 	code, body, _ := request(t, srv, "/sessions/h-pi-0007/messages", true)
 	if code != http.StatusOK {
 		t.Fatalf("status = %d; body %s", code, body)
@@ -192,6 +192,105 @@ func TestHeadlessMessagesPrefersPiTranscriptOverLogTail(t *testing.T) {
 	}
 	if got.Name != "h-pi-0007" || got.Messages[0].Role != "user" {
 		t.Errorf("wire = %+v", got)
+	}
+}
+
+func piSystemOnlyFixture(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	return writePiFixture(t, dir, "system-only.jsonl", piFixtureLines[:2]) // session header + system row, no talk
+}
+
+func TestHeadlessUnusableFileKeepsLogTailButEmptyFileStaysEmpty(t *testing.T) {
+	// A readable-but-conversation-less session file must answer an honest empty
+	// mirror; only an unusable (unreadable) file falls back to the log tail.
+	emptyTalk := piSystemOnlyFixture(t)
+	srv, logsDir := piTestServer(t, emptyTalk)
+	if err := os.WriteFile(filepath.Join(logsDir, "h-pi-0007.log"), []byte("line1\nline2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, body, _ := request(t, srv, "/sessions/h-pi-0007/messages", true)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	var got mirrorWire
+	decodeJSON(t, body, &got)
+	if len(got.Messages) != 0 {
+		t.Fatalf("messages = %d, want 0: a parseable empty conversation beats the log tail", len(got.Messages))
+	}
+	// Now make the file unusable (unlink) and confirm the log-tail fallback returns.
+	if err := os.Remove(emptyTalk); err != nil {
+		t.Fatal(err)
+	}
+	code, body, _ = request(t, srv, "/sessions/h-pi-0007/messages", true)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	var fellBack mirrorWire
+	decodeJSON(t, body, &fellBack)
+	if len(fellBack.Messages) == 0 {
+		t.Fatal("unusable session file must fall back to the headless log tail, got none")
+	}
+}
+
+func TestFatLineLosesOnlyItsOwnTurn(t *testing.T) {
+	dir := t.TempDir()
+	wide := strings.Repeat("x", maxTranscriptLineBytes+4096)
+	fat := `{"type":"message","timestamp":"2026-10-05T09:00:06Z","message":{"role":"user","content":[{"type":"text","text":"` + wide + `"}]}}`
+	lines := []string{piFixtureLines[0], fat}
+	lines = append(lines, piFixtureLines[1:]...)
+	// and add a real turn after the fat one.
+	lines = append(lines,
+		`{"type":"message","timestamp":"2026-10-05T09:00:07Z","message":{"role":"assistant","content":[{"type":"text","text":"after the fat line"}]}}`,
+	)
+	p := writePiFixture(t, dir, "pi.jsonl", lines)
+	srv, _ := piTestServer(t, p)
+	code, body, _ := request(t, srv, "/sessions/k-pi-0005/messages", true)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d; body %s", code, body)
+	}
+	var got mirrorWire
+	decodeJSON(t, body, &got)
+	// The fat turn drops; the user turn before it and the assistant turn after survive.
+	var texts []string
+	for _, m := range got.Messages {
+		texts = append(texts, partsText(m.Parts))
+	}
+	if len(got.Messages) != 4 {
+		t.Fatalf("turns = %d (%v), want 4: fat line loses only its own turn", len(got.Messages), texts)
+	}
+	if texts[3] != "after the fat line" {
+		t.Errorf("last turn = %q, want 'after the fat line'", texts[3])
+	}
+}
+
+func TestTranscriptTextBudgetDropsOldest(t *testing.T) {
+	lines := []string{
+		`{"type":"session","version":3,"id":"budget","timestamp":"2026-10-05T09:00:00Z"}`,
+	}
+	big := strings.Repeat("y", 4<<20) // 4 MiB per turn: 5 turns overshoot the 8 MiB budget
+	for i := 0; i < 5; i++ {
+		lines = append(lines, fmt.Sprintf(`{"type":"message","message":{"role":"user","content":[{"type":"text","text":"%d%[2]s"}]}}`, i, big))
+	}
+	dir := t.TempDir()
+	p := writePiFixture(t, dir, "pi.jsonl", lines)
+	srv, _ := piTestServer(t, p)
+	_, body, _ := request(t, srv, "/sessions/k-pi-0005/messages", true)
+	var got mirrorWire
+	decodeJSON(t, body, &got)
+	total := 0
+	for _, m := range got.Messages {
+		total += len(partsText(m.Parts))
+	}
+	if total > maxTranscriptTextBytes+(1<<20) {
+		t.Fatalf("retained text = %d bytes, want <= maxTranscriptTextBytes + one newest turn", total)
+	}
+	if len(got.Messages) == 5 {
+		t.Fatal("the oldest over-budget turns must drop, all 5 were kept")
+	}
+	first := partsText(got.Messages[0].Parts)
+	if !strings.HasPrefix(first, "3") && !strings.HasPrefix(first, "4") {
+		t.Errorf("oldest kept turn = %.20q, want the newest budget window", first)
 	}
 }
 

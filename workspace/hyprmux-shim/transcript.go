@@ -35,21 +35,23 @@ func (s *server) messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if row.PiSessionFile != "" {
-		if turns := piTurnsFor(row.PiSessionFile, maxTranscriptTurns); len(turns) > 0 {
+		if turns, usable := piTurnsFor(row.PiSessionFile, maxTranscriptTurns, maxTranscriptTextBytes); usable {
+			// The real transcript governs when the file is readable — even if it holds no
+			// turns yet, an honest empty conversation beats resurrecting a stale log tail.
 			writeJSON(w, http.StatusOK, map[string]any{
 				"name": row.ID, "messages": turns, "cursor": 0, "reset": true, "firstLine": 0, "hasMore": false,
 			})
 			return
 		}
+		// An unusable session file: a kitty row mirrors the pre-lane answer (empty), a
+		// headless row keeps its log-tail answer below. A parse failure never surfaces
+		// as a 500 to the mirror.
 		if !isHeadless(row) {
-			// A kitty row with a missing or unusable session file mirrors the pre-lane
-			// answer: an empty transcript, never a parse failure surfacing as a 500.
 			writeJSON(w, http.StatusOK, map[string]any{
 				"name": row.ID, "messages": []transcriptTurn{}, "cursor": 0, "reset": true, "firstLine": 0, "hasMore": false,
 			})
 			return
 		}
-		// A headless row with an unusable session file keeps its log-tail answer below.
 	}
 	turns := []transcriptTurn{}
 	if isHeadless(row) {
