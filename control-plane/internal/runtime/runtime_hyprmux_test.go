@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // hyprmux-host is single-user like native: it serves the host's own session registry.
@@ -187,6 +190,59 @@ func TestHyprmuxStartReplacesOrphanThatNeverAnswers(t *testing.T) {
 	}
 	if pidAlive(orphanPID, shim) {
 		t.Fatalf("orphan pid %d still alive after Start", orphanPID)
+	}
+}
+
+// Start on a context that is already done returns its error before any side effect: the data
+// dir is not created, no log is opened, and no shim is left listening on the workspace port.
+func TestHyprmuxStartFailsFastOnDoneContext(t *testing.T) {
+	shim := buildHyprmuxShimForTest(t)
+	registry, err := filepath.Abs(filepath.Join("..", "..", "..", "workspace", "hyprmux-shim", "testdata", "sessions-v4.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AF_HYPRMUX_SHIM", shim)
+	t.Setenv("AF_HYPRMUX_REGISTRY", registry)
+	t.Setenv("AF_HYPRMUX_LOGS", t.TempDir())
+	f, err := NewFactory("hyprmux-host", Config{AuthMode: "dev"})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, expire := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer expire()
+
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		want error
+	}{
+		{"canceled", canceled, context.Canceled},
+		{"deadline passed", expired, context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := filepath.Join(t.TempDir(), "hyprmux-host")
+			ws := Workspace{ContainerName: "hyprmux-host", DataDir: dataDir, AgentPort: freeLoopbackPortForTest(t), AgentToken: "test-token"}
+			rt := f.New(ws, SecretKeys{}, nil)
+
+			started := time.Now()
+			err := rt.Start(tc.ctx)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Start = %v, want %v", err, tc.want)
+			}
+			if elapsed := time.Since(started); elapsed >= hyprmuxReadyWait {
+				t.Fatalf("Start took %v, want it to fail before the ready wait (%v)", elapsed, hyprmuxReadyWait)
+			}
+			if _, err := os.Stat(dataDir); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("Start touched the data dir (stat err=%v); it must not run before the ctx check", err)
+			}
+			if conn, err := net.Dial("tcp", "127.0.0.1:"+ws.AgentPort); err == nil {
+				conn.Close()
+				t.Fatal("a shim is listening on the workspace port after a refused Start")
+			}
+		})
 	}
 }
 

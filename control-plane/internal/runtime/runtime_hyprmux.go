@@ -127,6 +127,11 @@ func (h *hyprmuxRuntime) State(ctx context.Context) string {
 // container agent it has no boot to wait out, so a silent failure here is a misconfiguration
 // (a port in use, an unreadable registry) and must surface at once.
 func (h *hyprmuxRuntime) Start(ctx context.Context) error {
+	// Checked before any side effect: a done ctx must not spawn a shim that the first wait
+	// would then kill.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("start hyprmux shim: %w", err)
+	}
 	switch h.State(ctx) {
 	case "running":
 		return nil
