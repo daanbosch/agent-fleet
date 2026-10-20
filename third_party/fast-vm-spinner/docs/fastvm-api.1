@@ -1,0 +1,181 @@
+.TH FASTVM-API 1 "March 2026" "fastvm-api 1.0.0" "FastVM Manual"
+.SH NAME
+fastvm\-api \- REST API server for FastVM (runs on a backend host)
+.SH SYNOPSIS
+.B fastvm\-api
+.RB [ \-\-port
+.IR PORT ]
+.RB [ \-\-backend
+.IR proxmox|firecracker ]
+.RB [ \-\-state\-dir
+.IR DIR ]
+.SH DESCRIPTION
+.B fastvm\-api
+is a Go HTTP server that runs on the VM backend host and provides a REST API
+for VM lifecycle management. It can manage Proxmox VMs or Firecracker
+microVMs behind the same client API.
+.PP
+Remote clients (the
+.B fastvm
+CLI, CI/CD pipelines, AI agents) connect over HTTP.
+.SH BACKEND SIZING
+Firecracker follows the upstream Firecracker machine\-config API and supports
+at most 32 vCPUs per microVM. Use Firecracker for fast create/clone/destroy
+workflows and for scale\-out across multiple microVMs.
+.PP
+Use Proxmox for one large compile VM, including 64\-120+ vCPU requests.
+FastVM preserves the requested Proxmox VM core count, but caps virtio
+.B net0.queues
+at 64 because Proxmox rejects larger NIC queue counts.
+.SH OPTIONS
+.TP
+.B \-\-port PORT
+HTTP listen port. Default: 8090.
+.TP
+.B \-\-backend proxmox|firecracker
+VM backend implementation. Default: firecracker.
+.TP
+.B \-\-state\-dir DIR
+State directory with vms.json and users.json. Default: /var/lib/fastvm.
+.TP
+.B \-\-ssh\-host HOSTNAME
+Public hostname or IP that users should SSH to for port\-forwarded VM access.
+This value appears in the
+.B ssh_command
+field of API responses (e.g., "ssh \-p 60000 ubuntu@HOSTNAME").
+Default: the machine's hostname.
+.TP
+.B \-\-firecracker\-install\-dir DIR
+Firecracker install directory. Default: /opt/fastvm-microvm.
+.TP
+.B \-\-firecracker\-bin PATH
+Path to firecrackerctl. Default: <install-dir>/bin/firecrackerctl.
+.TP
+.B \-\-firecracker\-template NAME
+Default Firecracker rootfs template name. Default: 9013.
+.SH ENVIRONMENT
+.TP
+.B FASTVM_BACKEND
+Backend implementation: proxmox or firecracker. Default: firecracker.
+.TP
+.B FASTVM_STATE_DIR
+State directory (same as \-\-state\-dir).
+.TP
+.B FASTVM_SSH_HOST
+Public hostname/IP for SSH proxy commands (same as \-\-ssh\-host).
+.TP
+.B FASTVM_DEFAULT_TEMPLATE
+Proxmox template VMID used when create requests omit the template field.
+Default: 9012.
+.TP
+.B FASTVM_FIRECRACKER_INSTALL_DIR
+Firecracker install directory.
+.TP
+.B FASTVM_FIRECRACKER_DEFAULT_TEMPLATE
+Default Firecracker rootfs template name.
+.TP
+.B FASTVM_FIRECRACKER_SSH_USER
+Guest SSH user for Firecracker responses. Default: root.
+.SH API ENDPOINTS
+.SS Health & Status
+.TP
+.B GET /api/v1/health
+Returns {"status":"ok"}. Use for liveness probes.
+.TP
+.B GET /api/v1/status
+System overview: total VMs, user count, per\-user network allocations.
+.SS VM Lifecycle
+.TP
+.B POST /api/v1/vms
+Create VMs. Body:
+.nf
+  {"user":"X", "count":N, "memory":4096, "cores":2,
+   "template":9012, "ssh_key":"/path/to/key.pub"}
+.fi
+Returns created VMs with deterministic IPs immediately.
+.TP
+.B GET /api/v1/vms[?user=X]
+List VMs, optionally filtered by user.
+.TP
+.B GET /api/v1/vms/{vmid}
+Get single VM details.
+.TP
+.B DELETE /api/v1/vms/{vmid}
+Queue destruction of a single VM. The VM is removed from FastVM state
+immediately; backend cleanup may continue asynchronously.
+.TP
+.B DELETE /api/v1/users/{user}/vms
+Queue destruction of all VMs for a user. Cleans up FastVM state and networking
+when the last VM is removed; backend cleanup may continue asynchronously.
+.SS Snapshot
+.TP
+.B POST /api/v1/vms/{vmid}/snapshot
+Convert a VM into a Proxmox template. The VM is stopped, its SSH proxy removed,
+and it becomes an immutable template suitable for cloning. The VM is unregistered
+from active state. Returns the template VMID for use with
+.BR "POST /api/v1/vms" " (template field)" .
+.PP
+Response:
+.nf
+  {"ok": true, "data": {"vmid": "60000",
+   "message": "VM 60000 converted to template. Use -t 60000 to clone from it."}}
+.fi
+.SS Convergence
+.TP
+.B POST /api/v1/converge
+Keep one VM, destroy the rest. Body: {"user":"X", "keep_vmid":"60001"}.
+.SS SSH Proxy
+When a VM is created, the API automatically starts a
+.B socat
+listener on port = VMID that forwards to the VM's internal SSH port (22).
+This allows external users to SSH into VMs without needing hypervisor access
+or knowing internal IPs.
+.PP
+The proxy binds to 0.0.0.0 on the backend host. PID files are stored in
+.IR /var/lib/fastvm/proxy/<vmid>.pid .
+On VM destruction, the proxy is stopped automatically.
+On API startup, orphan proxies (from crashed runs) are cleaned up.
+.PP
+VM responses include
+.B ssh_port
+(= VMID) and
+.B ssh_command
+(e.g., "ssh \-p 60000 ubuntu@host") fields.
+.PP
+Requirements:
+.B socat
+must be installed. Ports 60000\-60999 must be open in any firewall.
+.SH RESPONSE FORMAT
+.nf
+{
+  "ok": true|false,
+  "data": { ... },
+  "error": "message" | null
+}
+.fi
+.SH DEPLOYMENT
+The API server is designed to run on the backend host as a systemd service:
+.PP
+.RS
+.nf
+[Unit]
+Description=FastVM API Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fastvm-api --port 8090
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
+.fi
+.RE
+.PP
+It needs root or equivalent permissions for the selected backend: qm on
+Proxmox, or firecrackerctl and networking setup on Firecracker hosts.
+.SH SEE ALSO
+.BR fastvm (1)
+.SH AUTHORS
+Telnyx Bare Metal Squad

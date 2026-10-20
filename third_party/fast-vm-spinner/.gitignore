@@ -1,0 +1,42 @@
+# Binaries (the compiled binary, not the source directory)
+/fastvm
+/fastvm-api
+/fastvm-enroller
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Config files (may contain host-specific settings)
+config.yaml
+config.yml
+config.json
+.env
+
+# PID files
+*.pid
+
+# Test artifacts
+*.test
+*.out
+coverage.html
+bench-results/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+bin/
+dist/
+fastvm-cli-darwin-arm64
+fastvm-cli-linux-amd64
+fastvm-api-linux-amd64
+fastvm-cli

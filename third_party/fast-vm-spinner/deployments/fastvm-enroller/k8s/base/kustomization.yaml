@@ -1,0 +1,33 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: infra-bare-metal-squad
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - serviceaccount.yaml
+  - serviceid.yaml
+  - vaultauth.yaml
+  - vaultstaticsecret.yaml
+
+configMapGenerator:
+  - name: overlay-configuration
+    options:
+      annotations:
+        config.kubernetes.io/local-config: "true"
+    literals:
+      - K8S_CLUSTER=undef
+      - SITE=undef
+  - name: fastvm-enroller-static-config
+    literals:
+      - FASTVM_ENROLLER_PORT=8080
+      - FASTVM_ENROLLER_SECRETS_DIR=/run/secrets/fastvm-enroller
+      - FASTVM_ENROLLER_TOKEN_FILE=/run/secrets/fastvm-enroller/token
+      - FASTVM_ENROLLER_SSH_KEY=/tmp/fastvm-enroller/id_rsa
+      - FASTVM_ENROLLER_LACEWORK_TOKEN_FILE=/run/secrets/fastvm-enroller-lacework/agent_access_token
+      - FASTVM_ENROLLER_CROWDSTRIKE_CUSTOMER_ID_FILE=/run/secrets/fastvm-enroller-crowdstrike/crowdstrike_customer_id
+      - FASTVM_ENROLLER_ALLOWED_SSH_HOST_SUFFIX=.hosts.telnyx.io
+      - FASTVM_ENROLLER_ENABLE_SYSTEMCTL=true
+      - FASTVM_ENROLLER_TIMEOUT=2m
+      - FASTVM_ENROLLER_ALLOW_UNAUTH=false

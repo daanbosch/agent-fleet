@@ -56,4 +56,4 @@ require (
 
 require github.com/team-telnyx/fast-vm-spinner v0.0.0
 
-replace github.com/team-telnyx/fast-vm-spinner => /home/daan/git/team-telnyx/fast-vm-spinner-substrate
+replace github.com/team-telnyx/fast-vm-spinner => ../third_party/fast-vm-spinner

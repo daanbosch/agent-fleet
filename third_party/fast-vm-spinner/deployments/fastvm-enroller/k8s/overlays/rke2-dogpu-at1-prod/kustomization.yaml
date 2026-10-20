@@ -1,0 +1,54 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+namespace: infra-bare-metal-squad
+
+images:
+  - name: registry.internal.telnyx.com/infra/fastvm-enroller-oci
+    newTag: 2026.06.03.10.33.130a7aa97040
+
+replacements:
+  - source:
+      kind: ConfigMap
+      name: overlay-configuration
+      fieldPath: data.K8S_CLUSTER
+    targets:
+      - select:
+          kind: ServiceId
+          name: fastvm-enroller
+        fieldPaths:
+          - spec.vault_k8s_auth_path
+        options:
+          create: true
+  - source:
+      kind: ConfigMap
+      name: overlay-configuration
+      fieldPath: data.K8S_CLUSTER
+    targets:
+      - select:
+          kind: VaultAuth
+          name: fastvm-enroller
+        fieldPaths:
+          - spec.mount
+        options:
+          create: true
+
+labels:
+  - pairs:
+      env: prod
+      site: at1
+    includeSelectors: true
+    includeTemplates: true
+
+configMapGenerator:
+  - name: overlay-configuration
+    behavior: merge
+    options:
+      annotations:
+        config.kubernetes.io/local-config: "true"
+    literals:
+      - K8S_CLUSTER=rke2-dogpu-at1-prod
+      - SITE=at1

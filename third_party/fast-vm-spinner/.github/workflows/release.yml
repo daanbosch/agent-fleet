@@ -1,0 +1,229 @@
+name: Release & Deploy
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Run tests
+        run: |
+          go test ./...
+          cargo test --manifest-path tools/firecrackerctl/Cargo.toml
+
+      - name: Build linux binaries
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o fastvm-api-linux-amd64 ./cmd/fastvm-api
+          cargo build --release --target x86_64-unknown-linux-musl --manifest-path tools/firecrackerctl/Cargo.toml
+          cp tools/firecrackerctl/target/x86_64-unknown-linux-musl/release/firecrackerctl firecrackerctl-linux-amd64
+
+      - name: Upload deploy artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastvm-api-linux-amd64
+          path: fastvm-api-linux-amd64
+          if-no-files-found: error
+
+      - name: Upload Firecracker helper artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firecrackerctl-linux-amd64
+          path: firecrackerctl-linux-amd64
+          if-no-files-found: error
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            fastvm-api-linux-amd64
+            firecrackerctl-linux-amd64
+
+  deploy-proxmox:
+    needs: release
+    runs-on: telnyx-2xsmall
+    steps:
+      - name: Trigger update on host
+        env:
+          UPDATE_SECRET: ${{ secrets.FASTVM_UPDATE_SECRET }}
+          PROXMOX_API_HOST: ${{ vars.FASTVM_PROXMOX_API_HOST || 'http://atl1-pc1-025.hosts.telnyx.io:8090' }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$UPDATE_SECRET" ]; then
+            echo "::error::FASTVM_UPDATE_SECRET is required for Proxmox deploy"
+            exit 1
+          fi
+
+          echo "Triggering self-update on Proxmox FastVM API at ${PROXMOX_API_HOST}..."
+          curl -sf -X POST \
+            -H "Authorization: Bearer $UPDATE_SECRET" \
+            "${PROXMOX_API_HOST}/api/v1/update"
+
+          echo "Waiting for health check..."
+          sleep 15
+
+          VERSION=$(curl -sf "${PROXMOX_API_HOST}/api/v1/version" | jq -r '.data.version')
+          echo "Running version: $VERSION"
+          if [ "$VERSION" != "${{ github.ref_name }}" ]; then
+            echo "::error::Expected ${{ github.ref_name }} but got $VERSION (possible rollback)"
+            exit 1
+          fi
+
+  deploy-firecracker:
+    needs: release
+    runs-on: telnyx-2xsmall
+    name: Deploy Firecracker (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: atl1-pc1-027
+            deploy_host: atl1-pc1-027.hosts.telnyx.io
+            api_host: http://atl1-pc1-027.hosts.telnyx.io:8090
+            ssh_host: atl1-pc1-027.hosts.telnyx.io
+            node: atl1-pc1-027
+          - name: atl1-pc1-026
+            deploy_host: atl1-pc1-026.hosts.telnyx.io
+            api_host: http://atl1-pc1-026.hosts.telnyx.io:8090
+            ssh_host: atl1-pc1-026.hosts.telnyx.io
+            node: atl1-pc1-026
+    env:
+      DEPLOY_HOST: ${{ matrix.deploy_host }}
+      DEPLOY_USER: ${{ vars.FASTVM_FIRECRACKER_DEPLOY_USER || 'terraform' }}
+      FIRECRACKER_API_HOST: ${{ matrix.api_host }}
+      FIRECRACKER_SSH_HOST: ${{ matrix.ssh_host }}
+      FIRECRACKER_INSTALL_DIR: ${{ vars.FASTVM_FIRECRACKER_INSTALL_DIR || '/opt/fastvm-microvm' }}
+      FIRECRACKER_TEMPLATE: ${{ vars.FASTVM_FIRECRACKER_DEFAULT_TEMPLATE || '9013' }}
+      FIRECRACKER_NODE: ${{ matrix.node }}
+      FIRECRACKER_SSH_USER: ${{ vars.FASTVM_FIRECRACKER_SSH_USER || 'root' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download deploy artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: fastvm-api-linux-amd64
+
+      - name: Download Firecracker helper artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: firecrackerctl-linux-amd64
+
+      - name: Configure SSH
+        env:
+          FIRECRACKER_DEPLOY_SSH_KEY: ${{ secrets.FASTVM_FIRECRACKER_DEPLOY_SSH_KEY }}
+          FALLBACK_DEPLOY_SSH_KEY: ${{ secrets.FASTVM_DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+
+          key="${FIRECRACKER_DEPLOY_SSH_KEY:-$FALLBACK_DEPLOY_SSH_KEY}"
+          if [ -n "$key" ]; then
+            key_path="$RUNNER_TEMP/fastvm-firecracker-deploy-key"
+            install -m 700 -d "$RUNNER_TEMP"
+            printf '%s\n' "$key" > "$key_path"
+            chmod 600 "$key_path"
+            echo "FASTVM_SSH_ARGS=-i $key_path -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" >> "$GITHUB_ENV"
+          else
+            echo "FASTVM_SSH_ARGS=-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" >> "$GITHUB_ENV"
+          fi
+
+      - name: Write Firecracker API environment
+        env:
+          UPDATE_SECRET: ${{ secrets.FASTVM_UPDATE_SECRET }}
+          RELEASE_GITHUB_TOKEN: ${{ secrets.FASTVM_RELEASE_GITHUB_TOKEN }}
+          ENROLLER_URL: ${{ vars.FASTVM_ENROLLER_URL }}
+          ENROLLER_TOKEN: ${{ secrets.FASTVM_ENROLLER_TOKEN }}
+          ENROLLER_TOKEN_FILE: ${{ vars.FASTVM_ENROLLER_TOKEN_FILE }}
+          ENROLLER_MODE: ${{ vars.FASTVM_ENROLLER_MODE || 'async' }}
+          ENROLLER_FEATURES: ${{ vars.FASTVM_ENROLLER_FEATURES }}
+          ENROLLER_TIMEOUT: ${{ vars.FASTVM_ENROLLER_TIMEOUT }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$UPDATE_SECRET" ]; then
+            echo "::error::FASTVM_UPDATE_SECRET is required for Firecracker deploy"
+            exit 1
+          fi
+
+          cat > fastvm-api.env <<EOF
+          FASTVM_BACKEND=firecracker
+          FASTVM_SSH_HOST=${FIRECRACKER_SSH_HOST}
+          FASTVM_UPDATE_SECRET=${UPDATE_SECRET}
+          FASTVM_FIRECRACKER_INSTALL_DIR=${FIRECRACKER_INSTALL_DIR}
+          FASTVM_FIRECRACKER_DEFAULT_TEMPLATE=${FIRECRACKER_TEMPLATE}
+          FASTVM_FIRECRACKER_NODE=${FIRECRACKER_NODE}
+          FASTVM_FIRECRACKER_SSH_USER=${FIRECRACKER_SSH_USER}
+          EOF
+
+          if [ -n "$RELEASE_GITHUB_TOKEN" ]; then
+            printf 'GITHUB_TOKEN=%s\n' "$RELEASE_GITHUB_TOKEN" >> fastvm-api.env
+          fi
+
+          if [ -n "$ENROLLER_URL" ]; then
+            printf 'FASTVM_ENROLLER_URL=%s\n' "$ENROLLER_URL" >> fastvm-api.env
+            printf 'FASTVM_ENROLLER_MODE=%s\n' "${ENROLLER_MODE:-async}" >> fastvm-api.env
+            if [ -n "$ENROLLER_TOKEN" ]; then
+              printf 'FASTVM_ENROLLER_TOKEN=%s\n' "$ENROLLER_TOKEN" >> fastvm-api.env
+            fi
+            if [ -n "$ENROLLER_TOKEN_FILE" ]; then
+              printf 'FASTVM_ENROLLER_TOKEN_FILE=%s\n' "$ENROLLER_TOKEN_FILE" >> fastvm-api.env
+            fi
+            if [ -n "$ENROLLER_FEATURES" ]; then
+              printf 'FASTVM_ENROLLER_FEATURES=%s\n' "$ENROLLER_FEATURES" >> fastvm-api.env
+            fi
+            if [ -n "$ENROLLER_TIMEOUT" ]; then
+              printf 'FASTVM_ENROLLER_TIMEOUT=%s\n' "$ENROLLER_TIMEOUT" >> fastvm-api.env
+            fi
+          fi
+
+      - name: Deploy Firecracker API host
+        run: |
+          set -euo pipefail
+
+          remote="${DEPLOY_USER}@${DEPLOY_HOST}"
+          echo "Deploying Firecracker FastVM API to ${remote} (${FIRECRACKER_NODE})..."
+
+          # shellcheck disable=SC2086
+          scp $FASTVM_SSH_ARGS \
+            fastvm-api-linux-amd64 \
+            firecrackerctl-linux-amd64 \
+            scripts/fastvm-api.service \
+            scripts/deploy-fastvm-api-remote.sh \
+            fastvm-api.env \
+            "${remote}:/tmp/"
+
+          # shellcheck disable=SC2086
+          ssh $FASTVM_SSH_ARGS "${remote}" \
+            "sudo FASTVM_EXPECTED_VERSION='${{ github.ref_name }}' bash /tmp/deploy-fastvm-api-remote.sh"
+
+          echo "Waiting for public Firecracker API health check..."
+          for i in $(seq 1 30); do
+            if curl -sf "${FIRECRACKER_API_HOST}/api/v1/health" >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+
+          VERSION=$(curl -sf "${FIRECRACKER_API_HOST}/api/v1/version" | jq -r '.data.version')
+          echo "Firecracker API running version: $VERSION"
+          if [ "$VERSION" != "${{ github.ref_name }}" ]; then
+            echo "::error::Expected ${{ github.ref_name }} but got $VERSION"
+            exit 1
+          fi

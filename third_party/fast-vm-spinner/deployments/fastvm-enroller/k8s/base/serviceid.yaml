@@ -1,0 +1,19 @@
+apiVersion: infra-core.telnyx.com/v1alpha1
+kind: ServiceId
+metadata:
+  name: fastvm-enroller
+spec:
+  k8s_sa_name: fastvm-enroller
+  k8s_sa_namespace: infra-bare-metal-squad
+  k8s_sa_rules: []
+  vault_policy_name: fastvm-enroller
+  vault_policies:
+    - path: "infra-bare-metal-squad/data/fastvm-enroller"
+      capabilities: ["read", "list"]
+    - path: "infra-bare-metal-squad/data/fastvm-enroller/*"
+      capabilities: ["read", "list"]
+    - path: "infraops-squad/data/infra-roles-lacework-agent"
+      capabilities: ["read", "list"]
+    - path: "infraops-squad/data/infra-roles-crowdstrike-falcon"
+      capabilities: ["read", "list"]
+  vault_k8s_auth_role_name: fastvm-enroller

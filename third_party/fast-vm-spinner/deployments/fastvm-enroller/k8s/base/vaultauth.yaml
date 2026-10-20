@@ -1,0 +1,10 @@
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultAuth
+metadata:
+  name: fastvm-enroller
+spec:
+  method: kubernetes
+  namespace: infra-bare-metal-squad
+  kubernetes:
+    role: fastvm-enroller
+    serviceAccount: fastvm-enroller

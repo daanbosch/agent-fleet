@@ -1,0 +1,5 @@
+createNamespace: false
+syncPolicy:
+  automated:
+    prune: true
+    selfHeal: true

@@ -1,0 +1,14 @@
+[Unit]
+Description=Fast VM Spinner API
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/fastvm-api
+ExecStart=/usr/local/bin/fastvm-api --port 8090
+Restart=on-failure
+RestartSec=5
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

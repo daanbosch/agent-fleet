@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastvm-enroller
+  annotations:
+    consul.hashicorp.com/service-name: "fastvm-enroller"
+    consul.hashicorp.com/service-port: "8080"
+    consul.hashicorp.com/service-tags: "fastvm,enroller,bare-metal-squad"
+  labels:
+    app: fastvm-enroller
+    canary: "false"
+    service_role: service
+    squad: infra.bare.metal.squad
+spec:
+  type: ClusterIP
+  selector:
+    app: fastvm-enroller
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: http

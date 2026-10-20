@@ -1,0 +1,21 @@
+FROM registry.internal.telnyx.com/docker/library/golang:1.25-alpine AS build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags "-s -w" \
+    -o /out/fastvm-enroller \
+    ./cmd/fastvm-enroller
+
+FROM registry.internal.telnyx.com/docker/library/alpine:3.20
+
+RUN apk add --no-cache ca-certificates openssh-client \
+    && addgroup -S -g 65532 fastvm \
+    && adduser -S -D -H -u 65532 -G fastvm -h /tmp fastvm
+COPY --from=build /out/fastvm-enroller /usr/local/bin/fastvm-enroller
+
+USER fastvm:fastvm
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/fastvm-enroller"]

@@ -1,0 +1,124 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastvm-enroller
+  labels:
+    app: fastvm-enroller
+    canary: "false"
+    service_role: service
+    squad: infra.bare.metal.squad
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fastvm-enroller
+  template:
+    metadata:
+      labels:
+        app: fastvm-enroller
+        canary: "false"
+        service_role: service
+        squad: infra.bare.metal.squad
+      annotations:
+        app.telnyx.com/name: "fastvm-enroller"
+        app.telnyx.com/managed-by: "fast-vm-spinner"
+        consul.hashicorp.com/connect-inject: "true"
+        consul.hashicorp.com/connect-service: "fastvm-enroller"
+        consul.hashicorp.com/connect-service-port: "http"
+        consul.hashicorp.com/sidecar-proxy-memory-request: "128Mi"
+        consul.hashicorp.com/sidecar-proxy-memory-limit: "256Mi"
+        consul.hashicorp.com/service-meta-external-source: "kubernetes"
+        consul.hashicorp.com/service-tags: "fastvm,enroller,bare-metal-squad"
+    spec:
+      serviceAccountName: fastvm-enroller
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        - name: fastvm-enroller
+          image: registry.internal.telnyx.com/infra/fastvm-enroller-oci:red
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -ec
+          args:
+            - |
+              install -d -m 0700 /tmp/fastvm-enroller
+              if [ -f /run/secrets/fastvm-enroller/id_rsa ]; then
+                cp /run/secrets/fastvm-enroller/id_rsa /tmp/fastvm-enroller/id_rsa
+                chmod 0600 /tmp/fastvm-enroller/id_rsa
+              fi
+              exec /usr/local/bin/fastvm-enroller
+          envFrom:
+            - configMapRef:
+                name: fastvm-enroller-static-config
+            - secretRef:
+                name: fastvm-enroller
+                optional: true
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: fastvm-enroller-secrets
+              mountPath: /run/secrets/fastvm-enroller
+              readOnly: true
+            - name: fastvm-enroller-lacework
+              mountPath: /run/secrets/fastvm-enroller-lacework
+              readOnly: true
+            - name: fastvm-enroller-crowdstrike
+              mountPath: /run/secrets/fastvm-enroller-crowdstrike
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: fastvm-enroller-secrets
+          secret:
+            secretName: fastvm-enroller
+            optional: true
+            defaultMode: 0440
+        - name: fastvm-enroller-lacework
+          secret:
+            secretName: fastvm-enroller-lacework
+            optional: true
+            defaultMode: 0440
+        - name: fastvm-enroller-crowdstrike
+          secret:
+            secretName: fastvm-enroller-crowdstrike
+            optional: true
+            defaultMode: 0440
+        - name: tmp
+          emptyDir:
+            medium: Memory

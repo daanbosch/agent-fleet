@@ -1,0 +1,16 @@
+names:
+  service: fastvm-enroller-oci
+
+project:
+  squad: infra-bare-metal-squad
+  primary_maintainer: daan
+  public_api: false
+  private_api: false
+  dependencies: []
+  processes_pii: false
+
+build:
+  build_stage_targets:
+    - build-enroller-image
+  test_stage_targets:
+    - test-enroller-image

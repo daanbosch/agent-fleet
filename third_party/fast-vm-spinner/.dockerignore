@@ -1,0 +1,9 @@
+.git
+.github
+tools/firecrackerctl/target
+fastvm
+fastvm-api
+fastvm-enroller
+*.log
+*.tmp
+/tmp

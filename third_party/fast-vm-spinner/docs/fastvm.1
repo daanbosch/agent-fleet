@@ -1,0 +1,318 @@
+.TH FASTVM 1 "March 2026" "fastvm 1.0.0" "FastVM Manual"
+.SH NAME
+fastvm \- rapid VM provisioning for parallel AI agent workloads
+.SH SYNOPSIS
+.B fastvm
+.I command
+.RI [ options ]
+.SH DESCRIPTION
+.B fastvm
+provisions isolated VMs through the configured FastVM API backend in seconds.
+It is designed for AI agents that need to spin up parallel compute environments,
+run experiments, and converge on a winner.
+.PP
+The CLI runs on your local machine and talks to the
+.B fastvm-api
+server running on the backend host. All VM management happens through the API.
+.SS THE PARADIGM
+AI agents work best when they can iterate in isolation. fastvm enables this:
+.PP
+.RS 4
+.B 1. CREATE
+\(em Spin up a base VM from a stock template.
+.br
+.B 2. SET UP
+\(em SSH in and install your application, tools, and configuration.
+.br
+.B 3. SNAPSHOT
+\(em Convert the configured VM to a reusable template with
+.BR "fastvm snapshot" .
+.br
+.B 4. DIVERGE
+\(em Clone N copies from your custom template.
+.br
+.B 5. EXPERIMENT
+\(em Each agent works in its own VM. Build, break things freely.
+.br
+.B 6. BENCHMARK
+\(em Measure and compare results across VMs.
+.br
+.B 7. CONVERGE
+\(em Pick the winner with
+.B fastvm converge
+and destroy the rest.
+.RE
+.PP
+The snapshot step turns a one-off VM into a reusable starting point.
+Instead of cloning from generic OS templates, clone from your own pre-configured image.
+This is the core loop: create, snapshot, diverge, experiment, converge.
+Repeat at any level of granularity.
+.PP
+Each VM gets its own static IP, internet access, and internal DNS.
+VMs are network-isolated per user but can reach the internet and internal
+services (*.query.prod.telnyx.io, *.query.dev.telnyx.io).
+.SS SSH ACCESS
+VMs are accessible via SSH proxy \(em no hypervisor access needed.
+Each VM's SSH port equals its VMID (e.g., VMID 60000 listens on port 60000).
+A
+.B socat
+process on the backend host forwards connections from the public port to
+the VM's internal SSH port (22).
+.PP
+.RS 4
+.nf
+ssh \-p 60000 ubuntu@backend\-host    \(->    VM:22
+.fi
+.RE
+.PP
+Users never see internal IPs. They just need the backend host address and the
+port number (which equals the VMID). The
+.B ssh_command
+field in the API response and CLI output provides the complete command.
+.PP
+The proxy starts automatically when a VM is created and stops when the VM
+is destroyed. Orphan proxies from previous runs are cleaned up on API startup.
+.PP
+Requirements:
+.B socat
+must be installed on the backend host. Ports 60000\-60999 must be open
+in any firewall.
+.SS FOR AI AGENTS
+If you are an AI agent using fastvm, here is how to work with it:
+.PP
+.RS 4
+.IP \(bu 2
+Call
+.B fastvm create
+to get VMs. The response includes SSH commands with port\-forwarded access.
+.IP \(bu 2
+SSH into your VM using the
+.B ssh_command
+from the response (e.g.,
+.BR "ssh \-p 60000 ubuntu@host" ).
+You have sudo. Install what you need. The VM has internet.
+.IP \(bu 2
+The SSH port equals the VMID. No hypervisor access or internal IPs needed.
+.IP \(bu 2
+Internal DNS resolves Telnyx services at 10.255.0.100.
+.IP \(bu 2
+When done, call
+.B fastvm converge --keep <your-vmid>
+or
+.B fastvm destroy
+to clean up.
+.IP \(bu 2
+VMs are ephemeral. Do not store persistent data. Extract results before destroying.
+.RE
+.SH COMMANDS
+.TP
+.B create \-u USER \-c COUNT [\-m MEM] [\-\-cores N] [\-t TEMPLATE] [\-\-ssh\-key PATH]
+Create COUNT VMs for USER. VMs are linked clones from a Proxmox template
+(default: server configured). Each gets a unique static IP in the user's
+/26 network block.
+.RS
+.TP
+.B \-u, \-\-user USER
+Username to own the VMs (required). Alphanumeric, dashes, underscores.
+Determines the network block assignment.
+.TP
+.B \-c, \-\-count COUNT
+Number of VMs to create, 1\-50 (required).
+.TP
+.B \-m, \-\-memory MEM
+Memory in MB (default: 4096).
+.TP
+.B \-\-cores N
+CPU cores per VM (default: 2).
+.TP
+.B \-t, \-\-template VMID
+Backend template VMID to clone from (default: server configured).
+If omitted, the API server uses its configured default template.
+.TP
+.B \-\-ssh\-key PATH
+SSH public key to inject. Local files are read by the client; otherwise the
+path is interpreted on the API/backend host.
+.RE
+.TP
+.B list [\-u USER]
+List VMs with VMID, name, user, IP, and creation time.
+Alias:
+.BR ls .
+.TP
+.B get VMID
+Show full details for a single VM including SSH command.
+.TP
+.B destroy \-\-vm VMID | \-u USER
+Queue destruction of a single VM or all VMs for a user. The VM is removed from
+FastVM state immediately; backend cleanup may continue asynchronously.
+Networking is cleaned up automatically when a user's last VM is removed.
+Alias:
+.BR rm .
+.TP
+.B snapshot \-\-vm VMID
+Convert a running VM into a reusable Proxmox template. The VM is stopped,
+its SSH proxy is removed, and it becomes an immutable template that can be
+cloned via
+.BR "fastvm create \-t VMID" .
+The VM is unregistered from active state (it is no longer a running VM).
+.RS
+.TP
+.B \-\-vm VMID
+VMID of the VM to convert (required).
+.RE
+.TP
+.B converge \-u USER \-\-keep VMID
+The key operation: keep one VM (the winner), destroy all others for that user.
+Use this after parallel experiments to select the best result.
+.TP
+.B status
+System overview: total VMs, users, per\-user network blocks and VM counts.
+.TP
+.B health
+Verify API connectivity. Prints status and response time in milliseconds.
+.TP
+.B ssh VMID
+Print the SSH command to connect to a VM.
+.SH ENVIRONMENT
+.TP
+.B FASTVM_API
+Base URL of the fastvm\-api server.
+Default:
+.IR http://localhost:8090 .
+Set this to the backend host's API address, e.g.
+.IR http://atl1-pc1-025:8090 .
+For Firecracker, point it at the Firecracker API host, e.g.
+.IR http://atl1-pc1-027.hosts.telnyx.io:8090 .
+.SH NETWORKING
+Each user gets an isolated /26 block from the 192.168.0.0/16 supernet:
+.PP
+.RS
+.nf
+Block N \(-> 192.168.<N/4>.<(N%4)*64>/26
+Gateway:   base + 1
+VM IPs:    base + 2, base + 3, ... (up to 50 VMs)
+.fi
+.RE
+.PP
+Block assignment is deterministic (hashed from username) and persisted.
+No two users can collide.
+.PP
+.B Internet access:
+VMs reach the internet via iptables MASQUERADE on the backend host.
+.PP
+.B DNS:
+Set to 10.255.0.100 (Telnyx internal). Resolves *.query.prod.telnyx.io,
+*.query.dev.telnyx.io, and standard public domains.
+.PP
+.B Isolation:
+Each user's VMs share a Linux bridge. Different users are on different bridges.
+VMs within the same user can see each other; VMs across users cannot.
+.SH ARCHITECTURE
+.nf
+  \fBYour machine\fR (Mac/laptop/CI)        \fBBackend Host\fR
+  +------------------+               +----------------------------+
+  |  fastvm (CLI)    | --HTTP--->    |  fastvm-api (Go server)    |
+  |  thin HTTP client|               |    |                       |
+  +------------------+               |    +-> Proxmox or Firecracker |
+                                     |    +-> /var/lib/fastvm/    |
+  +------------------+               |    +-> backend storage     |
+  |  ssh -p <VMID>   | --TCP---->   |    +-> Linux bridge + NAT  |
+  |  (SSH client)    |               |    +-> socat SSH proxy     |
+  +------------------+               |         port VMID -> VM:22 |
+                                     +----------------------------+
+.fi
+.PP
+The CLI is a stateless HTTP client. All state lives on the backend host.
+The API server runs co\-located with the VM backend for instant state reads and
+direct backend execution (no SSH overhead).
+.PP
+SSH access is proxied via socat: each VM gets a listener on the backend
+host's public interface at port = VMID, forwarding to the VM's internal
+SSH port (22). No VPN or jump host required.
+.SH EXAMPLES
+.SS Custom template workflow (create \(-> set up \(-> snapshot \(-> diverge)
+.PP
+Create a base VM and set it up:
+.PP
+.RS
+.nf
+$ fastvm create \-u base \-c 1
+Creating 1 VM(s) for user 'base'...
+VMID   NAME            IP            SSH
+60000  fastvm\-base\-1  192.168.42.2  ssh \-p 60000 ubuntu@atl1\-pc1\-025
+
+\(ok 1 VM(s) created in 12.3s
+
+$ ssh \-p 60000 ubuntu@atl1\-pc1\-025
+ubuntu@fastvm\-base\-1:~$ sudo apt install \-y nodejs npm
+ubuntu@fastvm\-base\-1:~$ npm install \-g my\-app && my\-app \-\-init
+ubuntu@fastvm\-base\-1:~$ exit
+.fi
+.RE
+.PP
+Snapshot the configured VM into a reusable template:
+.PP
+.RS
+.nf
+$ fastvm snapshot \-\-vm 60000
+Converting VM 60000 to template...
+\(ok VM 60000 converted to template. Use \-t 60000 to clone from it.
+.fi
+.RE
+.PP
+Clone 5 copies from your custom template and compete:
+.PP
+.RS
+.nf
+$ fastvm create \-u compete \-c 5 \-t 60000 \-\-cores 4
+Creating 5 VM(s) for user 'compete'...
+VMID   NAME                IP            SSH
+60001  fastvm\-compete\-1   192.168.85.2  ssh \-p 60001 ubuntu@atl1\-pc1\-025
+60002  fastvm\-compete\-2   192.168.85.3  ssh \-p 60002 ubuntu@atl1\-pc1\-025
+60003  fastvm\-compete\-3   192.168.85.4  ssh \-p 60003 ubuntu@atl1\-pc1\-025
+60004  fastvm\-compete\-4   192.168.85.5  ssh \-p 60004 ubuntu@atl1\-pc1\-025
+60005  fastvm\-compete\-5   192.168.85.6  ssh \-p 60005 ubuntu@atl1\-pc1\-025
+
+\(ok 5 VM(s) created in 22.1s
+.fi
+.RE
+.PP
+Pick the winner and clean up:
+.PP
+.RS
+.nf
+$ fastvm converge \-u compete \-\-keep 60003
+Converging user 'compete', keeping VMID 60003...
+\(ok Converged user 'compete', kept VMID 60003
+
+$ fastvm destroy \-u compete
+Destroying all VMs for user 'compete'...
+\(ok Destroyed 1 VM(s) for user 'compete'
+.fi
+.RE
+.SS Quick diverge (skip snapshot, use stock template)
+.PP
+.RS
+.nf
+$ fastvm create \-u backend\-race \-c 3 \-\-cores 4 \-m 8192
+Creating 3 VM(s) for user 'backend\-race'...
+VMID   NAME                    IP            SSH
+60000  fastvm\-backend\-race\-1  192.168.42.2  ssh \-p 60000 ubuntu@atl1\-pc1\-025
+60001  fastvm\-backend\-race\-2  192.168.42.3  ssh \-p 60001 ubuntu@atl1\-pc1\-025
+60002  fastvm\-backend\-race\-3  192.168.42.4  ssh \-p 60002 ubuntu@atl1\-pc1\-025
+
+\(ok 3 VM(s) created in 28.4s
+
+$ fastvm converge \-u backend\-race \-\-keep 60001
+Converging user 'backend\-race', keeping VMID 60001...
+\(ok Converged user 'backend\-race', kept VMID 60001
+.fi
+.RE
+.SH SEE ALSO
+.BR fastvm\-api (1),
+.BR qm (1),
+.BR ssh (1)
+.SH AUTHORS
+Telnyx Bare Metal Squad
+.SH BUGS
+Report issues at https://github.com/team\-telnyx/fast\-vm\-spinner/issues
