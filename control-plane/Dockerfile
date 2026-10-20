@@ -43,6 +43,7 @@ RUN NODE_OPTIONS=--max-old-space-size=4096 npm run build   # -> /src/console/dis
 # Native on the builder, cross-compiling to the target: see the header.
 FROM --platform=$BUILDPLATFORM golang:1.26-trixie AS build
 WORKDIR /src/control-plane
+COPY third_party/fast-vm-spinner /src/third_party/fast-vm-spinner
 COPY control-plane/go.mod control-plane/go.sum ./
 RUN go mod download
 COPY control-plane/ ./
